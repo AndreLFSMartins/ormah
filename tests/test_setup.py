@@ -963,8 +963,15 @@ class TestRunUninstall:
         for d in (share_dir, cache_dir, config_dir):
             d.mkdir(parents=True)
 
+        fake_settings = MagicMock()
+        # memory_dir inside the XDG tree so it doesn't get added as an extra candidate
+        fake_settings.memory_dir = share_dir / "memory"
+        fake_settings.embedding_model = "BAAI/bge-base-en-v1.5"
+        fake_settings.whisper_reranker_model = "Xenova/ms-marco-MiniLM-L-6-v2"
+
         with (
             patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.config.settings", fake_settings),
             patch("ormah.server_manager.uninstall_autostart"),
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
