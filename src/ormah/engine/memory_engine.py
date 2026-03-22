@@ -732,13 +732,14 @@ class MemoryEngine:
 
         return f"Connected {req.source_id[:8]}... →[{req.edge.value}]→ {req.target_id[:8]}..."
 
-    def get_context(self, space: str | None = None, task_hint: str | None = None) -> str:
+    def get_context(self, space: str | None = None, task_hint: str | None = None, session_id: str | None = None) -> str:
         """Get core memories formatted for system prompt."""
         return self.context_builder.build_core_context(
             space=space,
             user_node_id=self.user_node_id,
             task_hint=task_hint,
             max_nodes=self.settings.context_max_nodes,
+            session_id=session_id,
         )
 
     def get_whisper_context(

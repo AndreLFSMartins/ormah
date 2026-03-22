@@ -44,6 +44,125 @@ _ONBOARDING_NUDGE = (
 )
 
 
+_REVIEW_FRAMING = (
+    "\n\n## Ormah: one quick question (optional)\n"
+    "Before we start — in a recent session in /{space}, you were working on:\n"
+    "\"{prompt_snippet}\"\n\n"
+    "I held back this memory because I wasn't confident it was relevant:\n"
+    "\"{title}\" — {content}\n\n"
+    "Ask the user naturally: would that memory have been useful while they were working on "
+    "that? Yes or no is all you need. Then call submit_feedback with node_id=\"{node_id}\", "
+    "signal=1 for yes, signal=-1 for no. If they'd rather skip, proceed normally — won't be asked "
+    "again for this memory."
+)
+
+
+def _truncate_at_word_boundary(text: str, max_len: int = 300) -> str:
+    """Return *text* truncated to *max_len* characters at a word boundary."""
+    if len(text) <= max_len:
+        return text
+    truncated = text[:max_len]
+    last_space = truncated.rfind(" ")
+    if last_space == -1:
+        return truncated + "…"
+    return truncated[:last_space] + "…"
+
+
+def _find_review_candidate(conn, threshold: float) -> dict | None:
+    """Find a gated-out whisper candidate eligible for session-start review.
+
+    Applies three Python-side filters after SQL eligibility query:
+    1. No strong affinity signal (cosine sim < threshold against existing affinity rows)
+    2. Not recently surfaced (no review_log row within 14 days)
+    3. Not exhausted (fewer than 3 unanswered review_log rows)
+    """
+    try:
+        rows = conn.execute(
+            """
+            WITH ranked AS (
+              SELECT
+                wl.node_id, wl.score, wl.session_id, wl.space, wl.prompt_text,
+                wl.prompt_vec,
+                n.title, n.content,
+                ROW_NUMBER() OVER (PARTITION BY wl.node_id ORDER BY wl.score DESC) AS rn
+              FROM whisper_log wl
+              JOIN nodes n ON n.id = wl.node_id
+              WHERE wl.was_injected = 0
+                AND wl.logged_at > datetime('now', '-7 days')
+                AND NOT EXISTS (
+                  SELECT 1 FROM whisper_log wl2
+                  WHERE wl2.node_id = wl.node_id
+                    AND wl2.was_injected = 1
+                    AND wl2.logged_at > datetime('now', '-7 days')
+                )
+            )
+            SELECT node_id, score, session_id, space, prompt_text, prompt_vec, title, content
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY score DESC
+            LIMIT 20
+            """
+        ).fetchall()
+    except Exception as e:
+        logger.warning("_find_review_candidate SQL failed: %s", e)
+        return None
+
+    for row in rows:
+        node_id = row["node_id"]
+        candidate_prompt_vec_blob = row["prompt_vec"]
+
+        # Step 2a: No strong affinity signal
+        try:
+            affinity_rows = conn.execute(
+                "SELECT prompt_vec FROM affinity WHERE node_id = ?", (node_id,)
+            ).fetchall()
+            if affinity_rows and candidate_prompt_vec_blob:
+                candidate_vec = np.frombuffer(candidate_prompt_vec_blob, dtype=np.float32)
+                candidate_norm = float(np.linalg.norm(candidate_vec))
+                skip = False
+                if candidate_norm > 0:
+                    for arow in affinity_rows:
+                        aff_vec = np.frombuffer(arow["prompt_vec"], dtype=np.float32)
+                        aff_norm = float(np.linalg.norm(aff_vec))
+                        if aff_norm > 0:
+                            sim = float(np.dot(candidate_vec, aff_vec) / (candidate_norm * aff_norm))
+                            if sim >= threshold:
+                                skip = True
+                                break
+                if skip:
+                    continue
+        except Exception as e:
+            logger.warning("Affinity check failed for node %s: %s", node_id, e)
+
+        # Step 2b: Not recently surfaced
+        try:
+            recently = conn.execute(
+                "SELECT 1 FROM review_log WHERE node_id = ? AND surfaced_at > datetime('now', '-14 days') LIMIT 1",
+                (node_id,),
+            ).fetchone()
+            if recently:
+                continue
+        except Exception as e:
+            logger.warning("review_log recency check failed for node %s: %s", node_id, e)
+            continue
+
+        # Step 2c: Not exhausted
+        try:
+            unanswered_count = conn.execute(
+                "SELECT COUNT(*) FROM review_log WHERE node_id = ? AND answered = 0",
+                (node_id,),
+            ).fetchone()[0]
+            if unanswered_count >= 3:
+                continue
+        except Exception as e:
+            logger.warning("review_log exhaustion check failed for node %s: %s", node_id, e)
+            continue
+
+        return dict(row)
+
+    return None
+
+
 def _first_sentence_truncate(content: str, max_len: int) -> str:
     """Return the first sentence of content, capped to max_len."""
     content = content.strip()
@@ -101,6 +220,7 @@ class ContextBuilder:
         user_node_id: str | None = None,
         task_hint: str | None = None,
         max_nodes: int | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Get core-tier nodes + project working nodes formatted for system prompt.
 
@@ -252,6 +372,39 @@ class ContextBuilder:
                 except Exception as e:
                     logger.warning("Failed to compute unprocessed_memories count: %s", e)
 
+        # Session-start review: surface a gated-out candidate for user feedback
+        if self.engine is not None:
+            settings = getattr(self.engine, "settings", None)
+            try:
+                threshold = getattr(settings, "affinity_similarity_threshold", 0.70) if settings else 0.70
+                candidate = _find_review_candidate(self.graph.conn, threshold)
+                if candidate:
+                    # session_id is provided by the client (Claude Code hook); fall back to
+                    # an empty string when not available (REST callers without a session).
+                    # Rate-limiting uses surfaced_at/node_id, not session_id, so this is safe.
+                    current_session_id = session_id or ""
+                    # Insert review_log row — must succeed before appending block
+                    self.graph.conn.execute(
+                        "INSERT INTO review_log (node_id, session_id, surfaced_at) VALUES (?, ?, datetime('now'))",
+                        (candidate["node_id"], current_session_id),
+                    )
+                    self.graph.conn.commit()
+                    # Build review block
+                    prompt_snippet = _truncate_at_word_boundary(
+                        candidate["prompt_text"] or "", max_len=300
+                    )
+                    space_label = candidate["space"] or "global"
+                    review_block = _REVIEW_FRAMING.format(
+                        space=space_label,
+                        prompt_snippet=prompt_snippet,
+                        title=candidate["title"],
+                        content=candidate["content"],
+                        node_id=candidate["node_id"],
+                    )
+                    result = result + review_block
+            except Exception as e:
+                logger.warning("Review mechanism failed: %s", e)
+
         return result
 
     def build_whisper_context(
@@ -271,7 +424,7 @@ class ContextBuilder:
         recent_prompts: list[str] | None = None,
         topic_shift_enabled: bool = False,
         topic_shift_threshold: float = 0.75,
-        injection_gate: float = 0.50,
+        injection_gate: float = 0.55,
         content_total_budget: int = 0,
         content_min_per_node: int = 100,
         content_max_per_node: int = 500,
