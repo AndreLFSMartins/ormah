@@ -252,6 +252,17 @@ async def _dispatch(
                 return _handle_error(resp)
             return resp.json()["text"]
 
+        elif name == "submit_feedback":
+            body = {
+                "node_id": args["node_id"],
+                "signal": args["signal"],
+                "source": args.get("source", "explicit"),
+            }
+            resp = await client.post("/agent/feedback", json=body)
+            if not resp.is_success:
+                return _handle_error(resp)
+            return resp.json()["text"]
+
         elif name == "run_maintenance":
             body = {}
             if args.get("results"):

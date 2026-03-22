@@ -56,6 +56,9 @@ scripts/eval_*.py
 scripts/eval_snapshots/
 scripts/release.sh
 
+# Git worktrees
+.worktrees/
+
 # Generated docs and plans (local dev artifacts)
 ARCHITECTURE.md
 GRAPH_IMPROVEMENTS.md

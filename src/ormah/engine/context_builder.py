@@ -44,6 +44,125 @@ _ONBOARDING_NUDGE = (
 )
 
 
+_REVIEW_FRAMING = (
+    "\n\n## Ormah: one quick question (optional)\n"
+    "Before we start — in a recent session in /{space}, you were working on:\n"
+    "\"{prompt_snippet}\"\n\n"
+    "I held back this memory because I wasn't confident it was relevant:\n"
+    "\"{title}\" — {content}\n\n"
+    "Ask the user naturally: would that memory have been useful while they were working on "
+    "that? Yes or no is all you need. Then call submit_feedback with node_id=\"{node_id}\", "
+    "signal=1 for yes, signal=-1 for no. If they'd rather skip, proceed normally — won't be asked "
+    "again for this memory."
+)
+
+
+def _truncate_at_word_boundary(text: str, max_len: int = 300) -> str:
+    """Return *text* truncated to *max_len* characters at a word boundary."""
+    if len(text) <= max_len:
+        return text
+    truncated = text[:max_len]
+    last_space = truncated.rfind(" ")
+    if last_space == -1:
+        return truncated + "…"
+    return truncated[:last_space] + "…"
+
+
+def _find_review_candidate(conn, threshold: float) -> dict | None:
+    """Find a gated-out whisper candidate eligible for session-start review.
+
+    Applies three Python-side filters after SQL eligibility query:
+    1. No strong affinity signal (cosine sim < threshold against existing affinity rows)
+    2. Not recently surfaced (no review_log row within 14 days)
+    3. Not exhausted (fewer than 3 unanswered review_log rows)
+    """
+    try:
+        rows = conn.execute(
+            """
+            WITH ranked AS (
+              SELECT
+                wl.node_id, wl.score, wl.session_id, wl.space, wl.prompt_text,
+                wl.prompt_vec,
+                n.title, n.content,
+                ROW_NUMBER() OVER (PARTITION BY wl.node_id ORDER BY wl.score DESC) AS rn
+              FROM whisper_log wl
+              JOIN nodes n ON n.id = wl.node_id
+              WHERE wl.was_injected = 0
+                AND wl.logged_at > datetime('now', '-7 days')
+                AND NOT EXISTS (
+                  SELECT 1 FROM whisper_log wl2
+                  WHERE wl2.node_id = wl.node_id
+                    AND wl2.was_injected = 1
+                    AND wl2.logged_at > datetime('now', '-7 days')
+                )
+            )
+            SELECT node_id, score, session_id, space, prompt_text, prompt_vec, title, content
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY score DESC
+            LIMIT 20
+            """
+        ).fetchall()
+    except Exception as e:
+        logger.warning("_find_review_candidate SQL failed: %s", e)
+        return None
+
+    for row in rows:
+        node_id = row["node_id"]
+        candidate_prompt_vec_blob = row["prompt_vec"]
+
+        # Step 2a: No strong affinity signal
+        try:
+            affinity_rows = conn.execute(
+                "SELECT prompt_vec FROM affinity WHERE node_id = ?", (node_id,)
+            ).fetchall()
+            if affinity_rows and candidate_prompt_vec_blob:
+                candidate_vec = np.frombuffer(candidate_prompt_vec_blob, dtype=np.float32)
+                candidate_norm = float(np.linalg.norm(candidate_vec))
+                skip = False
+                if candidate_norm > 0:
+                    for arow in affinity_rows:
+                        aff_vec = np.frombuffer(arow["prompt_vec"], dtype=np.float32)
+                        aff_norm = float(np.linalg.norm(aff_vec))
+                        if aff_norm > 0:
+                            sim = float(np.dot(candidate_vec, aff_vec) / (candidate_norm * aff_norm))
+                            if sim >= threshold:
+                                skip = True
+                                break
+                if skip:
+                    continue
+        except Exception as e:
+            logger.warning("Affinity check failed for node %s: %s", node_id, e)
+
+        # Step 2b: Not recently surfaced
+        try:
+            recently = conn.execute(
+                "SELECT 1 FROM review_log WHERE node_id = ? AND surfaced_at > datetime('now', '-14 days') LIMIT 1",
+                (node_id,),
+            ).fetchone()
+            if recently:
+                continue
+        except Exception as e:
+            logger.warning("review_log recency check failed for node %s: %s", node_id, e)
+            continue
+
+        # Step 2c: Not exhausted
+        try:
+            unanswered_count = conn.execute(
+                "SELECT COUNT(*) FROM review_log WHERE node_id = ? AND answered = 0",
+                (node_id,),
+            ).fetchone()[0]
+            if unanswered_count >= 3:
+                continue
+        except Exception as e:
+            logger.warning("review_log exhaustion check failed for node %s: %s", node_id, e)
+            continue
+
+        return dict(row)
+
+    return None
+
+
 def _first_sentence_truncate(content: str, max_len: int) -> str:
     """Return the first sentence of content, capped to max_len."""
     content = content.strip()
@@ -101,6 +220,7 @@ class ContextBuilder:
         user_node_id: str | None = None,
         task_hint: str | None = None,
         max_nodes: int | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Get core-tier nodes + project working nodes formatted for system prompt.
 
@@ -252,6 +372,39 @@ class ContextBuilder:
                 except Exception as e:
                     logger.warning("Failed to compute unprocessed_memories count: %s", e)
 
+        # Session-start review: surface a gated-out candidate for user feedback
+        if self.engine is not None:
+            settings = getattr(self.engine, "settings", None)
+            try:
+                threshold = getattr(settings, "affinity_similarity_threshold", 0.70) if settings else 0.70
+                candidate = _find_review_candidate(self.graph.conn, threshold)
+                if candidate:
+                    # session_id is provided by the client (Claude Code hook); fall back to
+                    # an empty string when not available (REST callers without a session).
+                    # Rate-limiting uses surfaced_at/node_id, not session_id, so this is safe.
+                    current_session_id = session_id or ""
+                    # Insert review_log row — must succeed before appending block
+                    with self.engine.db.transaction() as conn:
+                        conn.execute(
+                            "INSERT INTO review_log (node_id, session_id, surfaced_at) VALUES (?, ?, datetime('now'))",
+                            (candidate["node_id"], current_session_id),
+                        )
+                    # Build review block
+                    prompt_snippet = _truncate_at_word_boundary(
+                        candidate["prompt_text"] or "", max_len=300
+                    )
+                    space_label = candidate["space"] or "global"
+                    review_block = _REVIEW_FRAMING.format(
+                        space=space_label,
+                        prompt_snippet=prompt_snippet,
+                        title=candidate["title"],
+                        content=candidate["content"],
+                        node_id=candidate["node_id"],
+                    )
+                    result = result + review_block
+            except Exception as e:
+                logger.warning("Review mechanism failed: %s", e)
+
         return result
 
     def build_whisper_context(
@@ -271,10 +424,11 @@ class ContextBuilder:
         recent_prompts: list[str] | None = None,
         topic_shift_enabled: bool = False,
         topic_shift_threshold: float = 0.75,
-        injection_gate: float = 0.50,
+        injection_gate: float = 0.55,
         content_total_budget: int = 0,
         content_min_per_node: int = 100,
         content_max_per_node: int = 500,
+        session_id: str | None = None,
     ) -> str:
         """Build compact whisper context for involuntary recall injection.
 
@@ -333,6 +487,15 @@ class ContextBuilder:
         # identity-only → skip general search, use existing identity path below
         identity_only = intent is not None and intent.categories == ["identity"]
 
+        # Compute prompt_vec early — needed for affinity boost and whisper_log
+        prompt_vec: np.ndarray | None = None
+        try:
+            hybrid_search = self.engine._get_hybrid_search()
+            if hybrid_search is not None:
+                prompt_vec = hybrid_search.encoder.encode(prompt)
+        except Exception as e:
+            logger.warning("Failed to compute prompt_vec for affinity: %s", e)
+
         # Build context-enhanced search query from recent prompts
         search_query = prompt
         if recent_prompts:
@@ -381,9 +544,9 @@ class ContextBuilder:
             r for r in search_results
             if r.get("score", 0) >= effective_min_score or r.get("source") == "temporal"
         ]
-        effective_reranker_min = 0.0 if has_temporal else reranker_min_score
-
-        # Cross-encoder reranking
+        # Cross-encoder reranking — always pass min_score=0.0 so affinity boost
+        # can rescue candidates before any floor is applied (spec: reranker_min_score
+        # is now applied as a post-boost floor, not inside rerank())
         if reranker_enabled and search_results:
             try:
                 from ormah.embeddings.reranker import rerank
@@ -392,13 +555,38 @@ class ContextBuilder:
                     query=prompt,
                     candidates=search_results,
                     model_name=reranker_model,
-                    min_score=effective_reranker_min,
+                    min_score=0.0,
                     blend_alpha=reranker_blend_alpha,
                     max_doc_chars=reranker_max_doc_chars,
                 )
 
             except Exception as e:
                 logger.warning("Whisper reranker failed, using embedding scores: %s", e)
+
+        # Affinity boost (adaptive feedback loop): apply personalised score
+        # adjustments based on historical signals before any floor filtering.
+        # pre_gate_candidates captures the full set after boost (used by
+        # exploration slot and whisper_log logging below).
+        pre_gate_candidates: list[dict] = []
+        if not has_temporal and reranker_enabled and search_results and prompt_vec is not None:
+            try:
+                from ormah.engine.affinity import batch_fetch_affinity, compute_affinity_boost
+
+                node_ids = [r["node"]["id"] for r in search_results]
+                affinity_rows_map = batch_fetch_affinity(self.graph.conn, node_ids)
+                boosted = []
+                for r in search_results:
+                    nid = r["node"]["id"]
+                    rows = affinity_rows_map.get(nid, [])
+                    boost = compute_affinity_boost(prompt_vec, nid, rows, self.engine.settings)
+                    boosted.append({**r, "score": r["score"] + boost, "_pre_boost_score": r["score"]})
+                # Apply 0.40 floor AFTER boost (spec: reranker_min_score is now a post-boost floor).
+                # Use the reranker_min_score parameter (passed from engine.settings); fall back to 0.40.
+                effective_floor = reranker_min_score if reranker_min_score > 0.0 else 0.40
+                pre_gate_candidates = [r for r in boosted if r["score"] >= effective_floor]
+                search_results = pre_gate_candidates
+            except Exception as e:
+                logger.warning("Affinity boost failed, using unmodified scores: %s", e)
 
         # Injection gate: require at least one result with a strong enough
         # blended score to justify injection.  Temporal queries are exempt
@@ -412,6 +600,47 @@ class ContextBuilder:
                 # injection gate.  Weak queries naturally get fewer results
                 # instead of padding to max_nodes with marginal matches.
                 search_results = [r for r in search_results if r.get("score", 0) >= injection_gate]
+
+        # Exploration slot: inject one unconfirmed gated-out candidate to
+        # surface false negatives and collect affinity signal for them.
+        if (not has_temporal
+                and getattr(self.engine.settings, "whisper_exploration_enabled", True)
+                and prompt_vec is not None
+                and pre_gate_candidates):
+            try:
+                from ormah.engine.affinity import batch_fetch_affinity
+
+                injected_ids = {r["node"]["id"] for r in search_results}
+                # Gated-out candidates that cleared the 0.40 floor but not the gate
+                gated_out = [
+                    r for r in pre_gate_candidates
+                    if r["node"]["id"] not in injected_ids
+                ]
+                if gated_out:
+                    explore_node_ids = [r["node"]["id"] for r in gated_out]
+                    affinity_map = batch_fetch_affinity(self.graph.conn, explore_node_ids)
+                    explore_threshold = getattr(
+                        self.engine.settings, "affinity_similarity_threshold", 0.70
+                    )
+                    for candidate in sorted(gated_out, key=lambda r: r["score"], reverse=True):
+                        nid = candidate["node"]["id"]
+                        rows = affinity_map.get(nid, [])
+                        # Only explore nodes with no existing affinity signal for similar prompts
+                        has_signal = False
+                        for arow in rows:
+                            row_vec = np.frombuffer(arow["prompt_vec"], dtype=np.float32)
+                            row_norm = float(np.linalg.norm(row_vec))
+                            prompt_norm = float(np.linalg.norm(prompt_vec))
+                            if row_norm > 0 and prompt_norm > 0:
+                                sim = float(np.dot(prompt_vec, row_vec) / (prompt_norm * row_norm))
+                                if sim >= explore_threshold:
+                                    has_signal = True
+                                    break
+                        if not has_signal:
+                            search_results.append(candidate)
+                            break  # one exploration slot only
+            except Exception as e:
+                logger.warning("Exploration slot failed: %s", e)
 
         # Temporal queries: re-sort by recency (most recent first).
         # Semantic scores already filtered noise via the 0.45 threshold,
@@ -542,6 +771,42 @@ class ContextBuilder:
 
         parts = [p for p in (identity_text, memories_text) if p]
         body = "\n\n".join(parts)
+
+        # Write whisper_log: one row per non-temporal candidate with boosted_score >= 0.40.
+        # Uses pre_gate_candidates (all above the 0.40 floor) so gated-out candidates
+        # are also logged. was_injected reflects the final post-gate, post-exploration decision.
+        if session_id and prompt_vec is not None and self.engine is not None:
+            try:
+                import hashlib
+                from datetime import datetime, timezone
+
+                prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+                now_iso = datetime.now(timezone.utc).isoformat()
+                vec_blob = prompt_vec.astype(np.float32).tobytes()
+                # Use pre_gate_candidates when available (after affinity boost),
+                # otherwise fall back to the current search_results
+                candidates_to_log = pre_gate_candidates if pre_gate_candidates else search_results
+                injected_ids = {r["node"]["id"] for r in search_results}
+                with self.engine.db.transaction() as conn:
+                    for r in candidates_to_log:
+                        if r.get("source") == "temporal":
+                            continue
+                        boosted_score = r["score"]
+                        if boosted_score < 0.40:
+                            continue  # below noise floor, skip
+                        pre_boost_score = r.get("_pre_boost_score", r["score"])
+                        was_injected = 1 if r["node"]["id"] in injected_ids else 0
+                        conn.execute(
+                            "INSERT INTO whisper_log "
+                            "(session_id, space, prompt_hash, prompt_text, prompt_vec, "
+                            "node_id, score, was_injected, logged_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (session_id, space, prompt_hash, prompt, vec_blob,
+                             r["node"]["id"], pre_boost_score, was_injected, now_iso),
+                        )
+            except Exception as e:
+                logger.warning("whisper_log write failed: %s", e)
+
         if not body:
             return ""
         return _WHISPER_FRAMING + "\n\n" + body

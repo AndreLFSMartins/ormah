@@ -96,6 +96,78 @@ class Database:
                 if col_name not in node_cols:
                     conn.execute(ddl)
 
+            # Create new feedback/logging tables if missing
+            existing_tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+
+            if "whisper_log" not in existing_tables:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS whisper_log (
+                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id   TEXT NOT NULL,
+                        space        TEXT,
+                        prompt_hash  TEXT NOT NULL,
+                        prompt_text  TEXT,
+                        prompt_vec   BLOB NOT NULL,
+                        node_id      TEXT NOT NULL,
+                        score        REAL NOT NULL,
+                        was_injected INTEGER NOT NULL,
+                        logged_at    TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_whisper_log_session ON whisper_log(session_id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_whisper_log_node ON whisper_log(node_id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_whisper_log_logged ON whisper_log(logged_at)"
+                )
+
+            if "affinity" not in existing_tables:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS affinity (
+                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        prompt_vec   BLOB NOT NULL,
+                        prompt_text  TEXT,
+                        node_id      TEXT NOT NULL,
+                        signal       INTEGER NOT NULL,
+                        source       TEXT NOT NULL DEFAULT 'explicit',
+                        confirmed_at TEXT NOT NULL,
+                        space        TEXT,
+                        session_id   TEXT NOT NULL,
+                        UNIQUE (node_id, session_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_affinity_node ON affinity(node_id)"
+                )
+
+            if "review_log" not in existing_tables:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS review_log (
+                        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                        node_id     TEXT NOT NULL,
+                        session_id  TEXT NOT NULL,
+                        surfaced_at TEXT NOT NULL,
+                        answered    INTEGER DEFAULT 0
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_review_log_node ON review_log(node_id)"
+                )
+
         # Migrate FTS table to porter stemmer if needed
         self._migrate_fts_tokenizer()
 

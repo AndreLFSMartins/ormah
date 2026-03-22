@@ -732,13 +732,14 @@ class MemoryEngine:
 
         return f"Connected {req.source_id[:8]}... →[{req.edge.value}]→ {req.target_id[:8]}..."
 
-    def get_context(self, space: str | None = None, task_hint: str | None = None) -> str:
+    def get_context(self, space: str | None = None, task_hint: str | None = None, session_id: str | None = None) -> str:
         """Get core memories formatted for system prompt."""
         return self.context_builder.build_core_context(
             space=space,
             user_node_id=self.user_node_id,
             task_hint=task_hint,
             max_nodes=self.settings.context_max_nodes,
+            session_id=session_id,
         )
 
     def get_whisper_context(
@@ -746,6 +747,7 @@ class MemoryEngine:
         prompt: str,
         space: str | None = None,
         recent_prompts: list[str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Get compact whisper context for involuntary recall injection."""
         return self.context_builder.build_whisper_context(
@@ -768,6 +770,7 @@ class MemoryEngine:
             content_total_budget=self.settings.whisper_content_total_budget,
             content_min_per_node=self.settings.whisper_content_min_per_node,
             content_max_per_node=self.settings.whisper_content_max_per_node,
+            session_id=session_id,
         )
 
     def mark_outdated(self, node_id: str, reason: str | None = None) -> str | None:
@@ -1737,6 +1740,57 @@ class MemoryEngine:
                 "LLM extraction failed. "
                 "Pass pre-extracted memories via the 'memories' parameter instead."
             )
+
+    def submit_feedback(self, node_id: str, signal: int, source: str = "explicit") -> str:
+        """Record explicit or implicit feedback signal for a whisper candidate.
+
+        Looks up the most recent whisper_log entry for *node_id*, inserts an
+        affinity row, and (for explicit feedback) marks any open review_log
+        entry as answered.
+        """
+        row = self.db.conn.execute(
+            """
+            SELECT prompt_vec, prompt_text, session_id, space
+            FROM whisper_log
+            WHERE node_id = ?
+            ORDER BY logged_at DESC
+            LIMIT 1
+            """,
+            (node_id,),
+        ).fetchone()
+
+        if row is None:
+            return f"No whisper_log entry found for node {node_id}"
+
+        prompt_vec = row["prompt_vec"]
+        prompt_text = row["prompt_text"]
+        session_id = row["session_id"]
+        space = row["space"]
+
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO affinity
+                    (prompt_vec, prompt_text, node_id, signal, source, confirmed_at, space, session_id)
+                VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?)
+                ON CONFLICT (node_id, session_id) DO NOTHING
+                """,
+                (prompt_vec, prompt_text, node_id, signal, source, space, session_id),
+            )
+            if source != "implicit":
+                conn.execute(
+                    """
+                    UPDATE review_log SET answered = 1
+                    WHERE id = (
+                        SELECT id FROM review_log
+                        WHERE node_id = ? AND answered = 0
+                        ORDER BY surfaced_at DESC LIMIT 1
+                    )
+                    """,
+                    (node_id,),
+                )
+
+        return f"Feedback recorded for node {node_id[:8]}..."
 
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""

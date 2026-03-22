@@ -167,3 +167,14 @@ def test_context_max_nodes_zero():
 def test_consolidation_interval_zero():
     with pytest.raises(ValidationError, match="interval must be >= 1"):
         _settings(consolidation_interval_minutes=0)
+
+
+# --- Affinity and exploration defaults ---
+
+def test_affinity_defaults():
+    s = _settings()
+    assert s.affinity_similarity_threshold == 0.70
+    assert s.affinity_half_life_days == 30.0
+    assert s.affinity_max_boost == 0.15
+    assert s.affinity_implicit_weight == 0.8
+    assert s.whisper_exploration_enabled is True
