@@ -66,7 +66,7 @@ The affinity layer adds personalised relevance the cross-encoder cannot provide.
 
 ### In scope (Phase 1)
 
-- `whisper_log` table — log every non-temporal injection candidate (with `prompt_snippet` for review display)
+- `whisper_log` table — log every non-temporal injection candidate (with `prompt_text` for review display and fine-tuning data collection)
 - `affinity` table — labeled (prompt_vec, prompt_text, node, signal) pairs; `source` column distinguishes explicit (user) vs implicit (Claude inline) feedback
 - `review_log` table — track surfaced candidates to enforce rate limits
 - Affinity boost inserted after cross-encoder scoring, before both filters; implicit signals weighted at 0.8×
@@ -96,16 +96,16 @@ Non-temporal candidates only.
 
 ```sql
 CREATE TABLE IF NOT EXISTS whisper_log (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id     TEXT NOT NULL,
-    space          TEXT,
-    prompt_hash    TEXT NOT NULL,    -- sha256(prompt), no raw text stored
-    prompt_snippet TEXT,             -- first 300 chars of prompt for review context display
-    prompt_vec     BLOB NOT NULL,    -- 768-dim float32 embedding
-    node_id        TEXT NOT NULL,
-    score          REAL NOT NULL,    -- cross-encoder blended score, before affinity boost
-    was_injected   INTEGER NOT NULL, -- 1 = injected, 0 = gated out
-    logged_at      TEXT NOT NULL
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL,
+    space        TEXT,
+    prompt_hash  TEXT NOT NULL,    -- sha256(prompt), for deduplication
+    prompt_text  TEXT,             -- full prompt text; used by submit_feedback to populate affinity.prompt_text
+    prompt_vec   BLOB NOT NULL,    -- 768-dim float32 embedding
+    node_id      TEXT NOT NULL,
+    score        REAL NOT NULL,    -- cross-encoder blended score, before affinity boost
+    was_injected INTEGER NOT NULL, -- 1 = injected, 0 = gated out
+    logged_at    TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_whisper_log_session ON whisper_log(session_id);
@@ -116,14 +116,14 @@ CREATE INDEX IF NOT EXISTS idx_whisper_log_logged  ON whisper_log(logged_at);
 `score` records the cross-encoder blended score before the affinity boost is applied.
 This preserves the raw retrieval signal independently of feedback history.
 
-`prompt_snippet` stores the first 300 characters of the prompt (truncated at a word
-boundary with `…` if longer). Used only for the session-start review context block so
-the user understands what was being discussed when ormah held back a memory. The paired
-memory content provides additional context for ambiguous snippets (e.g. code-heavy
-prompts). Not used for retrieval.
+`prompt_text` stores the full prompt text. It is the source for two things: (1) the
+review context block display — the server truncates to 300 chars at a word boundary for
+display, no separate column needed; (2) `affinity.prompt_text` — when `submit_feedback`
+is called for either the explicit or implicit path, the server fetches `prompt_text`
+from the most recent `whisper_log` row for that `node_id` and stores it in `affinity`.
 
-**Storage:** 768 dims × 4 bytes + ~300 bytes text ≈ 3.3KB/row. At ~250 candidates/day
-→ ~300MB/year. Rows older than 90 days can be pruned by the decay_manager background
+**Storage:** 768 dims × 4 bytes + avg ~500 bytes text ≈ 3.5KB/row. At ~250 candidates/day
+→ ~320MB/year. Rows older than 90 days can be pruned by the decay_manager background
 job (outside the 7-day review eligibility window; affinity signal already extracted).
 
 ### `affinity`
@@ -185,18 +185,18 @@ the maximum opportunity to rescue false negatives:
 ```
 ... (steps 1–5 unchanged) ...
 
-6.  Cross-encoder reranker → scores all candidates
+6.  Cross-encoder reranker → scores all candidates, returns blended scores only
     blended = 0.4 × sigmoid(CE) + 0.6 × embedding_score
-    (no filter applied yet — all scored candidates continue)
+    Called with min_score=0.0 (no filter applied inside rerank())
 
     [NEW] Affinity boost
           → for each candidate: boosted_score = blended + affinity_adjustment
           → affinity_adjustment ∈ [−0.15, +0.15]
 
-    Reranker min_score filter → drop boosted_score < 0.40
-    (previously dropped blended < 0.40; now drops boosted < 0.40)
+    Reranker min_score filter (applied here, not inside rerank())
+          → drop candidates where boosted_score < 0.40
 
-7.  Injection gate → drop if max boosted_score < 0.55
+7.  Injection gate → drop everything if max boosted_score < 0.55
     Score floor: keep only boosted_score ≥ 0.55
 ```
 
@@ -206,6 +206,12 @@ filters and injects.
 A node at 0.30 blended with max +1 signal → boosted to 0.45 → survives reranker floor
 but not gate (0.55). The effective rescue range for false negatives is [0.40, 0.55):
 nodes that cleared the hybrid min_score (0.45) but would have been gated out.
+
+**Implementation note:** The existing `rerank()` function applies `min_score` internally
+before returning. This must be changed: call `rerank(candidates, min_score=0.0)` to get
+all scored candidates back, apply the affinity boost, then apply the 0.40 floor in the
+caller. The `whisper_reranker_min_score` config value (currently applied inside rerank)
+becomes the post-boost floor in `build_whisper_context`.
 
 ### Affinity Boost Computation
 
@@ -295,20 +301,35 @@ keeps candidates fresh.
 **Step 1 — SQL pre-filter** (deduplicates by `node_id` before loading blobs):
 
 ```sql
-SELECT wl.node_id, MAX(wl.score) as score, wl.session_id, wl.space,
-       wl.prompt_snippet, n.title, n.content
-FROM whisper_log wl
-JOIN nodes n ON n.id = wl.node_id
-WHERE wl.was_injected = 0
-  AND wl.logged_at > datetime('now', '-7 days')
-GROUP BY wl.node_id
+WITH ranked AS (
+  SELECT
+    wl.node_id, wl.score, wl.session_id, wl.space, wl.prompt_text,
+    n.title, n.content,
+    ROW_NUMBER() OVER (PARTITION BY wl.node_id ORDER BY wl.score DESC) AS rn
+  FROM whisper_log wl
+  JOIN nodes n ON n.id = wl.node_id
+  WHERE wl.was_injected = 0
+    AND wl.logged_at > datetime('now', '-7 days')
+    AND NOT EXISTS (
+      SELECT 1 FROM whisper_log wl2
+      WHERE wl2.node_id = wl.node_id
+        AND wl2.was_injected = 1
+        AND wl2.logged_at > datetime('now', '-7 days')
+    )
+)
+SELECT node_id, score, session_id, space, prompt_text, title, content
+FROM ranked
+WHERE rn = 1
 ORDER BY score DESC
 LIMIT 20
 ```
 
-Note: `wl.source != 'temporal'` is not a filter here — `whisper_log` never contains
-temporal rows (they are excluded at logging time). The `prompt_vec` blob is loaded only
-in Step 2 Python filtering, not in this pre-filter query.
+The CTE with `ROW_NUMBER()` ensures all non-aggregated columns (`session_id`, `space`,
+`prompt_text`) come from the same row that produced the highest score for that node —
+not an arbitrary row. `NOT EXISTS` excludes nodes that were successfully injected in
+any cycle within the same 7-day window (they don't need a review question; the
+exploration slot already captured them). `whisper_log` never contains temporal rows —
+they are excluded at logging time. `prompt_vec` blobs are loaded only in Step 2.
 
 **Step 2 — Python filtering** (loads `prompt_vec` only for top-20):
 
@@ -330,7 +351,7 @@ Take the first eligible candidate. **Limit: 1 question per session.**
 ```
 ## Ormah: one quick question (optional)
 Before we start — in a recent session in /{space}, you were working on:
-"{prompt_snippet}"
+"{prompt_text[:300]}…"
 
 I held back this memory because I wasn't confident it was relevant:
 "{node title}" — {node content}
@@ -341,10 +362,11 @@ for yes, signal=-1 for no). If they'd rather skip, proceed normally — won't be
 again for this memory.
 ```
 
-No raw scores exposed. No node IDs shown to the user. Claude reads the memory content
-and prompt snippet, then frames the question in its own words — conversational, not
-transactional. If the memory content is long, Claude summarises it in one sentence.
-No blocking: if the user skips or ignores the question, the session proceeds normally.
+`prompt_text` is truncated to 300 chars at a word boundary for display. No raw scores
+exposed. No node IDs shown to the user. Claude reads the memory content and prompt
+context, then frames the question in its own words — conversational, not transactional.
+If the memory content is long, Claude summarises it in one sentence. No blocking:
+if the user skips or ignores the question, the session proceeds normally.
 
 ### Rate Limits
 
@@ -390,8 +412,17 @@ this `node_id`. This avoids requiring Claude to track session identifiers across
 3. UPDATE review_log SET answered = 1
    WHERE node_id = ? AND answered = 0
    ORDER BY surfaced_at DESC LIMIT 1
-   (skipped for implicit feedback — review_log is not updated)
+   (skipped for implicit feedback — review_log is only updated for explicit calls)
 ```
+
+**On the UNIQUE (node_id, session_id) constraint:** The `session_id` used in step 2 is
+resolved from `whisper_log` (the most recent row for that node). Because different
+sessions produce different `session_id` values, signals from multiple sessions for the
+same node are each stored as separate rows. The constraint only prevents duplicate
+submissions within the same session (e.g. the user answering the same review question
+twice). For implicit feedback, if Claude calls `submit_feedback` more than once for
+the same node within a single session, only the first signal is kept — this is
+intentional.
 
 Active immediately on the next inject cycle.
 
@@ -470,8 +501,16 @@ Year 1:   Genuinely personalised. Different from any other user's ormah instance
 - **Temporal exclusion:** check `r.get("source") == "temporal"` before logging to
   `whisper_log`. These results have near-zero scores and should never enter the
   review queue.
-- **prompt_snippet truncation:** truncate at a word boundary ≤ 300 chars, append `…`.
-  Stored at inject time alongside `prompt_vec`. Never used for retrieval.
+- **prompt_text display truncation:** when building the review context block, truncate
+  `prompt_text` to 300 chars at a word boundary and append `…`. The full text is stored
+  in `whisper_log` and carried through to `affinity` via `submit_feedback`.
+- **review_log permanent suppression:** a node reaching 3 `answered=0` rows is
+  permanently excluded from explicit review. This is intentional — after 3 ignored
+  attempts, ormah stops asking. The affinity boost can still fire from implicit signals.
+- **Exploration slot and negative implicit signals:** a single negative implicit signal
+  for a node at similarity > 0.70 will prevent that node from appearing in the
+  exploration slot. This is the correct behaviour — ormah already has a signal and does
+  not need to probe further.
 - **Implicit feedback:** add instructions to `CLAUDE.md` (ormah project) telling Claude
   to call `submit_feedback(node_id, signal, source="implicit")` inline — with `signal=1`
   when it actively uses a whispered memory in its response, `signal=-1` when it
