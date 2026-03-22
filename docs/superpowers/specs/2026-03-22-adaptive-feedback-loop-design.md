@@ -276,9 +276,13 @@ Only fires when `whisper_exploration_enabled = True`.
 
 At the end of each inject cycle, write one `whisper_log` row per candidate where:
 - `source != "temporal"` (temporal results excluded — their scores are not meaningful)
-- `boosted_score >= 0.40` (below this is noise)
+- in-memory `boosted_score >= 0.40` (below this is noise — not a stored column)
 
-`score` stored is the **pre-boost blended score** from the cross-encoder step.
+`whisper_log.score` stores the **pre-boost blended score** from the cross-encoder step,
+not the boosted value. The `boosted_score` variable is used only as an in-memory filter
+to decide whether to log a row at all. Storing the pre-boost value preserves the raw
+retrieval signal independently of feedback history.
+
 `was_injected` reflects the final post-gate, post-exploration decision.
 
 ---
@@ -410,8 +414,11 @@ this `node_id`. This avoids requiring Claude to track session identifiers across
    ON CONFLICT (node_id, session_id) DO NOTHING   ← idempotent
 
 3. UPDATE review_log SET answered = 1
-   WHERE node_id = ? AND answered = 0
-   ORDER BY surfaced_at DESC LIMIT 1
+   WHERE id = (
+     SELECT id FROM review_log
+     WHERE node_id = ? AND answered = 0
+     ORDER BY surfaced_at DESC LIMIT 1
+   )
    (skipped for implicit feedback — review_log is only updated for explicit calls)
 ```
 
@@ -447,8 +454,9 @@ Next new session start:
   get_context MCP call:
     → [NEW] build_core_context runs eligibility check
     → finds gated-out candidate, no affinity signal, not recently surfaced
-    → appends review block to context text
     → [NEW] review_log row inserted (surfaced_at = now, answered = 0)
+         ↳ if insert fails → skip review block entirely for this session
+    → appends review block to context text (only if insert succeeded)
     → Claude asks naturally, one question before any work begins
     → user answers (or skips)
     → if answered: Claude calls submit_feedback(node_id, ±1)
@@ -504,6 +512,11 @@ Year 1:   Genuinely personalised. Different from any other user's ormah instance
 - **prompt_text display truncation:** when building the review context block, truncate
   `prompt_text` to 300 chars at a word boundary and append `…`. The full text is stored
   in `whisper_log` and carried through to `affinity` via `submit_feedback`.
+- **review_log insert before context append:** the `review_log` insert must succeed
+  before the review block is appended to the context string. If the insert fails, skip
+  the review block entirely for that session. This prevents a scenario where Claude asks
+  a question but no `review_log` row exists to be marked `answered=1`, which would
+  silently bypass the 14-day rate-limit check.
 - **review_log permanent suppression:** a node reaching 3 `answered=0` rows is
   permanently excluded from explicit review. This is intentional — after 3 ignored
   attempts, ormah stops asking. The affinity boost can still fire from implicit signals.
