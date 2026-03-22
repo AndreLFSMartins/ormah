@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import patch, MagicMock
 
 from ormah.background.llm import get_adapter
@@ -51,18 +52,22 @@ def test_litellm_adapter_success():
     mock_response = MagicMock()
     mock_response.choices = [mock_choice]
 
-    with patch("litellm.completion", return_value=mock_response) as mock_comp:
+    mock_litellm = MagicMock()
+    mock_litellm.completion.return_value = mock_response
+    with patch.dict(sys.modules, {"litellm": mock_litellm}):
         result = adapter.generate("test prompt", json_mode=True)
 
     assert result == '{"result": "ok"}'
-    call_kwargs = mock_comp.call_args[1]
+    call_kwargs = mock_litellm.completion.call_args[1]
     assert call_kwargs["response_format"] == {"type": "json_object"}
 
 
 def test_litellm_adapter_failure():
     adapter = LiteLLMAdapter(model="claude-sonnet-4-20250514")
 
-    with patch("litellm.completion", side_effect=Exception("API error")):
+    mock_litellm = MagicMock()
+    mock_litellm.completion.side_effect = Exception("API error")
+    with patch.dict(sys.modules, {"litellm": mock_litellm}):
         result = adapter.generate("test prompt")
 
     assert result is None

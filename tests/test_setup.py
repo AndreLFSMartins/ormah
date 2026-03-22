@@ -302,7 +302,10 @@ class TestConfigureClaudeDesktop:
         config_dir = tmp_path / "Claude"
         config_dir.mkdir()
 
-        with patch("ormah.setup.os.path.expanduser", return_value=str(config_dir)):
+        with (
+            patch("ormah.setup.os.path.expanduser", return_value=str(config_dir)),
+            patch("platform.system", return_value="Darwin"),
+        ):
             configure_claude_desktop("/abs/path/ormah")
 
         config_path = config_dir / "claude_desktop_config.json"
