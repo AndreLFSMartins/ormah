@@ -92,3 +92,42 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail TEXT,                    -- operation-specific context
     performed_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS whisper_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL,
+    space        TEXT,
+    prompt_hash  TEXT NOT NULL,
+    prompt_text  TEXT,
+    prompt_vec   BLOB NOT NULL,
+    node_id      TEXT NOT NULL,
+    score        REAL NOT NULL,
+    was_injected INTEGER NOT NULL,
+    logged_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_whisper_log_session ON whisper_log(session_id);
+CREATE INDEX IF NOT EXISTS idx_whisper_log_node    ON whisper_log(node_id);
+CREATE INDEX IF NOT EXISTS idx_whisper_log_logged  ON whisper_log(logged_at);
+
+CREATE TABLE IF NOT EXISTS affinity (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt_vec   BLOB NOT NULL,
+    prompt_text  TEXT,
+    node_id      TEXT NOT NULL,
+    signal       INTEGER NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'explicit',
+    confirmed_at TEXT NOT NULL,
+    space        TEXT,
+    session_id   TEXT,
+    UNIQUE (node_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_affinity_node ON affinity(node_id);
+
+CREATE TABLE IF NOT EXISTS review_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id     TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    surfaced_at TEXT NOT NULL,
+    answered    INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_review_log_node ON review_log(node_id);
