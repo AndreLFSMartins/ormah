@@ -384,11 +384,11 @@ class ContextBuilder:
                     # Rate-limiting uses surfaced_at/node_id, not session_id, so this is safe.
                     current_session_id = session_id or ""
                     # Insert review_log row — must succeed before appending block
-                    self.graph.conn.execute(
-                        "INSERT INTO review_log (node_id, session_id, surfaced_at) VALUES (?, ?, datetime('now'))",
-                        (candidate["node_id"], current_session_id),
-                    )
-                    self.graph.conn.commit()
+                    with self.engine.db.transaction() as conn:
+                        conn.execute(
+                            "INSERT INTO review_log (node_id, session_id, surfaced_at) VALUES (?, ?, datetime('now'))",
+                            (candidate["node_id"], current_session_id),
+                        )
                     # Build review block
                     prompt_snippet = _truncate_at_word_boundary(
                         candidate["prompt_text"] or "", max_len=300
@@ -619,6 +619,9 @@ class ContextBuilder:
                 if gated_out:
                     explore_node_ids = [r["node"]["id"] for r in gated_out]
                     affinity_map = batch_fetch_affinity(self.graph.conn, explore_node_ids)
+                    explore_threshold = getattr(
+                        self.engine.settings, "affinity_similarity_threshold", 0.70
+                    )
                     for candidate in sorted(gated_out, key=lambda r: r["score"], reverse=True):
                         nid = candidate["node"]["id"]
                         rows = affinity_map.get(nid, [])
@@ -630,7 +633,7 @@ class ContextBuilder:
                             prompt_norm = float(np.linalg.norm(prompt_vec))
                             if row_norm > 0 and prompt_norm > 0:
                                 sim = float(np.dot(prompt_vec, row_vec) / (prompt_norm * row_norm))
-                                if sim >= 0.70:
+                                if sim >= explore_threshold:
                                     has_signal = True
                                     break
                         if not has_signal:

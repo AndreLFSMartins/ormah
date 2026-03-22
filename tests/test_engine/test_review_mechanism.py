@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -231,6 +232,11 @@ class TestReviewBlockInBuildCoreContext:
         settings.affinity_similarity_threshold = threshold
         settings.claude_maintenance_enabled = False
         engine.settings = settings
+        if conn is not None:
+            @contextmanager
+            def _fake_transaction():
+                yield conn
+            engine.db.transaction = _fake_transaction
         return engine
 
     def _insert_whisper_row(self, conn, node_id, prompt_text="how does auth work", prompt_vec_bytes=b""):
