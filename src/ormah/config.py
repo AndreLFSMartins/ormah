@@ -168,6 +168,13 @@ class Settings(BaseSettings):
     # Whisper injection gate (minimum blended score to justify injection)
     whisper_injection_gate: float = 0.55
 
+    # Affinity boost (adaptive feedback loop)
+    affinity_similarity_threshold: float = 0.70
+    affinity_half_life_days: float = 30.0
+    affinity_max_boost: float = 0.15
+    affinity_implicit_weight: float = 0.8
+    whisper_exploration_enabled: bool = True
+
     # Whisper dynamic content budget (distribute chars across results)
     whisper_content_total_budget: int = 1500
     whisper_content_min_per_node: int = 100
