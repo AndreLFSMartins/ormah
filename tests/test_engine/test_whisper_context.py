@@ -61,10 +61,10 @@ class TestWhisperMinScore:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict(f"node-{i}", f"Fact {i}") for i in range(5)]
-        # Only 2 results above threshold
+        # Only 2 results above threshold (min_score=0.15, gate=0.55)
         mock_engine.recall_search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
-            {"node": nodes[1], "score": 0.5, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.6, "source": "hybrid"},
             {"node": nodes[2], "score": 0.1, "source": "hybrid"},
             {"node": nodes[3], "score": 0.05, "source": "hybrid"},
             {"node": nodes[4], "score": 0.02, "source": "hybrid"},
@@ -161,7 +161,7 @@ class TestWhisperIdentityCap:
 
         topical = _make_node_dict("fact-1", "Auth module info")
         mock_engine.recall_search_structured.return_value = [
-            {"node": pref, "score": 0.5, "source": "hybrid"},
+            {"node": pref, "score": 0.6, "source": "hybrid"},
             {"node": topical, "score": 0.7, "source": "hybrid"},
         ]
 
