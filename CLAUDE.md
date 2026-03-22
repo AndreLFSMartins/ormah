@@ -59,7 +59,7 @@ Store layer (markdown files in memory/nodes/*.md as backup)
 - **Embeddings**: Default provider is `local` with `BAAI/bge-base-en-v1.5` (768-dim, no task prefixes needed). Also supports ollama and litellm.
 - **Background jobs** (APScheduler): auto-linker, conflict detector, duplicate merger, importance scorer, decay manager, consolidator, hippocampus (file watcher), session watcher.
 - **Tier decay**: working-tier memories decay after ~14 days using FSRS spaced repetition; `core` is capped at 50.
-- **MCP tools exposed**: `remember`, `recall`, `get_context`, `get_self`, `mark_outdated`, `run_maintenance`.
+- **MCP tools exposed**: `remember`, `recall`, `get_context`, `get_self`, `mark_outdated`, `run_maintenance`, `submit_feedback`.
 
 ### Frontend
 
@@ -85,6 +85,7 @@ You have access to a persistent memory system (via MCP tools) that maintains kno
 - **get_context**: Load core memories (call at conversation start). Pass `task_hint` to filter context to only the most relevant memories for the current task instead of loading everything.
 - **get_self**: Get the user's identity profile — name, preferences, and personal facts. Returns all identity-linked memories.
 - **mark_outdated**: Mark a memory as no longer valid. Optionally provide a `reason`. Outdated memories are heavily demoted in search results.
+- **submit_feedback**: Record whether a whispered memory was useful. `signal=1` if helpful, `signal=-1` if not relevant. `source="explicit"` for user-confirmed answers; `source="implicit"` when you infer usefulness from the conversation.
 
 ### Project Awareness
 
@@ -120,6 +121,7 @@ Memories are automatically scoped to the current project directory. The MCP serv
 11. **Mark outdated info**: When a memory is wrong or outdated, call `mark_outdated` with a reason so it gets demoted in future searches.
 12. **Set confidence**: When storing information you're not fully certain about, set `confidence` below 1.0. This affects how prominently the memory appears in search results.
 13. **Run maintenance in the background**: When the context from `get_context` includes `unprocessed_memories: N`, silently spawn `Agent(subagent_type="ormah-maintenance", run_in_background=True)` — do NOT run inline. Continue the conversation normally without mentioning it to the user.
+14. **Submit implicit feedback when you use a whispered memory**: If a whispered memory (from the `## Whispered memories` block) is genuinely useful and you actively draw on it in your response, call `submit_feedback(node_id=<id>, signal=1, source="implicit")`. If you explicitly decide a whispered memory is not relevant to the current task (not just that you didn't mention it), call `submit_feedback(node_id=<id>, signal=-1, source="implicit")`. **Do not call `submit_feedback` for silence** — only call it when you actively use a memory or actively decide it's irrelevant.
 
 
 Strict Rule: When fixing issues always make sure you are fixing the root cause and not patching or papering over issues.
