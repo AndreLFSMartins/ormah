@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -91,7 +92,7 @@ def test_affinity_unique_constraint(db):
         "VALUES (?, ?, ?, ?, ?, ?)",
         (b"\x00" * 4, "node-1", 1, "explicit", now, "sess-1"),
     )
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.IntegrityError):
         db.conn.execute(
             "INSERT INTO affinity (prompt_vec, node_id, signal, source, confirmed_at, session_id) "
             "VALUES (?, ?, ?, ?, ?, ?)",

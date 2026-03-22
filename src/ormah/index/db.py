@@ -143,7 +143,7 @@ class Database:
                         source       TEXT NOT NULL DEFAULT 'explicit',
                         confirmed_at TEXT NOT NULL,
                         space        TEXT,
-                        session_id   TEXT,
+                        session_id   TEXT NOT NULL,
                         UNIQUE (node_id, session_id)
                     )
                     """

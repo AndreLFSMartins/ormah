@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS affinity (
     source       TEXT NOT NULL DEFAULT 'explicit',
     confirmed_at TEXT NOT NULL,
     space        TEXT,
-    session_id   TEXT,
+    session_id   TEXT NOT NULL,
     UNIQUE (node_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_affinity_node ON affinity(node_id);
