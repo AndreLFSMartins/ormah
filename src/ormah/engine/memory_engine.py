@@ -1741,6 +1741,57 @@ class MemoryEngine:
                 "Pass pre-extracted memories via the 'memories' parameter instead."
             )
 
+    def submit_feedback(self, node_id: str, signal: int, source: str = "explicit") -> str:
+        """Record explicit or implicit feedback signal for a whisper candidate.
+
+        Looks up the most recent whisper_log entry for *node_id*, inserts an
+        affinity row, and (for explicit feedback) marks any open review_log
+        entry as answered.
+        """
+        row = self.db.conn.execute(
+            """
+            SELECT prompt_vec, prompt_text, session_id, space
+            FROM whisper_log
+            WHERE node_id = ?
+            ORDER BY logged_at DESC
+            LIMIT 1
+            """,
+            (node_id,),
+        ).fetchone()
+
+        if row is None:
+            return f"No whisper_log entry found for node {node_id}"
+
+        prompt_vec = row["prompt_vec"]
+        prompt_text = row["prompt_text"]
+        session_id = row["session_id"]
+        space = row["space"]
+
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO affinity
+                    (prompt_vec, prompt_text, node_id, signal, source, confirmed_at, space, session_id)
+                VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?)
+                ON CONFLICT (node_id, session_id) DO NOTHING
+                """,
+                (prompt_vec, prompt_text, node_id, signal, source, space, session_id),
+            )
+            if source != "implicit":
+                conn.execute(
+                    """
+                    UPDATE review_log SET answered = 1
+                    WHERE id = (
+                        SELECT id FROM review_log
+                        WHERE node_id = ? AND answered = 0
+                        ORDER BY surfaced_at DESC LIMIT 1
+                    )
+                    """,
+                    (node_id,),
+                )
+
+        return f"Feedback recorded for node {node_id[:8]}..."
+
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""
         try:

@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from collections import deque
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -162,6 +163,24 @@ async def whisper(request: Request):
     text = engine.get_whisper_context(
         prompt=prompt, space=space, recent_prompts=recent_prompts,
         session_id=session_id,
+    )
+    return TextResponse(text=text)
+
+
+class FeedbackRequest(BaseModel):
+    node_id: str
+    signal: Literal[1, -1]
+    source: Literal["explicit", "implicit"] = "explicit"
+
+
+@router.post("/feedback", response_model=TextResponse)
+async def submit_feedback(request: Request, body: FeedbackRequest):
+    """Record explicit or implicit feedback signal for a whisper candidate."""
+    engine = request.app.state.engine
+    text = engine.submit_feedback(
+        node_id=body.node_id,
+        signal=body.signal,
+        source=body.source,
     )
     return TextResponse(text=text)
 
