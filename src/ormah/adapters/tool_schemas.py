@@ -1,6 +1,6 @@
 """Canonical tool definitions shared across MCP and OpenAI adapters.
 
-TOOLS: The core set of tools exposed via MCP to AI agents (6 tools).
+TOOLS: The core set of tools exposed via MCP to AI agents (7 tools).
 ADMIN_TOOLS: Tools for human administration via CLI/API only (9 tools).
 ALL_TOOLS: Combined list for adapters that want the full set.
 """
@@ -176,6 +176,41 @@ TOOLS = [
                 },
             },
             "required": ["node_id"],
+        },
+    },
+    {
+        "name": "submit_feedback",
+        "description": (
+            "Record whether a held-back memory would have been useful. "
+            "Call this after asking the user about a memory that ormah didn't inject during a prior session. "
+            "Use signal=1 if the memory would have helped, signal=-1 if it was not relevant. "
+            "Also call inline (source='implicit') when you inject a memory yourself and the user's response "
+            "clearly confirms it was useful — no need to ask first. "
+            "The system uses this feedback to improve which memories surface in future sessions."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "description": "The ID of the memory node the feedback is about.",
+                },
+                "signal": {
+                    "type": "integer",
+                    "enum": [1, -1],
+                    "description": "1 if the memory would have been useful, -1 if it was not relevant.",
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["explicit", "implicit"],
+                    "description": (
+                        "'explicit' when the user answered a review question (default). "
+                        "'implicit' when you infer usefulness from the conversation without asking."
+                    ),
+                    "default": "explicit",
+                },
+            },
+            "required": ["node_id", "signal"],
         },
     },
     {
