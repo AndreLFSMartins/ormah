@@ -160,6 +160,7 @@ async def whisper(request: Request):
 
     text = engine.get_whisper_context(
         prompt=prompt, space=space, recent_prompts=recent_prompts,
+        session_id=session_id,
     )
     return TextResponse(text=text)
 

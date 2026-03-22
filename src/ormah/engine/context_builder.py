@@ -275,6 +275,7 @@ class ContextBuilder:
         content_total_budget: int = 0,
         content_min_per_node: int = 100,
         content_max_per_node: int = 500,
+        session_id: str | None = None,
     ) -> str:
         """Build compact whisper context for involuntary recall injection.
 
@@ -333,6 +334,15 @@ class ContextBuilder:
         # identity-only → skip general search, use existing identity path below
         identity_only = intent is not None and intent.categories == ["identity"]
 
+        # Compute prompt_vec early — needed for affinity boost and whisper_log
+        prompt_vec: np.ndarray | None = None
+        try:
+            hybrid_search = self.engine._get_hybrid_search()
+            if hybrid_search is not None:
+                prompt_vec = hybrid_search.encoder.encode(prompt)
+        except Exception as e:
+            logger.warning("Failed to compute prompt_vec for affinity: %s", e)
+
         # Build context-enhanced search query from recent prompts
         search_query = prompt
         if recent_prompts:
@@ -381,9 +391,9 @@ class ContextBuilder:
             r for r in search_results
             if r.get("score", 0) >= effective_min_score or r.get("source") == "temporal"
         ]
-        effective_reranker_min = 0.0 if has_temporal else reranker_min_score
-
-        # Cross-encoder reranking
+        # Cross-encoder reranking — always pass min_score=0.0 so affinity boost
+        # can rescue candidates before any floor is applied (spec: reranker_min_score
+        # is now applied as a post-boost floor, not inside rerank())
         if reranker_enabled and search_results:
             try:
                 from ormah.embeddings.reranker import rerank
@@ -392,13 +402,38 @@ class ContextBuilder:
                     query=prompt,
                     candidates=search_results,
                     model_name=reranker_model,
-                    min_score=effective_reranker_min,
+                    min_score=0.0,
                     blend_alpha=reranker_blend_alpha,
                     max_doc_chars=reranker_max_doc_chars,
                 )
 
             except Exception as e:
                 logger.warning("Whisper reranker failed, using embedding scores: %s", e)
+
+        # Affinity boost (adaptive feedback loop): apply personalised score
+        # adjustments based on historical signals before any floor filtering.
+        # pre_gate_candidates captures the full set after boost (used by
+        # exploration slot and whisper_log logging below).
+        pre_gate_candidates: list[dict] = []
+        if not has_temporal and reranker_enabled and search_results and prompt_vec is not None:
+            try:
+                from ormah.engine.affinity import batch_fetch_affinity, compute_affinity_boost
+
+                node_ids = [r["node"]["id"] for r in search_results]
+                affinity_rows_map = batch_fetch_affinity(self.graph.conn, node_ids)
+                boosted = []
+                for r in search_results:
+                    nid = r["node"]["id"]
+                    rows = affinity_rows_map.get(nid, [])
+                    boost = compute_affinity_boost(prompt_vec, nid, rows, self.engine.settings)
+                    boosted.append({**r, "score": r["score"] + boost, "_pre_boost_score": r["score"]})
+                # Apply 0.40 floor AFTER boost (spec: reranker_min_score is now a post-boost floor).
+                # Use the reranker_min_score parameter (passed from engine.settings); fall back to 0.40.
+                effective_floor = reranker_min_score if reranker_min_score > 0.0 else 0.40
+                pre_gate_candidates = [r for r in boosted if r["score"] >= effective_floor]
+                search_results = pre_gate_candidates
+            except Exception as e:
+                logger.warning("Affinity boost failed, using unmodified scores: %s", e)
 
         # Injection gate: require at least one result with a strong enough
         # blended score to justify injection.  Temporal queries are exempt
@@ -412,6 +447,44 @@ class ContextBuilder:
                 # injection gate.  Weak queries naturally get fewer results
                 # instead of padding to max_nodes with marginal matches.
                 search_results = [r for r in search_results if r.get("score", 0) >= injection_gate]
+
+        # Exploration slot: inject one unconfirmed gated-out candidate to
+        # surface false negatives and collect affinity signal for them.
+        if (not has_temporal
+                and getattr(self.engine.settings, "whisper_exploration_enabled", True)
+                and prompt_vec is not None
+                and pre_gate_candidates):
+            try:
+                from ormah.engine.affinity import batch_fetch_affinity
+
+                injected_ids = {r["node"]["id"] for r in search_results}
+                # Gated-out candidates that cleared the 0.40 floor but not the gate
+                gated_out = [
+                    r for r in pre_gate_candidates
+                    if r["node"]["id"] not in injected_ids
+                ]
+                if gated_out:
+                    explore_node_ids = [r["node"]["id"] for r in gated_out]
+                    affinity_map = batch_fetch_affinity(self.graph.conn, explore_node_ids)
+                    for candidate in sorted(gated_out, key=lambda r: r["score"], reverse=True):
+                        nid = candidate["node"]["id"]
+                        rows = affinity_map.get(nid, [])
+                        # Only explore nodes with no existing affinity signal for similar prompts
+                        has_signal = False
+                        for arow in rows:
+                            row_vec = np.frombuffer(arow["prompt_vec"], dtype=np.float32)
+                            row_norm = float(np.linalg.norm(row_vec))
+                            prompt_norm = float(np.linalg.norm(prompt_vec))
+                            if row_norm > 0 and prompt_norm > 0:
+                                sim = float(np.dot(prompt_vec, row_vec) / (prompt_norm * row_norm))
+                                if sim >= 0.70:
+                                    has_signal = True
+                                    break
+                        if not has_signal:
+                            search_results.append(candidate)
+                            break  # one exploration slot only
+            except Exception as e:
+                logger.warning("Exploration slot failed: %s", e)
 
         # Temporal queries: re-sort by recency (most recent first).
         # Semantic scores already filtered noise via the 0.45 threshold,
@@ -542,6 +615,42 @@ class ContextBuilder:
 
         parts = [p for p in (identity_text, memories_text) if p]
         body = "\n\n".join(parts)
+
+        # Write whisper_log: one row per non-temporal candidate with boosted_score >= 0.40.
+        # Uses pre_gate_candidates (all above the 0.40 floor) so gated-out candidates
+        # are also logged. was_injected reflects the final post-gate, post-exploration decision.
+        if session_id and prompt_vec is not None and self.engine is not None:
+            try:
+                import hashlib
+                from datetime import datetime, timezone
+
+                prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+                now_iso = datetime.now(timezone.utc).isoformat()
+                vec_blob = prompt_vec.astype(np.float32).tobytes()
+                # Use pre_gate_candidates when available (after affinity boost),
+                # otherwise fall back to the current search_results
+                candidates_to_log = pre_gate_candidates if pre_gate_candidates else search_results
+                injected_ids = {r["node"]["id"] for r in search_results}
+                with self.engine.db.transaction() as conn:
+                    for r in candidates_to_log:
+                        if r.get("source") == "temporal":
+                            continue
+                        boosted_score = r["score"]
+                        if boosted_score < 0.40:
+                            continue  # below noise floor, skip
+                        pre_boost_score = r.get("_pre_boost_score", r["score"])
+                        was_injected = 1 if r["node"]["id"] in injected_ids else 0
+                        conn.execute(
+                            "INSERT INTO whisper_log "
+                            "(session_id, space, prompt_hash, prompt_text, prompt_vec, "
+                            "node_id, score, was_injected, logged_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (session_id, space, prompt_hash, prompt, vec_blob,
+                             r["node"]["id"], pre_boost_score, was_injected, now_iso),
+                        )
+            except Exception as e:
+                logger.warning("whisper_log write failed: %s", e)
+
         if not body:
             return ""
         return _WHISPER_FRAMING + "\n\n" + body
