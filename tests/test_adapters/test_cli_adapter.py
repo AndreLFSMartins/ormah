@@ -356,6 +356,114 @@ def test_node_json(monkeypatch):
     assert parsed["node"]["id"] == "abc-123"
 
 
+# --- self ---
+
+
+def test_self_text(monkeypatch):
+    def handler(request):
+        assert "/agent/self" in str(request.url)
+        return _mock_response({"text": "# About the User\n\n- **[preference]** Prefers concise responses"})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "ormah.adapters.cli_adapter._client",
+        lambda: httpx.Client(transport=transport, base_url="http://test"),
+    )
+    code, out, err = _run_cli(["self"], monkeypatch)
+    assert code == 0
+    assert "About the User" in out
+
+
+def test_self_json(monkeypatch):
+    response_data = {"text": "# About the User\n", "node_id": None}
+
+    def handler(request):
+        return _mock_response(response_data)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "ormah.adapters.cli_adapter._client",
+        lambda: httpx.Client(transport=transport, base_url="http://test"),
+    )
+    code, out, err = _run_cli(["self", "--json"], monkeypatch)
+    assert code == 0
+    parsed = json.loads(out)
+    assert "text" in parsed
+
+
+# --- outdated ---
+
+
+def test_outdated(monkeypatch):
+    def handler(request):
+        assert "/agent/outdated/abc-123" in str(request.url)
+        body = json.loads(request.content)
+        assert body.get("reason") == "no longer valid"
+        return _mock_response({"text": "Marked as outdated: abc-123"})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "ormah.adapters.cli_adapter._client",
+        lambda: httpx.Client(transport=transport, base_url="http://test"),
+    )
+    code, out, err = _run_cli(["outdated", "abc-123", "--reason", "no longer valid"], monkeypatch)
+    assert code == 0
+    assert "Marked as outdated" in out
+
+
+def test_outdated_no_reason(monkeypatch):
+    def handler(request):
+        assert "/agent/outdated/abc-123" in str(request.url)
+        body = json.loads(request.content)
+        assert body == {}
+        return _mock_response({"text": "Marked as outdated: abc-123"})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "ormah.adapters.cli_adapter._client",
+        lambda: httpx.Client(transport=transport, base_url="http://test"),
+    )
+    code, out, err = _run_cli(["outdated", "abc-123"], monkeypatch)
+    assert code == 0
+
+
+# --- stats ---
+
+
+def test_stats_text(monkeypatch):
+    def handler(request):
+        assert "/admin/stats" in str(request.url)
+        return _mock_response({"total_nodes": 42, "by_tier": {"core": 5, "working": 30, "archival": 7}, "total_edges": 18})
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "ormah.adapters.cli_adapter._client",
+        lambda: httpx.Client(transport=transport, base_url="http://test"),
+    )
+    code, out, err = _run_cli(["stats"], monkeypatch)
+    assert code == 0
+    assert "42" in out
+    assert "18" in out
+    assert "core: 5" in out
+
+
+def test_stats_json(monkeypatch):
+    response_data = {"total_nodes": 42, "by_tier": {"core": 5}, "total_edges": 18}
+
+    def handler(request):
+        return _mock_response(response_data)
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        "ormah.adapters.cli_adapter._client",
+        lambda: httpx.Client(transport=transport, base_url="http://test"),
+    )
+    code, out, err = _run_cli(["stats", "--json"], monkeypatch)
+    assert code == 0
+    parsed = json.loads(out)
+    assert parsed["total_nodes"] == 42
+
+
 # --- error handling ---
 
 

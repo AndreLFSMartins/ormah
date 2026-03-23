@@ -97,10 +97,27 @@ step "Installing ormah"
 
 INSTALL_SOURCE="${ORMAH_INSTALL_SOURCE:-ormah[litellm]}"
 UV_FLAGS=(--python 3.11)
+IS_UPGRADE=false
 
 if uv tool list 2>/dev/null | grep -q '^ormah '; then
     info "Existing install found — upgrading"
     UV_FLAGS+=(--upgrade)
+    IS_UPGRADE=true
+
+    # Back up memory before upgrading so it can be recovered if something goes wrong
+    _mem_dir="${ORMAH_MEMORY_DIR:-$HOME/.local/share/ormah/memory}"
+    if [[ -d "$_mem_dir" ]]; then
+        _backup_dir="$HOME/.local/share/ormah-backups"
+        _backup_dest="$_backup_dir/memory_$(date +"%Y-%m-%d_%H-%M-%S")"
+        mkdir -p "$_backup_dir"
+        cp -r "$_mem_dir" "$_backup_dest"
+        ok "Memory backed up to $_backup_dest"
+        # Keep only the 10 most recent backups
+        _count=$(ls -1d "$_backup_dir"/memory_* 2>/dev/null | wc -l)
+        if [[ "$_count" -gt 10 ]]; then
+            ls -1dt "$_backup_dir"/memory_* | tail -n +11 | xargs rm -rf
+        fi
+    fi
 fi
 
 _install_ok=false
@@ -168,10 +185,17 @@ warn "First server start will download the embedding model (~500 MB one-time dow
 # ── Run setup ───────────────────────────────────────────────────────────────
 
 if $RUN_SETUP; then
-    step "Running ormah setup"
-    info "This will configure your LLM, start the server, and set up integrations"
-    echo ""
-    ormah setup
+    if $IS_UPGRADE; then
+        step "Reapplying integrations"
+        info "Skipping interactive questions — updating hooks and MCP config"
+        echo ""
+        ormah setup --update
+    else
+        step "Running ormah setup"
+        info "This will configure your LLM, start the server, and set up integrations"
+        echo ""
+        ormah setup
+    fi
 else
     echo ""
     ok "Installation complete"

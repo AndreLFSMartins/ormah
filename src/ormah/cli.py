@@ -69,7 +69,7 @@ def _cmd_server_status(args):
 def _cmd_setup(args):
     from ormah.setup import run_setup
 
-    run_setup(ci=args.ci)
+    run_setup(ci=args.ci, update=args.update)
 
 
 def _cmd_uninstall(args):
@@ -121,6 +121,7 @@ def main():
     # --- setup ---
     setup_p = sub.add_parser("setup", help="One-shot setup (hooks, MCP, server)")
     setup_p.add_argument("--ci", action="store_true", help="Non-interactive mode for CI/testing")
+    setup_p.add_argument("--update", action="store_true", help="Skip interactive questions, just reapply hooks and MCP config")
     setup_p.set_defaults(func=_cmd_setup)
 
     # --- uninstall ---
@@ -138,8 +139,11 @@ def main():
         cmd_ingest,
         cmd_ingest_session,
         cmd_node,
+        cmd_outdated,
         cmd_recall,
         cmd_remember,
+        cmd_self,
+        cmd_stats,
         cmd_whisper_inject,
         cmd_whisper_store,
         cmd_whisper_setup,
@@ -202,17 +206,33 @@ def main():
     nd.add_argument("--json", action="store_true", help="Output raw JSON")
     nd.set_defaults(func=cmd_node)
 
+    # self
+    slf = sub.add_parser("self", help="Show your identity profile")
+    slf.add_argument("--json", action="store_true", help="Output raw JSON")
+    slf.set_defaults(func=cmd_self)
+
+    # outdated
+    out = sub.add_parser("outdated", help="Mark a memory as outdated")
+    out.add_argument("id", help="Memory UUID")
+    out.add_argument("--reason", help="Reason for marking outdated")
+    out.set_defaults(func=cmd_outdated)
+
+    # stats
+    sts = sub.add_parser("stats", help="Show memory store statistics")
+    sts.add_argument("--json", action="store_true", help="Output raw JSON")
+    sts.set_defaults(func=cmd_stats)
+
     # whisper
     wh = sub.add_parser("whisper", help="Claude Code hook integration")
     wh_sub = wh.add_subparsers(dest="whisper_cmd", required=True)
 
-    wh_inject = wh_sub.add_parser("inject", help="Hook handler: inject memories")
+    wh_inject = wh_sub.add_parser("inject", help="(internal) UserPromptSubmit hook — called automatically by Claude Code")
     wh_inject.set_defaults(func=cmd_whisper_inject)
 
-    wh_store = wh_sub.add_parser("store", help="Hook handler: store memories")
+    wh_store = wh_sub.add_parser("store", help="(internal) PreCompact/SessionEnd hook — called automatically by Claude Code")
     wh_store.set_defaults(func=cmd_whisper_store)
 
-    wh_setup = wh_sub.add_parser("setup", help="Generate Claude Code hook config")
+    wh_setup = wh_sub.add_parser("setup", help="Write Claude Code hook config to settings.json")
     wh_setup.add_argument(
         "--global", dest="glob", action="store_true",
         help="Write to global ~/.claude/settings.json",

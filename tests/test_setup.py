@@ -335,7 +335,7 @@ class TestCliEntryPoint:
             patch("ormah.setup.run_setup") as mock_setup,
         ):
             main()
-            mock_setup.assert_called_once_with(ci=False)
+            mock_setup.assert_called_once_with(ci=False, update=False)
 
     def test_setup_ci_flag(self):
         from ormah.cli import main
@@ -345,7 +345,7 @@ class TestCliEntryPoint:
             patch("ormah.setup.run_setup") as mock_setup,
         ):
             main()
-            mock_setup.assert_called_once_with(ci=True)
+            mock_setup.assert_called_once_with(ci=True, update=False)
 
     def test_server_status_when_not_running(self):
         from ormah.cli import main

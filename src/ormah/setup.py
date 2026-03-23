@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import subprocess
+import webbrowser
 from pathlib import Path
 
 import httpx
@@ -644,8 +645,11 @@ def backfill_transcripts() -> None:
     ok(f"Backfill complete: {total_memories} memories from {len(selected)} transcripts")
 
 
-def configure_claude_maintenance() -> None:
-    """Ask whether to use Claude Code as the LLM for memory maintenance."""
+def configure_claude_maintenance() -> bool:
+    """Ask whether to use Claude Code as the LLM for memory maintenance.
+
+    Returns True if maintenance was enabled, False if skipped.
+    """
     print("\n  Use Claude for memory maintenance?")
     print("  (Recommended for Pro/Max users — links memories, detects conflicts,")
     print("   merges duplicates. No API key needed — Claude is the LLM.)")
@@ -658,8 +662,10 @@ def configure_claude_maintenance() -> None:
         env["ORMAH_CLAUDE_MAINTENANCE_ENABLED"] = "true"
         _write_env_file(env)
         ok("Claude maintenance enabled — run_maintenance via MCP when signalled")
+        return True
     else:
         info("Skipped — run 'ormah setup' again to enable later")
+        return False
 
 
 def _diagnose_server_failure() -> None:
@@ -1045,34 +1051,51 @@ def run_uninstall(yes: bool = False) -> None:
     ok("Ormah has been uninstalled")
 
 
-def run_setup(ci: bool = False) -> None:
-    """First-time setup. Pass ci=True (or set ORMAH_CI=1) for non-interactive mode."""
+def run_setup(ci: bool = False, update: bool = False) -> None:
+    """First-time setup. Pass ci=True (or set ORMAH_CI=1) for non-interactive mode.
+    Pass update=True to skip interactive questions and only reapply hooks/MCP config."""
     ci = ci or os.environ.get("ORMAH_CI") == "1"
 
-    print("Setting up ormah...\n")
+    if update:
+        print("Updating ormah integrations...\n")
+    else:
+        print("Setting up ormah...\n")
 
     # 1. Find absolute path to ormah binary
     ormah_bin = get_ormah_bin_path()
 
     # 2. Ask for name (store in variable, seed after server is up)
-    if ci:
+    if ci or update:
         user_name = None
     else:
         user_name = configure_identity()
 
-    # 3. Configure LLM (writes to .env with 600 permissions)
+    # 3. Detect Claude Code and offer maintenance upfront — no API key needed
+    has_claude_code = shutil.which("claude") is not None
+    claude_maintenance = False
+    if has_claude_code and not ci and not update:
+        step("Claude Code detected")
+        claude_maintenance = configure_claude_maintenance()
+
+    # 4. Configure LLM — skip if Claude maintenance is handling background jobs
     if ci:
         env = _read_env_file()
         env["ORMAH_LLM_PROVIDER"] = "none"
         _write_env_file(env)
         info("CI mode — LLM set to none")
+    elif update:
+        pass  # keep existing LLM config
+    elif claude_maintenance:
+        env = _read_env_file()
+        env["ORMAH_LLM_PROVIDER"] = "none"
+        _write_env_file(env)
     else:
         configure_llm()
 
-    # 3.5 Generate server wrapper
+    # 4.5 Generate server wrapper
     wrapper_path = generate_server_wrapper(ormah_bin)
 
-    # 4. Start server + install auto-start
+    # 5. Start server + install auto-start
     if is_server_running():
         ok("Server already running")
         server_ok = True
@@ -1092,7 +1115,6 @@ def run_setup(ci: bool = False) -> None:
         seed_identity(user_name)
 
     # 6. Hook up Claude integrations
-    has_claude_code = shutil.which("claude") is not None
     has_claude_desktop = os.path.exists(
         os.path.expanduser("~/Library/Application Support/Claude")
     )
@@ -1104,8 +1126,6 @@ def run_setup(ci: bool = False) -> None:
         install_claude_md()
         install_claude_agents()
         install_claude_commands()
-        if not ci:
-            configure_claude_maintenance()
 
     desktop_configured = configure_claude_desktop(ormah_bin)
 
@@ -1124,4 +1144,5 @@ def run_setup(ci: bool = False) -> None:
     if not ci:
         play_finale()
     ok('Ormah is ready! Try asking your AI: "What do you know about me?"')
-    info("The more you use it, the more it remembers.")
+    if server_ok and not ci:
+        webbrowser.open(f"http://localhost:{settings.port}")
