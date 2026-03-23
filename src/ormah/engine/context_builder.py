@@ -603,6 +603,8 @@ class ContextBuilder:
 
         # Exploration slot: inject one unconfirmed gated-out candidate to
         # surface false negatives and collect affinity signal for them.
+        # CE gate: skip candidates the cross-encoder strongly rejected
+        # (ce < -8 means "definitely not relevant") to prevent noise injection.
         if (not has_temporal
                 and getattr(self.engine.settings, "whisper_exploration_enabled", True)
                 and prompt_vec is not None
@@ -623,6 +625,10 @@ class ContextBuilder:
                         self.engine.settings, "affinity_similarity_threshold", 0.70
                     )
                     for candidate in sorted(gated_out, key=lambda r: r["score"], reverse=True):
+                        # CE gate: don't explore candidates the CE strongly rejected
+                        ce_score = candidate.get("cross_encoder_score")
+                        if ce_score is not None and ce_score < -8.0:
+                            continue
                         nid = candidate["node"]["id"]
                         rows = affinity_map.get(nid, [])
                         # Only explore nodes with no existing affinity signal for similar prompts

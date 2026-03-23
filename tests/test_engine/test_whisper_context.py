@@ -1868,6 +1868,146 @@ class TestExplorationSlot:
         assert "Should not appear" not in result
 
 
+class TestExplorationCEGate:
+    """Exploration slot should skip candidates the CE strongly rejected."""
+
+    def test_exploration_skips_strongly_rejected_by_ce(self, mock_graph):
+        """Candidate with CE < -8 should not be explored even with no affinity signal."""
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock(
+            whisper_exploration_enabled=True,
+            affinity_similarity_threshold=0.70,
+            whisper_reranker_min_score=0.0,
+        )
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            _make_node_dict("pass-1", "Relevant fact"),
+            _make_node_dict("noise-1", "Noise fact"),
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.75, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.60, "source": "hybrid"},
+        ]
+
+        # Mock CE model: pass-1 gets positive CE (passes gate), noise-1 gets very negative CE
+        mock_ce = MagicMock()
+        mock_ce.rerank.return_value = [2.0, -10.0]
+
+        # Mock encoder for affinity boost path
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={"noise-1": []}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="what is kubernetes",
+                injection_gate=0.50,
+                reranker_enabled=True,
+                reranker_min_score=0.40,
+            )
+
+        assert "Noise fact" not in result
+        assert "Relevant fact" in result
+
+    def test_exploration_allows_borderline_ce(self, mock_graph):
+        """Candidate with CE > -8 should still be eligible for exploration."""
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock(
+            whisper_exploration_enabled=True,
+            affinity_similarity_threshold=0.70,
+            whisper_reranker_min_score=0.0,
+        )
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            _make_node_dict("pass-1", "Relevant fact"),
+            _make_node_dict("maybe-1", "Maybe useful"),
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.75, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.60, "source": "hybrid"},
+        ]
+
+        # pass-1: CE=+2.0 → passes gate; maybe-1: CE=-5.0 → gated out but CE > -8 (explorable)
+        mock_ce = MagicMock()
+        mock_ce.rerank.return_value = [2.0, -5.0]
+
+        # Mock encoder for affinity boost path
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={"maybe-1": []}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="how does fastapi routing work",
+                injection_gate=0.50,
+                reranker_enabled=True,
+                reranker_min_score=0.40,
+            )
+
+        assert "Maybe useful" in result
+
+    def test_exploration_when_no_ce_score_proceeds_normally(self, mock_graph):
+        """When a candidate has no cross_encoder_score (e.g., reranker errored),
+        the CE gate check should be skipped and exploration proceeds normally."""
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock(
+            whisper_exploration_enabled=True,
+            affinity_similarity_threshold=0.70,
+            whisper_reranker_min_score=0.40,
+        )
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            _make_node_dict("pass-1", "Relevant fact"),
+            _make_node_dict("explore-1", "Explore me"),
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.70, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.45, "source": "hybrid"},
+        ]
+
+        # Reranker fails, so candidates don't have cross_encoder_score
+        mock_ce = MagicMock()
+        mock_ce.rerank.side_effect = RuntimeError("CE model not found")
+
+        # Mock encoder for affinity boost path
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={"explore-1": []}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="some query",
+                injection_gate=0.50,
+                reranker_enabled=True,  # reranker enabled but errors
+                reranker_min_score=0.40,
+            )
+
+        # explore-1 at 0.45 clears the 0.40 floor, gets gated out at 0.50,
+        # but should be explored since it has no CE score to block it
+        assert "Explore me" in result
+
+
 class TestWhisperLog:
     """whisper_log rows are written when session_id is provided."""
 
