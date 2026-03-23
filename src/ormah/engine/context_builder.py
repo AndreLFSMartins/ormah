@@ -547,7 +547,7 @@ class ContextBuilder:
         # Cross-encoder reranking — always pass min_score=0.0 so affinity boost
         # can rescue candidates before any floor is applied (spec: reranker_min_score
         # is now applied as a post-boost floor, not inside rerank())
-        if reranker_enabled and search_results:
+        if reranker_enabled and search_results and not identity_only:
             try:
                 from ormah.embeddings.reranker import rerank
 
