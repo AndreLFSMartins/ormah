@@ -652,8 +652,8 @@ class TestWhisperIntentAware:
 
         # Search SHOULD be called even for identity-only intent
         mock_engine.recall_search_structured.assert_called_once()
-        # Should still return identity info from graph neighbors
-        assert "Likes dark mode" in result
+        # With no search results, whisper stays silent (no graph neighbor dump)
+        assert result == ""
 
     def test_classifier_failure_falls_back_to_normal(self, mock_graph):
         """If classifier raises, should fall back to normal search."""
@@ -1050,8 +1050,8 @@ class TestWhisperIdentityGating:
         assert "Likes dark mode" in result
         assert "Search pipeline details" in result
 
-    def test_identity_only_intent_bypasses_gating(self, mock_graph):
-        """identity-only intent should return identity even without topical results."""
+    def test_identity_only_intent_stays_silent_without_search_results(self, mock_graph):
+        """identity-only intent with no search results should stay silent (no graph dump)."""
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
         conn = mock_graph.conn
@@ -1079,7 +1079,7 @@ class TestWhisperIdentityGating:
             min_score=0.1,
         )
 
-        assert "Likes dark mode" in result
+        assert result == ""
 
 
 class TestWhisperContextBuffer:

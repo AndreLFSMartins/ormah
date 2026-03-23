@@ -695,22 +695,14 @@ class ContextBuilder:
         if not identity_only and not other_results and top_identity_score < min_score:
             identity_results = []
 
-        # For identity-only intent, fall back to graph neighbors when
-        # search didn't surface any identity nodes (e.g. "who am I?").
-        if identity_only and not identity_results and user_node_id:
-            identity_neighbors = self.graph.get_neighbors(
-                user_node_id, depth=1, edge_types=["defines"]
-            )
-            if identity_neighbors:
-                identity_results = identity_neighbors
+        # Identity-only intent with no search results: stay silent.
+        # The graph neighbor fallback was dumping all ~42 preferences
+        # uncapped. If search can't find relevant identity nodes for
+        # the query, injecting everything is worse than injecting nothing.
 
-        # Cap identity nodes
-        if identity_results:
-            # Always keep person/preference, filter the rest
-            always_keep = [n for n in identity_results if n.get("type") in self._ALWAYS_KEEP_TYPES]
-            rest = [n for n in identity_results if n.get("type") not in self._ALWAYS_KEEP_TYPES]
-            remaining = max(identity_max - len(always_keep), 0)
-            identity_results = always_keep + rest[:remaining]
+        # Cap identity nodes to identity_max (no exemptions)
+        if len(identity_results) > identity_max:
+            identity_results = identity_results[:identity_max]
 
         # Cap non-identity to remaining budget
         non_identity_budget = max(max_nodes - len(identity_results), 0)
