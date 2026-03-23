@@ -1,18 +1,29 @@
 """Cross-encoder reranker for whisper context precision.
 
-Uses sigmoid-blended scoring to combine cross-encoder relevance with
-the original embedding score, preventing the CE model from over-filtering
-semantically relevant memories that lack keyword overlap.
+Uses linear-rescale blended scoring to combine cross-encoder relevance with
+the original embedding score. Unlike sigmoid blending, linear rescale preserves
+the CE model's ability to suppress noise (negative CE scores pull blended score
+down proportionally).
 """
 
 from __future__ import annotations
 
 import logging
-import math
 
 logger = logging.getLogger(__name__)
 
 _model_cache: dict[str, object] = {}
+
+# CE score range for linear rescale normalization.
+# Derived from empirical distribution: MS MARCO MiniLM scores range
+# from ~-12 (completely irrelevant) to ~+6 (perfect keyword match).
+_CE_MIN = -12.0
+_CE_MAX = 6.0
+
+
+def _linear_rescale(ce_score: float) -> float:
+    """Rescale raw CE score to [0, 1] using clamped linear interpolation."""
+    return max(0.0, min(1.0, (ce_score - _CE_MIN) / (_CE_MAX - _CE_MIN)))
 
 
 def rerank(
@@ -20,23 +31,22 @@ def rerank(
     candidates: list[dict],
     model_name: str,
     min_score: float,
-    blend_alpha: float = 0.4,
+    blend_alpha: float = 0.6,
     max_doc_chars: int = 512,
 ) -> list[dict]:
-    """Rerank search results using a cross-encoder with sigmoid-blended scoring.
+    """Rerank search results using a cross-encoder with linear-rescale blended scoring.
 
-    Final score = α * sigmoid(ce_score) + (1-α) * embedding_score
+    Final score = alpha * linear_rescale(ce_score) + (1-alpha) * embedding_score
 
-    This preserves the reranker's ability to boost truly relevant results
-    (ce=+6 → sigmoid≈1.0) while preventing it from destroying valid embedding
-    matches (ce=-10 → sigmoid≈0 → falls back to embedding score).
+    Linear rescale maps the CE score range [-12, +6] to [0, 1], preserving the
+    model's ability to both boost relevant results and suppress irrelevant ones.
 
     Args:
         query: The user's prompt.
         candidates: List of search result dicts ({"node": {...}, "score": float}).
         model_name: CrossEncoder model name.
         min_score: Drop results below this blended score.
-        blend_alpha: Weight for cross-encoder component (0–1). Default 0.4.
+        blend_alpha: Weight for cross-encoder component (0–1). Default 0.6.
         max_doc_chars: Max characters of content to feed to cross-encoder.
 
     Returns:
@@ -60,12 +70,12 @@ def rerank(
     # Score all docs in one batch
     ce_scores = list(model.rerank(query, docs))
 
-    # Sigmoid-blend with original embedding scores, filter, sort
+    # Linear-rescale blend with original embedding scores, filter, sort
     reranked = []
     for r, ce_score in zip(candidates, ce_scores):
-        ce_prob = 1.0 / (1.0 + math.exp(-float(ce_score)))
+        ce_rescaled = _linear_rescale(float(ce_score))
         emb_score = r.get("score", 0.0)
-        blended = blend_alpha * ce_prob + (1 - blend_alpha) * emb_score
+        blended = blend_alpha * ce_rescaled + (1 - blend_alpha) * emb_score
 
         if blended >= min_score:
             reranked.append({
