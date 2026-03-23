@@ -147,11 +147,11 @@ class Settings(BaseSettings):
     whisper_identity_max_nodes: int = 5
     whisper_content_max_chars: int = 150
 
-    # Whisper reranking (cross-encoder with sigmoid-blended scoring)
+    # Whisper reranking (cross-encoder with linear-rescale blended scoring)
     whisper_reranker_enabled: bool = True
     whisper_reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
     whisper_reranker_min_score: float = 0.40
-    whisper_reranker_blend_alpha: float = 0.4
+    whisper_reranker_blend_alpha: float = 0.6
     whisper_reranker_max_doc_chars: int = 512
 
     # Whisper context buffer (session-aware search enhancement)
@@ -166,7 +166,7 @@ class Settings(BaseSettings):
     whisper_topic_shift_threshold: float = 0.75  # cosine sim above this = same topic
 
     # Whisper injection gate (minimum blended score to justify injection)
-    whisper_injection_gate: float = 0.55
+    whisper_injection_gate: float = 0.50
 
     # Affinity boost (adaptive feedback loop)
     affinity_similarity_threshold: float = 0.70

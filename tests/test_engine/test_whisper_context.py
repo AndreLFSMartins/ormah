@@ -332,7 +332,7 @@ class TestWhisperNodeLimit:
 
 
 class TestWhisperReranker:
-    """Whisper cross-encoder reranking with sigmoid-blended scoring."""
+    """Whisper cross-encoder reranking with linear-rescale blended scoring."""
 
     def test_reranker_blends_and_preserves_relevant(self, mock_graph):
         """Blended scoring should preserve semantically relevant results
@@ -349,6 +349,7 @@ class TestWhisperReranker:
         ]
 
         # CE scores: node-2 highest CE, node-3 negative but has decent embedding
+        # All mild CE scores → linear rescale keeps all 4 results
         mock_cross_encoder = MagicMock()
         mock_cross_encoder.rerank.return_value = [0.3, 0.9, 0.95, -0.5]
 
@@ -362,8 +363,8 @@ class TestWhisperReranker:
                 reranker_min_score=0.0,
             )
 
-        # All results preserved — blended scores fall back to embedding
-        # when CE is negative (sigmoid(-0.5)≈0.38, blended≈0.45)
+        # All results preserved — mild CE scores → rescale preserves all
+        # (CE=-0.5 → rescale≈0.639, blended≈0.456)
         assert "Fact 0" in result
         assert "Fact 1" in result
         assert "Fact 2" in result
@@ -382,7 +383,7 @@ class TestWhisperReranker:
         ]
 
         mock_cross_encoder = MagicMock()
-        # node-2: CE=-10 → sigmoid≈0, emb=0.2 → blended=0.4*0+0.6*0.2=0.12
+        # node-2: CE=-10 → rescale=0.111, emb=0.2 → blended=0.4*0.111+0.6*0.2=0.164
         mock_cross_encoder.rerank.return_value = [2.0, -1.0, -10.0]
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_cross_encoder):
@@ -392,14 +393,14 @@ class TestWhisperReranker:
                 injection_gate=0.1,  # low gate to isolate reranker behavior
                 reranker_enabled=True,
                 reranker_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
-                reranker_min_score=0.15,
+                reranker_min_score=0.17,  # raised to filter node-2
             )
 
-        # node-0: blended = 0.4*sigmoid(2)+0.6*0.8 ≈ 0.4*0.88+0.48 = 0.83 ✓
+        # node-0: blended = 0.4*rescale(2)+0.6*0.8 ≈ 0.4*0.778+0.48 = 0.791 ✓
         assert "Fact 0" in result
-        # node-1: blended = 0.4*sigmoid(-1)+0.6*0.5 ≈ 0.4*0.27+0.30 = 0.41 ✓
+        # node-1: blended = 0.4*rescale(-1)+0.6*0.5 ≈ 0.4*0.611+0.30 = 0.544 ✓
         assert "Fact 1" in result
-        # node-2: blended = 0.4*sigmoid(-10)+0.6*0.2 ≈ 0.4*0.00+0.12 = 0.12 ✗
+        # node-2: blended = 0.4*rescale(-10)+0.6*0.2 ≈ 0.4*0.111+0.12 = 0.164 ✗
         assert "Fact 2" not in result
 
     def test_reranker_min_score_on_blended(self, mock_graph):
@@ -415,6 +416,9 @@ class TestWhisperReranker:
         ]
 
         mock_cross_encoder = MagicMock()
+        # Linear rescale: CE [0.8, 0.1, 0.05] → rescale [0.711, 0.672, 0.669]
+        # With alpha=0.4: node-0=0.764, node-1=0.689, node-2=0.628
+        # At reranker_min_score=0.7: only node-0 passes
         mock_cross_encoder.rerank.return_value = [0.8, 0.1, 0.05]
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_cross_encoder):
@@ -426,11 +430,11 @@ class TestWhisperReranker:
                 reranker_min_score=0.7,
             )
 
-        # node-0: blended = 0.4*sigmoid(0.8)+0.6*0.8 ≈ 0.4*0.69+0.48 = 0.756 ✓
+        # node-0: blended = 0.4*rescale(0.8)+0.6*0.8 ≈ 0.4*0.711+0.48 = 0.764 ✓
         assert "Fact 0" in result
-        # node-1: blended = 0.4*sigmoid(0.1)+0.6*0.7 ≈ 0.4*0.525+0.42 = 0.630 ✗
+        # node-1: blended = 0.4*rescale(0.1)+0.6*0.7 ≈ 0.4*0.672+0.42 = 0.689 ✗
         assert "Fact 1" not in result
-        # node-2: blended = 0.4*sigmoid(0.05)+0.6*0.6 ≈ 0.4*0.512+0.36 = 0.565 ✗
+        # node-2: blended = 0.4*rescale(0.05)+0.6*0.6 ≈ 0.4*0.669+0.36 = 0.628 ✗
         assert "Fact 2" not in result
 
     def test_reranker_fallback_on_error(self, mock_graph):
@@ -726,6 +730,8 @@ class TestWhisperRerankerBlendIntegration:
 
         mock_ce = MagicMock()
         # All strongly negative CE — off-topic signal
+        # CE [-10.7, -11.4, -8.2] → rescale [0.072, 0.033, 0.211]
+        # With alpha=0.4: blended [0.457, 0.455, 0.449] → below gate 0.55
         mock_ce.rerank.return_value = [-10.7, -11.4, -8.2]
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce):
@@ -779,10 +785,11 @@ class TestWhisperRerankerBlendIntegration:
         ]
 
         mock_ce = MagicMock()
-        mock_ce.rerank.return_value = [-5.0]
+        # CE=-10.0 → rescale=0.111
+        # With α=0.4: 0.4*0.111+0.6*0.3 = 0.224 (passes 0.15)
+        # With α=0.9: 0.9*0.111+0.1*0.3 = 0.130 (fails 0.15)
+        mock_ce.rerank.return_value = [-10.0]
 
-        # With α=0.4 (default): 0.4*sigmoid(-5)+0.6*0.3 ≈ 0.003+0.18 = 0.183
-        # With α=0.9: 0.9*sigmoid(-5)+0.1*0.3 ≈ 0.006+0.03 = 0.036
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce):
             # Default alpha: should pass min_score=0.15
             result_default = builder.build_whisper_context(
@@ -1743,12 +1750,14 @@ class TestExplorationSlot:
         explore_node = _make_node_dict("explore", "Exploration memory")
         mock_engine.recall_search_structured.return_value = [
             {"node": injected_node, "score": 0.70, "source": "hybrid"},
-            {"node": explore_node, "score": 0.48, "source": "hybrid"},
+            {"node": explore_node, "score": 0.49, "source": "hybrid"},
         ]
 
         mock_ce = MagicMock()
-        # CE scores keeping both above 0.40 but only injected above 0.55
-        mock_ce.rerank.return_value = [2.0, 0.5]
+        # CE scores: injected above 0.50 gate, explore between 0.40-0.50
+        # CE=2.0 → rescale=0.778, emb=0.70 → blended=0.4*0.778+0.6*0.70=0.731 (above 0.50) ✓
+        # CE=-5.0 → rescale=0.389, emb=0.49 → blended=0.4*0.389+0.6*0.49=0.450 (below 0.50, above 0.40)
+        mock_ce.rerank.return_value = [2.0, -5.0]
 
         # No affinity signal for explore_node → eligible for exploration
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
@@ -1759,7 +1768,7 @@ class TestExplorationSlot:
                 min_score=0.1,
                 reranker_enabled=True,
                 reranker_min_score=0.40,
-                injection_gate=0.55,
+                injection_gate=0.50,
             )
 
         assert "Exploration memory" in result
@@ -1789,11 +1798,13 @@ class TestExplorationSlot:
         known_node = _make_node_dict("known", "Known gated memory")
         mock_engine.recall_search_structured.return_value = [
             {"node": injected_node, "score": 0.70, "source": "hybrid"},
-            {"node": known_node, "score": 0.48, "source": "hybrid"},
+            {"node": known_node, "score": 0.49, "source": "hybrid"},
         ]
 
         mock_ce = MagicMock()
-        mock_ce.rerank.return_value = [2.0, 0.5]
+        # CE=2.0 → rescale=0.778, emb=0.70 → blended=0.731 (above 0.50) ✓
+        # CE=-5.0 → rescale=0.389, emb=0.49 → blended=0.450 (below 0.50, above 0.40)
+        mock_ce.rerank.return_value = [2.0, -5.0]
 
         # known_node has an affinity row with sim > 0.70 to current prompt
         affinity_map_for_explore = {
@@ -1809,7 +1820,7 @@ class TestExplorationSlot:
                 min_score=0.1,
                 reranker_enabled=True,
                 reranker_min_score=0.40,
-                injection_gate=0.55,
+                injection_gate=0.50,
             )
 
         # known_node already has signal → should NOT be explored
@@ -1835,11 +1846,13 @@ class TestExplorationSlot:
         explore_node = _make_node_dict("explore", "Should not appear")
         mock_engine.recall_search_structured.return_value = [
             {"node": injected_node, "score": 0.70, "source": "hybrid"},
-            {"node": explore_node, "score": 0.48, "source": "hybrid"},
+            {"node": explore_node, "score": 0.49, "source": "hybrid"},
         ]
 
         mock_ce = MagicMock()
-        mock_ce.rerank.return_value = [2.0, 0.5]
+        # CE=2.0 → rescale=0.778, emb=0.70 → blended=0.731 (above 0.50) ✓
+        # CE=-5.0 → rescale=0.389, emb=0.49 → blended=0.450 (below 0.50, above 0.40)
+        mock_ce.rerank.return_value = [2.0, -5.0]
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
              patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
@@ -1849,7 +1862,7 @@ class TestExplorationSlot:
                 min_score=0.1,
                 reranker_enabled=True,
                 reranker_min_score=0.40,
-                injection_gate=0.55,
+                injection_gate=0.50,
             )
 
         assert "Should not appear" not in result
