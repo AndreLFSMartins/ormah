@@ -249,6 +249,11 @@ class HybridSearch:
                     title_bonus = title_match_boost * (overlap / max(len(query_tokens), 1))
                     base_score *= (1.0 + title_bonus)
 
+            # Cap base_score at 1.0 — title boost and RRF fusion can push
+            # scores above 1.0, which breaks the CE blend assumption that
+            # embedding scores are in [0, 1].
+            base_score = min(base_score, 1.0)
+
             # --- Multiplicative factors from enrichment fields ---
             confidence = node.get("confidence")
             if confidence is None:
@@ -289,6 +294,7 @@ class HybridSearch:
             tier_factor = 1.0 + tier_boosts.get(node.get("tier", "working"), 0.0)
 
             final_score = adjusted_score * tier_factor + r_boost + a_boost
+            final_score = min(final_score, 1.0)  # CE blend assumes scores in [0, 1]
 
             results.append({"node": node, "score": round(final_score, 6), "source": "hybrid"})
 
