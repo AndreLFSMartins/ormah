@@ -406,6 +406,15 @@ def install_codex_md() -> None:
     ok(f"Instructions added to {target}")
 
 
+def install_codex_agents() -> None:
+    """Install Ormah custom agent definitions into ~/.codex/agents/."""
+    target = Path.home() / ".codex" / "agents"
+    target.mkdir(parents=True, exist_ok=True)
+    content = resources.files("ormah").joinpath("agents/ormah-maintenance.toml").read_text()
+    (target / "ormah-maintenance.toml").write_text(content)
+    ok("Agent definition installed — ormah-maintenance subagent available in Codex")
+
+
 def install_claude_agents() -> None:
     """Install ormah custom agent definitions into ~/.claude/agents/."""
     target = Path.home() / ".claude" / "agents"
@@ -438,6 +447,14 @@ def _remove_claude_commands() -> None:
     if command_file.exists():
         command_file.unlink()
         ok("Removed ormah-maintenance slash command")
+
+
+def _remove_codex_agents() -> None:
+    """Remove Ormah agent definitions from ~/.codex/agents/."""
+    agent_file = Path.home() / ".codex" / "agents" / "ormah-maintenance.toml"
+    if agent_file.exists():
+        agent_file.unlink()
+        ok("Removed ormah-maintenance Codex agent definition")
 
 
 def _remove_codex_hooks() -> None:
@@ -1295,6 +1312,7 @@ def run_uninstall(yes: bool = False) -> None:
     step("Removing CLAUDE.md instructions")
     _remove_claude_md_block()
     _remove_codex_md_block()
+    _remove_codex_agents()
     _remove_claude_agents()
     _remove_claude_commands()
 
@@ -1433,6 +1451,7 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
         configure_codex_hooks(ormah_bin)
         configure_codex_mcp(ormah_bin)
         install_codex_md()
+        install_codex_agents()
 
     desktop_configured = configure_claude_desktop(ormah_bin)
 

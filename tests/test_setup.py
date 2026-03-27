@@ -30,6 +30,7 @@ from ormah.setup import (
     _remove_codex_md_block,
     _remove_codex_mcp_config,
     _read_env_file,
+    _remove_codex_agents,
     _remove_claude_hooks,
     _remove_claude_md_block,
     _remove_fastembed_cache,
@@ -45,6 +46,7 @@ from ormah.setup import (
     configure_llm,
     generate_server_wrapper,
     install_claude_md,
+    install_codex_agents,
     install_codex_md,
     run_uninstall,
     seed_identity,
@@ -921,6 +923,34 @@ class TestInstallCodexMd:
         assert first == second
 
 
+class TestInstallCodexAgents:
+    def test_creates_agent_file(self, tmp_path, capsys):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_codex_agents()
+
+        agent_file = tmp_path / ".codex" / "agents" / "ormah-maintenance.toml"
+        content = agent_file.read_text()
+        assert 'name = "ormah-maintenance"' in content
+        assert 'mcp_servers = ["ormah"]' in content
+        assert 'sandbox_mode = "read-only"' in content
+
+        captured = capsys.readouterr()
+        assert "Codex" in captured.out
+
+    def test_overwrites_existing_agent_file(self, tmp_path):
+        agent_dir = tmp_path / ".codex" / "agents"
+        agent_dir.mkdir(parents=True)
+        agent_file = agent_dir / "ormah-maintenance.toml"
+        agent_file.write_text('name = "old"\n')
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_codex_agents()
+
+        content = agent_file.read_text()
+        assert 'name = "ormah-maintenance"' in content
+        assert 'name = "old"' not in content
+
+
 # --- Uninstall tests ---
 
 
@@ -1123,6 +1153,23 @@ class TestRemoveCodexHooks:
     def test_noop_when_missing(self, tmp_path):
         with patch("ormah.setup.Path.home", return_value=tmp_path):
             _remove_codex_hooks()
+
+
+class TestRemoveCodexAgents:
+    def test_removes_agent_file(self, tmp_path):
+        agent_dir = tmp_path / ".codex" / "agents"
+        agent_dir.mkdir(parents=True)
+        agent_file = agent_dir / "ormah-maintenance.toml"
+        agent_file.write_text('name = "ormah-maintenance"\n')
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_agents()
+
+        assert not agent_file.exists()
+
+    def test_noop_when_missing(self, tmp_path):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_agents()
 
 
 class TestRemoveCodexMdBlock:
