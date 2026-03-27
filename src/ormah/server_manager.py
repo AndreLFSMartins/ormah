@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -224,7 +225,7 @@ def uninstall_autostart() -> None:
 
 def is_first_run() -> bool:
     """Check if the fastembed model cache exists — if not, first download needed."""
-    cache_dir = Path(tempfile.gettempdir()) / "fastembed_cache"
+    cache_dir = Path.home() / ".cache" / "fastembed"
     if not cache_dir.exists():
         return True
     # Check if any model directories exist inside the cache
@@ -239,16 +240,20 @@ _PHASE_MAP: list[tuple[str, str]] = [
     ("Starting ormah server", "Starting server..."),
     ("Initializing memory engine", "Initializing memory engine..."),
     ("Initial index rebuild", "Building search index..."),
-    ("Loading embedding model", "Downloading embedding model (~420 MB)..."),
+    ("Loading embedding model", "Loading embedding model..."),
     ("Embedding model ready", "Embedding model loaded"),
+    ("Re-indexing embeddings", "Re-embedding memories..."),
     ("Memory engine ready", "Memory engine ready"),
     ("Background scheduler", "Starting background jobs..."),
 ]
+
+_REEMBED_RE = re.compile(r"Re-embedding memories: (\d+)/(\d+)")
 
 
 def _tail_server_log(
     callback: callable,
     stop_event: threading.Event,
+    phase_map: list[tuple[str, str]] | None = None,
 ) -> None:
     """Tail ormah.err.log for phase markers, calling callback on each new phase.
 
@@ -256,6 +261,7 @@ def _tail_server_log(
     reads new lines, matching against known phase markers.
     """
     log_path = LOG_DIR / "ormah.err.log"
+    effective_phase_map = phase_map if phase_map is not None else _PHASE_MAP
 
     # Wait for the log file to appear
     while not stop_event.is_set():
@@ -275,7 +281,13 @@ def _tail_server_log(
                 if not line:
                     stop_event.wait(0.2)
                     continue
-                for marker, label in _PHASE_MAP:
+                m = _REEMBED_RE.search(line)
+                if m:
+                    done, total = int(m.group(1)), int(m.group(2))
+                    pct = int(done / total * 100)
+                    callback(f"Re-embedding memories: {done}/{total} ({pct}%)")
+                    continue
+                for marker, label in effective_phase_map:
                     if marker in line:
                         callback(label)
                         break
@@ -307,9 +319,14 @@ def wait_for_server(
     if first_run:
         effective_timeout = max(timeout, 600.0)
         initial_msg = "Starting server (first run — downloading embedding model)..."
+        phase_map = [
+            (marker, "Downloading embedding model (~420 MB)..." if marker == "Loading embedding model" else label)
+            for marker, label in _PHASE_MAP
+        ]
     else:
-        effective_timeout = max(timeout, 60.0)
+        effective_timeout = max(timeout, 300.0)
         initial_msg = "Starting server..."
+        phase_map = _PHASE_MAP
 
     stop_event = threading.Event()
 
@@ -317,7 +334,7 @@ def wait_for_server(
         # Start log tailer thread
         tail_thread = threading.Thread(
             target=_tail_server_log,
-            args=(sp.update, stop_event),
+            args=(sp.update, stop_event, phase_map),
             daemon=True,
         )
         tail_thread.start()

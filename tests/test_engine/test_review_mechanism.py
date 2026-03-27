@@ -258,7 +258,7 @@ class TestReviewBlockInBuildCoreContext:
         builder = ContextBuilder(mock_graph, engine=engine)
         result = builder.build_core_context(session_id="test-session-123")
 
-        assert "one quick question" in result
+        assert "held-back memory review" in result
         assert "Auth token storage" in result
 
     def test_review_log_row_inserted(self, mock_graph):
@@ -295,7 +295,7 @@ class TestReviewBlockInBuildCoreContext:
         builder = ContextBuilder(mock_graph, engine=None)
         result = builder.build_core_context(session_id="test-session-789")
 
-        assert "one quick question" not in result
+        assert "held-back memory review" not in result
 
     def test_prompt_text_truncated_to_300(self, mock_graph):
         """Long prompt_text is truncated at word boundary to ≤300 chars + ellipsis."""
@@ -315,12 +315,12 @@ class TestReviewBlockInBuildCoreContext:
         builder = ContextBuilder(mock_graph, engine=engine)
         result = builder.build_core_context(session_id="test-session-truncate")
 
-        assert "one quick question" in result
+        assert "held-back memory review" in result
         # Find the quoted snippet in the review block
         # The snippet should end with "…"
         assert "…" in result
         # The snippet should be ≤300 chars (find it between quotes in the review block)
-        review_start = result.find("one quick question")
+        review_start = result.find("held-back memory review")
         review_portion = result[review_start:]
         # Extract between the first pair of quotes after "working on:"
         working_on_idx = review_portion.find('working on:\n"')

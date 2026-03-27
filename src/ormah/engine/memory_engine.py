@@ -822,11 +822,13 @@ class MemoryEngine:
 
             nodes = self.db.conn.execute("SELECT id, title, content FROM nodes").fetchall()
             max_chars = self.settings.embedding_max_content_chars
+            total = len(nodes)
+            log_every = max(1, total // 10)  # log every ~10%
 
             # Build all embeddings first
             all_items: list[tuple[str, Any]] = []
             failed = 0
-            for n in nodes:
+            for idx, n in enumerate(nodes):
                 text = _embedding_text(n["title"], n["content"], max_chars)
                 if text:
                     try:
@@ -835,6 +837,9 @@ class MemoryEngine:
                     except Exception as e:
                         logger.warning("Failed to embed node %s: %s", n["id"][:8], e)
                         failed += 1
+                done = idx + 1
+                if done % log_every == 0 or done == total:
+                    logger.info("Re-embedding memories: %d/%d", done, total)
 
             # Upsert in small chunks with WAL checkpoint after each.
             # sqlite-vec vec0 virtual tables can silently drop rows in

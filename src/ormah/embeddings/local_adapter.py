@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import numpy as np
 
@@ -36,7 +37,7 @@ class LocalAdapter(EmbeddingAdapter):
                 self._model = _model_cache[self.model_name]
             else:
                 logger.info("Loading embedding model (~420MB, first time only)...")
-                self._model = TextEmbedding(self.model_name)
+                self._model = TextEmbedding(self.model_name, cache_dir=str(Path.home() / ".cache" / "fastembed"))
                 _model_cache[self.model_name] = self._model
                 logger.info("Embedding model ready.")
         return self._model
