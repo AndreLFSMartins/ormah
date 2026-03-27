@@ -129,8 +129,10 @@ TOOLS = [
     {
         "name": "get_self",
         "description": (
-            "Get the user's identity profile — name, preferences, and personal facts. "
-            "Returns all identity-linked memories. No parameters required."
+            "Get the user's identity profile — preferences, goals, decisions, and key facts. "
+            "Returns the top 15 most relevant identity memories for the current project, "
+            "prioritising preferences and goals over biographical facts. "
+            "Use recall for anything not found here. No parameters required."
         ),
         "parameters": {
             "type": "object",

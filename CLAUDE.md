@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Always plan before making changes.** Before editing any file or running any mutating command, explore the relevant code and present a plan. Do not begin implementation until the plan is approved.
+
 ## Development Commands
 
 ```bash

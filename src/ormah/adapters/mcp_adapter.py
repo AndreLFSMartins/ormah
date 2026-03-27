@@ -236,7 +236,8 @@ async def _dispatch(
             return resp.json()["text"]
 
         elif name == "get_self":
-            resp = await client.get("/agent/self")
+            params = {"space": default_space} if default_space else {}
+            resp = await client.get("/agent/self", params=params)
             if not resp.is_success:
                 return _handle_error(resp)
             return resp.json()["text"]

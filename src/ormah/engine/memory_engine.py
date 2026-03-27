@@ -1279,8 +1279,14 @@ class MemoryEngine:
             return (a, b) if len(a.content) >= len(b.content) else (b, a)
         return (a, b) if a.updated >= b.updated else (b, a)
 
-    def get_self(self) -> str:
-        """Get formatted identity profile for the user."""
+    def get_self(self, space: str | None = None) -> str:
+        """Get formatted identity profile for the user.
+
+        Returns the top 15 identity nodes, filtered to same-space and global
+        ('null'-space) nodes only, sorted by type utility then importance.
+        Type priority: preference > goal > decision > observation > person >
+        fact > procedure > event.
+        """
         _ONBOARDING_NUDGE = (
             "\n\n## Ormah: Action required — initiate first-session onboarding\n"
             "This is the user's first session with ormah. The identity profile is empty. "
@@ -1306,6 +1312,38 @@ class MemoryEngine:
         identity_nodes = self.graph.get_neighbors(
             self.user_node_id, depth=1, edge_types=["defines"]
         ) if self.user_node_id else []
+
+        # Filter to same-space and global ('null'-space) nodes only
+        if space:
+            identity_nodes = [
+                n for n in identity_nodes
+                if n.get("space") in (space, "null", None)
+            ]
+
+        # Reserved slots: top 8 preferences + top 7 non-preferences
+        # Preferences are the behavioral briefing; the rest provide directional context.
+        _TYPE_PRIORITY = {
+            "preference": 0,
+            "goal": 1,
+            "decision": 2,
+            "observation": 3,
+            "person": 4,
+            "fact": 5,
+            "procedure": 6,
+            "event": 7,
+        }
+        prefs = sorted(
+            [n for n in identity_nodes if n.get("type") == "preference"],
+            key=lambda n: -(n.get("importance") or 0.0),
+        )[:8]
+        others = sorted(
+            [n for n in identity_nodes if n.get("type") != "preference"],
+            key=lambda n: (
+                _TYPE_PRIORITY.get(n.get("type", ""), 5),
+                -(n.get("importance") or 0.0),
+            ),
+        )[:7]
+        identity_nodes = prefs + others
 
         # Touch access on each identity node
         for n in identity_nodes:
