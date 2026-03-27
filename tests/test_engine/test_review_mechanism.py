@@ -1,4 +1,4 @@
-"""Tests for the session-start review mechanism in build_core_context."""
+"""Tests for the review mechanism in build_whisper_context."""
 
 from __future__ import annotations
 
@@ -223,8 +223,8 @@ class TestReviewPythonFilter:
 # TestReviewBlockInBuildCoreContext
 # ---------------------------------------------------------------------------
 
-class TestReviewBlockInBuildCoreContext:
-    """Integration tests for review mechanism inside build_core_context."""
+class TestReviewBlockInBuildWhisperContext:
+    """Integration tests for review mechanism inside build_whisper_context."""
 
     def _make_mock_engine(self, conn=None, threshold=0.70):
         engine = MagicMock()
@@ -232,6 +232,9 @@ class TestReviewBlockInBuildCoreContext:
         settings.affinity_similarity_threshold = threshold
         settings.claude_maintenance_enabled = False
         engine.settings = settings
+        # Disable embedding/search paths so they don't interfere
+        engine._get_hybrid_search.return_value = None
+        engine.recall_search_structured.return_value = []
         if conn is not None:
             @contextmanager
             def _fake_transaction():
@@ -247,7 +250,7 @@ class TestReviewBlockInBuildCoreContext:
         )
 
     def test_review_block_appended_when_eligible(self, mock_graph):
-        """Eligible candidate causes review block to appear in result."""
+        """Eligible candidate causes review block to appear in result on first message."""
         conn = mock_graph.conn
         node = _make_node_dict("node-r1", "Auth token storage", space="myspace")
         _insert_node(conn, node)
@@ -256,13 +259,15 @@ class TestReviewBlockInBuildCoreContext:
 
         engine = self._make_mock_engine(conn)
         builder = ContextBuilder(mock_graph, engine=engine)
-        result = builder.build_core_context(session_id="test-session-123")
+        result = builder.build_whisper_context(
+            prompt="how does auth work", recent_prompts=None, session_id="test-session-123"
+        )
 
-        assert "held-back memory review" in result
+        assert "one thing to review when you get a chance" in result
         assert "Auth token storage" in result
 
     def test_review_log_row_inserted(self, mock_graph):
-        """After build_core_context with eligible candidate, review_log has 1 row."""
+        """After build_whisper_context with eligible candidate, review_log has 1 row."""
         conn = mock_graph.conn
         node = _make_node_dict("node-r2", "DB schema design", space="myspace")
         _insert_node(conn, node)
@@ -271,7 +276,9 @@ class TestReviewBlockInBuildCoreContext:
 
         engine = self._make_mock_engine(conn)
         builder = ContextBuilder(mock_graph, engine=engine)
-        builder.build_core_context(session_id="test-session-456")
+        builder.build_whisper_context(
+            prompt="how does auth work", recent_prompts=None, session_id="test-session-456"
+        )
 
         row_count = conn.execute(
             "SELECT COUNT(*) FROM review_log WHERE node_id = ?", ("node-r2",)
@@ -293,9 +300,29 @@ class TestReviewBlockInBuildCoreContext:
         conn.commit()
 
         builder = ContextBuilder(mock_graph, engine=None)
-        result = builder.build_core_context(session_id="test-session-789")
+        result = builder.build_whisper_context(
+            prompt="how does auth work", recent_prompts=None, session_id="test-session-789"
+        )
 
-        assert "held-back memory review" not in result
+        assert "one thing to review when you get a chance" not in result
+
+    def test_review_block_not_appended_on_subsequent_messages(self, mock_graph):
+        """Review block only fires on first message (recent_prompts=None)."""
+        conn = mock_graph.conn
+        node = _make_node_dict("node-r5", "Subsequent message node", space="myspace")
+        _insert_node(conn, node)
+        self._insert_whisper_row(conn, "node-r5")
+        conn.commit()
+
+        engine = self._make_mock_engine(conn)
+        builder = ContextBuilder(mock_graph, engine=engine)
+        result = builder.build_whisper_context(
+            prompt="how does auth work",
+            recent_prompts=["previous message"],  # not first message
+            session_id="test-session-subseq",
+        )
+
+        assert "one thing to review when you get a chance" not in result
 
     def test_prompt_text_truncated_to_300(self, mock_graph):
         """Long prompt_text is truncated at word boundary to ≤300 chars + ellipsis."""
@@ -303,7 +330,6 @@ class TestReviewBlockInBuildCoreContext:
         node = _make_node_dict("node-r4", "Long prompt node", space="myspace")
         _insert_node(conn, node)
 
-        # Build a prompt longer than 300 chars, ensuring a word boundary exists
         long_prompt = ("This is a very long prompt that goes on and on about authentication "
                        "and authorization flows in the application. ") * 4
         assert len(long_prompt) > 300
@@ -313,16 +339,14 @@ class TestReviewBlockInBuildCoreContext:
 
         engine = self._make_mock_engine(conn)
         builder = ContextBuilder(mock_graph, engine=engine)
-        result = builder.build_core_context(session_id="test-session-truncate")
+        result = builder.build_whisper_context(
+            prompt="how does auth work", recent_prompts=None, session_id="test-session-truncate"
+        )
 
-        assert "held-back memory review" in result
-        # Find the quoted snippet in the review block
-        # The snippet should end with "…"
+        assert "one thing to review when you get a chance" in result
         assert "…" in result
-        # The snippet should be ≤300 chars (find it between quotes in the review block)
-        review_start = result.find("held-back memory review")
+        review_start = result.find("one thing to review when you get a chance")
         review_portion = result[review_start:]
-        # Extract between the first pair of quotes after "working on:"
         working_on_idx = review_portion.find('working on:\n"')
         if working_on_idx != -1:
             snippet_start = working_on_idx + len('working on:\n"')

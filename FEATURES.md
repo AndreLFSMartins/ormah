@@ -254,8 +254,7 @@ LLM is **optional** — ormah is fully functional for storage, search, and whisp
 |------|-------------|
 | `remember` | Store a new memory (content, type, tier, space, tags, confidence, about_self) |
 | `recall` | Hybrid search with natural language |
-| `get_context` | Load core memories for system prompt; accepts `task_hint` to filter to most relevant |
-| `get_self` | Get the user's identity profile (all personal/preference memories) |
+| `get_self` | Get the user's identity profile (all personal/preference memories); triggers onboarding on first use |
 | `mark_outdated` | Mark a memory as stale with an optional reason |
 
 ---

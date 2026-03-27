@@ -127,28 +127,6 @@ TOOLS = [
         },
     },
     {
-        "name": "get_context",
-        "description": (
-            "Get core memories and current project context formatted for inclusion in the system prompt. "
-            "Automatically scoped to the current project directory. "
-            "Call this at the start of a conversation to load persistent context. "
-            "Pass `task_hint` when the task is known to get focused context instead of loading everything."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "task_hint": {
-                    "type": "string",
-                    "description": (
-                        "Optional task description to filter context. When provided, "
-                        "only the most relevant memories for the task are returned "
-                        "instead of all core memories."
-                    ),
-                },
-            },
-        },
-    },
-    {
         "name": "get_self",
         "description": (
             "Get the user's identity profile — name, preferences, and personal facts. "

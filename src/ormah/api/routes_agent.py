@@ -112,20 +112,6 @@ async def get_self(request: Request):
     return TextResponse(text=text)
 
 
-@router.get("/context", response_model=TextResponse)
-async def get_context(
-    request: Request,
-    space: str | None = Query(None, description="Space to scope context to"),
-    task_hint: str | None = Query(None, description="Task hint for adaptive context filtering"),
-    session_id: str | None = Query(None, description="Session ID for review rate limiting"),
-):
-    """Get core memories for system prompt injection."""
-    engine = request.app.state.engine
-    text = engine.get_context(space=space, task_hint=task_hint, session_id=session_id)
-    return TextResponse(text=text)
-
-
-
 @router.post("/whisper", response_model=TextResponse)
 async def whisper(request: Request):
     """Build compact whisper context for involuntary recall injection."""

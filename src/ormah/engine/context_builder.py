@@ -1,4 +1,4 @@
-"""Builds the 'always loaded' core context for system prompt injection."""
+"""Builds whisper context for involuntary recall injection."""
 
 from __future__ import annotations
 
@@ -24,37 +24,16 @@ _WHISPER_FRAMING = (
     "If a memory ends with '…', it is truncated — call recall with its node ID to get the full content before acting on it."
 )
 
-_ONBOARDING_NUDGE = (
-    "\n\n## Ormah: Action required — initiate first-session onboarding\n"
-    "This is the user's first session with ormah. The identity profile is empty. "
-    "Your very first response MUST acknowledge what the user said, then pivot to onboarding — "
-    "e.g. 'Happy to help with that — but before we dive in, I'd love to get to know you a bit.' "
-    "Then ask your first question. Cover these areas naturally, one question at a time:\n"
-    "- Start personal: ask something like 'If you had to describe who you are, what would you say? "
-    "What are you passionate about or what do you love doing?' — warm and open, not work-first\n"
-    "- Family and close relationships — ask gently, don't press for details\n"
-    "- Professional background: ask what they do, and suggest they share a LinkedIn, GitHub, CV, "
-    "or personal site if they have one — easier than describing everything from scratch\n"
-    "- How they like to collaborate and communicate\n\n"
-    "Once you have a decent picture (around 5–10 facts stored), wrap up warmly: "
-    "\"I have enough context to get started — I'll keep learning as we work together.\" "
-    "Store everything you learn using the `remember` tool with `about_self=true`. "
-    "This message will not appear again."
-)
-
 
 _REVIEW_FRAMING = (
-    "\n\n## Ormah: held-back memory review\n"
+    "\n\n## Ormah: one thing to review when you get a chance\n"
     "In a recent session, the user was working on:\n"
     "\"{prompt_snippet}\"\n\n"
     "Ormah held back this memory because it wasn't confident it was relevant:\n"
-    "\"{title}\" — {content}\n\n"
-    "First, judge this yourself: based on the context above, would this memory have been useful? "
-    "If you can tell, call submit_feedback with node_id=\"{node_id}\", signal=1 for yes, "
-    "signal=-1 for no, source=\"implicit\" — do not ask the user. "
-    "Only ask the user if you genuinely cannot determine this from the context alone. "
-    "If you do ask, keep it brief and natural. If they'd rather skip, proceed normally — "
-    "this memory won't be reviewed again."
+    "\"{title}\" — {content}  (node: {node_id})\n\n"
+    "When you can judge it, call submit_feedback(node_id=\"{node_id}\", signal=1 for yes, "
+    "signal=-1 for no, source=\"implicit\"). Skip if it's not a good moment — "
+    "this won't be surfaced again for 14 days."
 )
 
 
@@ -214,199 +193,6 @@ class ContextBuilder:
             "SELECT tag FROM node_tags WHERE node_id = ?", (node_id,)
         ).fetchall()
         return {r["tag"] for r in rows}
-
-    def build_core_context(
-        self,
-        space: str | None = None,
-        user_node_id: str | None = None,
-        task_hint: str | None = None,
-        max_nodes: int | None = None,
-        session_id: str | None = None,
-    ) -> str:
-        """Get core-tier nodes + project working nodes formatted for system prompt.
-
-        When *task_hint* is provided, candidate memories are scored against
-        the hint embedding and only the top-N most relevant are returned.
-        Identity nodes are always included regardless of scoring.
-        """
-        core_nodes = self.graph.get_nodes_by_tier("core")
-
-        # Separate identity nodes from other core nodes
-        identity_nodes: list[dict] = []
-        identity_ids: set[str] = set()
-        if user_node_id:
-            identity_ids.add(user_node_id)
-            identity_nodes = self.graph.get_neighbors(
-                user_node_id, depth=1, edge_types=["defines"]
-            )
-            identity_ids.update(n["id"] for n in identity_nodes)
-
-            for n in core_nodes:
-                if n["id"] in identity_ids:
-                    continue
-                tags = self._get_tags(n["id"])
-                if "about_self" in tags:
-                    identity_nodes.append(n)
-                    identity_ids.add(n["id"])
-
-        other_core = [n for n in core_nodes if n["id"] not in identity_ids]
-
-        # Gather working nodes for the project
-        working_nodes: list[dict] = []
-        if space is not None:
-            working_nodes = [
-                n for n in self.graph.get_nodes_by_tier("working")
-                if n.get("space") == space
-            ]
-
-        # Adaptive filtering when task_hint is given
-        if task_hint and self.engine:
-            candidate_ids = {n["id"] for n in other_core + working_nodes}
-            try:
-                search_results = self.engine.recall_search_structured(
-                    query=task_hint,
-                    limit=max_nodes or 20,
-                    default_space=space,
-                    tiers=["core", "working"],
-                    touch_access=False,
-                )
-                # Keep only results that are in our candidate set
-                filtered = [r["node"] for r in search_results if r["node"]["id"] in candidate_ids]
-                core_ids = {n["id"] for n in other_core}
-                other_core = [n for n in filtered if n["id"] in core_ids]
-                working_nodes = [n for n in filtered if n["id"] not in core_ids]
-            except Exception as e:
-                logger.warning("Hybrid context filtering failed, falling back to capped context: %s", e)
-                effective_max = max_nodes or 20
-                other_core, working_nodes = self._cap_by_space(
-                    other_core, working_nodes, space, effective_max
-                )
-        elif task_hint:
-            # Fallback: engine not available, use old vector-only method
-            candidates = other_core + working_nodes
-            filtered = self._filter_by_hint(
-                candidates, task_hint, max_nodes=max_nodes or 20
-            )
-            if filtered is not None:
-                core_ids = {n["id"] for n in other_core}
-                other_core = [n for n in filtered if n["id"] in core_ids]
-                working_nodes = [n for n in filtered if n["id"] not in core_ids]
-            else:
-                effective_max = max_nodes or 20
-                other_core, working_nodes = self._cap_by_space(
-                    other_core, working_nodes, space, effective_max
-                )
-        else:
-            # No task_hint: space-partition and cap to max_nodes
-            effective_max = max_nodes or 20
-            other_core, working_nodes = self._cap_by_space(
-                other_core, working_nodes, space, effective_max
-            )
-
-        # Filter identity nodes when task_hint is given
-        if task_hint and identity_nodes:
-            identity_nodes = self._filter_identity(identity_nodes, task_hint)
-
-        # Deduplicate: remove nodes from core/working that duplicate identity
-        # entries (by ID or by title). This prevents the same preference from
-        # appearing in both "About the User" and the core/project sections.
-        identity_titles = {n.get("title") for n in identity_nodes if n.get("title")}
-        other_core = [
-            n for n in other_core
-            if n["id"] not in identity_ids and n.get("title") not in identity_titles
-        ]
-        working_nodes = [
-            n for n in working_nodes
-            if n["id"] not in identity_ids and n.get("title") not in identity_titles
-        ]
-
-        # Build identity section
-        identity_text = format_identity_section(identity_nodes) if identity_nodes else ""
-
-        if space is None and not working_nodes:
-            core_text = format_context(other_core)
-        else:
-            core_text = format_context_with_project(
-                other_core, working_nodes, space or "default"
-            )
-
-        if identity_text and core_text:
-            result = identity_text + "\n\n" + core_text
-        elif identity_text:
-            result = identity_text
-        elif core_text:
-            result = core_text
-        else:
-            result = "No core memories stored yet."
-
-        # One-time onboarding nudge: fires exactly once after fresh install
-        if self.engine is not None:
-            try:
-                row = self.graph.conn.execute(
-                    "SELECT value FROM meta WHERE key = 'onboarding_prompted'"
-                ).fetchone()
-                if row is None:
-                    result = (result + _ONBOARDING_NUDGE) if result else _ONBOARDING_NUDGE
-                    with self.engine.db.transaction() as conn:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
-                        )
-            except Exception as e:
-                logger.warning("Onboarding nudge check failed: %s", e)
-
-        # Append maintenance signal when Claude maintenance is enabled and
-        # the count of recently added unprocessed nodes exceeds the threshold.
-        if self.engine is not None:
-            settings = getattr(self.engine, "settings", None)
-            if settings and getattr(settings, "claude_maintenance_enabled", False):
-                threshold = getattr(settings, "claude_maintenance_threshold", 20)
-                try:
-                    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-                    count = self.graph.conn.execute(
-                        "SELECT COUNT(*) FROM nodes n "
-                        "WHERE n.created >= ? "
-                        "AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.source_id = n.id)",
-                        (cutoff,),
-                    ).fetchone()[0]
-                    if count > threshold:
-                        result = result + f"\nunprocessed_memories: {count}"
-                except Exception as e:
-                    logger.warning("Failed to compute unprocessed_memories count: %s", e)
-
-        # Session-start review: surface a gated-out candidate for user feedback
-        if self.engine is not None:
-            settings = getattr(self.engine, "settings", None)
-            try:
-                threshold = getattr(settings, "affinity_similarity_threshold", 0.70) if settings else 0.70
-                candidate = _find_review_candidate(self.graph.conn, threshold)
-                if candidate:
-                    # session_id is provided by the client (Claude Code hook); fall back to
-                    # an empty string when not available (REST callers without a session).
-                    # Rate-limiting uses surfaced_at/node_id, not session_id, so this is safe.
-                    current_session_id = session_id or ""
-                    # Insert review_log row — must succeed before appending block
-                    with self.engine.db.transaction() as conn:
-                        conn.execute(
-                            "INSERT INTO review_log (node_id, session_id, surfaced_at) VALUES (?, ?, datetime('now'))",
-                            (candidate["node_id"], current_session_id),
-                        )
-                    # Build review block
-                    prompt_snippet = _truncate_at_word_boundary(
-                        candidate["prompt_text"] or "", max_len=300
-                    )
-                    space_label = candidate["space"] or "global"
-                    review_block = _REVIEW_FRAMING.format(
-                        space=space_label,
-                        prompt_snippet=prompt_snippet,
-                        title=candidate["title"],
-                        content=candidate["content"],
-                        node_id=candidate["node_id"],
-                    )
-                    result = result + review_block
-            except Exception as e:
-                logger.warning("Review mechanism failed: %s", e)
-
-        return result
 
     def build_whisper_context(
         self,
@@ -777,7 +563,6 @@ class ContextBuilder:
         if session_id and prompt_vec is not None and self.engine is not None:
             try:
                 import hashlib
-                from datetime import datetime, timezone
 
                 prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
                 now_iso = datetime.now(timezone.utc).isoformat()
@@ -807,138 +592,56 @@ class ContextBuilder:
                 logger.warning("whisper_log write failed: %s", e)
 
         if not body:
-            return ""
-        return _WHISPER_FRAMING + "\n\n" + body
+            result = ""
+        else:
+            result = _WHISPER_FRAMING + "\n\n" + body
 
-    @staticmethod
-    def _cap_by_space(
-        core_nodes: list[dict],
-        working_nodes: list[dict],
-        space: str | None,
-        max_nodes: int,
-    ) -> tuple[list[dict], list[dict]]:
-        """Space-partition and cap non-identity nodes to *max_nodes*.
+        # Unprocessed memories signal: append when maintenance is needed.
+        # Self-limiting: once maintenance runs and processes nodes, count drops to 0.
+        if self.engine is not None:
+            settings = getattr(self.engine, "settings", None)
+            if settings and getattr(settings, "claude_maintenance_enabled", False):
+                threshold = getattr(settings, "claude_maintenance_threshold", 20)
+                try:
+                    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+                    count = self.graph.conn.execute(
+                        "SELECT COUNT(*) FROM nodes n "
+                        "WHERE n.created >= ? "
+                        "AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.source_id = n.id)",
+                        (cutoff,),
+                    ).fetchone()[0]
+                    if count > threshold:
+                        result = result + f"\nunprocessed_memories: {count}"
+                except Exception as e:
+                    logger.warning("Failed to compute unprocessed_memories count: %s", e)
 
-        Buckets (in priority order):
-        1. Current-space core nodes
-        2. Global (space=None) core nodes
-        3. Other-project core nodes
-        4. Working nodes (already scoped to current space)
+        # First-message review: surface a gated-out whisper candidate for feedback.
+        # recent_prompts is None only on the first message of a session (buffer just created).
+        if recent_prompts is None and self.engine is not None:
+            settings = getattr(self.engine, "settings", None)
+            try:
+                threshold = getattr(settings, "affinity_similarity_threshold", 0.70) if settings else 0.70
+                candidate = _find_review_candidate(self.graph.conn, threshold)
+                if candidate:
+                    current_session_id = session_id or ""
+                    with self.engine.db.transaction() as conn:
+                        conn.execute(
+                            "INSERT INTO review_log (node_id, session_id, surfaced_at) VALUES (?, ?, datetime('now'))",
+                            (candidate["node_id"], current_session_id),
+                        )
+                    prompt_snippet = _truncate_at_word_boundary(
+                        candidate["prompt_text"] or "", max_len=300
+                    )
+                    space_label = candidate["space"] or "global"
+                    review_block = _REVIEW_FRAMING.format(
+                        space=space_label,
+                        prompt_snippet=prompt_snippet,
+                        title=candidate["title"],
+                        content=candidate["content"],
+                        node_id=candidate["node_id"],
+                    )
+                    result = result + review_block
+            except Exception as e:
+                logger.warning("Review mechanism failed: %s", e)
 
-        Within each bucket, nodes are sorted by importance descending.
-        """
-
-        def _by_importance(n: dict) -> float:
-            return -(n.get("importance") or 0.0)
-
-        current_core: list[dict] = []
-        global_core: list[dict] = []
-        other_core: list[dict] = []
-
-        for n in core_nodes:
-            ns = n.get("space")
-            if ns == space and space is not None:
-                current_core.append(n)
-            elif ns is None:
-                global_core.append(n)
-            else:
-                other_core.append(n)
-
-        current_core.sort(key=_by_importance)
-        global_core.sort(key=_by_importance)
-        other_core.sort(key=_by_importance)
-        working_nodes = sorted(working_nodes, key=_by_importance)
-
-        # Fill up to max_nodes in priority order
-        selected: list[dict] = []
-        for bucket in (current_core, global_core, other_core, working_nodes):
-            for n in bucket:
-                if len(selected) >= max_nodes:
-                    break
-                selected.append(n)
-            if len(selected) >= max_nodes:
-                break
-
-        # Split back into core vs working
-        core_ids = {n["id"] for n in core_nodes}
-        capped_core = [n for n in selected if n["id"] in core_ids]
-        capped_working = [n for n in selected if n["id"] not in core_ids]
-        return capped_core, capped_working
-
-    def _filter_by_hint(
-        self, candidates: list[dict], task_hint: str, max_nodes: int = 20
-    ) -> list[dict] | None:
-        """Score candidates against a task hint and return the top-N.
-
-        Returns None on failure (caller should fall back to full dump).
-        """
-        try:
-            from ormah.config import settings as default_settings
-            from ormah.embeddings.encoder import get_encoder
-            from ormah.embeddings.vector_store import VectorStore
-
-            encoder = get_encoder(default_settings)
-            if self.engine is None:
-                return None
-            vec_store = VectorStore(self.engine.db)
-
-            hint_vec = encoder.encode_query(task_hint)
-
-            scored: list[tuple[dict, float]] = []
-            for node in candidates:
-                node_vec = vec_store.get(node["id"])
-                if node_vec is None:
-                    # No embedding — give neutral score based on importance alone
-                    importance = node.get("importance") or 0.5
-                    scored.append((node, 0.3 * importance))
-                    continue
-
-                similarity = float(np.dot(hint_vec, node_vec) / (
-                    np.linalg.norm(hint_vec) * np.linalg.norm(node_vec) + 1e-9
-                ))
-                importance = node.get("importance") or 0.5
-                score = 0.7 * similarity + 0.3 * importance
-                scored.append((node, score))
-
-            scored.sort(key=lambda x: x[1], reverse=True)
-            return [n for n, _ in scored[:max_nodes]]
-
-        except Exception as e:
-            logger.warning("Adaptive context filtering failed, falling back to capped context: %s", e)
-            return None
-
-    # Types that are always kept regardless of relevance score
-    _ALWAYS_KEEP_TYPES = {"person", "preference"}
-
-    def _filter_identity(
-        self, identity_nodes: list[dict], task_hint: str, max_nodes: int = 10
-    ) -> list[dict]:
-        """Filter identity nodes by relevance to task_hint.
-
-        Always keeps person and preference nodes (the agent needs to know
-        who it's talking to and how they want to communicate). Other
-        identity facts are scored against the hint and only the top-N
-        are included.
-        """
-        always: list[dict] = []
-        scorable: list[dict] = []
-        for n in identity_nodes:
-            if n.get("type") in self._ALWAYS_KEEP_TYPES:
-                always.append(n)
-            else:
-                scorable.append(n)
-
-        if not scorable:
-            return always
-
-        # Score the rest against the hint
-        remaining_slots = max(max_nodes - len(always), 0)
-        if remaining_slots == 0:
-            return always
-
-        scored = self._filter_by_hint(scorable, task_hint, max_nodes=remaining_slots)
-        if scored is None:
-            # Scoring failed — return all rather than lose identity
-            return identity_nodes
-
-        return always + scored
+        return result

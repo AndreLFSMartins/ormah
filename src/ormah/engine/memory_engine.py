@@ -732,16 +732,6 @@ class MemoryEngine:
 
         return f"Connected {req.source_id[:8]}... →[{req.edge.value}]→ {req.target_id[:8]}..."
 
-    def get_context(self, space: str | None = None, task_hint: str | None = None, session_id: str | None = None) -> str:
-        """Get core memories formatted for system prompt."""
-        return self.context_builder.build_core_context(
-            space=space,
-            user_node_id=self.user_node_id,
-            task_hint=task_hint,
-            max_nodes=self.settings.context_max_nodes,
-            session_id=session_id,
-        )
-
     def get_whisper_context(
         self,
         prompt: str,
@@ -1291,16 +1281,31 @@ class MemoryEngine:
 
     def get_self(self) -> str:
         """Get formatted identity profile for the user."""
-        if not self.user_node_id:
-            return "No user identity profile exists yet."
+        _ONBOARDING_NUDGE = (
+            "\n\n## Ormah: Action required — initiate first-session onboarding\n"
+            "This is the user's first session with ormah. The identity profile is empty. "
+            "Your very first response MUST acknowledge what the user said, then pivot to onboarding — "
+            "e.g. 'Happy to help with that — but before we dive in, I'd love to get to know you a bit.' "
+            "Then ask your first question. Cover these areas naturally, one question at a time:\n"
+            "- Start personal: ask something like 'If you had to describe who you are, what would you say? "
+            "What are you passionate about or what do you love doing?' — warm and open, not work-first\n"
+            "- Family and close relationships — ask gently, don't press for details\n"
+            "- Professional background: ask what they do, and suggest they share a LinkedIn, GitHub, CV, "
+            "or personal site if they have one — easier than describing everything from scratch\n"
+            "- How they like to collaborate and communicate\n\n"
+            "Once you have a decent picture (around 5–10 facts stored), wrap up warmly: "
+            "\"I have enough context to get started — I'll keep learning as we work together.\" "
+            "Store everything you learn using the `remember` tool with `about_self=true`. "
+            "This message will not appear again."
+        )
 
-        # Touch access on self node
-        self._touch_access(self.user_node_id)
+        if self.user_node_id:
+            self._touch_access(self.user_node_id)
 
         # Get all nodes linked via defines edges from self node
         identity_nodes = self.graph.get_neighbors(
             self.user_node_id, depth=1, edge_types=["defines"]
-        )
+        ) if self.user_node_id else []
 
         # Touch access on each identity node
         for n in identity_nodes:
@@ -1308,7 +1313,24 @@ class MemoryEngine:
 
         from ormah.engine.traversal import format_identity_section
 
-        return format_identity_section(identity_nodes)
+        result = format_identity_section(identity_nodes)
+
+        # One-time onboarding nudge: fires when identity is empty and not yet prompted
+        if not identity_nodes:
+            try:
+                row = self.graph.conn.execute(
+                    "SELECT value FROM meta WHERE key = 'onboarding_prompted'"
+                ).fetchone()
+                if row is None:
+                    result = result + _ONBOARDING_NUDGE
+                    with self.db.transaction() as conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
+                        )
+            except Exception as e:
+                logger.warning("Onboarding nudge check failed: %s", e)
+
+        return result
 
     def _link_to_self(self, node: MemoryNode) -> None:
         """Create a defines edge from self node to the given node."""

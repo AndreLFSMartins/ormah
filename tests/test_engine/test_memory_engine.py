@@ -141,22 +141,15 @@ def test_connect(engine):
     assert "Connected" in text
 
 
-def test_context_empty(engine):
-    text = engine.get_context()
-    assert "No core memories" in text
+def test_get_self_onboarding_nudge(engine):
+    """get_self fires onboarding nudge exactly once when identity is empty."""
+    # First call: no user node → nudge should appear
+    text = engine.get_self()
+    assert "onboarding" in text.lower()
 
-
-def test_context_with_core(engine):
-    req = CreateNodeRequest(
-        content="User prefers dark mode.",
-        type=NodeType.preference,
-        tier=Tier.core,
-        title="Dark mode preference",
-    )
-    engine.remember(req)
-
-    text = engine.get_context()
-    assert "dark mode" in text.lower()
+    # Second call: nudge must NOT fire again (tracked by meta key)
+    text2 = engine.get_self()
+    assert "onboarding" not in text2.lower()
 
 
 def test_stats(engine):

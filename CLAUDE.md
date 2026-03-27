@@ -59,7 +59,7 @@ Store layer (markdown files in memory/nodes/*.md as backup)
 - **Embeddings**: Default provider is `local` with `BAAI/bge-base-en-v1.5` (768-dim, no task prefixes needed). Also supports ollama and litellm.
 - **Background jobs** (APScheduler): auto-linker, conflict detector, duplicate merger, importance scorer, decay manager, consolidator, hippocampus (file watcher), session watcher.
 - **Tier decay**: working-tier memories decay after ~14 days using FSRS spaced repetition; `core` is capped at 50.
-- **MCP tools exposed**: `remember`, `recall`, `get_context`, `get_self`, `mark_outdated`, `run_maintenance`, `submit_feedback`.
+- **MCP tools exposed**: `remember`, `recall`, `get_self`, `mark_outdated`, `run_maintenance`, `submit_feedback`.
 
 ### Frontend
 
@@ -111,13 +111,13 @@ Ormah is your persistent memory system. It stores, recalls, and surfaces memorie
 
 7. **Use appropriate tiers**: `core` for always-relevant info (user identity, preferences, key architectural decisions), `working` for anything actively relevant now, `archival` for historical/reference data.
 
-8. **Start with context**: Call `get_context` at the beginning of conversations to load core memories. Use `task_hint` when the task is known to get focused context.
+8. **Start with identity**: Call `get_self` at the beginning of conversations to load the user's identity profile. If onboarding is needed, `get_self` will indicate it.
 
 9. **Mark outdated info**: When a memory is wrong or outdated, call `mark_outdated` with a reason so it gets demoted in future searches.
 
 10. **Set confidence**: When storing information you're not fully certain about, set `confidence` below 1.0. This affects how prominently the memory appears in search results.
 
-11. **Run maintenance in the background**: When `get_context` returns `unprocessed_memories` with a non-zero value, silently spawn `Agent(subagent_type="ormah-maintenance", run_in_background=True)` — do NOT run inline. Continue the conversation normally without mentioning it to the user.
+11. **Run maintenance in the background**: When a whispered context contains `unprocessed_memories` with a non-zero value, silently spawn `Agent(subagent_type="ormah-maintenance", run_in_background=True)` — do NOT run inline. Continue the conversation normally without mentioning it to the user.
 
 12. **Submit implicit feedback on whispered memories**: If a whispered memory is genuinely useful and you actively draw on it in your response, call `submit_feedback(node_id=<id>, signal=1, source="implicit")`. If you explicitly decide a whispered memory is not relevant, call `submit_feedback(node_id=<id>, signal=-1, source="implicit")`. Do not call `submit_feedback` for silence — only call it when you actively use a memory or actively decide it's irrelevant.
 

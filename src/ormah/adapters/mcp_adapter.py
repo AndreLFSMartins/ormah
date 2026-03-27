@@ -141,17 +141,6 @@ async def _dispatch(
                 return _handle_error(resp)
             return resp.json()["text"]
 
-        elif name == "get_context":
-            params = {}
-            if default_space:
-                params["space"] = default_space
-            if args.get("task_hint"):
-                params["task_hint"] = args["task_hint"]
-            resp = await client.get("/agent/context", params=params)
-            if not resp.is_success:
-                return _handle_error(resp)
-            return resp.json()["text"]
-
         elif name == "mark_outdated":
             body = {}
             if args.get("reason"):

@@ -237,7 +237,7 @@ class TestWhisperSignal:
     def test_signal_absent_when_disabled(self, engine):
         """No signal when claude_maintenance_enabled=False."""
         engine.settings.claude_maintenance_enabled = False
-        text = engine.get_context()
+        text = engine.get_whisper_context(prompt="how does Python indexing work")
         assert "unprocessed_memories" not in text
 
     def test_signal_absent_below_threshold(self, engine):
@@ -245,7 +245,7 @@ class TestWhisperSignal:
         engine.settings.claude_maintenance_enabled = True
         engine.settings.claude_maintenance_threshold = 100  # very high
         _seed_similar_nodes(engine, 2)
-        text = engine.get_context()
+        text = engine.get_whisper_context(prompt="how does Python indexing work")
         assert "unprocessed_memories" not in text
 
     def test_signal_present_above_threshold(self, engine):
@@ -253,5 +253,5 @@ class TestWhisperSignal:
         engine.settings.claude_maintenance_enabled = True
         engine.settings.claude_maintenance_threshold = 0  # always trigger
         _seed_similar_nodes(engine, 3)
-        text = engine.get_context()
+        text = engine.get_whisper_context(prompt="how does Python indexing work")
         assert "unprocessed_memories:" in text

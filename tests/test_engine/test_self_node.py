@@ -183,21 +183,3 @@ def test_get_self_with_identity(engine):
     assert "About the User" in text
     assert "User name" in text
 
-
-def test_context_includes_identity_section(engine):
-    """get_context should include identity section at top."""
-    req = CreateNodeRequest(
-        content="User prefers dark mode.",
-        type=NodeType.preference,
-        title="Dark mode preference",
-        about_self=True,
-    )
-    engine.remember(req)
-
-    text = engine.get_context()
-    assert "About the User" in text
-    # Identity section should come before core memories
-    identity_pos = text.find("About the User")
-    core_pos = text.find("Core Memories")
-    if core_pos >= 0:
-        assert identity_pos < core_pos

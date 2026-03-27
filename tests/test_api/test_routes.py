@@ -61,11 +61,6 @@ def test_recall_not_found(client):
     assert resp.status_code == 404
 
 
-def test_context(client):
-    resp = client.get("/agent/context")
-    assert resp.status_code == 200
-
-
 def test_stats(client):
     resp = client.get("/admin/stats")
     assert resp.status_code == 200

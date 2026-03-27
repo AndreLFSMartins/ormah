@@ -181,7 +181,7 @@ Background jobs use an LLM to make linking, conflict, merge, and consolidation d
 
 This is one of ormah's most distinctive capabilities: Claude Code silently manages your memory graph in the background, without interrupting your conversation.
 
-Enable it during `ormah setup` (or set `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` in `~/.config/ormah/.env`). When enabled, `get_context` appends a whisper signal — `unprocessed_memories: N` — when recently-added unlinked nodes exceed a threshold.
+Enable it during `ormah setup` (or set `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` in `~/.config/ormah/.env`). When enabled, the whisper context includes an `unprocessed_memories: N` signal when recently-added unlinked nodes exceed a threshold.
 
 When Claude detects this signal, it silently spawns a dedicated **ormah-maintenance background agent** — a custom Claude Code subagent installed by `ormah setup` into `~/.claude/agents/`. The agent runs the two-call `run_maintenance` protocol autonomously in the background without interrupting your conversation.
 
@@ -228,14 +228,13 @@ Ormah is designed to work with any LLM agent through multiple integration points
 
 ### MCP (Model Context Protocol)
 
-Any MCP-compatible client gets 6 focused tools:
+Any MCP-compatible client gets 5 focused tools:
 
 | Tool | What it does |
 |------|-------------|
 | `remember` | Store a memory with type, tier, confidence, tags, and space. Set `about_self: true` for identity memories. Pass `links` to explicitly connect the new memory to existing nodes at store time. |
 | `recall` | Search by natural language. Hybrid search with spreading activation. Filterable by type, space, tags, and date range. |
-| `get_context` | Load core memories + project context. Pass `task_hint` to get only memories relevant to the current task. |
-| `get_self` | Get the user's identity profile: all memories linked via `defines` edges from the user node. |
+| `get_self` | Get the user's identity profile: all memories linked via `defines` edges from the user node. Triggers onboarding nudge on first use if identity is empty. |
 | `mark_outdated` | Demote a memory as no longer valid. Optionally provide a reason. Heavily deprioritized in future searches. |
 | `run_maintenance` | Claude-in-the-loop graph maintenance. See below. |
 
