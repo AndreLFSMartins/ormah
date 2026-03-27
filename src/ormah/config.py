@@ -143,10 +143,8 @@ class Settings(BaseSettings):
     whisper_nudge_interval: int = 10  # Nudge every N prompts (0 = disabled)
 
     # Whisper (involuntary recall)
-    whisper_max_nodes: int = 8
+    whisper_max_nodes: int = 6
     whisper_min_relevance_score: float = 0.45
-    whisper_identity_max_nodes: int = 5
-    whisper_content_max_chars: int = 150
 
     # Whisper reranking (cross-encoder with linear-rescale blended scoring)
     whisper_reranker_enabled: bool = True
@@ -175,11 +173,6 @@ class Settings(BaseSettings):
     affinity_max_boost: float = 0.15
     affinity_implicit_weight: float = 0.8
     whisper_exploration_enabled: bool = True
-
-    # Whisper dynamic content budget (distribute chars across results)
-    whisper_content_total_budget: int = 1500
-    whisper_content_min_per_node: int = 100
-    whisper_content_max_per_node: int = 600
 
     # Space prioritization
     space_boost_global: float = 1.0
