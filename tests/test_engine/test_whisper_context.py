@@ -2195,3 +2195,149 @@ class TestWhisperLog:
         # The logged score is the pre-boost (CE blended), not boosted
         # We just verify a row was written — exact value depends on reranker mock
         assert logged_score >= 0.0
+
+
+class TestWhisperFlatRankedDisplay:
+    """Whisper outputs a flat ranked list — top 2 full, rest title+ID only."""
+
+    def test_top_two_nodes_shown_in_full(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            {**_make_node_dict(f"node-{i}", f"Title {i}"), "content": f"Full content for node {i}, longer than a title."}
+            for i in range(4)
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+            {"node": nodes[2], "score": 0.7, "source": "hybrid"},
+            {"node": nodes[3], "score": 0.6, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="tell me about nodes",
+            injection_gate=0.0,
+        )
+
+        # Top 2 show full content
+        assert "Full content for node 0" in result
+        assert "Full content for node 1" in result
+        # Nodes 3-4 do NOT show content
+        assert "Full content for node 2" not in result
+        assert "Full content for node 3" not in result
+
+    def test_remaining_nodes_show_title_and_id_only(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            {**_make_node_dict(f"abcd{i:04d}", f"Title {i}"), "content": f"Full content for node {i}."}
+            for i in range(4)
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+            {"node": nodes[2], "score": 0.7, "source": "hybrid"},
+            {"node": nodes[3], "score": 0.6, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="tell me about nodes",
+            injection_gate=0.0,
+        )
+
+        # Nodes 3-4 show title and ID
+        assert "Title 2" in result
+        assert "abcd0002" in result
+        assert "Title 3" in result
+        assert "abcd0003" in result
+
+    def test_all_nodes_have_node_id(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            _make_node_dict(f"nodeid{i:02d}", f"Title {i}")
+            for i in range(3)
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+            {"node": nodes[2], "score": 0.7, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="tell me about nodes",
+            injection_gate=0.0,
+        )
+
+        # All nodes show their IDs
+        assert "nodeid00" in result
+        assert "nodeid01" in result
+        assert "nodeid02" in result
+
+    def test_no_section_headers(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        # Mix of tiers and types
+        nodes = [
+            {**_make_node_dict("core-001", "Core fact", tier="core"), "content": "Some core content."},
+            {**_make_node_dict("work-001", "Working fact", tier="working"), "content": "Some working content."},
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="tell me something",
+            injection_gate=0.0,
+        )
+
+        assert "## About the User" not in result
+        assert "## Core Memories" not in result
+        assert "## Project:" not in result
+
+    def test_flat_list_preserves_search_result_order(self, mock_graph):
+        # recall_search_structured always returns results sorted by score descending.
+        # Whisper should preserve that order — first result in list = first in output.
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            _make_node_dict("high-score", "High score title"),
+            _make_node_dict("low-score", "Low score title"),
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.6, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="tell me something",
+            injection_gate=0.0,
+        )
+
+        # First result in search appears first in output
+        high_pos = result.index("High score title")
+        low_pos = result.index("Low score title")
+        assert high_pos < low_pos
+
+    def test_framing_text_updated(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [_make_node_dict("node-x", "Some title")]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="something",
+            injection_gate=0.0,
+        )
+
+        assert "The 2 most relevant memories are shown in full" in result
+        assert "use recall with its node ID" in result
