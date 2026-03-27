@@ -8,20 +8,15 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-from ormah.engine.traversal import (
-    format_context,
-    format_context_with_project,
-    format_identity_section,
-)
 from ormah.index.graph import GraphIndex
 
 logger = logging.getLogger(__name__)
 
 _WHISPER_FRAMING = (
     "# Ormah whispers\n"
-    "Memories from your knowledge graph, selected for relevance to the current prompt. "
-    "Use them naturally if they add useful context; ignore if not relevant. "
-    "If a memory ends with '…', it is truncated — call recall with its node ID to get the full content before acting on it."
+    "The 2 most relevant memories are shown in full. The rest are titles only. "
+    "If any memory looks relevant or interesting, use recall with its node ID "
+    "to get the full content and related memories."
 )
 
 
@@ -201,8 +196,7 @@ class ContextBuilder:
         user_node_id: str | None = None,
         max_nodes: int = 8,
         min_score: float = 0.45,
-        identity_max: int = 5,
-        max_content_len: int = 150,
+        full_content_count: int = 2,
         reranker_enabled: bool = False,
         reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         reranker_min_score: float = 0.0,
@@ -212,9 +206,6 @@ class ContextBuilder:
         topic_shift_enabled: bool = False,
         topic_shift_threshold: float = 0.75,
         injection_gate: float = 0.55,
-        content_total_budget: int = 0,
-        content_min_per_node: int = 100,
-        content_max_per_node: int = 500,
         session_id: str | None = None,
     ) -> str:
         """Build compact whisper context for involuntary recall injection.
@@ -294,7 +285,7 @@ class ContextBuilder:
         # Build search kwargs, merging any intent-derived params
         search_kwargs: dict = {
             "query": search_query,
-            "limit": max_nodes + identity_max,
+            "limit": max_nodes,
             "default_space": space,
             "tiers": ["core", "working"],
             "touch_access": False,
@@ -444,118 +435,30 @@ class ContextBuilder:
                 reverse=True,
             )
 
-        # Separate identity nodes from search results.
-        # Identity nodes compete on search merit like everything else —
-        # no proactive graph-neighbor fetch.  We query identity neighbor
-        # *IDs* (cheap) to classify search results, but don't inject
-        # neighbors that didn't score well in search.
-        identity_ids: set[str] = set()
-        if user_node_id:
-            identity_ids.add(user_node_id)
+        # Cap to max_nodes (already ordered by relevance score, or by recency for temporal queries)
+        search_results = search_results[:max_nodes]
 
-            # Collect identity-linked IDs from graph edges (lightweight ID query)
-            neighbor_rows = self.graph.conn.execute(
-                "SELECT target_id FROM edges WHERE source_id = ? AND edge_type = 'defines'",
-                (user_node_id,),
-            ).fetchall()
-            identity_ids.update(r["target_id"] for r in neighbor_rows)
-
-            # Also check about_self tags on search results
-            for r in search_results:
-                node = r["node"]
-                if node["id"] in identity_ids:
-                    continue
-                tags = self._get_tags(node["id"])
-                if "about_self" in tags:
-                    identity_ids.add(node["id"])
-
-        # Split results into identity vs non-identity, tracking top identity score
-        identity_results: list[dict] = []
-        other_results: list[dict] = []
-        top_identity_score: float = 0.0
-        for r in search_results:
+        # Build flat ranked list — top full_content_count get full content,
+        # rest get title + type + node ID only.
+        lines = []
+        for i, r in enumerate(search_results):
             node = r["node"]
-            if node["id"] in identity_ids:
-                identity_results.append(node)
-                top_identity_score = max(top_identity_score, r.get("score", 0))
-            else:
-                other_results.append(node)
+            node_id = node.get("id", "")
+            short_id = node_id[:8] if node_id else ""
+            title = node.get("title") or (node.get("content", "")[:60].strip() + "…")
+            node_type = node.get("type", "fact")
+            id_suffix = f" (id: {short_id})" if short_id else ""
 
-        # Don't inject identity if no topical results survived AND
-        # identity results scored low — prevents identity dump for
-        # vague/off-topic prompts while keeping high-confidence identity
-        # matches (e.g. "where does X live" → score 0.99).
-        if not identity_only and not other_results and top_identity_score < min_score:
-            identity_results = []
+            lines.append(f"- **[{node_type}]** {title}{id_suffix}")
 
-        # Identity-only intent with no search results: stay silent.
-        # The graph neighbor fallback was dumping all ~42 preferences
-        # uncapped. If search can't find relevant identity nodes for
-        # the query, injecting everything is worse than injecting nothing.
+            if i < full_content_count:
+                content = node.get("content", "").strip()
+                if content and content != title:
+                    lines.append(f"  {content}")
 
-        # Cap identity nodes to identity_max (no exemptions)
-        if len(identity_results) > identity_max:
-            identity_results = identity_results[:identity_max]
+            lines.append("")
 
-        # Cap non-identity to remaining budget
-        non_identity_budget = max(max_nodes - len(identity_results), 0)
-        other_results = other_results[:non_identity_budget]
-
-        # Split other results into core vs working for formatting
-        core_nodes = [n for n in other_results if n.get("tier") == "core"]
-        working_nodes = [n for n in other_results if n.get("tier") != "core"]
-
-        # Dynamic content budget: distribute total chars across results
-        effective_content_len = max_content_len
-        if content_total_budget > 0:
-            total_results = len(identity_results) + len(other_results)
-            if total_results > 0:
-                per_node = content_total_budget // total_results
-                effective_content_len = max(
-                    content_min_per_node,
-                    min(content_max_per_node, per_node),
-                )
-
-        # Truncate content for whisper nodes (defensive copy to avoid
-        # mutating objects that may be referenced elsewhere)
-        for node_list in (identity_results, core_nodes, working_nodes):
-            for i, node in enumerate(node_list):
-                content = node.get("content", "")
-                if content and len(content) > effective_content_len:
-                    node_list[i] = node = dict(node)
-                    node["content"] = _first_sentence_truncate(content, effective_content_len)
-
-        # Format sections (whisper uses ## headers and includes node IDs)
-        identity_text = (
-            format_identity_section(
-                identity_results,
-                max_content_len=effective_content_len,
-                header_prefix="##",
-                include_ids=True,
-            )
-            if identity_results
-            else ""
-        )
-
-        if space is not None and working_nodes:
-            memories_text = format_context_with_project(
-                core_nodes, working_nodes, space,
-                max_content_len=effective_content_len,
-                header_prefix="##",
-                include_ids=True,
-            )
-        elif core_nodes or working_nodes:
-            memories_text = format_context(
-                core_nodes + working_nodes,
-                max_content_len=effective_content_len,
-                header_prefix="##",
-                include_ids=True,
-            )
-        else:
-            memories_text = ""
-
-        parts = [p for p in (identity_text, memories_text) if p]
-        body = "\n\n".join(parts)
+        body = "\n".join(lines).rstrip()
 
         # Write whisper_log: one row per non-temporal candidate with boosted_score >= 0.40.
         # Uses pre_gate_candidates (all above the 0.40 floor) so gated-out candidates
