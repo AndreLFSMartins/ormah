@@ -9,6 +9,7 @@ import socket
 import subprocess
 import webbrowser
 from pathlib import Path
+import re
 
 import httpx
 
@@ -180,6 +181,85 @@ def configure_claude_desktop(ormah_bin: str) -> bool:
     ok("Connected to Claude Desktop \u2014 MCP tools available")
     info("Whisper hooks require Claude Code; Desktop uses MCP tools directly")
     return True
+
+
+def _remove_toml_table_block(text: str, table_name: str) -> str:
+    """Remove a top-level TOML table block while preserving surrounding content."""
+    lines = text.splitlines(keepends=True)
+    start = None
+    end = None
+    header = f"[{table_name}]"
+
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            start = i
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                stripped = lines[j].strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    end = j
+                    break
+            break
+
+    if start is None or end is None:
+        return text
+
+    updated = "".join(lines[:start] + lines[end:])
+    updated = re.sub(r"\n{3,}", "\n\n", updated)
+    return updated.lstrip("\n")
+
+
+def _upsert_codex_mcp_config(ormah_bin: str) -> None:
+    """Write or update the Ormah MCP entry in ~/.codex/config.toml."""
+    config_path = Path.home() / ".codex" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = config_path.read_text() if config_path.exists() else ""
+    existing = _remove_toml_table_block(existing, "mcp_servers.ormah").rstrip()
+
+    block = (
+        "[mcp_servers.ormah]\n"
+        f"command = {json.dumps(ormah_bin)}\n"
+        'args = ["mcp"]\n'
+    )
+
+    if existing:
+        updated = f"{existing}\n\n{block}"
+    else:
+        updated = block
+
+    config_path.write_text(updated)
+
+
+def configure_codex_mcp(ormah_bin: str) -> None:
+    """Register Ormah MCP server in Codex config."""
+    codex_bin = shutil.which("codex")
+    if codex_bin:
+        try:
+            result = subprocess.run(
+                [codex_bin, "mcp", "add", "ormah", "--", ormah_bin, "mcp"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                ok("Connected to Codex — MCP tools available")
+                return
+            if "already exists" in result.stderr or "already exists" in result.stdout:
+                subprocess.run(
+                    [codex_bin, "mcp", "remove", "ormah"],
+                    capture_output=True, timeout=10,
+                )
+                result2 = subprocess.run(
+                    [codex_bin, "mcp", "add", "ormah", "--", ormah_bin, "mcp"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result2.returncode == 0:
+                    ok("Connected to Codex — MCP tools available")
+                    return
+        except Exception:
+            pass
+
+    _upsert_codex_mcp_config(ormah_bin)
+    ok("Connected to Codex — MCP tools available")
 
 
 def install_claude_md() -> None:
@@ -743,10 +823,10 @@ def _remove_claude_hooks() -> None:
 
 
 def _remove_mcp_registration() -> None:
-    """Unregister ormah MCP server from Claude Code (and Claude Desktop on macOS)."""
+    """Unregister ormah MCP server from supported AI clients."""
     import platform as _platform
 
-    # Try official CLI first
+    # Claude Code
     claude_bin = shutil.which("claude")
     if claude_bin:
         try:
@@ -770,6 +850,23 @@ def _remove_mcp_registration() -> None:
         if desktop_config.exists():
             _remove_mcp_from_json(desktop_config)
 
+    # Codex
+    codex_bin = shutil.which("codex")
+    if codex_bin:
+        try:
+            result = subprocess.run(
+                [codex_bin, "mcp", "remove", "ormah"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                ok("Removed ormah MCP registration from Codex")
+            else:
+                _remove_codex_mcp_config()
+        except Exception:
+            _remove_codex_mcp_config()
+    else:
+        _remove_codex_mcp_config()
+
 
 def _remove_mcp_from_json(config_path: Path) -> None:
     """Remove ormah entry from mcpServers in a JSON config file."""
@@ -792,6 +889,21 @@ def _remove_mcp_from_json(config_path: Path) -> None:
         data["mcpServers"] = mcp_servers
 
     config_path.write_text(json.dumps(data, indent=2) + "\n")
+    ok(f"Removed ormah from {config_path}")
+
+
+def _remove_codex_mcp_config() -> None:
+    """Remove ormah entry from ~/.codex/config.toml."""
+    config_path = Path.home() / ".codex" / "config.toml"
+    if not config_path.exists():
+        return
+
+    existing = config_path.read_text()
+    updated = _remove_toml_table_block(existing, "mcp_servers.ormah")
+    if updated == existing:
+        return
+
+    config_path.write_text(updated.rstrip() + ("\n" if updated.strip() else ""))
     ok(f"Removed ormah from {config_path}")
 
 
@@ -1072,6 +1184,7 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
 
     # 3. Detect Claude Code and offer maintenance upfront — no API key needed
     has_claude_code = shutil.which("claude") is not None
+    has_codex = shutil.which("codex") is not None or (Path.home() / ".codex").exists()
     claude_maintenance = False
     if has_claude_code and not ci and not update:
         step("Claude Code detected")
@@ -1127,13 +1240,17 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
         install_claude_agents()
         install_claude_commands()
 
+    if has_codex:
+        step("Hooking up Codex")
+        configure_codex_mcp(ormah_bin)
+
     desktop_configured = configure_claude_desktop(ormah_bin)
 
-    if not has_claude_code and not desktop_configured:
-        warn("No Claude client detected")
+    if not has_claude_code and not has_codex and not desktop_configured:
+        warn("No Claude Code, Claude Desktop, or Codex detected")
         info("You can manually configure MCP in your AI client:")
         print(f"    Command: {ormah_bin} mcp")
-        info("Or run 'ormah setup' again after installing Claude Code or Claude Desktop")
+        info("Or run 'ormah setup' again after installing Claude Code, Claude Desktop, or Codex")
 
     # 7. Cold start backfill (needs server + LLM)
     if server_ok and not ci:

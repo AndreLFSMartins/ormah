@@ -24,6 +24,7 @@ from ormah.setup import (
     ENV_PATH,
     WRAPPER_PATH,
     _merge_json_file,
+    _remove_codex_mcp_config,
     _read_env_file,
     _remove_claude_hooks,
     _remove_claude_md_block,
@@ -34,6 +35,7 @@ from ormah.setup import (
     configure_claude_hooks,
     configure_claude_code_mcp,
     configure_claude_desktop,
+    configure_codex_mcp,
     configure_identity,
     configure_llm,
     generate_server_wrapper,
@@ -310,6 +312,113 @@ class TestConfigureClaudeDesktop:
             data = json.load(f)
 
         assert data["mcpServers"]["ormah"]["command"] == "/abs/path/ormah"
+
+
+class TestConfigureCodexMcp:
+    def test_writes_mcp_config_to_codex_toml(self, tmp_path):
+        with (
+            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup.subprocess.run") as mock_run,
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+        ):
+            configure_codex_mcp("/abs/path/ormah")
+
+        mock_run.assert_not_called()
+
+        config_path = tmp_path / ".codex" / "config.toml"
+        content = config_path.read_text()
+        assert '[mcp_servers.ormah]' in content
+        assert 'command = "/abs/path/ormah"' in content
+        assert 'args = ["mcp"]' in content
+
+    def test_preserves_existing_toml_content(self, tmp_path):
+        config_dir = tmp_path / ".codex"
+        config_dir.mkdir()
+        config_path = config_dir / "config.toml"
+        config_path.write_text(
+            '[projects."/tmp/demo"]\n'
+            'trust_level = "trusted"\n'
+        )
+
+        with (
+            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup.subprocess.run") as mock_run,
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+        ):
+            configure_codex_mcp("/abs/path/ormah")
+
+        mock_run.assert_not_called()
+        content = config_path.read_text()
+        assert '[projects."/tmp/demo"]' in content
+        assert 'trust_level = "trusted"' in content
+        assert '[mcp_servers.ormah]' in content
+
+    def test_replaces_existing_ormah_block(self, tmp_path):
+        config_dir = tmp_path / ".codex"
+        config_dir.mkdir()
+        config_path = config_dir / "config.toml"
+        config_path.write_text(
+            '[mcp_servers.ormah]\n'
+            'command = "/old/path/ormah"\n'
+            'args = ["mcp"]\n\n'
+            '[projects."/tmp/demo"]\n'
+            'trust_level = "trusted"\n'
+        )
+
+        with (
+            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup.subprocess.run") as mock_run,
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+        ):
+            configure_codex_mcp("/new/path/ormah")
+
+        mock_run.assert_not_called()
+        content = config_path.read_text()
+        assert 'command = "/new/path/ormah"' in content
+        assert 'command = "/old/path/ormah"' not in content
+        assert content.count('[mcp_servers.ormah]') == 1
+
+    def test_uses_codex_cli_when_available(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+
+        with (
+            patch("ormah.setup.shutil.which", return_value="/usr/local/bin/codex"),
+            patch("ormah.setup.subprocess.run", return_value=mock_result) as mock_run,
+        ):
+            configure_codex_mcp("/usr/local/bin/ormah")
+
+        mock_run.assert_called_once_with(
+            ["/usr/local/bin/codex", "mcp", "add", "ormah", "--",
+             "/usr/local/bin/ormah", "mcp"],
+            capture_output=True, text=True, timeout=10,
+        )
+
+    def test_cli_already_exists_removes_and_readds(self):
+        first_result = MagicMock()
+        first_result.returncode = 1
+        first_result.stderr = "already exists"
+        first_result.stdout = ""
+
+        second_result = MagicMock()
+        second_result.returncode = 0
+
+        with (
+            patch("ormah.setup.shutil.which", return_value="/usr/local/bin/codex"),
+            patch("ormah.setup.subprocess.run", side_effect=[
+                first_result, second_result, second_result,
+            ]) as mock_run,
+        ):
+            configure_codex_mcp("/usr/local/bin/ormah")
+
+        assert mock_run.call_count == 3
+        assert mock_run.call_args_list[1][0][0] == [
+            "/usr/local/bin/codex", "mcp", "remove", "ormah",
+        ]
+        assert mock_run.call_args_list[2][0][0] == [
+            "/usr/local/bin/codex", "mcp", "add", "ormah", "--",
+            "/usr/local/bin/ormah", "mcp",
+        ]
 
 
 # --- CLI tests ---
@@ -854,6 +963,31 @@ class TestRemoveMcpFromJson:
         _remove_mcp_from_json(config)
         result = json.loads(config.read_text())
         assert result == original
+
+
+class TestRemoveCodexMcpConfig:
+    def test_removes_ormah_block(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        config = codex_dir / "config.toml"
+        config.write_text(
+            '[projects."/tmp/demo"]\n'
+            'trust_level = "trusted"\n\n'
+            '[mcp_servers.ormah]\n'
+            'command = "/bin/ormah"\n'
+            'args = ["mcp"]\n'
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_mcp_config()
+
+        content = config.read_text()
+        assert '[mcp_servers.ormah]' not in content
+        assert '[projects."/tmp/demo"]' in content
+
+    def test_noop_when_missing(self, tmp_path):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_mcp_config()
 
 
 class TestRemoveClaudeMdBlock:
