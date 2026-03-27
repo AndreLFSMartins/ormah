@@ -13,7 +13,9 @@ TOOLS = [
         "description": (
             "Store a new memory. Use this to save facts, decisions, "
             "preferences, observations, or any information worth remembering across sessions. "
-            "Memories are automatically indexed, embedded, and linked to related memories."
+            "Memories are automatically indexed and embedded. If you have node IDs from a recent "
+            "recall, pass them via `links` to connect related memories at creation time — "
+            "background jobs will also discover relationships automatically."
         ),
         "parameters": {
             "type": "object",
@@ -129,7 +131,8 @@ TOOLS = [
         "description": (
             "Get core memories and current project context formatted for inclusion in the system prompt. "
             "Automatically scoped to the current project directory. "
-            "Call this at the start of a conversation to load persistent context."
+            "Call this at the start of a conversation to load persistent context. "
+            "Pass `task_hint` when the task is known to get focused context instead of loading everything."
         ),
         "parameters": {
             "type": "object",
@@ -181,11 +184,10 @@ TOOLS = [
     {
         "name": "submit_feedback",
         "description": (
-            "Record whether a held-back memory would have been useful. "
-            "Call this after asking the user about a memory that ormah didn't inject during a prior session. "
-            "Use signal=1 if the memory would have helped, signal=-1 if it was not relevant. "
-            "Also call inline (source='implicit') when you inject a memory yourself and the user's response "
-            "clearly confirms it was useful — no need to ask first. "
+            "Record relevance feedback on a memory. "
+            "Call with source='implicit' when you can judge from context whether a whispered or recalled "
+            "memory was useful — signal=1 if useful, signal=-1 if not relevant. "
+            "Only ask the user (source='explicit') when you genuinely cannot determine relevance yourself. "
             "The system uses this feedback to improve which memories surface in future sessions."
         ),
         "parameters": {
@@ -227,8 +229,8 @@ TOOLS = [
             "  - edges: list of {node_a_id, node_b_id, edge_type, reason} — use 'none' to skip\n"
             "  - merges: list of {keep_id, discard_id, merged_content, merged_title}\n"
             "  - consolidations: list of {node_ids, title, content, type}\n\n"
-            "Use after heavy remember sessions when the whisper context "
-            "signals unprocessed_memories. Pro/Max users: no API key needed — you are the LLM."
+            "Use when get_context signals unprocessed_memories. "
+            "No separate API key needed — the calling LLM performs the analysis."
         ),
         "parameters": {
             "type": "object",
