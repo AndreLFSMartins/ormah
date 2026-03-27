@@ -18,24 +18,23 @@ from ormah.index.graph import GraphIndex
 logger = logging.getLogger(__name__)
 
 _WHISPER_FRAMING = (
-    "# Whispered memories (ormah)\n"
-    "Memories from the user's knowledge graph, selected for relevance to the current prompt. "
+    "# Ormah whispers\n"
+    "Memories from your knowledge graph, selected for relevance to the current prompt. "
     "Use them naturally if they add useful context; ignore if not relevant. "
-    "If a memory is truncated and you need the full content, you can use the recall tool with its node ID."
+    "If a memory ends with '…', it is truncated — call recall with its node ID to get the full content before acting on it."
 )
 
 _ONBOARDING_NUDGE = (
     "\n\n## Ormah: Action required — initiate first-session onboarding\n"
-    "This is the user's first Claude Code session with ormah. The identity profile is empty. "
-    "Your very first response MUST start the onboarding — do not just reply to the user's message. "
-    "Briefly introduce what you're doing (e.g. 'Before we dive in, I'd love to get to know you a bit'), "
-    "then ask your first question. Cover these areas naturally, one question at a time:\n"
+    "This is the user's first session with ormah. The identity profile is empty. "
+    "Your very first response MUST acknowledge what the user said, then pivot to onboarding — "
+    "e.g. 'Happy to help with that — but before we dive in, I'd love to get to know you a bit.' "
+    "Then ask your first question. Cover these areas naturally, one question at a time:\n"
     "- Start personal: ask something like 'If you had to describe who you are, what would you say? "
     "What are you passionate about or what do you love doing?' — warm and open, not work-first\n"
-    "- Family and close friends — ask gently, don't press for details\n"
-    "- Professional background: ask for a LinkedIn URL, GitHub profile, personal site, or CV file "
-    "you could read — say something like 'Do you have a LinkedIn, GitHub, or CV I can look at? "
-    "It's easier than describing everything from scratch.' Don't just ask them to describe their role\n"
+    "- Family and close relationships — ask gently, don't press for details\n"
+    "- Professional background: ask what they do, and suggest they share a LinkedIn, GitHub, CV, "
+    "or personal site if they have one — easier than describing everything from scratch\n"
     "- How they like to collaborate and communicate\n\n"
     "Once you have a decent picture (around 5–10 facts stored), wrap up warmly: "
     "\"I have enough context to get started — I'll keep learning as we work together.\" "
@@ -45,15 +44,17 @@ _ONBOARDING_NUDGE = (
 
 
 _REVIEW_FRAMING = (
-    "\n\n## Ormah: one quick question (optional)\n"
-    "Before we start — in a recent session in /{space}, you were working on:\n"
+    "\n\n## Ormah: held-back memory review\n"
+    "In a recent session, the user was working on:\n"
     "\"{prompt_snippet}\"\n\n"
-    "I held back this memory because I wasn't confident it was relevant:\n"
+    "Ormah held back this memory because it wasn't confident it was relevant:\n"
     "\"{title}\" — {content}\n\n"
-    "Ask the user naturally: would that memory have been useful while they were working on "
-    "that? Yes or no is all you need. Then call submit_feedback with node_id=\"{node_id}\", "
-    "signal=1 for yes, signal=-1 for no. If they'd rather skip, proceed normally — won't be asked "
-    "again for this memory."
+    "First, judge this yourself: based on the context above, would this memory have been useful? "
+    "If you can tell, call submit_feedback with node_id=\"{node_id}\", signal=1 for yes, "
+    "signal=-1 for no, source=\"implicit\" — do not ask the user. "
+    "Only ask the user if you genuinely cannot determine this from the context alone. "
+    "If you do ask, keep it brief and natural. If they'd rather skip, proceed normally — "
+    "this memory won't be reviewed again."
 )
 
 
