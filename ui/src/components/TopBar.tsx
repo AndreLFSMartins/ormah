@@ -114,6 +114,14 @@ export default function TopBar({
 
   return (
     <div className="top-bar">
+      <div className="top-bar-logo">
+        <span>o</span>
+        <span className="top-bar-logo-r">
+          r
+          <span className="top-bar-logo-dot" />
+        </span>
+        <span>mah</span>
+      </div>
       <div
         className="search-wrapper"
         ref={wrapperRef}
