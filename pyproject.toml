@@ -56,8 +56,6 @@ dev = [
 
 [project.scripts]
 ormah = "ormah.cli:main"
-ormah-mcp = "ormah.adapters.mcp_adapter:main"
-ormah-cli = "ormah.adapters.cli_adapter:main"
 
 [project.urls]
 Homepage = "https://ormah.me"
