@@ -30,6 +30,8 @@ WRAPPER_PATH = ENV_DIR / "start-server.sh"
 
 CLAUDE_MD_SENTINEL_START = "<!-- ormah:start -->"
 CLAUDE_MD_SENTINEL_END = "<!-- ormah:end -->"
+CODEX_AGENTS_SENTINEL_START = "<!-- ormah:start -->"
+CODEX_AGENTS_SENTINEL_END = "<!-- ormah:end -->"
 
 # Provider definitions: (display name, provider, env var for API key, default model)
 LLM_PROVIDERS = [
@@ -183,6 +185,45 @@ def configure_claude_desktop(ormah_bin: str) -> bool:
     return True
 
 
+def configure_codex_hooks(ormah_bin: str) -> None:
+    """Write Codex hook config to ~/.codex/hooks.json and enable the feature flag."""
+    hooks_path = Path.home() / ".codex" / "hooks.json"
+    config_path = Path.home() / ".codex" / "config.toml"
+    hooks_path.parent.mkdir(parents=True, exist_ok=True)
+
+    hooks: dict = {
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"{ormah_bin} whisper inject",
+                        "timeout": 10,
+                    }
+                ]
+            }
+        ],
+        "Stop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"{ormah_bin} whisper store",
+                        "timeout": 300,
+                    }
+                ]
+            }
+        ],
+    }
+
+    _merge_json_file(str(hooks_path), {"hooks": hooks})
+
+    existing = config_path.read_text() if config_path.exists() else ""
+    updated = _upsert_toml_table_key(existing, "features", "codex_hooks", "true")
+    config_path.write_text(updated)
+    ok("Codex hooks installed — memories flow before every message")
+
+
 def _remove_toml_table_block(text: str, table_name: str) -> str:
     """Remove a top-level TOML table block while preserving surrounding content."""
     lines = text.splitlines(keepends=True)
@@ -207,6 +248,49 @@ def _remove_toml_table_block(text: str, table_name: str) -> str:
     updated = "".join(lines[:start] + lines[end:])
     updated = re.sub(r"\n{3,}", "\n\n", updated)
     return updated.lstrip("\n")
+
+
+def _upsert_toml_table_key(text: str, table_name: str, key: str, rendered_value: str) -> str:
+    """Insert or update a key within a top-level TOML table."""
+    lines = text.splitlines(keepends=True)
+    header = f"[{table_name}]"
+    start = None
+    end = None
+
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            start = i
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                stripped = lines[j].strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    end = j
+                    break
+            break
+
+    entry = f"{key} = {rendered_value}\n"
+
+    if start is None or end is None:
+        block = f"{header}\n{entry}"
+        if text.rstrip():
+            return text.rstrip() + "\n\n" + block
+        return block
+
+    block_lines = lines[start:end]
+    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+
+    replaced = False
+    for idx in range(1, len(block_lines)):
+        if key_pattern.match(block_lines[idx]):
+            block_lines[idx] = entry
+            replaced = True
+            break
+
+    if not replaced:
+        block_lines.append(entry)
+
+    updated = "".join(lines[:start] + block_lines + lines[end:])
+    return updated
 
 
 def _upsert_codex_mcp_config(ormah_bin: str) -> None:
@@ -262,34 +346,64 @@ def configure_codex_mcp(ormah_bin: str) -> None:
     ok("Connected to Codex — MCP tools available")
 
 
-def install_claude_md() -> None:
-    """Install ormah instructions into ~/.claude/CLAUDE.md."""
-    target = Path.home() / ".claude" / "CLAUDE.md"
+def _install_markdown_block(
+    target: Path,
+    content_path: str,
+    sentinel_start: str,
+    sentinel_end: str,
+) -> None:
+    """Install or replace a sentinel-wrapped markdown block in a target file."""
     target.parent.mkdir(parents=True, exist_ok=True)
-
-    # Load instructions from package data
-    instructions = resources.files("ormah").joinpath("instructions.md").read_text()
-    block = f"{CLAUDE_MD_SENTINEL_START}\n{instructions}{CLAUDE_MD_SENTINEL_END}\n"
+    instructions = resources.files("ormah").joinpath(content_path).read_text()
+    block = f"{sentinel_start}\n{instructions}{sentinel_end}\n"
 
     existing = target.read_text() if target.exists() else ""
 
-    if CLAUDE_MD_SENTINEL_START in existing and CLAUDE_MD_SENTINEL_END in existing:
-        # Replace existing block
-        start = existing.index(CLAUDE_MD_SENTINEL_START)
-        end = existing.index(CLAUDE_MD_SENTINEL_END) + len(CLAUDE_MD_SENTINEL_END)
-        # Consume trailing newline if present
+    if sentinel_start in existing and sentinel_end in existing:
+        start = existing.index(sentinel_start)
+        end = existing.index(sentinel_end) + len(sentinel_end)
         if end < len(existing) and existing[end] == "\n":
             end += 1
         updated = existing[:start] + block + existing[end:]
     elif existing:
-        # Append with blank line separator
         updated = existing.rstrip("\n") + "\n\n" + block
     else:
-        # New file
         updated = block
 
     target.write_text(updated)
+
+
+def install_claude_md() -> None:
+    """Install ormah instructions into ~/.claude/CLAUDE.md."""
+    target = Path.home() / ".claude" / "CLAUDE.md"
+    _install_markdown_block(
+        target,
+        "instructions.md",
+        CLAUDE_MD_SENTINEL_START,
+        CLAUDE_MD_SENTINEL_END,
+    )
     ok("Instructions added to ~/.claude/CLAUDE.md")
+
+
+def _codex_agents_target() -> Path:
+    """Return the effective global Codex instructions file."""
+    codex_home = Path.home() / ".codex"
+    override = codex_home / "AGENTS.override.md"
+    if override.exists():
+        return override
+    return codex_home / "AGENTS.md"
+
+
+def install_codex_md() -> None:
+    """Install ormah instructions into Codex global AGENTS.md."""
+    target = _codex_agents_target()
+    _install_markdown_block(
+        target,
+        "codex_instructions.md",
+        CODEX_AGENTS_SENTINEL_START,
+        CODEX_AGENTS_SENTINEL_END,
+    )
+    ok(f"Instructions added to {target}")
 
 
 def install_claude_agents() -> None:
@@ -324,6 +438,87 @@ def _remove_claude_commands() -> None:
     if command_file.exists():
         command_file.unlink()
         ok("Removed ormah-maintenance slash command")
+
+
+def _remove_codex_hooks() -> None:
+    """Remove ormah whisper hooks from ~/.codex/hooks.json."""
+    hooks_path = Path.home() / ".codex" / "hooks.json"
+    if not hooks_path.exists():
+        info("No ~/.codex/hooks.json found — skipping")
+        return
+    try:
+        data = json.loads(hooks_path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        warn("Could not parse ~/.codex/hooks.json — skipping")
+        return
+
+    hooks_top = data.get("hooks")
+    if not isinstance(hooks_top, dict):
+        info("No hooks section — nothing to remove")
+        return
+
+    def _is_ormah_hook(entry: dict) -> bool:
+        cmd = entry.get("command", "")
+        return "whisper inject" in cmd or "whisper store" in cmd
+
+    changed = False
+    to_delete = []
+    for event, matchers in hooks_top.items():
+        if not isinstance(matchers, list):
+            continue
+        new_matchers = []
+        for matcher in matchers:
+            if not isinstance(matcher, dict):
+                new_matchers.append(matcher)
+                continue
+            inner = matcher.get("hooks", [])
+            filtered = [h for h in inner if not _is_ormah_hook(h)]
+            if len(filtered) != len(inner):
+                changed = True
+            if filtered:
+                new_matchers.append({**matcher, "hooks": filtered})
+            else:
+                changed = True
+        if new_matchers:
+            hooks_top[event] = new_matchers
+        else:
+            to_delete.append(event)
+            changed = True
+
+    for key in to_delete:
+        del hooks_top[key]
+    if not hooks_top:
+        del data["hooks"]
+        changed = True
+
+    if changed:
+        hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+        ok("Removed whisper hooks from ~/.codex/hooks.json")
+    else:
+        info("No ormah hooks found in hooks.json")
+
+
+def _remove_markdown_block(target: Path, sentinel_start: str, sentinel_end: str, label: str) -> bool:
+    """Remove a sentinel-wrapped markdown block from a target file."""
+    if not target.exists():
+        info(f"No {label} found — skipping")
+        return False
+
+    existing = target.read_text()
+    if sentinel_start not in existing or sentinel_end not in existing:
+        info(f"No ormah block found in {label} — skipping")
+        return False
+
+    start = existing.index(sentinel_start)
+    end = existing.index(sentinel_end) + len(sentinel_end)
+    if end < len(existing) and existing[end] == "\n":
+        end += 1
+
+    updated = existing[:start] + existing[end:]
+    updated = re.sub(r"\n{3,}", "\n\n", updated)
+
+    target.write_text(updated)
+    return True
 
 
 def _read_env_file() -> dict[str, str]:
@@ -910,28 +1105,19 @@ def _remove_codex_mcp_config() -> None:
 def _remove_claude_md_block() -> None:
     """Remove the ormah instructions block from ~/.claude/CLAUDE.md."""
     target = Path.home() / ".claude" / "CLAUDE.md"
-    if not target.exists():
-        info("No ~/.claude/CLAUDE.md found — skipping")
-        return
+    if _remove_markdown_block(
+        target, CLAUDE_MD_SENTINEL_START, CLAUDE_MD_SENTINEL_END, "~/.claude/CLAUDE.md"
+    ):
+        ok("Removed ormah block from ~/.claude/CLAUDE.md")
 
-    existing = target.read_text()
-    if CLAUDE_MD_SENTINEL_START not in existing or CLAUDE_MD_SENTINEL_END not in existing:
-        info("No ormah block found in CLAUDE.md — skipping")
-        return
 
-    start = existing.index(CLAUDE_MD_SENTINEL_START)
-    end = existing.index(CLAUDE_MD_SENTINEL_END) + len(CLAUDE_MD_SENTINEL_END)
-    # Consume trailing newline if present
-    if end < len(existing) and existing[end] == "\n":
-        end += 1
-
-    updated = existing[:start] + existing[end:]
-    # Collapse triple (or more) newlines to double
-    import re
-    updated = re.sub(r"\n{3,}", "\n\n", updated)
-
-    target.write_text(updated)
-    ok("Removed ormah block from ~/.claude/CLAUDE.md")
+def _remove_codex_md_block() -> None:
+    """Remove the ormah instructions block from the active Codex AGENTS file."""
+    target = _codex_agents_target()
+    if _remove_markdown_block(
+        target, CODEX_AGENTS_SENTINEL_START, CODEX_AGENTS_SENTINEL_END, str(target)
+    ):
+        ok(f"Removed ormah block from {target}")
 
 
 def _get_running_server_data_dir() -> Path | None:
@@ -1099,6 +1285,7 @@ def run_uninstall(yes: bool = False) -> None:
     # b. Remove Claude Code hooks
     step("Removing Claude Code hooks")
     _remove_claude_hooks()
+    _remove_codex_hooks()
 
     # c. Remove MCP registration
     step("Removing MCP registration")
@@ -1107,6 +1294,7 @@ def run_uninstall(yes: bool = False) -> None:
     # d. Remove CLAUDE.md block
     step("Removing CLAUDE.md instructions")
     _remove_claude_md_block()
+    _remove_codex_md_block()
     _remove_claude_agents()
     _remove_claude_commands()
 
@@ -1242,7 +1430,9 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
 
     if has_codex:
         step("Hooking up Codex")
+        configure_codex_hooks(ormah_bin)
         configure_codex_mcp(ormah_bin)
+        install_codex_md()
 
     desktop_configured = configure_claude_desktop(ormah_bin)
 

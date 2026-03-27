@@ -19,11 +19,15 @@ from ormah.server_manager import (
     is_server_running,
 )
 from ormah.setup import (
+    CODEX_AGENTS_SENTINEL_END,
+    CODEX_AGENTS_SENTINEL_START,
     CLAUDE_MD_SENTINEL_END,
     CLAUDE_MD_SENTINEL_START,
     ENV_PATH,
     WRAPPER_PATH,
     _merge_json_file,
+    _remove_codex_hooks,
+    _remove_codex_md_block,
     _remove_codex_mcp_config,
     _read_env_file,
     _remove_claude_hooks,
@@ -35,11 +39,13 @@ from ormah.setup import (
     configure_claude_hooks,
     configure_claude_code_mcp,
     configure_claude_desktop,
+    configure_codex_hooks,
     configure_codex_mcp,
     configure_identity,
     configure_llm,
     generate_server_wrapper,
     install_claude_md,
+    install_codex_md,
     run_uninstall,
     seed_identity,
 )
@@ -419,6 +425,63 @@ class TestConfigureCodexMcp:
             "/usr/local/bin/codex", "mcp", "add", "ormah", "--",
             "/usr/local/bin/ormah", "mcp",
         ]
+
+
+class TestConfigureCodexHooks:
+    def test_writes_hooks_and_enables_feature(self, tmp_path):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            configure_codex_hooks("/abs/path/ormah")
+
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        config_path = tmp_path / ".codex" / "config.toml"
+
+        hooks_data = json.loads(hooks_path.read_text())
+        assert hooks_data["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == "/abs/path/ormah whisper inject"
+        assert hooks_data["hooks"]["Stop"][0]["hooks"][0]["command"] == "/abs/path/ormah whisper store"
+
+        content = config_path.read_text()
+        assert "[features]" in content
+        assert "codex_hooks = true" in content
+
+    def test_preserves_existing_features_and_projects(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        config_path = codex_dir / "config.toml"
+        config_path.write_text(
+            '[projects."/tmp/demo"]\n'
+            'trust_level = "trusted"\n\n'
+            '[features]\n'
+            'foo = true\n'
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            configure_codex_hooks("/abs/path/ormah")
+
+        content = config_path.read_text()
+        assert '[projects."/tmp/demo"]' in content
+        assert 'trust_level = "trusted"' in content
+        assert "[features]" in content
+        assert "foo = true" in content
+        assert "codex_hooks = true" in content
+
+    def test_merges_with_existing_hooks(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({
+            "hooks": {
+                "Stop": [
+                    {"hooks": [{"type": "command", "command": "/bin/other"}]}
+                ]
+            }
+        }, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            configure_codex_hooks("/abs/path/ormah")
+
+        hooks_data = json.loads(hooks_path.read_text())
+        assert "UserPromptSubmit" in hooks_data["hooks"]
+        assert hooks_data["hooks"]["Stop"][0]["hooks"][0]["command"] == "/abs/path/ormah whisper store"
 
 
 # --- CLI tests ---
@@ -819,6 +882,45 @@ class TestInstallClaudeMd:
         assert "# Ormah Memory System" in content
 
 
+class TestInstallCodexMd:
+    def test_creates_agents_md(self, tmp_path, capsys):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_codex_md()
+
+        agents_md = tmp_path / ".codex" / "AGENTS.md"
+        content = agents_md.read_text()
+        assert CODEX_AGENTS_SENTINEL_START in content
+        assert CODEX_AGENTS_SENTINEL_END in content
+        assert "# Ormah Memory System" in content
+
+        captured = capsys.readouterr()
+        assert "Instructions added to" in captured.out
+        assert "AGENTS.md" in captured.out
+
+    def test_uses_override_file_when_present(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        override_md = codex_dir / "AGENTS.override.md"
+        override_md.write_text("# Existing override\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_codex_md()
+
+        content = override_md.read_text()
+        assert content.startswith("# Existing override\n")
+        assert CODEX_AGENTS_SENTINEL_START in content
+        assert not (codex_dir / "AGENTS.md").exists()
+
+    def test_idempotent_replace(self, tmp_path):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_codex_md()
+            first = (tmp_path / ".codex" / "AGENTS.md").read_text()
+            install_codex_md()
+            second = (tmp_path / ".codex" / "AGENTS.md").read_text()
+
+        assert first == second
+
+
 # --- Uninstall tests ---
 
 
@@ -988,6 +1090,76 @@ class TestRemoveCodexMcpConfig:
     def test_noop_when_missing(self, tmp_path):
         with patch("ormah.setup.Path.home", return_value=tmp_path):
             _remove_codex_mcp_config()
+
+
+class TestRemoveCodexHooks:
+    def test_removes_ormah_hooks_only(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({
+            "hooks": {
+                "UserPromptSubmit": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "/usr/bin/ormah whisper inject"},
+                            {"type": "command", "command": "/usr/bin/other-tool run"},
+                        ]
+                    }
+                ],
+                "Stop": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/ormah whisper store"}]}
+                ],
+            }
+        }, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_hooks()
+
+        result = json.loads(hooks_path.read_text())
+        assert result["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == "/usr/bin/other-tool run"
+        assert "Stop" not in result["hooks"]
+
+    def test_noop_when_missing(self, tmp_path):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_hooks()
+
+
+class TestRemoveCodexMdBlock:
+    def test_removes_sentinel_block_from_agents_md(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        agents_md = codex_dir / "AGENTS.md"
+        agents_md.write_text(
+            "# Before\n\n"
+            f"{CODEX_AGENTS_SENTINEL_START}\ncontent\n{CODEX_AGENTS_SENTINEL_END}\n"
+            "\n# After\n"
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_md_block()
+
+        content = agents_md.read_text()
+        assert CODEX_AGENTS_SENTINEL_START not in content
+        assert CODEX_AGENTS_SENTINEL_END not in content
+        assert "content" not in content
+        assert "# Before" in content
+        assert "# After" in content
+
+    def test_uses_override_file_when_present(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        override_md = codex_dir / "AGENTS.override.md"
+        override_md.write_text(
+            "# Before\n\n"
+            f"{CODEX_AGENTS_SENTINEL_START}\ncontent\n{CODEX_AGENTS_SENTINEL_END}\n"
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_md_block()
+
+        content = override_md.read_text()
+        assert CODEX_AGENTS_SENTINEL_START not in content
 
 
 class TestRemoveClaudeMdBlock:
