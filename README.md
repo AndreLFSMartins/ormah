@@ -2,6 +2,8 @@
 
 A whispering memory system for AI agents. Ormah gives LLM agents persistent, self-maintaining memory that lives locally on your machine, a knowledge graph that grows as you work, forgets what no longer matters, and whispers relevant context before you even ask.
 
+Runs entirely on your machine. No cloud, no subscription. Your memories never leave unless you configure an external LLM.
+
 The name comes from the Malayalam word ഓർമ (ormah), meaning "memory" or "remember." The system is designed around one idea: memory should be involuntary. You shouldn't have to tell your AI what to remember or what to recall. It should just know.
 
 ## How it feels
@@ -26,10 +28,12 @@ bash <(curl -fsSL https://ormah.me/install.sh)
 
 1. Detects available API keys and prompts for LLM provider (Anthropic, OpenAI, Google, Ollama, or none)
 2. Starts the server and configures it to auto-start on login (launchd on macOS, systemd on Linux)
-3. Sets up integrations: whisper hooks, MCP server registration, and agent instructions
-4. Registers with supported clients (Claude Code, Claude Desktop, and any MCP-compatible tool)
+3. Installs into `~/.claude/`: ormah instructions into `CLAUDE.md`, background maintenance agent at `~/.claude/agents/ormah-maintenance.md`, and `/ormah-maintenance` slash command at `~/.claude/commands/ormah-maintenance.md`
+4. Registers with supported clients: Claude Code, Claude Desktop (macOS only), and any MCP-compatible tool
 
 All paths are resolved to absolutes; hooks work in any terminal, no venv activation required.
+
+No API key required for core functionality — embeddings and search run entirely locally. An LLM is only needed for background maintenance jobs, and Claude Code itself can serve that role (see [LLM configuration](#llm-configuration)).
 
 ## The whisper system
 
@@ -41,7 +45,7 @@ Whisper exposes its retrieval via `POST /agent/whisper`, so any tool with pre-pr
 
 When you type a prompt, ormah intercepts it and decides what memories are relevant, before the LLM ever sees your message. The process:
 
-1. **Intent classification**: Is this a temporal query ("what did I do yesterday")? An identity question ("what's my preference for...")? A continuation of the current topic? Each archetype triggers different retrieval strategies.
+1. **Intent classification**: The query is compared against four named archetypes — `temporal`, `identity`, `continuation`, and `conversational` — using embedding similarity. Temporal queries ("what did I do last week") trigger dynamic phrase extraction ("last 4 days", "past 2 weeks") and rolling window logic, with time phrases stripped from the query before semantic search runs. Identity queries ("what's my preference for...") route to the user node. Each archetype activates a different retrieval strategy.
 
 2. **Hybrid search**: Candidates are retrieved using hybrid search, blending semantic and keyword matching into a single ranked list.
 
@@ -114,6 +118,43 @@ Every memory carries a confidence score (0.0–1.0) representing belief strength
 
 Memories are automatically scoped to the project you're working in (detected from the git repo name). Cross-project recall still works: current project memories rank highest, then global memories (identity, preferences), then other projects. You never have to manage this manually.
 
+## Hippocampus
+
+The hippocampus is ormah's file watcher, a way to feed it from your existing knowledge without any manual effort.
+
+Point it at directories containing markdown files and it automatically extracts memories from them. As you add or edit files, the graph updates in seconds. Useful for:
+
+- **Obsidian / Notion exports / personal knowledge bases**: your notes become memories
+- **Journals and half-formed thoughts**: things you wrote down but never explicitly "remembered"
+- **Project documentation**: decision logs, ADRs, notes that should inform your AI context
+- **Past conversations**: exported chat logs saved as markdown
+
+### How it works
+
+On startup, hippocampus does a catch-up scan of every configured directory: any file it hasn't seen before (or that has changed since last time) gets ingested. Then it watches in real time: create or modify a `.md` file and ormah ingests it within 2 seconds.
+
+Hash-based change detection means unchanged files are never re-processed, even across restarts. State is persisted in a `.hippocampus_state` file inside each watched directory.
+
+Space is auto-detected from the git repo the file lives in (falls back to the parent directory name), so notes in a project folder are scoped to that project automatically.
+
+### Configuration
+
+```env
+# Comma-separated list of directories to watch
+ORMAH_HIPPOCAMPUS_WATCH_DIRS=~/notes,~/obsidian/vault,~/Documents/journal
+
+# Debounce delay before ingesting a changed file (default: 2s)
+ORMAH_HIPPOCAMPUS_DEBOUNCE_SECONDS=2.0
+
+# Glob patterns to exclude (comma-separated)
+ORMAH_HIPPOCAMPUS_IGNORE_PATTERNS=**/templates/**,**/.trash/**
+
+# Disable entirely
+ORMAH_HIPPOCAMPUS_ENABLED=false
+```
+
+You can also trigger a manual scan from the admin panel at `localhost:8787` without restarting the server.
+
 ## Self-maintenance
 
 Ormah runs 8 background jobs that keep the knowledge graph healthy without human intervention:
@@ -126,7 +167,7 @@ Ormah runs 8 background jobs that keep the knowledge graph healthy without human
 
 **Importance scorer**: Recomputes importance from three dynamic signals: access frequency (how often a memory is used), edge centrality (how connected it is), and recency. Memories that are frequently accessed, well-connected, and recently touched score highest.
 
-**Decay manager**: Implements spaced repetition for memory. New memories decay quickly unless accessed; each access strengthens stability. When retrievability drops low enough and importance is low, the memory demotes from working to archival. High-importance memories are protected.
+**Decay manager**: Implements **FSRS (Free Spaced Repetition Scheduler)** for memory. New memories decay quickly unless accessed; each access strengthens stability. When retrievability drops low enough and importance is low, the memory demotes from working to archival. High-importance memories are protected.
 
 **Consolidator**: Clusters similar working-tier memories and merges redundant clusters via LLM. Keeps the working tier lean.
 
@@ -137,6 +178,8 @@ Ormah runs 8 background jobs that keep the knowledge graph healthy without human
 ### Claude-in-the-loop maintenance
 
 Background jobs use an LLM to make linking, conflict, merge, and consolidation decisions. If you don't have a separate API key, you can use Claude Code itself as the intelligence layer.
+
+This is one of ormah's most distinctive capabilities: Claude Code silently manages your memory graph in the background, without interrupting your conversation.
 
 Enable it during `ormah setup` (or set `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` in `~/.config/ormah/.env`). When enabled, `get_context` appends a whisper signal — `unprocessed_memories: N` — when recently-added unlinked nodes exceed a threshold.
 
@@ -185,7 +228,7 @@ Ormah is designed to work with any LLM agent through multiple integration points
 
 ### MCP (Model Context Protocol)
 
-Any MCP-compatible client gets 8 focused tools:
+Any MCP-compatible client gets 6 focused tools:
 
 | Tool | What it does |
 |------|-------------|
@@ -200,12 +243,16 @@ Any MCP-compatible client gets 8 focused tools:
 
 The full API runs at `localhost:8787`:
 
-- **Agent endpoints** (`/agent/*`): remember, recall, whisper, context, identity
-- **Admin endpoints** (`/admin/*`): manual edge creation, audit log, undo, job control
+- **Agent endpoints** (`/agent/*`): remember, recall, whisper, context, identity, connect (manual edge creation)
+- **Admin endpoints** (`/admin/*`): job control (pause, resume, run), index rebuild, stats
 - **Ingest endpoints** (`/ingest/*`): conversation and file ingestion
 - **UI endpoints** (`/ui/*`): graph data, node details, search, insights
 
 Any tool that can make HTTP requests can use ormah as a memory backend.
+
+### OpenAI function-calling
+
+Any agent using the OpenAI SDK can use ormah via the OpenAI function-calling adapter. Tools are exposed in OpenAI format, enabling integration with any OpenAI SDK-compatible framework without any additional configuration.
 
 ### Hooks
 
@@ -214,6 +261,10 @@ The whisper system uses pre-prompt hooks for involuntary memory injection. Any t
 ## Claude Code
 
 Ormah has deep integration with Claude Code today. Support for other tools (Cursor, Windsurf, etc.) is planned.
+
+### Using Claude Code as the LLM
+
+Claude Code Pro/Max users can use Claude Code itself as the intelligence layer for all background maintenance jobs — no separate API key needed. Enable during `ormah setup` or set `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` in `~/.config/ormah/.env`. See [Claude-in-the-loop maintenance](#claude-in-the-loop-maintenance) for details.
 
 ### Whisper hooks
 
@@ -229,49 +280,12 @@ New users face a cold start problem: whisper is most useful when memories exist,
 
 - Scans all historical transcripts, filters by minimum turn count
 - Lets you choose scope: last 20 sessions, last 15% of sessions, all, or skip
-- Estimates API cost before proceeding (for paid LLM providers)
+- Shows an estimated cost in dollars (e.g. "Estimated cost: $0.42") before proceeding for paid LLM providers
 - Ingests with deduplication so re-running is safe
 
 ### Session watcher
 
-Once enabled (`ORMAH_SESSION_WATCHER_ENABLED=true`), ormah continuously monitors `~/.claude/projects/` for new transcripts and auto-ingests them. This captures memories from every session going forward without manual intervention. Configurable debounce (60s), minimum turn count (5), and lookback window (72h) on startup.
-
-## Hippocampus
-
-The hippocampus is ormah's file watcher, a way to feed it from your existing knowledge without any manual effort.
-
-Point it at directories containing markdown files and it automatically extracts memories from them. As you add or edit files, the graph updates in seconds. Useful for:
-
-- **Obsidian / Notion exports / personal knowledge bases**: your notes become memories
-- **Journals and half-formed thoughts**: things you wrote down but never explicitly "remembered"
-- **Project documentation**: decision logs, ADRs, notes that should inform your AI context
-- **Past conversations**: exported chat logs saved as markdown
-
-### How it works
-
-On startup, hippocampus does a catch-up scan of every configured directory: any file it hasn't seen before (or that has changed since last time) gets ingested. Then it watches in real time: create or modify a `.md` file and ormah ingests it within 2 seconds.
-
-Hash-based change detection means unchanged files are never re-processed, even across restarts. State is persisted in a `.hippocampus_state` file inside each watched directory.
-
-Space is auto-detected from the git repo the file lives in (falls back to the parent directory name), so notes in a project folder are scoped to that project automatically.
-
-### Configuration
-
-```env
-# Comma-separated list of directories to watch
-ORMAH_HIPPOCAMPUS_WATCH_DIRS=~/notes,~/obsidian/vault,~/Documents/journal
-
-# Debounce delay before ingesting a changed file (default: 2s)
-ORMAH_HIPPOCAMPUS_DEBOUNCE_SECONDS=2.0
-
-# Glob patterns to exclude (comma-separated)
-ORMAH_HIPPOCAMPUS_IGNORE_PATTERNS=**/templates/**,**/.trash/**
-
-# Disable entirely
-ORMAH_HIPPOCAMPUS_ENABLED=false
-```
-
-You can also trigger a manual scan from the admin panel at `localhost:8787` without restarting the server.
+Disabled by default. Set `ORMAH_SESSION_WATCHER_ENABLED=true` to have ormah continuously monitor `~/.claude/projects/` for new transcripts and auto-ingest them. This captures memories from every session going forward without manual intervention. Configurable debounce (60s), minimum turn count (5), and lookback window (72h) on startup.
 
 ## CLI
 
@@ -281,7 +295,7 @@ ormah uninstall                # Remove all integrations, data, and the package
 ormah uninstall -y             # Same, skip confirmation prompts
 
 ormah server start             # Start server (foreground)
-ormah server start -d          # Start as daemon (launchd on macOS)
+ormah server start -d          # Start as daemon (launchd on macOS, systemd on Linux)
 ormah server stop              # Stop daemon
 ormah server status            # Check if running
 
@@ -289,6 +303,9 @@ ormah recall <query>           # Search memories
 ormah remember <text>          # Store a memory
 ormah context [--task HINT]    # Get context (for piping into prompts)
 ormah node <id>                # Inspect a specific memory
+ormah self                     # Show your identity profile
+ormah outdated <id>            # Mark a memory as outdated
+ormah stats                    # Show memory store statistics
 ormah ingest <file>            # Ingest a conversation log
 ormah ingest-session <path>    # Ingest a JSONL transcript
 
@@ -298,9 +315,18 @@ ormah whisper store            # Hook: extract and store from transcript
 ormah mcp                      # Run MCP stdio server
 ```
 
+Key flags:
+- `recall`: `--limit N`, `--types TYPE,...`, `--json`, `--space NAME`
+- `ingest-session`: `--dry-run` (extract but don't store), `--min-turns N`
+- Most commands accept `--space NAME` to override auto-detection
+
 ## LLM configuration
 
-Background jobs (auto-linker, conflict detector, duplicate merger, consolidator) use an LLM. Three provider modes:
+Background jobs (auto-linker, conflict detector, duplicate merger, consolidator) use an LLM. Four provider modes:
+
+### Claude Code (no API key required)
+
+Claude Code Pro/Max users can skip external LLM configuration entirely. Enable Claude-in-the-loop maintenance during `ormah setup` and Claude Code will handle graph maintenance automatically as a background agent. No additional env vars needed.
 
 ### Ollama (local, no API key)
 
@@ -357,7 +383,7 @@ Key settings:
 # Server
 ORMAH_PORT=8787
 
-# Embeddings (local FastEmbed/ONNX by default)
+# Embeddings (local FastEmbed/ONNX by default — no API key, runs offline)
 ORMAH_EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
 ORMAH_EMBEDDING_DIM=768
 
@@ -384,9 +410,15 @@ ORMAH_CONFLICT_CHECK_INTERVAL_MINUTES=1440
 
 # Tier limits
 ORMAH_CORE_MEMORY_CAP=50
+
+# Space detection override (default: auto-detected from git repo)
+# ORMAH_SPACE=my-project
+
+# Session watcher (disabled by default; enable to auto-ingest all future Claude Code sessions)
+ORMAH_SESSION_WATCHER_ENABLED=false
 ```
 
-See `config.py` for the full list of 100+ configurable parameters.
+See `config.py` for the full list of ~100 configurable parameters.
 
 ## Architecture
 
@@ -397,7 +429,9 @@ ormah/
   store/           # Markdown file storage (source of truth) + file watcher
   embeddings/      # Hybrid search, RRF fusion, cross-encoder reranking
   background/      # APScheduler jobs: linker, decay, conflicts, consolidation
-  adapters/        # MCP adapter, CLI adapter, space detection
+  adapters/        # MCP adapter, CLI adapter, OpenAI adapter, space detection
+  agents/          # Claude Code background agent definition (ormah-maintenance)
+  commands/        # Claude Code slash command definition (/ormah-maintenance)
   api/             # FastAPI routes: agent, admin, ingest, UI, WebSocket
   models/          # Pydantic models: MemoryNode, EdgeType, Tier
   transcript/      # Conversation transcript parser
@@ -405,7 +439,7 @@ ormah/
 ui/                # React + TypeScript + Cytoscape.js graph visualization
 ```
 
-Memories are stored as markdown files with YAML frontmatter in `~/.local/share/ormah/memory/nodes/`, human-readable, git-friendly, and portable. The SQLite database is a derived index that can be rebuilt from the markdown files at any time.
+Memories are stored as markdown files with YAML frontmatter in `~/.local/share/ormah/memory/nodes/`, human-readable, git-friendly, and portable. The SQLite database is a derived index — if it's ever lost or corrupted, it can be fully rebuilt from the markdown files.
 
 ## Development
 

@@ -208,6 +208,52 @@ def cmd_node(args):
     _api(call)
 
 
+def cmd_self(args):
+    def call():
+        with _client() as c:
+            r = c.get("/agent/self")
+            r.raise_for_status()
+            if args.json:
+                print(json.dumps(r.json(), indent=2))
+            else:
+                print(r.json()["text"])
+
+    _api(call)
+
+
+def cmd_outdated(args):
+    body: dict = {}
+    if args.reason:
+        body["reason"] = args.reason
+
+    def call():
+        with _client() as c:
+            r = c.post(f"/agent/outdated/{args.id}", json=body)
+            r.raise_for_status()
+            print(r.json()["text"])
+
+    _api(call)
+
+
+def cmd_stats(args):
+    def call():
+        with _client() as c:
+            r = c.get("/admin/stats")
+            r.raise_for_status()
+            data = r.json()
+            if args.json:
+                print(json.dumps(data, indent=2))
+            else:
+                total = data.get("total_nodes", 0)
+                edges = data.get("total_edges", 0)
+                by_tier = data.get("by_tier", {})
+                print(f"Memories: {total}  Edges: {edges}")
+                for tier, count in sorted(by_tier.items()):
+                    print(f"  {tier}: {count}")
+
+    _api(call)
+
+
 def cmd_status(args):
     def call():
         with _client() as c:
@@ -563,6 +609,22 @@ def main():
     nd.add_argument("--json", action="store_true", help="Output raw JSON")
     nd.set_defaults(func=cmd_node)
 
+    # --- self ---
+    slf = sub.add_parser("self", help="Show your identity profile")
+    slf.add_argument("--json", action="store_true", help="Output raw JSON")
+    slf.set_defaults(func=cmd_self)
+
+    # --- outdated ---
+    out = sub.add_parser("outdated", help="Mark a memory as outdated")
+    out.add_argument("id", help="Memory UUID")
+    out.add_argument("--reason", help="Reason for marking outdated")
+    out.set_defaults(func=cmd_outdated)
+
+    # --- stats ---
+    st2 = sub.add_parser("stats", help="Show memory store statistics")
+    st2.add_argument("--json", action="store_true", help="Output raw JSON")
+    st2.set_defaults(func=cmd_stats)
+
     # --- status ---
     st = sub.add_parser("status", help="Check server health")
     st.set_defaults(func=cmd_status)
@@ -571,13 +633,13 @@ def main():
     wh = sub.add_parser("whisper", help="Claude Code hook integration")
     wh_sub = wh.add_subparsers(dest="whisper_cmd", required=True)
 
-    wh_inject = wh_sub.add_parser("inject", help="Hook handler: inject memories into prompt")
+    wh_inject = wh_sub.add_parser("inject", help="(internal) UserPromptSubmit hook — called automatically by Claude Code")
     wh_inject.set_defaults(func=cmd_whisper_inject)
 
-    wh_store = wh_sub.add_parser("store", help="Hook handler: extract memories before compaction")
+    wh_store = wh_sub.add_parser("store", help="(internal) PreCompact/SessionEnd hook — called automatically by Claude Code")
     wh_store.set_defaults(func=cmd_whisper_store)
 
-    wh_setup = wh_sub.add_parser("setup", help="Generate Claude Code hook config")
+    wh_setup = wh_sub.add_parser("setup", help="Write Claude Code hook config to settings.json")
     wh_setup.add_argument("--global", dest="glob", action="store_true", help="Write to global ~/.claude/settings.json instead of local")
     wh_setup.set_defaults(func=cmd_whisper_setup)
 
