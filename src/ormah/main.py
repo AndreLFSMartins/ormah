@@ -19,8 +19,13 @@ from ormah.api.routes_ui import router as ui_router
 from ormah.config import settings
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.logging_setup import setup_logging
+from ormah.server_manager import LOG_DIR
 
-setup_logging(log_format=settings.log_format)
+setup_logging(
+    log_format=settings.log_format,
+    level=getattr(logging, settings.log_level),
+    log_file=LOG_DIR / "ormah.log",
+)
 logger = logging.getLogger(__name__)
 
 

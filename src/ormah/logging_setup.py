@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 class _JSONFormatter(logging.Formatter):
@@ -35,13 +37,19 @@ class _JSONFormatter(logging.Formatter):
         return json.dumps(obj, default=str)
 
 
-def setup_logging(log_format: str = "text", level: int = logging.INFO) -> None:
+def setup_logging(
+    log_format: str = "text",
+    level: int = logging.INFO,
+    log_file: Path | None = None,
+) -> None:
     """Configure the root logger.
 
     Args:
         log_format: ``"text"`` for human-readable lines, ``"json"`` for
             machine-parseable JSON (one object per line).
         level: logging level (default ``INFO``).
+        log_file: optional path to a rotating log file. When provided, logs are
+            written to both stderr and the file (5 MB max, 3 backups kept).
     """
     root = logging.getLogger()
     root.setLevel(level)
@@ -50,13 +58,22 @@ def setup_logging(log_format: str = "text", level: int = logging.INFO) -> None:
     for h in root.handlers[:]:
         root.removeHandler(h)
 
-    handler = logging.StreamHandler()
-
     if log_format == "json":
-        handler.setFormatter(_JSONFormatter())
+        formatter = _JSONFormatter()
     else:
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-        )
+        formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
-    root.addHandler(handler)
+    stderr_handler = logging.StreamHandler()
+    stderr_handler.setFormatter(formatter)
+    root.addHandler(stderr_handler)
+
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        rotating = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=5 * 1024 * 1024,  # 5 MB
+            backupCount=3,
+            encoding="utf-8",
+        )
+        rotating.setFormatter(formatter)
+        root.addHandler(rotating)

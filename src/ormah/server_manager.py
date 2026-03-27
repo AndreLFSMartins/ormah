@@ -32,8 +32,6 @@ After=network.target
 [Service]
 ExecStart={wrapper_path}
 Environment="PATH={bin_dir}:/usr/local/bin:/usr/bin:/bin"
-StandardOutput=append:{log_dir}/ormah.out.log
-StandardError=append:{log_dir}/ormah.err.log
 Restart=on-failure
 RestartSec=5
 
@@ -58,8 +56,6 @@ PLIST_TEMPLATE = """\
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>{log_dir}/ormah.out.log</string>
-  <key>StandardErrorPath</key><string>{log_dir}/ormah.err.log</string>
 </dict>
 </plist>
 """
@@ -90,7 +86,6 @@ def is_server_running() -> bool:
 
 def install_launchd_agent(ormah_bin: str, wrapper_path: str | None = None) -> None:
     """Install and load a launchd agent for auto-starting the server on macOS."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
     PLIST_DIR.mkdir(parents=True, exist_ok=True)
 
     bin_dir = str(Path(ormah_bin).parent)
@@ -99,7 +94,6 @@ def install_launchd_agent(ormah_bin: str, wrapper_path: str | None = None) -> No
         label=LAUNCHD_LABEL,
         wrapper_path=effective_wrapper,
         bin_dir=bin_dir,
-        log_dir=LOG_DIR,
     )
 
     # Unload existing agent if present (ignore errors)
@@ -130,7 +124,6 @@ def uninstall_launchd_agent() -> None:
 
 def install_systemd_service(ormah_bin: str, wrapper_path: str | None = None) -> None:
     """Install and enable a user-space systemd service for auto-starting the server."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
     SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
 
     bin_dir = str(Path(ormah_bin).parent)
@@ -138,7 +131,6 @@ def install_systemd_service(ormah_bin: str, wrapper_path: str | None = None) -> 
     unit_content = SYSTEMD_TEMPLATE.format(
         wrapper_path=effective_wrapper,
         bin_dir=bin_dir,
-        log_dir=LOG_DIR,
     )
 
     # Stop existing service if present (ignore errors)
@@ -180,13 +172,8 @@ def uninstall_systemd_service() -> None:
 
 def _start_server_background(wrapper_path: str) -> None:
     """Start the server as a background process (fallback when no init system)."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    out_log = open(LOG_DIR / "ormah.out.log", "a")
-    err_log = open(LOG_DIR / "ormah.err.log", "a")
     subprocess.Popen(
         [wrapper_path],
-        stdout=out_log,
-        stderr=err_log,
         start_new_session=True,
     )
 
@@ -255,12 +242,12 @@ def _tail_server_log(
     stop_event: threading.Event,
     phase_map: list[tuple[str, str]] | None = None,
 ) -> None:
-    """Tail ormah.err.log for phase markers, calling callback on each new phase.
+    """Tail the server log file for phase markers, calling callback on each new phase.
 
     Runs on a background thread. Polls until the log file appears, then
     reads new lines, matching against known phase markers.
     """
-    log_path = LOG_DIR / "ormah.err.log"
+    log_path = LOG_DIR / "ormah.log"
     effective_phase_map = phase_map if phase_map is not None else _PHASE_MAP
 
     # Wait for the log file to appear

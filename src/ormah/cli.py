@@ -36,7 +36,7 @@ def _cmd_server_start(args):
         install_autostart(ormah_bin, wrapper_path=str(WRAPPER_PATH))
         if not wait_for_server(show_progress=True):
             warn("Server did not start in time")
-            info("Check ~/.local/share/ormah/logs/ormah.err.log")
+            info("Check ~/.local/share/ormah/logs/ormah.log")
     else:
         import uvicorn
         from ormah.config import settings

@@ -290,10 +290,14 @@ async def run_mcp_stdio():
 def main():
     """Entry point for MCP stdio server."""
     import asyncio
+    import logging
 
     from ormah.logging_setup import setup_logging
 
-    setup_logging(log_format=settings.log_format)
+    setup_logging(
+        log_format=settings.log_format,
+        level=getattr(logging, settings.log_level),
+    )
     asyncio.run(run_mcp_stdio())
 
 

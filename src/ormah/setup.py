@@ -679,7 +679,7 @@ def _diagnose_server_failure() -> None:
             info(f"Set ORMAH_PORT in {ENV_PATH} to use a different port")
         else:
             warn("Server did not start")
-            info("Check ~/.local/share/ormah/logs/ormah.err.log")
+            info("Check ~/.local/share/ormah/logs/ormah.log")
     finally:
         sock.close()
 

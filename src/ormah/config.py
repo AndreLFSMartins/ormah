@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8787
     log_format: str = "text"  # "text" or "json"
+    log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
 
     # Paths
     memory_dir: Path = Path.home() / ".local" / "share" / "ormah" / "memory"
@@ -210,6 +211,15 @@ class Settings(BaseSettings):
         if v not in allowed:
             raise ValueError(f"log_format must be one of {allowed}, got {v!r}")
         return v
+
+    @field_validator("log_level")
+    @classmethod
+    def _log_level_enum(cls, v: str) -> str:
+        allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        upper = v.upper()
+        if upper not in allowed:
+            raise ValueError(f"log_level must be one of {allowed}, got {v!r}")
+        return upper
 
     @field_validator("llm_provider")
     @classmethod

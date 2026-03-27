@@ -99,20 +99,19 @@ class TestPlistTemplate:
             label=LAUNCHD_LABEL,
             wrapper_path="/home/user/.config/ormah/start-server.sh",
             bin_dir="/usr/local/bin",
-            log_dir="/tmp/logs",
         )
         assert "<string>com.ormah.server</string>" in rendered
         assert "<string>/home/user/.config/ormah/start-server.sh</string>" in rendered
-        assert "<string>/tmp/logs/ormah.out.log</string>" in rendered
         assert "<key>RunAtLoad</key><true/>" in rendered
         assert "<key>KeepAlive</key><true/>" in rendered
+        assert "StandardOutPath" not in rendered
+        assert "StandardErrorPath" not in rendered
 
     def test_template_includes_path(self):
         rendered = PLIST_TEMPLATE.format(
             label=LAUNCHD_LABEL,
             wrapper_path="/home/user/.config/ormah/start-server.sh",
             bin_dir="/home/user/.local/bin",
-            log_dir="/tmp/logs",
         )
         assert "<key>PATH</key><string>/home/user/.local/bin:" in rendered
 
@@ -122,7 +121,6 @@ class TestSystemdTemplate:
         rendered = SYSTEMD_TEMPLATE.format(
             wrapper_path="/home/user/.config/ormah/start-server.sh",
             bin_dir="/usr/local/bin",
-            log_dir="/tmp/logs",
         )
         assert "ExecStart=/home/user/.config/ormah/start-server.sh" in rendered
         assert "Restart=on-failure" in rendered
@@ -130,14 +128,13 @@ class TestSystemdTemplate:
         assert "After=network.target" in rendered
         assert 'Environment="PATH=/usr/local/bin:' in rendered
         assert "EnvironmentFile" not in rendered
-        assert "StandardOutput=append:/tmp/logs/ormah.out.log" in rendered
-        assert "StandardError=append:/tmp/logs/ormah.err.log" in rendered
+        assert "StandardOutput" not in rendered
+        assert "StandardError" not in rendered
 
     def test_template_renders_with_spaces_in_path(self):
         rendered = SYSTEMD_TEMPLATE.format(
             wrapper_path="/home/user/.config/ormah/start-server.sh",
             bin_dir="/home/user/my apps",
-            log_dir="/tmp/logs",
         )
         assert "ExecStart=/home/user/.config/ormah/start-server.sh" in rendered
 
