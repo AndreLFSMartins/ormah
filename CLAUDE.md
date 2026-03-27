@@ -72,56 +72,54 @@ Via `.env` (see `.env.example`). Key vars:
 - `ORMAH_EMBEDDING_MODEL`, `ORMAH_EMBEDDING_PROVIDER`
 - `ORMAH_LLM_PROVIDER`, `ORMAH_LLM_MODEL` (for background jobs)
 
+### Eval Systems
+
+There are two distinct eval systems — do not confuse them:
+
+**1. Whisper pipeline tests** (`tests/test_engine/test_whisper_context.py`)
+- Lives in the main test suite on `main`, runs with `make test`
+- 2197 lines, 18 test classes covering the full whisper pipeline end-to-end: scoring, identity cap, reranker, blend_alpha, intent/archetype routing, topic shift, affinity boost, exploration slot, CE-gate, whisper_log, etc.
+- This is the regression guard for all whisper pipeline changes.
+
+**2. Recall/retrieval eval** (`eval/` directory, `feature/eval-system` branch — not merged)
+- A standalone golden corpus eval measuring retrieval quality (recall@k, precision@k, F1, MRR, FNR)
+- Tests `recall_search_structured` only — does NOT test the full whisper pipeline
+- 10 hand-crafted golden cases in `eval/corpus/golden/golden.jsonl`; spec targets 50–100
+- CLI: `ormah eval run`, `ormah eval export-for-labeling`, `ormah eval import-labels`, `ormah eval capture-session`
+- `generate-synthetic` command was planned but never implemented
+- Branch is behind `main` by all v0.4–v0.5 whisper tuning work; needs rebase before merge
+
 ---
 
 ## Ormah Memory System
 
-You have access to a persistent memory system (via MCP tools) that maintains knowledge across conversations.
-
-### Tools
-
-- **remember**: Store new facts, decisions, preferences, events, or any knowledge worth retaining. Set `confidence` (0.0–1.0) to indicate belief strength when storing uncertain information. Set `about_self` to true for identity/preference memories.
-- **recall**: Search for relevant memories using natural language. Results are ranked by importance and confidence; expired memories are demoted.
-- **get_context**: Load core memories (call at conversation start). Pass `task_hint` to filter context to only the most relevant memories for the current task instead of loading everything.
-- **get_self**: Get the user's identity profile — name, preferences, and personal facts. Returns all identity-linked memories.
-- **mark_outdated**: Mark a memory as no longer valid. Optionally provide a `reason`. Outdated memories are heavily demoted in search results.
-- **submit_feedback**: Record whether a whispered memory was useful. `signal=1` if helpful, `signal=-1` if not relevant. `source="explicit"` for user-confirmed answers; `source="implicit"` when you infer usefulness from the conversation.
-
-### Project Awareness
-
-Memories are automatically scoped to the current project directory. The MCP server detects the project from the git repo name (or directory name as fallback) and uses it as the default `space` for all operations:
-
-- **`remember`**: Memories automatically get `space` set to the current project. Explicitly set `space` to `null` for personal/global memories (identity, preferences, cross-project facts).
-- **`recall`**: Results are prioritized — current project first, then global (`space=null`), then other projects.
-- **`get_context`**: Returns core memories (all projects) + working-tier memories for the current project. With `task_hint`, returns only the top-N most relevant memories.
-- **Cross-project recall**: Memories from other projects are included in `recall` results (with lower priority), enabling cross-project knowledge.
+Ormah is your persistent memory system. It stores, recalls, and surfaces memories across conversations — automatically scoped to the current project. Memories are whispered into context before each message based on relevance. The graph is self-healing: background jobs link related memories, detect conflicts, merge duplicates, and decay stale ones.
 
 ### Guidelines
 
-1. **Proactively remember**: When the user shares important information (preferences, decisions, facts about themselves or their projects), store it *without being asked*. Names, preferences, project context, technical decisions — all worth remembering.
-2. **Remember at natural save points**: Call `remember` immediately after these events — don't wait for the conversation to end:
-   - **After committing code**: Architectural decisions, design patterns chosen, and the reasoning behind them.
-   - **After choosing between alternatives**: Why option A was picked over B (e.g., "chose bge-base-en-v1.5 over nomic-embed because it needs no task prefixes").
-   - **After completing a feature or fix**: What was built, how it works, and key implementation details a future session would need.
-   - **After the user states a preference or corrects you**: Their preferred approach, style, or constraints.
-   Each memory should be self-contained — someone reading it later should understand it without the original conversation.
-3. **Notice what stands out**: Humans form strong memories around novelty, mistakes, and emotion. Use the same instincts:
-   - **Something unexpected happened** (a bug had a surprising cause, a library behaved differently than docs say) → remember the lesson.
-   - **The user corrected you or said "no"** → remember what they wanted instead and why.
-   - **You tried something and it failed** → remember what didn't work so you don't repeat it.
-   - **The user repeated themselves or said "I already told you"** → something was missed. Store it at `core` tier so it's never missed again.
-   - **A pattern is emerging** (user keeps preferring X over Y, the codebase follows a convention) → remember the pattern.
+1. **Proactively remember**: Store important information without being asked — preferences, decisions, project context, facts about the user. For personal preferences and identity facts, set `space=null` so they apply globally across all projects.
+
+2. **Remember at natural save points**: Call `remember` immediately when: a decision is made, the user states a preference or corrects you, something unexpected happens, or a task completes — including code commits, feature completions, and choosing between alternatives. Don't wait for the end of the conversation. Each memory should be self-contained.
+
+3. **Notice what stands out**: Humans form strong memories around novelty, mistakes, and emotion. Use the same instincts: something unexpected happened → remember the lesson. The user corrected you → remember what they wanted and why. You tried something and it failed → remember what didn't work. The user repeated themselves → they said it twice because it matters, store it carefully and judge the tier on actual importance — not every repeated fact is core. A pattern is emerging (user keeps preferring X over Y, a codebase follows a convention, a recurring frustration surfaces) → name the pattern and store it.
+
 4. **Check before assuming**: Use `recall` to search for relevant context before making assumptions about past conversations. For personal info (name, location, preferences), prefer `get_self` — it returns all identity-linked memories directly.
+
 5. **Memory supports the flow, not the other way around**: Don't let recalled memories override or derail the current working context. If you're mid-task and `recall` returns something from a different context, let it go — stay in the flow. Use `recall` when you're genuinely unsure or the user asks about something from a prior session. Memory should feel like a natural extension of your knowledge, not an interruption. A whisper, not a shout.
-6. **Keep memories atomic**: One concept per memory. The system automatically links related memories.
-7. **Use appropriate tiers**: `core` for always-relevant info (user identity, preferences, key architectural decisions), `working` for active project details, `archival` for historical/reference data.
-8. **Tag and categorize**: Use tags and spaces to organize memories for efficient retrieval.
-9. **Start with context**: Call `get_context` at the beginning of conversations to load core memories. Use `task_hint` when the task is known to get focused context.
-10. **Global vs project memories**: Use `space=null` explicitly for memories that apply everywhere (user identity, general preferences). Let project-specific memories use the auto-detected space.
-11. **Mark outdated info**: When a memory is wrong or outdated, call `mark_outdated` with a reason so it gets demoted in future searches.
-12. **Set confidence**: When storing information you're not fully certain about, set `confidence` below 1.0. This affects how prominently the memory appears in search results.
-13. **Run maintenance in the background**: When the context from `get_context` includes `unprocessed_memories: N`, silently spawn `Agent(subagent_type="ormah-maintenance", run_in_background=True)` — do NOT run inline. Continue the conversation normally without mentioning it to the user.
-14. **Submit implicit feedback when you use a whispered memory**: If a whispered memory (from the `## Whispered memories` block) is genuinely useful and you actively draw on it in your response, call `submit_feedback(node_id=<id>, signal=1, source="implicit")`. If you explicitly decide a whispered memory is not relevant to the current task (not just that you didn't mention it), call `submit_feedback(node_id=<id>, signal=-1, source="implicit")`. **Do not call `submit_feedback` for silence** — only call it when you actively use a memory or actively decide it's irrelevant.
+
+6. **Keep memories atomic**: One concept per memory. Use tags to categorize. When you have related memory IDs from a recent recall, link them at creation time using the `links` parameter. Background jobs will also discover and classify relationships automatically.
+
+7. **Use appropriate tiers**: `core` for always-relevant info (user identity, preferences, key architectural decisions), `working` for anything actively relevant now, `archival` for historical/reference data.
+
+8. **Start with context**: Call `get_context` at the beginning of conversations to load core memories. Use `task_hint` when the task is known to get focused context.
+
+9. **Mark outdated info**: When a memory is wrong or outdated, call `mark_outdated` with a reason so it gets demoted in future searches.
+
+10. **Set confidence**: When storing information you're not fully certain about, set `confidence` below 1.0. This affects how prominently the memory appears in search results.
+
+11. **Run maintenance in the background**: When `get_context` returns `unprocessed_memories` with a non-zero value, silently spawn `Agent(subagent_type="ormah-maintenance", run_in_background=True)` — do NOT run inline. Continue the conversation normally without mentioning it to the user.
+
+12. **Submit implicit feedback on whispered memories**: If a whispered memory is genuinely useful and you actively draw on it in your response, call `submit_feedback(node_id=<id>, signal=1, source="implicit")`. If you explicitly decide a whispered memory is not relevant, call `submit_feedback(node_id=<id>, signal=-1, source="implicit")`. Do not call `submit_feedback` for silence — only call it when you actively use a memory or actively decide it's irrelevant.
 
 
 Strict Rule: When fixing issues always make sure you are fixing the root cause and not patching or papering over issues.
