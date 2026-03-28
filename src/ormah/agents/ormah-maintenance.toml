@@ -31,4 +31,3 @@ Return a one-line summary such as: `Maintenance complete: 5 edges, 2 merges, 1 c
 """
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
-mcp_servers = ["ormah"]
