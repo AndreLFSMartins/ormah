@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 
 from ormah.config import settings
+from ormah.embeddings.cache import get_fastembed_cache_dir
 
 LAUNCHD_LABEL = "com.ormah.server"
 PLIST_DIR = Path.home() / "Library" / "LaunchAgents"
@@ -212,7 +213,7 @@ def uninstall_autostart() -> None:
 
 def is_first_run() -> bool:
     """Check if the fastembed model cache exists — if not, first download needed."""
-    cache_dir = Path.home() / ".cache" / "fastembed"
+    cache_dir = get_fastembed_cache_dir()
     if not cache_dir.exists():
         return True
     # Check if any model directories exist inside the cache
@@ -229,6 +230,8 @@ _PHASE_MAP: list[tuple[str, str]] = [
     ("Initial index rebuild", "Building search index..."),
     ("Loading embedding model", "Loading embedding model..."),
     ("Embedding model ready", "Embedding model loaded"),
+    ("Loading whisper reranker", "Loading whisper reranker..."),
+    ("Whisper reranker ready", "Whisper reranker loaded"),
     ("Re-indexing embeddings", "Re-embedding memories..."),
     ("Memory engine ready", "Memory engine ready"),
     ("Background scheduler", "Starting background jobs..."),

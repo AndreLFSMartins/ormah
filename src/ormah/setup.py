@@ -17,6 +17,7 @@ from importlib import resources
 
 from ormah.config import settings
 from ormah.console import info, ok, play_finale, step, warn
+from ormah.embeddings.cache import get_fastembed_cache_dir, get_model_cache_dirname
 from ormah.server_manager import (
     get_ormah_bin_path,
     install_autostart,
@@ -41,6 +42,35 @@ LLM_PROVIDERS = [
     ("Ollama (local)", "ollama", None, "llama3.2"),
     ("None", "none", None, None),
 ]
+
+
+def _preload_local_models() -> None:
+    """Preload embedding and whisper reranker models into Ormah's shared cache."""
+    cache_dir = get_fastembed_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    step("Preloading local models")
+    info(f"Model cache: {cache_dir}")
+
+    try:
+        from fastembed import TextEmbedding
+
+        TextEmbedding(settings.embedding_model, cache_dir=str(cache_dir))
+        ok(f"Embedding model ready: {settings.embedding_model}")
+    except Exception as e:
+        warn(f"Could not preload embedding model {settings.embedding_model}: {e}")
+
+    if not settings.whisper_reranker_enabled:
+        info("Whisper reranker disabled — skipping reranker preload")
+        return
+
+    try:
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+        TextCrossEncoder(settings.whisper_reranker_model, cache_dir=str(cache_dir))
+        ok(f"Whisper reranker ready: {settings.whisper_reranker_model}")
+    except Exception as e:
+        warn(f"Could not preload whisper reranker {settings.whisper_reranker_model}: {e}")
 
 
 def _merge_json_file(path: str, updates: dict) -> None:
@@ -1207,13 +1237,9 @@ def _get_running_server_data_dir() -> Path | None:
 
 def _remove_fastembed_cache() -> None:
     """Delete the fastembed model cache entries that ormah downloaded."""
-    import tempfile
     from ormah.config import settings as _settings
 
-    cache_dir = Path(
-        os.environ.get("FASTEMBED_CACHE_PATH",
-                       os.path.join(tempfile.gettempdir(), "fastembed_cache"))
-    )
+    cache_dir = get_fastembed_cache_dir()
     if not cache_dir.exists():
         info("No fastembed model cache found — skipping")
         return
@@ -1227,9 +1253,9 @@ def _remove_fastembed_cache() -> None:
         from fastembed import TextEmbedding
         for m in TextEmbedding.list_supported_models():
             if m.get("model") == _settings.embedding_model:
-                hf_repo = (m.get("sources") or {}).get("hf", "")
-                if hf_repo:
-                    model_dirs.add(f"models--{hf_repo.replace('/', '--')}")
+                dir_name = get_model_cache_dirname(_settings.embedding_model, [m])
+                if dir_name:
+                    model_dirs.add(dir_name)
                 break
     except Exception:
         pass
@@ -1238,9 +1264,9 @@ def _remove_fastembed_cache() -> None:
         from fastembed.rerank.cross_encoder import TextCrossEncoder
         for m in TextCrossEncoder.list_supported_models():
             if m.get("model") == _settings.whisper_reranker_model:
-                hf_repo = (m.get("sources") or {}).get("hf", "")
-                if hf_repo:
-                    model_dirs.add(f"models--{hf_repo.replace('/', '--')}")
+                dir_name = get_model_cache_dirname(_settings.whisper_reranker_model, [m])
+                if dir_name:
+                    model_dirs.add(dir_name)
                 break
     except Exception:
         pass
@@ -1413,6 +1439,9 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
 
     # 4.5 Generate server wrapper
     wrapper_path = generate_server_wrapper(ormah_bin)
+
+    # 4.6 Preload local models into Ormah's shared model cache
+    _preload_local_models()
 
     # 5. Start server + install auto-start
     if is_server_running():

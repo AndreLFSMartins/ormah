@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from ormah.embeddings.base import EmbeddingAdapter
+from ormah.embeddings.cache import get_fastembed_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,10 @@ class LocalAdapter(EmbeddingAdapter):
                 self._model = _model_cache[self.model_name]
             else:
                 logger.info("Loading embedding model (~420MB, first time only)...")
-                self._model = TextEmbedding(self.model_name, cache_dir=str(Path.home() / ".cache" / "fastembed"))
+                self._model = TextEmbedding(
+                    self.model_name,
+                    cache_dir=str(get_fastembed_cache_dir()),
+                )
                 _model_cache[self.model_name] = self._model
                 logger.info("Embedding model ready.")
         return self._model

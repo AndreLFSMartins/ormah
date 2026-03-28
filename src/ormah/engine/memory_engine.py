@@ -93,6 +93,7 @@ class MemoryEngine:
 
         # Lazy-loaded components
         self._hybrid_search = None
+        self._whisper_reranker_available = False
 
     def startup(self) -> None:
         """Initialize on server start: rebuild index if empty, ensure self node."""
@@ -139,6 +140,7 @@ class MemoryEngine:
         self._ensure_self_node()
         self._migrate_identity_tiers()
         self._warmup_embedder()
+        self._warmup_reranker()
 
     def _migrate_fsrs(self) -> None:
         """Seed FSRS stability from access_count on first run, updating both DB and markdown."""
@@ -342,6 +344,45 @@ class MemoryEngine:
             get_encoder(self.settings).encode("")
         except Exception as e:
             logger.warning("Embedding model warmup failed: %s", e)
+
+    def _warmup_reranker(self) -> None:
+        """Mark whisper reranker availability up front instead of failing per prompt."""
+        if not self.settings.whisper_reranker_enabled:
+            logger.info("Whisper reranker disabled in settings.")
+            self._whisper_reranker_available = False
+            return
+
+        try:
+            from ormah.embeddings.cache import get_fastembed_cache_dir
+            from ormah.embeddings.reranker import model_is_cached, preload_model
+
+            model_name = self.settings.whisper_reranker_model
+            cache_dir = get_fastembed_cache_dir()
+            logger.info(
+                "Whisper reranker check: model=%s cache_dir=%s",
+                model_name,
+                cache_dir,
+            )
+            if not model_is_cached(model_name):
+                logger.warning(
+                    "Whisper reranker is enabled but model %s is not cached in %s. "
+                    "Whisper will run without reranking until the model is preloaded.",
+                    model_name,
+                    cache_dir,
+                )
+                self._whisper_reranker_available = False
+                return
+
+            logger.info("Loading whisper reranker...")
+            preload_model(model_name)
+            self._whisper_reranker_available = True
+            logger.info("Whisper reranker ready.")
+        except Exception as e:
+            logger.warning(
+                "Whisper reranker unavailable; whisper will run without reranking: %s",
+                e,
+            )
+            self._whisper_reranker_available = False
 
     def shutdown(self) -> None:
         self.db.close()
@@ -740,12 +781,24 @@ class MemoryEngine:
         session_id: str | None = None,
     ) -> str:
         """Get compact whisper context for involuntary recall injection."""
+        if self.settings.whisper_reranker_enabled and not self._whisper_reranker_available:
+            logger.error(
+                "Whisper reranker is required but unavailable; returning empty whisper context. "
+                "prompt=%r session_id=%r",
+                prompt[:80],
+                session_id,
+            )
+            return ""
+
         return self.context_builder.build_whisper_context(
             prompt=prompt,
             space=space,
             max_nodes=self.settings.whisper_max_nodes,
             min_score=self.settings.whisper_min_relevance_score,
-            reranker_enabled=self.settings.whisper_reranker_enabled,
+            reranker_enabled=(
+                self.settings.whisper_reranker_enabled
+                and self._whisper_reranker_available
+            ),
             reranker_model=self.settings.whisper_reranker_model,
             reranker_min_score=self.settings.whisper_reranker_min_score,
             reranker_blend_alpha=self.settings.whisper_reranker_blend_alpha,

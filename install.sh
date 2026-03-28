@@ -180,7 +180,7 @@ fi
 
 # ── Post-install note ───────────────────────────────────────────────────────
 
-warn "First server start will download the embedding model (~500 MB one-time download)"
+warn "Setup will preload the embedding and whisper reranker models into ~/.local/share/ormah/models"
 
 # ── Run setup ───────────────────────────────────────────────────────────────
 

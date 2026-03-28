@@ -43,6 +43,12 @@ def _truncate_at_word_boundary(text: str, max_len: int = 300) -> str:
     return truncated[:last_space] + "…"
 
 
+def _prompt_log_snippet(text: str, max_len: int = 80) -> str:
+    """Compact single-line prompt snippet for diagnostics."""
+    compact = " ".join(text.split())
+    return _truncate_at_word_boundary(compact, max_len=max_len)
+
+
 def _find_review_candidate(conn, threshold: float) -> dict | None:
     """Find a gated-out whisper candidate eligible for session-start review.
 
@@ -207,16 +213,26 @@ class ContextBuilder:
         - Hard min-score threshold: results below min_score are dropped.
         - Returns empty string on failure instead of full dump.
         """
+        prompt_snippet = _prompt_log_snippet(prompt)
         if not prompt.strip():
+            logger.info("Whisper diagnostics: empty prompt -> skip")
             return ""
 
         # Short prompts (≤2 alphanumeric chars) are navigational ("y", "ok",
         # "...", "---") — skip search
         stripped = re.sub(r'[^a-zA-Z0-9]', '', prompt.strip())
         if len(stripped) <= 2:
+            logger.info(
+                "Whisper diagnostics: prompt=%r short_prompt -> skip",
+                prompt_snippet,
+            )
             return ""
 
         if not self.engine:
+            logger.info(
+                "Whisper diagnostics: prompt=%r no_engine -> skip",
+                prompt_snippet,
+            )
             return ""
 
         # Topic-shift detection: skip injection when topic hasn't changed
@@ -236,6 +252,12 @@ class ContextBuilder:
                             / (norm_current * norm_centroid)
                         )
                         if similarity > topic_shift_threshold:
+                            logger.info(
+                                "Whisper diagnostics: prompt=%r topic_shift_skip similarity=%.3f threshold=%.3f",
+                                prompt_snippet,
+                                similarity,
+                                topic_shift_threshold,
+                            )
                             return ""  # same topic, skip injection
             except Exception as e:
                 logger.warning("Topic-shift detection failed, proceeding with whisper: %s", e)
@@ -251,6 +273,10 @@ class ContextBuilder:
 
         # conversational-only → inject nothing
         if intent is not None and intent.categories == ["conversational"]:
+            logger.info(
+                "Whisper diagnostics: prompt=%r conversational_intent -> skip",
+                prompt_snippet,
+            )
             return ""
 
         # identity-only → skip general search, use existing identity path below
@@ -297,6 +323,11 @@ class ContextBuilder:
             logger.warning("Whisper search failed: %s", e)
             return ""
 
+        initial_candidate_count = len(search_results)
+        reranker_applied = False
+        reranker_before_count = 0
+        reranker_after_count = 0
+
         # Per-intent adjustments: temporal queries rely on the created_after
         # filter for relevance rather than semantic similarity, so we relax
         # both the min-score threshold and the reranker threshold.
@@ -313,6 +344,7 @@ class ContextBuilder:
             r for r in search_results
             if r.get("score", 0) >= effective_min_score or r.get("source") == "temporal"
         ]
+        post_min_score_count = len(search_results)
         # Cross-encoder reranking — always pass min_score=0.0 so affinity boost
         # can rescue candidates before any floor is applied (spec: reranker_min_score
         # is now applied as a post-boost floor, not inside rerank())
@@ -320,6 +352,8 @@ class ContextBuilder:
             try:
                 from ormah.embeddings.reranker import rerank
 
+                reranker_applied = True
+                reranker_before_count = len(search_results)
                 search_results = rerank(
                     query=prompt,
                     candidates=search_results,
@@ -328,6 +362,7 @@ class ContextBuilder:
                     blend_alpha=reranker_blend_alpha,
                     max_doc_chars=reranker_max_doc_chars,
                 )
+                reranker_after_count = len(search_results)
 
             except Exception as e:
                 logger.warning("Whisper reranker failed, using embedding scores: %s", e)
@@ -363,6 +398,12 @@ class ContextBuilder:
         if not has_temporal and search_results:
             max_blended = max(r.get("score", 0.0) for r in search_results)
             if max_blended < injection_gate:
+                logger.info(
+                    "Whisper diagnostics: prompt=%r gate_reject max_score=%.3f gate=%.3f",
+                    prompt_snippet,
+                    max_blended,
+                    injection_gate,
+                )
                 search_results = []
             else:
                 # Score-floor: only keep results that individually clear the
@@ -428,6 +469,7 @@ class ContextBuilder:
 
         # Cap to max_nodes (already ordered by relevance score, or by recency for temporal queries)
         search_results = search_results[:max_nodes]
+        final_candidate_count = len(search_results)
 
         # Build flat ranked list — top full_content_count get full content,
         # rest get title + type + node ID only.
@@ -490,6 +532,24 @@ class ContextBuilder:
             result = ""
         else:
             result = _WHISPER_FRAMING + "\n\n" + body
+
+        logger.info(
+            "Whisper diagnostics: prompt=%r intent=%s identity_only=%s temporal=%s "
+            "candidates=%d post_min_score=%d reranker_enabled=%s reranker_applied=%s "
+            "reranker_before=%d reranker_after=%d final=%d injected=%s",
+            prompt_snippet,
+            intent.categories if intent is not None else None,
+            identity_only,
+            has_temporal,
+            initial_candidate_count,
+            post_min_score_count,
+            reranker_enabled,
+            reranker_applied,
+            reranker_before_count,
+            reranker_after_count,
+            final_candidate_count,
+            bool(result),
+        )
 
         # Unprocessed memories signal: append when maintenance is needed.
         # Self-limiting: once maintenance runs and processes nodes, count drops to 0.

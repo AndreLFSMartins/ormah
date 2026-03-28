@@ -26,6 +26,7 @@ from ormah.setup import (
     ENV_PATH,
     WRAPPER_PATH,
     _merge_json_file,
+    _preload_local_models,
     _remove_codex_hooks,
     _remove_codex_md_block,
     _remove_codex_mcp_config,
@@ -1416,6 +1417,58 @@ class TestRemoveFastembedCache:
 
         # cache_dir itself is removed when empty
         assert not tmp_path.exists()
+
+    def test_uses_default_fastembed_cache_dir(self, tmp_path):
+        cache_dir = tmp_path / ".local" / "share" / "ormah" / "models"
+        model_dir = cache_dir / "models--qdrant--bge-base-en-v1.5-onnx-q"
+        model_dir.mkdir(parents=True)
+
+        fake_embed_models = [{"model": "BAAI/bge-base-en-v1.5", "sources": {"hf": "qdrant/bge-base-en-v1.5-onnx-q"}}]
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("fastembed.TextEmbedding.list_supported_models", return_value=fake_embed_models),
+            patch("fastembed.rerank.cross_encoder.TextCrossEncoder.list_supported_models", return_value=[]),
+        ):
+            _remove_fastembed_cache()
+
+        assert not cache_dir.exists()
+
+
+class TestPreloadLocalModels:
+    def test_preloads_embedding_and_reranker_into_shared_cache(self, tmp_path):
+        fake_settings = MagicMock()
+        fake_settings.embedding_model = "BAAI/bge-base-en-v1.5"
+        fake_settings.whisper_reranker_enabled = True
+        fake_settings.whisper_reranker_model = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+        with (
+            patch("ormah.setup.settings", fake_settings),
+            patch("ormah.setup.get_fastembed_cache_dir", return_value=tmp_path),
+            patch("fastembed.TextEmbedding") as embed_cls,
+            patch("fastembed.rerank.cross_encoder.TextCrossEncoder") as reranker_cls,
+        ):
+            _preload_local_models()
+
+        embed_cls.assert_called_once_with("BAAI/bge-base-en-v1.5", cache_dir=str(tmp_path))
+        reranker_cls.assert_called_once_with("Xenova/ms-marco-MiniLM-L-6-v2", cache_dir=str(tmp_path))
+
+    def test_skips_reranker_preload_when_disabled(self, tmp_path):
+        fake_settings = MagicMock()
+        fake_settings.embedding_model = "BAAI/bge-base-en-v1.5"
+        fake_settings.whisper_reranker_enabled = False
+        fake_settings.whisper_reranker_model = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+        with (
+            patch("ormah.setup.settings", fake_settings),
+            patch("ormah.setup.get_fastembed_cache_dir", return_value=tmp_path),
+            patch("fastembed.TextEmbedding") as embed_cls,
+            patch("fastembed.rerank.cross_encoder.TextCrossEncoder") as reranker_cls,
+        ):
+            _preload_local_models()
+
+        embed_cls.assert_called_once()
+        reranker_cls.assert_not_called()
 
 
 class TestUninstallMemoryDirResolution:

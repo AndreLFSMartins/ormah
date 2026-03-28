@@ -1,5 +1,7 @@
 """Tests for the memory engine."""
 
+from unittest.mock import patch
+
 from ormah.engine.memory_engine import _embedding_text, _generate_title
 from ormah.models.node import CreateNodeRequest, NodeType, Tier, ConnectRequest, EdgeType, UpdateNodeRequest
 
@@ -159,3 +161,49 @@ def test_stats(engine):
     stats = engine.stats()
     # +1 for the self node created on startup
     assert stats["total_nodes"] == 2
+
+
+def test_warmup_reranker_marks_unavailable_when_cache_missing(settings):
+    with (
+        patch("ormah.engine.memory_engine.MemoryEngine._warmup_embedder"),
+        patch("ormah.embeddings.reranker.model_is_cached", return_value=False),
+        patch("ormah.embeddings.reranker.preload_model") as preload_model,
+    ):
+        from ormah.engine.memory_engine import MemoryEngine
+
+        engine = MemoryEngine(settings)
+        engine.startup()
+
+    assert engine._whisper_reranker_available is False
+    preload_model.assert_not_called()
+    engine.shutdown()
+
+
+def test_get_whisper_context_disables_reranker_when_feature_disabled(engine):
+    engine.settings.whisper_reranker_enabled = False
+    engine._whisper_reranker_available = False
+
+    with patch.object(engine.context_builder, "build_whisper_context", return_value="") as build:
+        engine.get_whisper_context("auth prompt")
+
+    assert build.call_args.kwargs["reranker_enabled"] is False
+
+
+def test_get_whisper_context_uses_reranker_when_available(engine):
+    engine._whisper_reranker_available = True
+
+    with patch.object(engine.context_builder, "build_whisper_context", return_value="") as build:
+        engine.get_whisper_context("auth prompt")
+
+    assert build.call_args.kwargs["reranker_enabled"] is True
+
+
+def test_get_whisper_context_returns_empty_when_reranker_required_but_unavailable(engine):
+    engine.settings.whisper_reranker_enabled = True
+    engine._whisper_reranker_available = False
+
+    with patch.object(engine.context_builder, "build_whisper_context", return_value="unused") as build:
+        result = engine.get_whisper_context("auth prompt")
+
+    assert result == ""
+    build.assert_not_called()

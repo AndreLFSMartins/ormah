@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import logging
 
+from ormah.embeddings.cache import get_fastembed_cache_dir, is_model_cached
+
 logger = logging.getLogger(__name__)
 
 _model_cache: dict[str, object] = {}
@@ -94,6 +96,25 @@ def _get_model(model_name: str):
         return _model_cache[model_name]
     from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-    model = TextCrossEncoder(model_name)
+    model = TextCrossEncoder(
+        model_name,
+        cache_dir=str(get_fastembed_cache_dir()),
+    )
     _model_cache[model_name] = model
     return model
+
+
+def preload_model(model_name: str):
+    """Load the configured reranker model into the in-process cache."""
+    return _get_model(model_name)
+
+
+def model_is_cached(model_name: str) -> bool:
+    """Return True if the reranker model is already present on disk."""
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+    return is_model_cached(
+        model_name,
+        TextCrossEncoder.list_supported_models(),
+        cache_dir=get_fastembed_cache_dir(),
+    )
