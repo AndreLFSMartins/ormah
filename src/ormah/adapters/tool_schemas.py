@@ -41,7 +41,12 @@ TOOLS = [
                 },
                 "title": {
                     "type": "string",
-                    "description": "Short descriptive title for the memory.",
+                    "description": (
+                        "Short descriptive title for the memory. "
+                        "Write it as a self-contained one-line summary — "
+                        "whisper shows only the title when this memory is not in the top 2 results, "
+                        "so it must convey the key fact on its own."
+                    ),
                 },
                 "space": {
                     "type": "string",
