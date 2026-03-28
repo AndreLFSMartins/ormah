@@ -1302,6 +1302,8 @@ class TestRunUninstall:
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
             patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_claude_agents"),
+            patch("ormah.setup._remove_claude_commands"),
             patch("shutil.rmtree"),
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
         ):
@@ -1330,6 +1332,8 @@ class TestRunUninstall:
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
             patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_claude_agents"),
+            patch("ormah.setup._remove_claude_commands"),
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
         ):
             run_uninstall(yes=True)
@@ -1344,6 +1348,8 @@ class TestRunUninstall:
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
             patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_claude_agents"),
+            patch("ormah.setup._remove_claude_commands"),
             patch("shutil.rmtree"),
             patch("subprocess.run", side_effect=Exception("uv not found")),
         ):

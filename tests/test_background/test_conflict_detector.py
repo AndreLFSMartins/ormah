@@ -46,18 +46,25 @@ def test_llm_detects_evolution_creates_evolved_from_edge(engine):
         node_type=NodeType.preference,
     )
 
-    llm_response = json.dumps({
-        "same_subject": True,
-        "conflict": True,
-        "type": "evolution",
-        "evolved_node": "b",
-        "explanation": "Refined from blanket dislike to nuanced preference by grape type.",
-    })
+    # ORDER BY RANDOM() means node_a/node_b ordering is non-deterministic.
+    # Use side_effect to return evolved_node="b" when "Loves red grapes" is
+    # presented as Memory B, and evolved_node="a" otherwise — so the
+    # direction assertion is always semantically correct.
+    def dynamic_llm_response(settings, prompt, json_mode=True):
+        parts = prompt.split("\nMemory B")
+        evolved = "b" if len(parts) > 1 and "Loves red grapes" in parts[1] else "a"
+        return json.dumps({
+            "same_subject": True,
+            "conflict": True,
+            "type": "evolution",
+            "evolved_node": evolved,
+            "explanation": "Refined from blanket dislike to nuanced preference by grape type.",
+        })
 
     engine.settings.llm_provider = "ollama"
     _reset_adapter()
 
-    with patch(_LLM_PATCH, return_value=llm_response):
+    with patch(_LLM_PATCH, side_effect=dynamic_llm_response):
         from ormah.background.conflict_detector import run_conflict_detection
         run_conflict_detection(engine)
 
