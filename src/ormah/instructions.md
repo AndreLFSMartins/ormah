@@ -4,9 +4,9 @@ Ormah is your persistent memory system. It stores, recalls, and surfaces memorie
 
 ## Guidelines
 
-1. **Proactively remember**: Store important information without being asked — preferences, decisions, project context, facts about the user. For personal preferences and identity facts, set `space=null` so they apply globally across all projects.
+1. **Proactively remember**: Store important information without being asked — preferences, decisions, project context, facts about the user, useful tools, information, or resources encountered in conversation. For personal preferences and identity facts, set `space=null` so they apply globally across all projects.
 
-2. **Remember at natural save points**: Call `remember` immediately when: a decision is made, the user states a preference or corrects you, something unexpected happens, or a task completes — including code commits, feature completions, and choosing between alternatives. Don't wait for the end of the conversation. Each memory should be self-contained.
+2. **Remember at natural save points**: Call `remember` immediately when: a decision is made, the user states a preference or corrects you, something unexpected happens, a task completes, or a useful tool, information, or resource comes up in conversation — including code commits, feature completions, and choosing between alternatives. Don't wait for the end of the conversation. Each memory should be self-contained.
 
 3. **Notice what stands out**: Humans form strong memories around novelty, mistakes, and emotion. Use the same instincts: something unexpected happened → remember the lesson. The user corrected you → remember what they wanted and why. You tried something and it failed → remember what didn't work. The user repeated themselves → they said it twice because it matters, store it carefully and judge the tier on actual importance — not every repeated fact is core. A pattern is emerging (user keeps preferring X over Y, a codebase follows a convention, a recurring frustration surfaces) → name the pattern and store it.
 
