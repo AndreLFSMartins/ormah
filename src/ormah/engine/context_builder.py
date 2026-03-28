@@ -206,7 +206,8 @@ class ContextBuilder:
         topic_shift_threshold: float = 0.75,
         injection_gate: float = 0.55,
         session_id: str | None = None,
-    ) -> str:
+        _return_debug: bool = False,
+    ) -> str | tuple[str, list[str]]:
         """Build compact whisper context for involuntary recall injection.
 
         Key differences from build_core_context:
@@ -214,8 +215,12 @@ class ContextBuilder:
         - Returns empty string on failure instead of full dump.
         """
         prompt_snippet = _prompt_log_snippet(prompt)
+        _injected_ids: list[str] = []
+
         if not prompt.strip():
             logger.info("Whisper diagnostics: empty prompt -> skip")
+            if _return_debug:
+                return "", _injected_ids
             return ""
 
         # Short prompts (≤2 alphanumeric chars) are navigational ("y", "ok",
@@ -226,6 +231,8 @@ class ContextBuilder:
                 "Whisper diagnostics: prompt=%r short_prompt -> skip",
                 prompt_snippet,
             )
+            if _return_debug:
+                return "", _injected_ids
             return ""
 
         if not self.engine:
@@ -233,6 +240,8 @@ class ContextBuilder:
                 "Whisper diagnostics: prompt=%r no_engine -> skip",
                 prompt_snippet,
             )
+            if _return_debug:
+                return "", _injected_ids
             return ""
 
         # Topic-shift detection: skip injection when topic hasn't changed
@@ -258,6 +267,8 @@ class ContextBuilder:
                                 similarity,
                                 topic_shift_threshold,
                             )
+                            if _return_debug:
+                                return "", _injected_ids
                             return ""  # same topic, skip injection
             except Exception as e:
                 logger.warning("Topic-shift detection failed, proceeding with whisper: %s", e)
@@ -277,6 +288,8 @@ class ContextBuilder:
                 "Whisper diagnostics: prompt=%r conversational_intent -> skip",
                 prompt_snippet,
             )
+            if _return_debug:
+                return "", _injected_ids
             return ""
 
         # identity-only → skip general search, use existing identity path below
@@ -321,6 +334,8 @@ class ContextBuilder:
             search_results = self.engine.recall_search_structured(**search_kwargs)
         except Exception as e:
             logger.warning("Whisper search failed: %s", e)
+            if _return_debug:
+                return "", _injected_ids
             return ""
 
         initial_candidate_count = len(search_results)
@@ -470,6 +485,7 @@ class ContextBuilder:
         # Cap to max_nodes (already ordered by relevance score, or by recency for temporal queries)
         search_results = search_results[:max_nodes]
         final_candidate_count = len(search_results)
+        _injected_ids = [r["node"]["id"] for r in search_results]
 
         # Build flat ranked list — top full_content_count get full content,
         # rest get title + type + node ID only.
@@ -599,4 +615,6 @@ class ContextBuilder:
             except Exception as e:
                 logger.warning("Review mechanism failed: %s", e)
 
+        if _return_debug:
+            return result, _injected_ids
         return result

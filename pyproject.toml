@@ -72,11 +72,12 @@ artifacts = ["src/ormah/ui_dist/**"]
 [tool.hatch.build.hooks.custom]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ormah"]
+packages = ["src/ormah", "eval"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py311"
