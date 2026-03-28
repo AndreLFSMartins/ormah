@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 import httpx
@@ -16,6 +17,20 @@ from ormah.config import settings
 logger = logging.getLogger(__name__)
 
 _BASE_URL = f"http://localhost:{settings.port}"
+
+
+def _coerce_list(value):
+    """Coerce a value to a list — handles clients that serialize arrays as JSON strings."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return value
 
 
 def create_mcp_server(base_url: str, default_space: str | None = None) -> Server:
@@ -76,13 +91,13 @@ async def _dispatch(
             if args.get("space"):
                 body["space"] = args["space"]
             if args.get("tags"):
-                body["tags"] = args["tags"]
+                body["tags"] = _coerce_list(args["tags"])
             if args.get("about_self"):
                 body["about_self"] = True
             if "confidence" in args:
                 body["confidence"] = args["confidence"]
             if args.get("links"):
-                body["connections"] = [{"target": node_id} for node_id in args["links"]]
+                body["connections"] = [{"target": node_id} for node_id in _coerce_list(args["links"])]
             params = {}
             if default_space:
                 params["default_space"] = default_space
@@ -96,9 +111,9 @@ async def _dispatch(
             if args.get("limit"):
                 body["limit"] = args["limit"]
             if args.get("types"):
-                body["types"] = args["types"]
+                body["types"] = _coerce_list(args["types"])
             if args.get("spaces"):
-                body["spaces"] = args["spaces"]
+                body["spaces"] = _coerce_list(args["spaces"])
             if args.get("created_after"):
                 body["created_after"] = args["created_after"]
             if args.get("created_before"):
@@ -119,9 +134,11 @@ async def _dispatch(
 
         elif name == "update_memory":
             body = {}
-            for key in ("content", "type", "tier", "tags", "title", "space"):
+            for key in ("content", "type", "tier", "title", "space"):
                 if key in args and args[key] is not None:
                     body[key] = args[key]
+            if args.get("tags") is not None:
+                body["tags"] = _coerce_list(args["tags"])
             resp = await client.post(f"/agent/update/{args['node_id']}", json=body)
             if not resp.is_success:
                 return _handle_error(resp)
