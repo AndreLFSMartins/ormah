@@ -567,24 +567,27 @@ class ContextBuilder:
             bool(result),
         )
 
-        # Unprocessed memories signal: append when maintenance is needed.
-        # Self-limiting: once maintenance runs and processes nodes, count drops to 0.
+        # Maintenance due signal: fires once per interval regardless of node creation rate.
+        # Self-limiting: apply_maintenance_results records last_maintenance_run, silencing
+        # the signal for claude_maintenance_interval_hours.
         if self.engine is not None:
             settings = getattr(self.engine, "settings", None)
             if settings and getattr(settings, "claude_maintenance_enabled", False):
-                threshold = getattr(settings, "claude_maintenance_threshold", 20)
+                interval_hours = getattr(settings, "claude_maintenance_interval_hours", 24)
                 try:
-                    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-                    count = self.graph.conn.execute(
-                        "SELECT COUNT(*) FROM nodes n "
-                        "WHERE n.created >= ? "
-                        "AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.source_id = n.id)",
-                        (cutoff,),
-                    ).fetchone()[0]
-                    if count > threshold:
-                        result = result + f"\nunprocessed_memories: {count}"
+                    row = self.graph.conn.execute(
+                        "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
+                    ).fetchone()
+                    last_run = row[0] if row else None
+                    due = True
+                    if last_run:
+                        from dateutil.parser import parse as parse_dt
+                        elapsed = datetime.now(timezone.utc) - parse_dt(last_run)
+                        due = elapsed.total_seconds() > interval_hours * 3600
+                    if due:
+                        result = result + "\nmaintenance_due"
                 except Exception as e:
-                    logger.warning("Failed to compute unprocessed_memories count: %s", e)
+                    logger.warning("Failed to compute maintenance_due: %s", e)
 
         # First-message review: surface a gated-out whisper candidate for feedback.
         # recent_prompts is None only on the first message of a session (buffer just created).

@@ -150,7 +150,7 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
         vec_store = VectorStore(engine.db)
 
         user_node_id = getattr(engine, "user_node_id", None)
-        nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes").fetchall()
+        nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes ORDER BY RANDOM()").fetchall()
         checked: set[tuple[str, str]] = set()
         candidates: list[dict] = []
 
@@ -179,6 +179,12 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
                 if pair in checked:
                     continue
                 checked.add(pair)
+
+                already_checked = engine.db.conn.execute(
+                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+                ).fetchone()
+                if already_checked:
+                    continue
 
                 embedding_sim = match["similarity"]
                 if embedding_sim < 0.25:

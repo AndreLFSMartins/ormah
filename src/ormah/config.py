@@ -186,7 +186,8 @@ class Settings(BaseSettings):
 
     # Claude-in-the-loop maintenance
     claude_maintenance_enabled: bool = False
-    claude_maintenance_threshold: int = 20  # unprocessed nodes before whispering signal
+    claude_maintenance_interval_hours: int = 24  # hours between maintenance runs
+    claude_maintenance_batch_size: int = 25  # candidates per type per run
 
     # --- Validators ---
 

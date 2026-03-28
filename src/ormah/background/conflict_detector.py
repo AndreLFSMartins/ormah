@@ -120,13 +120,13 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
         if settings.conflict_check_all_spaces:
             nodes = engine.db.conn.execute(
                 "SELECT id, content, title, type, created, space FROM nodes "
-                "WHERE type IN (?, ?, ?, ?)",
+                "WHERE type IN (?, ?, ?, ?) ORDER BY RANDOM()",
                 _BELIEF_TYPES,
             ).fetchall()
         else:
             nodes = engine.db.conn.execute(
                 "SELECT id, content, title, type, created, space FROM nodes "
-                "WHERE type IN (?, ?, ?, ?) AND (space IS NULL OR space = 'null')",
+                "WHERE type IN (?, ?, ?, ?) AND (space IS NULL OR space = 'null') ORDER BY RANDOM()",
                 _BELIEF_TYPES,
             ).fetchall()
 
@@ -154,6 +154,12 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
                 if pair in checked:
                     continue
                 checked.add(pair)
+
+                already_checked = engine.db.conn.execute(
+                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+                ).fetchone()
+                if already_checked:
+                    continue
 
                 similarity = match["similarity"]
                 if similarity < 0.4:

@@ -76,6 +76,78 @@ def _handle_error(resp: httpx.Response) -> str:
     return f"Error: {resp.status_code} {detail}"
 
 
+def _format_maintenance_batches(batches: dict) -> str:
+    """Format Phase 1 maintenance batches as readable text for the agent."""
+    lines: list[str] = []
+    summary = batches.get("summary", "nothing to process")
+    lines.append(f"Maintenance batches ready: {summary}")
+    lines.append(
+        "Submit ALL evaluated pairs via the edges list in Phase 2 — "
+        "use edge_type 'none' for pairs with no relationship (including non-duplicate merge pairs). "
+        "This records them so they won't reappear in future runs."
+    )
+    lines.append("")
+
+    def _pair_block(prefix: str, i: int, c: dict) -> None:
+        a, b = c["node_a"], c["node_b"]
+        sim = c.get("similarity", 0)
+        score = c.get("score")
+        score_str = f" score={score:.2f}" if score else ""
+        space_str = f"{a.get('space') or 'global'} ↔ {b.get('space') or 'global'}"
+        lines.append(f"[{prefix}{i}] sim={sim:.2f}{score_str} | {space_str}")
+        lines.append(f"  A [{a['type']}] {a['id']}  \"{a['title']}\"")
+        if a.get("content"):
+            lines.append(f"     {a['content'][:300]}")
+        lines.append(f"  B [{b['type']}] {b['id']}  \"{b['title']}\"")
+        if b.get("content"):
+            lines.append(f"     {b['content'][:300]}")
+        lines.append("")
+
+    link_candidates = batches.get("link_candidates", [])
+    if link_candidates:
+        lines.append(
+            f"## Link Candidates ({len(link_candidates)} pairs)\n"
+            "Classify each. Edge types: supports, part_of, depends_on, contradicts, related_to, none\n"
+        )
+        for i, c in enumerate(link_candidates, 1):
+            _pair_block("L", i, c)
+
+    conflict_candidates = batches.get("conflict_candidates", [])
+    if conflict_candidates:
+        lines.append(
+            f"## Conflict Candidates ({len(conflict_candidates)} pairs)\n"
+            "Check for contradictions or evolved beliefs. Edge types: contradicts, evolved_from, none\n"
+        )
+        for i, c in enumerate(conflict_candidates, 1):
+            _pair_block("C", i, c)
+
+    merge_candidates = batches.get("merge_candidates", [])
+    if merge_candidates:
+        lines.append(
+            f"## Merge Candidates ({len(merge_candidates)} pairs)\n"
+            "Decide if each pair is a duplicate. If yes, provide merged_content + merged_title via merges list.\n"
+            "If no, submit as edge_type 'none' via edges list.\n"
+        )
+        for i, c in enumerate(merge_candidates, 1):
+            _pair_block("M", i, c)
+
+    clusters = batches.get("consolidation_clusters", [])
+    if clusters:
+        lines.append(f"## Consolidation Clusters ({len(clusters)} clusters)\nSynthesize each into one crisp memory.\n")
+        for i, cluster in enumerate(clusters, 1):
+            lines.append(f"[Cluster {i}] {len(cluster)} nodes")
+            for j, n in enumerate(cluster, 1):
+                lines.append(f"  {j}. [{n['type']}] {n['id']}  \"{n['title']}\"")
+                if n.get("content"):
+                    lines.append(f"     {n['content'][:200]}")
+            lines.append("")
+
+    if not (link_candidates or conflict_candidates or merge_candidates or clusters):
+        lines.append("Nothing to process.")
+
+    return "\n".join(lines)
+
+
 async def _dispatch(
     base_url: str, name: str, args: dict, default_space: str | None = None
 ) -> str:
@@ -277,7 +349,15 @@ async def _dispatch(
             resp = await client.post("/agent/maintenance", json=body)
             if not resp.is_success:
                 return _handle_error(resp)
-            return resp.text
+            if "results" in args:
+                # Phase 2: return the applied summary
+                return resp.text
+            # Phase 1: format batches as readable text so the agent can reason over them
+            import json as _json
+            try:
+                return _format_maintenance_batches(_json.loads(resp.text))
+            except Exception:
+                return resp.text
 
         else:
             return f"Unknown tool: {name}"

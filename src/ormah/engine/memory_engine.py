@@ -1203,19 +1203,22 @@ class MemoryEngine:
         rows = self.db.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
-    def get_maintenance_batches(self, limit_per_batch: int = 8) -> dict:
+    def get_maintenance_batches(self, limit_per_batch: int | None = None) -> dict:
         """Return pending maintenance work for Claude-in-the-loop processing.
 
         Phase 1 of the ``run_maintenance`` two-call protocol.  Returns four
         batches of candidates (link, conflict, merge, consolidation clusters)
         plus a summary string.  Batch sizes are capped: up to *limit_per_batch*
-        pairs for link/conflict/merge (default 8), up to 4 clusters of max 5
-        nodes each for consolidation.
+        pairs for link/conflict/merge (default from settings), up to 4 clusters
+        of max 5 nodes each for consolidation.
         """
         from ormah.background.auto_linker import _find_link_candidates
         from ormah.background.conflict_detector import _find_conflict_candidates
         from ormah.background.consolidator import _find_consolidation_clusters
         from ormah.background.duplicate_merger import _find_merge_candidates
+
+        if limit_per_batch is None:
+            limit_per_batch = getattr(self.settings, "claude_maintenance_batch_size", 25)
 
         link_candidates = _find_link_candidates(self, limit_per_batch)
         conflict_candidates = _find_conflict_candidates(self, limit_per_batch)
@@ -1313,6 +1316,17 @@ class MemoryEngine:
                 counts["consolidations"] += 1
             except Exception as exc:
                 logger.warning("apply_maintenance_results: consolidation failed: %s", exc)
+
+        # Record completion timestamp — silences maintenance_due signal for interval_hours.
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_run', ?)",
+                    (now,),
+                )
+        except Exception as exc:
+            logger.warning("apply_maintenance_results: failed to record timestamp: %s", exc)
 
         return counts
 
