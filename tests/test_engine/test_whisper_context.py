@@ -83,6 +83,7 @@ class TestWhisperMinScore:
 
     def test_all_below_threshold_returns_empty(self, mock_graph):
         mock_engine = MagicMock()
+        mock_engine.settings.claude_maintenance_enabled = False
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict("node-0", "Irrelevant")]
@@ -396,6 +397,7 @@ class TestWhisperReranker:
 
     def test_reranker_empty_candidates_noop(self, mock_graph):
         mock_engine = MagicMock()
+        mock_engine.settings.claude_maintenance_enabled = False
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         # All below bi-encoder min_score
@@ -538,6 +540,7 @@ class TestWhisperIntentAware:
         """Identity-only intent should still run search (not skip it)."""
         mock_engine = MagicMock()
         mock_engine.recall_search_structured.return_value = []
+        mock_engine.settings.claude_maintenance_enabled = False
         builder = ContextBuilder(mock_graph, engine=mock_engine)
         conn = mock_graph.conn
 
@@ -878,6 +881,7 @@ class TestWhisperIdentityGating:
     def test_identity_suppressed_when_no_other_results_low_score(self, mock_graph):
         """Low-scoring identity results should be suppressed when no topical results survive."""
         mock_engine = MagicMock()
+        mock_engine.settings.claude_maintenance_enabled = False
         builder = ContextBuilder(mock_graph, engine=mock_engine)
         conn = mock_graph.conn
 
@@ -971,6 +975,7 @@ class TestWhisperIdentityGating:
     def test_identity_only_intent_stays_silent_without_search_results(self, mock_graph):
         """identity-only intent with no search results should stay silent (no graph dump)."""
         mock_engine = MagicMock()
+        mock_engine.settings.claude_maintenance_enabled = False
         builder = ContextBuilder(mock_graph, engine=mock_engine)
         conn = mock_graph.conn
 
@@ -1313,6 +1318,7 @@ def _make_settings_mock(
     affinity_half_life_days=30.0,
     affinity_max_boost=0.15,
     affinity_implicit_weight=0.8,
+    claude_maintenance_enabled=False,
 ):
     """Create a MagicMock settings object with affinity-related float attributes."""
     settings = MagicMock()
@@ -1322,6 +1328,7 @@ def _make_settings_mock(
     settings.affinity_half_life_days = affinity_half_life_days
     settings.affinity_max_boost = affinity_max_boost
     settings.affinity_implicit_weight = affinity_implicit_weight
+    settings.claude_maintenance_enabled = claude_maintenance_enabled
     return settings
 
 

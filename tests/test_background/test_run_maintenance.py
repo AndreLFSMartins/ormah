@@ -238,20 +238,30 @@ class TestWhisperSignal:
         """No signal when claude_maintenance_enabled=False."""
         engine.settings.claude_maintenance_enabled = False
         text = engine.get_whisper_context(prompt="how does Python indexing work")
-        assert "unprocessed_memories" not in text
+        assert "maintenance_due" not in text
 
-    def test_signal_absent_below_threshold(self, engine):
-        """No signal when count <= threshold."""
-        engine.settings.claude_maintenance_enabled = True
-        engine.settings.claude_maintenance_threshold = 100  # very high
-        _seed_similar_nodes(engine, 2)
-        text = engine.get_whisper_context(prompt="how does Python indexing work")
-        assert "unprocessed_memories" not in text
+    def test_signal_absent_when_recently_run(self, engine):
+        """No signal when maintenance was run within the interval."""
+        from datetime import datetime, timezone
 
-    def test_signal_present_above_threshold(self, engine):
-        """Signal appears when count > threshold."""
         engine.settings.claude_maintenance_enabled = True
-        engine.settings.claude_maintenance_threshold = 0  # always trigger
-        _seed_similar_nodes(engine, 3)
+        engine.settings.claude_maintenance_interval_hours = 24
+        # Record a recent maintenance run
+        now = datetime.now(timezone.utc).isoformat()
+        engine.db.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_run', ?)",
+            (now,),
+        )
+        engine.db.conn.commit()
         text = engine.get_whisper_context(prompt="how does Python indexing work")
-        assert "unprocessed_memories:" in text
+        assert "maintenance_due" not in text
+
+    def test_signal_present_when_interval_elapsed(self, engine):
+        """Signal appears when no maintenance has ever been run."""
+        engine.settings.claude_maintenance_enabled = True
+        engine.settings.claude_maintenance_interval_hours = 24
+        # Ensure no last_maintenance_run in meta (never ran)
+        engine.db.conn.execute("DELETE FROM meta WHERE key = 'last_maintenance_run'")
+        engine.db.conn.commit()
+        text = engine.get_whisper_context(prompt="how does Python indexing work")
+        assert "maintenance_due" in text

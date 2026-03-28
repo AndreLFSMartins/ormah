@@ -46,6 +46,7 @@ class TestWhisperDebugMode:
 
     def test_debug_suppressed_returns_empty_ids(self, mock_graph):
         mock_engine = MagicMock()
+        mock_engine.settings.claude_maintenance_enabled = False
         builder = ContextBuilder(mock_graph, engine=mock_engine)
         mock_engine.recall_search_structured.return_value = []
         whisper_text, injected_ids = builder.build_whisper_context(
