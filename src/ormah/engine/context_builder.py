@@ -182,13 +182,6 @@ class ContextBuilder:
             logger.warning("Failed to create prompt classifier: %s", e)
             return None
 
-    def _get_tags(self, node_id: str) -> set[str]:
-        """Get tags for a node from the DB."""
-        rows = self.graph.conn.execute(
-            "SELECT tag FROM node_tags WHERE node_id = ?", (node_id,)
-        ).fetchall()
-        return {r["tag"] for r in rows}
-
     def build_whisper_context(
         self,
         prompt: str,
@@ -212,8 +205,6 @@ class ContextBuilder:
 
         Key differences from build_core_context:
         - Hard min-score threshold: results below min_score are dropped.
-        - Tighter identity cap.
-        - Compact formatting (shorter content truncation).
         - Returns empty string on failure instead of full dump.
         """
         if not prompt.strip():
@@ -445,7 +436,8 @@ class ContextBuilder:
             node = r["node"]
             node_id = node.get("id", "")
             short_id = node_id[:8] if node_id else ""
-            title = node.get("title") or (node.get("content", "")[:60].strip() + "…")
+            content_preview = node.get("content", "")
+            title = node.get("title") or (content_preview[:60].strip() + ("…" if len(content_preview) > 60 else ""))
             node_type = node.get("type", "fact")
             id_suffix = f" (id: {short_id})" if short_id else ""
 
