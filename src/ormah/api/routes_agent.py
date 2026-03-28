@@ -338,7 +338,7 @@ async def run_maintenance(request: Request):
     if "results" in body:
         counts = engine.apply_maintenance_results(body["results"])
         return {"status": "applied", "summary": counts}
-    batches = engine.get_maintenance_batches()
+    batches = engine.get_maintenance_batches(limit_per_batch=25)
     return batches
 
 
