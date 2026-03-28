@@ -33,7 +33,7 @@ def create_mcp_server(base_url: str, default_space: str | None = None) -> Server
             for t in TOOLS
         ]
 
-    @server.call_tool()
+    @server.call_tool(validate_input=False)
     async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         try:
             result = await _dispatch(base_url, name, arguments, default_space=default_space)
