@@ -80,7 +80,7 @@ def format_search_results(results: list[dict[str, Any]]) -> str:
         parts.append(f"   ID: {node['id']} | Tier: {node['tier']} | Score: {score:.3f} | Created: {created}")
         content = node.get("content", "").strip()
         if content:
-            parts.append(f"   {content[:200]}{'...' if len(content) > 200 else ''}")
+            parts.append(f"   {content}")
         parts.append("")
 
     # Activated (non-conflict) results
@@ -96,7 +96,7 @@ def format_search_results(results: list[dict[str, Any]]) -> str:
             parts.append(f"   ID: {node['id']} | Score: {score:.3f} | via {edge_type} from {seed_id[:8]}...")
             content = node.get("content", "").strip()
             if content:
-                parts.append(f"   {content[:200]}{'...' if len(content) > 200 else ''}")
+                parts.append(f"   {content}")
             parts.append("")
 
     # Conflicting context
@@ -111,7 +111,7 @@ def format_search_results(results: list[dict[str, Any]]) -> str:
             parts.append(f"   ID: {node['id']} | Score: {score:.3f} | contradicts {seed_id[:8]}...")
             content = node.get("content", "").strip()
             if content:
-                parts.append(f"   {content[:200]}{'...' if len(content) > 200 else ''}")
+                parts.append(f"   {content}")
             parts.append("")
 
     return "\n".join(parts)
