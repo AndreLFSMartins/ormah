@@ -743,11 +743,8 @@ class MemoryEngine:
         return self.context_builder.build_whisper_context(
             prompt=prompt,
             space=space,
-            user_node_id=self.user_node_id,
             max_nodes=self.settings.whisper_max_nodes,
             min_score=self.settings.whisper_min_relevance_score,
-            identity_max=self.settings.whisper_identity_max_nodes,
-            max_content_len=self.settings.whisper_content_max_chars,
             reranker_enabled=self.settings.whisper_reranker_enabled,
             reranker_model=self.settings.whisper_reranker_model,
             reranker_min_score=self.settings.whisper_reranker_min_score,
@@ -757,9 +754,6 @@ class MemoryEngine:
             injection_gate=self.settings.whisper_injection_gate,
             topic_shift_enabled=self.settings.whisper_topic_shift_enabled,
             topic_shift_threshold=self.settings.whisper_topic_shift_threshold,
-            content_total_budget=self.settings.whisper_content_total_budget,
-            content_min_per_node=self.settings.whisper_content_min_per_node,
-            content_max_per_node=self.settings.whisper_content_max_per_node,
             session_id=session_id,
         )
 

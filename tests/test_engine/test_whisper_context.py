@@ -98,108 +98,25 @@ class TestWhisperMinScore:
         assert result == ""
 
 
-class TestWhisperIdentityCap:
-    """Whisper should cap identity nodes tightly."""
-
-    def test_identity_capped_to_max(self, mock_graph):
-        mock_engine = MagicMock()
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-        conn = mock_graph.conn
-
-        # Create user node
-        user_node = _make_node_dict("user-1", "Self", node_type="person")
-        _insert_node(conn, user_node)
-
-        # Create 8 identity nodes (mix of person/preference/fact)
-        identity_nodes = []
-        for i in range(8):
-            ntype = "preference" if i < 2 else "fact"
-            node = _make_node_dict(f"id-{i}", f"Identity {i}", node_type=ntype)
-            _insert_node(conn, node)
-            identity_nodes.append(node)
-            conn.execute(
-                "INSERT INTO edges (source_id, target_id, edge_type, weight, created) "
-                "VALUES (?, ?, 'defines', 1.0, '2026-01-01T00:00:00Z')",
-                ("user-1", f"id-{i}"),
-            )
-        conn.commit()
-
-        # All identity nodes returned by search with high scores
-        mock_engine.recall_search_structured.return_value = [
-            {"node": n, "score": 0.9, "source": "hybrid"} for n in identity_nodes
-        ]
-
-        result = builder.build_whisper_context(
-            prompt="tell me about myself",
-            user_node_id="user-1",
-            identity_max=5,
-            min_score=0.1,
-        )
-
-        # 2 preferences (always kept) + 3 facts (capped) = 5 total
-        identity_count = sum(1 for i in range(8) if f"Identity {i}" in result)
-        assert identity_count <= 5
-
-    def test_person_preference_always_kept(self, mock_graph):
-        """Preferences should be kept when topical results also exist."""
-        mock_engine = MagicMock()
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-        conn = mock_graph.conn
-
-        user_node = _make_node_dict("user-1", "Self", node_type="person")
-        _insert_node(conn, user_node)
-
-        pref = _make_node_dict("pref-1", "Prefers dark mode", node_type="preference")
-        _insert_node(conn, pref)
-
-        conn.execute(
-            "INSERT INTO edges (source_id, target_id, edge_type, weight, created) "
-            "VALUES (?, ?, 'defines', 1.0, '2026-01-01T00:00:00Z')",
-            ("user-1", "pref-1"),
-        )
-        conn.commit()
-
-        topical = _make_node_dict("fact-1", "Auth module info")
-        mock_engine.recall_search_structured.return_value = [
-            {"node": pref, "score": 0.6, "source": "hybrid"},
-            {"node": topical, "score": 0.7, "source": "hybrid"},
-        ]
-
-        result = builder.build_whisper_context(
-            prompt="how does auth work",
-            user_node_id="user-1",
-            identity_max=5,
-            min_score=0.1,
-        )
-
-        assert "Prefers dark mode" in result
-
-
 class TestWhisperCompactFormatting:
-    """Whisper should use compact content truncation."""
+    """Whisper formatting: flat list, top 2 full, rest title-only."""
 
-    def test_content_truncated_to_max_content_len(self, mock_graph):
+    def test_top_node_content_not_truncated(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
-        long_content = "A" * 500
-        node = _make_node_dict("node-1", "Long content node")
-        node["content"] = long_content
-
+        long_content = "A" * 600
+        node = {**_make_node_dict("node-1", "Some title"), "content": long_content}
         mock_engine.recall_search_structured.return_value = [
             {"node": node, "score": 0.9, "source": "hybrid"},
         ]
 
         result = builder.build_whisper_context(
-            prompt="test",
-            max_content_len=150,
-            min_score=0.1,
+            prompt="something",
+            injection_gate=0.0,
         )
 
-        # The formatted output should not contain the full 500-char content
-        assert long_content not in result
-        # But should contain a truncated version
-        assert "A" * 150 in result
+        assert long_content in result
 
 
 class TestWhisperFailSilently:
@@ -265,15 +182,14 @@ class TestWhisperNodeLimit:
         result = builder.build_whisper_context(
             prompt="test",
             max_nodes=3,
-            identity_max=5,
             min_score=0.1,
         )
 
-        # recall_search_structured called with limit=max_nodes+identity_max=8
+        # recall_search_structured called with limit=max_nodes
         mock_engine.recall_search_structured.assert_called_once()
         call_kwargs = mock_engine.recall_search_structured.call_args
         limit = call_kwargs.kwargs.get("limit") or call_kwargs[1].get("limit")
-        assert limit == 8  # max_nodes(3) + identity_max(5)
+        assert limit == 3  # max_nodes
 
     def test_total_budget_respected(self, mock_graph):
         """Total nodes in output should be <= max_nodes, even with identity nodes."""
@@ -314,7 +230,6 @@ class TestWhisperNodeLimit:
             prompt="test",
             user_node_id="user-1",
             max_nodes=max_nodes,
-            identity_max=5,
             min_score=0.1,
         )
 
@@ -504,29 +419,25 @@ class TestWhisperReranker:
 
 
 class TestWhisperWithProject:
-    """Whisper with space should format project section."""
+    """Space param still filters results correctly."""
 
-    def test_with_space_formats_project_section(self, mock_graph):
+    def test_with_space_passes_space_to_search(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
-        core_node = _make_node_dict("core-1", "Core fact", tier="core")
-        working_node = _make_node_dict("work-1", "Project detail", tier="working", space="myproj")
-
+        node = _make_node_dict("node-1", "Project fact", space="myproject")
         mock_engine.recall_search_structured.return_value = [
-            {"node": core_node, "score": 0.8, "source": "hybrid"},
-            {"node": working_node, "score": 0.7, "source": "hybrid"},
+            {"node": node, "score": 0.9, "source": "hybrid"},
         ]
 
-        result = builder.build_whisper_context(
+        builder.build_whisper_context(
             prompt="project stuff",
-            space="myproj",
-            min_score=0.1,
+            space="myproject",
+            injection_gate=0.0,
         )
 
-        assert "Core fact" in result
-        assert "Project detail" in result
-        assert "myproj" in result
+        call_kwargs = mock_engine.recall_search_structured.call_args[1]
+        assert call_kwargs["default_space"] == "myproject"
 
 
 class TestWhisperIntentAware:
@@ -1395,158 +1306,6 @@ class TestWhisperTopicShift:
         assert "Some fact" in result
 
 
-class TestWhisperDynamicContentBudget:
-    """Dynamic content budget: distribute total chars across results."""
-
-    def test_few_results_get_more_chars(self, mock_graph):
-        """1-2 results should get up to max_per_node chars each."""
-        mock_engine = MagicMock()
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-
-        long_content = "A" * 600
-        node = _make_node_dict("node-1", "Single result")
-        node["content"] = long_content
-
-        mock_engine.recall_search_structured.return_value = [
-            {"node": node, "score": 0.9, "source": "hybrid"},
-        ]
-
-        result = builder.build_whisper_context(
-            prompt="test",
-            min_score=0.1,
-            content_total_budget=1200,
-            content_min_per_node=100,
-            content_max_per_node=500,
-        )
-
-        # With 1 result: 1200/1 = 1200, clamped to 500
-        # Should contain at least 500 chars of content (capped at max_per_node)
-        assert "A" * 500 in result
-        # But NOT the full 600
-        assert "A" * 600 not in result
-
-    def test_many_results_get_fewer_chars(self, mock_graph):
-        """8+ results should get ~150 chars each (like current behavior)."""
-        mock_engine = MagicMock()
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-
-        nodes = []
-        for i in range(8):
-            node = _make_node_dict(f"node-{i}", f"Fact {i}")
-            node["content"] = "B" * 300
-            nodes.append(node)
-
-        mock_engine.recall_search_structured.return_value = [
-            {"node": n, "score": 0.9, "source": "hybrid"} for n in nodes
-        ]
-
-        result = builder.build_whisper_context(
-            prompt="test",
-            min_score=0.1,
-            content_total_budget=1200,
-            content_min_per_node=100,
-            content_max_per_node=500,
-        )
-
-        # With 8 results: 1200/8 = 150, clamped between 100 and 500
-        # Should contain 150 chars of content, not 300
-        assert "B" * 300 not in result
-        assert "B" * 150 in result
-
-    def test_budget_zero_uses_max_content_len(self, mock_graph):
-        """content_total_budget=0 → fall back to max_content_len."""
-        mock_engine = MagicMock()
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-
-        node = _make_node_dict("node-1", "A fact")
-        node["content"] = "C" * 300
-
-        mock_engine.recall_search_structured.return_value = [
-            {"node": node, "score": 0.9, "source": "hybrid"},
-        ]
-
-        result = builder.build_whisper_context(
-            prompt="test",
-            min_score=0.1,
-            max_content_len=150,
-            content_total_budget=0,
-        )
-
-        # Should use max_content_len=150 (budget disabled)
-        assert "C" * 150 in result
-        assert "C" * 300 not in result
-
-    def test_budget_respects_min_per_node(self, mock_graph):
-        """With many results, per-node budget should not go below min_per_node."""
-        mock_engine = MagicMock()
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-
-        nodes = []
-        for i in range(20):
-            node = _make_node_dict(f"node-{i}", f"Fact {i}")
-            node["content"] = "D" * 200
-            nodes.append(node)
-
-        mock_engine.recall_search_structured.return_value = [
-            {"node": n, "score": 0.9, "source": "hybrid"} for n in nodes
-        ]
-
-        result = builder.build_whisper_context(
-            prompt="test",
-            min_score=0.1,
-            max_nodes=20,
-            identity_max=0,
-            content_total_budget=1200,
-            content_min_per_node=100,
-            content_max_per_node=500,
-        )
-
-        # With 20 results: 1200/20 = 60, clamped to min 100
-        # Should contain at least 100 chars of content per node
-        assert "D" * 100 in result
-
-    def test_budget_with_identity_and_other_results(self, mock_graph):
-        """Budget should count both identity and non-identity results."""
-        mock_engine = MagicMock()
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-        conn = mock_graph.conn
-
-        user_node = _make_node_dict("user-1", "Self", node_type="person")
-        _insert_node(conn, user_node)
-
-        pref = _make_node_dict("pref-1", "User preference")
-        pref["content"] = "E" * 400
-        _insert_node(conn, pref)
-        conn.execute(
-            "INSERT INTO edges (source_id, target_id, edge_type, weight, created) "
-            "VALUES (?, ?, 'defines', 1.0, '2026-01-01T00:00:00Z')",
-            ("user-1", "pref-1"),
-        )
-        conn.commit()
-
-        other = _make_node_dict("fact-1", "Tech fact")
-        other["content"] = "F" * 400
-
-        mock_engine.recall_search_structured.return_value = [
-            {"node": pref, "score": 0.8, "source": "hybrid"},
-            {"node": other, "score": 0.7, "source": "hybrid"},
-        ]
-
-        result = builder.build_whisper_context(
-            prompt="test",
-            user_node_id="user-1",
-            min_score=0.1,
-            content_total_budget=1200,
-            content_min_per_node=100,
-            content_max_per_node=500,
-        )
-
-        # 2 total results → 1200/2 = 600, clamped to 500
-        # Both should have up to 500 chars, not full 400 (both under cap)
-        assert "User preference" in result
-        assert "Tech fact" in result
-
-
 def _make_settings_mock(
     whisper_reranker_min_score=0.40,
     whisper_exploration_enabled=True,
@@ -2195,3 +1954,149 @@ class TestWhisperLog:
         # The logged score is the pre-boost (CE blended), not boosted
         # We just verify a row was written — exact value depends on reranker mock
         assert logged_score >= 0.0
+
+
+class TestWhisperFlatRankedDisplay:
+    """Whisper outputs a flat ranked list — top 2 full, rest title+ID only."""
+
+    def test_top_two_nodes_shown_in_full(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            {**_make_node_dict(f"node-{i}", f"Title {i}"), "content": f"Full content for node {i}, longer than a title."}
+            for i in range(4)
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+            {"node": nodes[2], "score": 0.7, "source": "hybrid"},
+            {"node": nodes[3], "score": 0.6, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="tell me about nodes",
+            injection_gate=0.0,
+        )
+
+        # Top 2 show full content
+        assert "Full content for node 0" in result
+        assert "Full content for node 1" in result
+        # Nodes 3-4 do NOT show content
+        assert "Full content for node 2" not in result
+        assert "Full content for node 3" not in result
+
+    def test_remaining_nodes_show_title_and_id_only(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            {**_make_node_dict(f"abcd{i:04d}", f"Title {i}"), "content": f"Full content for node {i}."}
+            for i in range(4)
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+            {"node": nodes[2], "score": 0.7, "source": "hybrid"},
+            {"node": nodes[3], "score": 0.6, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="tell me about nodes",
+            injection_gate=0.0,
+        )
+
+        # Nodes 3-4 show title and ID
+        assert "Title 2" in result
+        assert "abcd0002" in result
+        assert "Title 3" in result
+        assert "abcd0003" in result
+
+    def test_all_nodes_have_node_id(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            _make_node_dict(f"nodeid{i:02d}", f"Title {i}")
+            for i in range(3)
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+            {"node": nodes[2], "score": 0.7, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="tell me about nodes",
+            injection_gate=0.0,
+        )
+
+        # All nodes show their IDs
+        assert "nodeid00" in result
+        assert "nodeid01" in result
+        assert "nodeid02" in result
+
+    def test_no_section_headers(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        # Mix of tiers and types
+        nodes = [
+            {**_make_node_dict("core-001", "Core fact", tier="core"), "content": "Some core content."},
+            {**_make_node_dict("work-001", "Working fact", tier="working"), "content": "Some working content."},
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.8, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="tell me something",
+            injection_gate=0.0,
+        )
+
+        assert "## About the User" not in result
+        assert "## Core Memories" not in result
+        assert "## Project:" not in result
+
+    def test_flat_list_preserves_search_result_order(self, mock_graph):
+        # recall_search_structured always returns results sorted by score descending.
+        # Whisper should preserve that order — first result in list = first in output.
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [
+            _make_node_dict("high-score", "High score title"),
+            _make_node_dict("low-score", "Low score title"),
+        ]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+            {"node": nodes[1], "score": 0.6, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="tell me something",
+            injection_gate=0.0,
+        )
+
+        # First result in search appears first in output
+        high_pos = result.index("High score title")
+        low_pos = result.index("Low score title")
+        assert high_pos < low_pos
+
+    def test_framing_text_updated(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        nodes = [_make_node_dict("node-x", "Some title")]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.9, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="something",
+            injection_gate=0.0,
+        )
+
+        assert "The most relevant memories are shown in full" in result
+        assert "use recall with its node ID" in result
