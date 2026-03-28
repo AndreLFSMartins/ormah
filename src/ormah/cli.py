@@ -239,6 +239,21 @@ def main():
     )
     wh_setup.set_defaults(func=cmd_whisper_setup)
 
+    # eval
+    from eval.whisper.cli import cmd_eval_whisper_run
+    ev = sub.add_parser("eval", help="Run evaluation harnesses")
+    ev_sub = ev.add_subparsers(dest="eval_cmd", required=True)
+
+    ev_wh = ev_sub.add_parser("whisper", help="Evaluate whisper pipeline quality")
+    ev_wh_sub = ev_wh.add_subparsers(dest="eval_whisper_cmd", required=True)
+
+    ev_wh_run = ev_wh_sub.add_parser("run", help="Run whisper eval against golden corpus")
+    ev_wh_run.add_argument("--category", help="Filter by category (e.g. preference, factual)")
+    ev_wh_run.add_argument("--show-failures", action="store_true", dest="show_failures",
+                           help="Print failure details")
+    ev_wh_run.add_argument("--json", action="store_true", help="Output as JSON")
+    ev_wh_run.set_defaults(func=cmd_eval_whisper_run)
+
     args = p.parse_args()
 
     if not args.cmd:
