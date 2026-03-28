@@ -2098,5 +2098,5 @@ class TestWhisperFlatRankedDisplay:
             injection_gate=0.0,
         )
 
-        assert "The 2 most relevant memories are shown in full" in result
+        assert "The most relevant memories are shown in full" in result
         assert "use recall with its node ID" in result

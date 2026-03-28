@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 _WHISPER_FRAMING = (
     "# Ormah whispers\n"
-    "The 2 most relevant memories are shown in full. The rest are titles only. "
+    "The most relevant memories are shown in full. The rest are titles only. "
     "If any memory looks relevant or interesting, use recall with its node ID "
     "to get the full content and related memories."
 )
