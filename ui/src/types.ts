@@ -18,10 +18,7 @@ export type EdgeType =
   | "contradicts"
   | "part_of"
   | "derived_from"
-  | "preceded_by"
-  | "caused_by"
   | "depends_on"
-  | "instance_of"
   | "defines"
   | "evolved_from";
 

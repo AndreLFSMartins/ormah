@@ -28,7 +28,7 @@ const ALL_TYPES: NodeType[] = [
 const ALL_EDGE_TYPES: EdgeType[] = [
   "supports", "contradicts", "part_of", "defines",
   "evolved_from", "depends_on", "derived_from",
-  "preceded_by", "caused_by", "instance_of", "related_to",
+  "related_to",
 ];
 const DEFAULT_EDGE_TYPES = new Set<EdgeType>(ALL_EDGE_TYPES);
 

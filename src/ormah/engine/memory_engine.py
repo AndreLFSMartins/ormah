@@ -67,9 +67,6 @@ _EDGE_TYPE_FACTORS: dict[str, float] = {
     "derived_from": 1.0,
     "evolved_from": 0.8,
     "related_to": 0.7,
-    "instance_of": 0.7,
-    "caused_by": 0.7,
-    "preceded_by": 0.7,
     "contradicts": 0.4,
 }
 
@@ -789,6 +786,8 @@ class MemoryEngine:
                 prompt[:80],
                 session_id,
             )
+            if _return_debug:
+                return "", []
             return ""
 
         return self.context_builder.build_whisper_context(

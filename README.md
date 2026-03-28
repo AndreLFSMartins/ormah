@@ -94,7 +94,7 @@ Memories live in three tiers:
 
 ### Edge types
 
-Nodes are connected by 11 typed edges:
+Nodes are connected by 8 typed edges:
 
 | Edge | Meaning |
 |------|---------|
@@ -105,9 +105,6 @@ Nodes are connected by 11 typed edges:
 | `evolved_from` | A belief that superseded an older one |
 | `depends_on` | Logical or practical dependency |
 | `derived_from` | One memory was extracted or synthesized from another |
-| `preceded_by` | Temporal ordering |
-| `caused_by` | Causal relationship |
-| `instance_of` | Type/instance relationship |
 | `related_to` | General semantic similarity (auto-created by embedding proximity) |
 
 ### Confidence

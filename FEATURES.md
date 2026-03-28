@@ -42,9 +42,6 @@ Memories are connected via typed **edges**:
 | `derived_from` | Synthesised from (used after consolidation) |
 | `evolved_from` | Newer version of (temporal succession) |
 | `related_to` | Semantically related |
-| `instance_of` | Is an example of a category |
-| `caused_by` | Resulted from |
-| `preceded_by` | Happened after (temporal ordering) |
 | `contradicts` | Logically incompatible with |
 
 Edges have a **weight** (0–1) and optional **reason** (LLM-generated explanation).

@@ -344,8 +344,7 @@ ADMIN_TOOLS = [
                     "type": "string",
                     "enum": [
                         "related_to", "supports", "contradicts", "part_of",
-                        "derived_from", "preceded_by", "caused_by", "depends_on",
-                        "instance_of", "defines",
+                        "derived_from", "depends_on", "defines",
                     ],
                     "description": "The type of connection.",
                     "default": "related_to",

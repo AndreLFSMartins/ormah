@@ -34,10 +34,7 @@ class EdgeType(str, Enum):
     contradicts = "contradicts"
     part_of = "part_of"
     derived_from = "derived_from"
-    preceded_by = "preceded_by"
-    caused_by = "caused_by"
     depends_on = "depends_on"
-    instance_of = "instance_of"
     defines = "defines"
     evolved_from = "evolved_from"
 

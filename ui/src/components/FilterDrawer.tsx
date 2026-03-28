@@ -20,7 +20,7 @@ const TYPES: NodeType[] = [
 const EDGE_TYPES: EdgeType[] = [
   "supports", "contradicts", "part_of", "defines",
   "evolved_from", "depends_on", "derived_from",
-  "preceded_by", "caused_by", "instance_of", "related_to",
+  "related_to",
 ];
 
 export default function FilterDrawer({
