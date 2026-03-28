@@ -15,7 +15,8 @@ def _make_engine():
     from ormah.engine.memory_engine import MemoryEngine
 
     (_EVAL_DB_DIR / "nodes").mkdir(parents=True, exist_ok=True)
-    settings = Settings(memory_dir=_EVAL_DB_DIR)
+    # Disable maintenance signal so it doesn't pollute injection_fired for noise cases
+    settings = Settings(memory_dir=_EVAL_DB_DIR, claude_maintenance_enabled=False)
     engine = MemoryEngine(settings)
     engine.startup()
     return engine
