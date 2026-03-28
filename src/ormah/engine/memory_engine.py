@@ -738,7 +738,8 @@ class MemoryEngine:
         space: str | None = None,
         recent_prompts: list[str] | None = None,
         session_id: str | None = None,
-    ) -> str:
+        _return_debug: bool = False,
+    ) -> str | tuple[str, list[str]]:
         """Get compact whisper context for involuntary recall injection."""
         return self.context_builder.build_whisper_context(
             prompt=prompt,
@@ -755,6 +756,7 @@ class MemoryEngine:
             topic_shift_enabled=self.settings.whisper_topic_shift_enabled,
             topic_shift_threshold=self.settings.whisper_topic_shift_threshold,
             session_id=session_id,
+            _return_debug=_return_debug,
         )
 
     def mark_outdated(self, node_id: str, reason: str | None = None) -> str | None:

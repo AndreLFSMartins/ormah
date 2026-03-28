@@ -200,23 +200,32 @@ class ContextBuilder:
         topic_shift_threshold: float = 0.75,
         injection_gate: float = 0.55,
         session_id: str | None = None,
-    ) -> str:
+        _return_debug: bool = False,
+    ) -> str | tuple[str, list[str]]:
         """Build compact whisper context for involuntary recall injection.
 
         Key differences from build_core_context:
         - Hard min-score threshold: results below min_score are dropped.
         - Returns empty string on failure instead of full dump.
         """
+        _injected_ids: list[str] = []
+
         if not prompt.strip():
+            if _return_debug:
+                return "", _injected_ids
             return ""
 
         # Short prompts (≤2 alphanumeric chars) are navigational ("y", "ok",
         # "...", "---") — skip search
         stripped = re.sub(r'[^a-zA-Z0-9]', '', prompt.strip())
         if len(stripped) <= 2:
+            if _return_debug:
+                return "", _injected_ids
             return ""
 
         if not self.engine:
+            if _return_debug:
+                return "", _injected_ids
             return ""
 
         # Topic-shift detection: skip injection when topic hasn't changed
@@ -236,6 +245,8 @@ class ContextBuilder:
                             / (norm_current * norm_centroid)
                         )
                         if similarity > topic_shift_threshold:
+                            if _return_debug:
+                                return "", _injected_ids
                             return ""  # same topic, skip injection
             except Exception as e:
                 logger.warning("Topic-shift detection failed, proceeding with whisper: %s", e)
@@ -251,6 +262,8 @@ class ContextBuilder:
 
         # conversational-only → inject nothing
         if intent is not None and intent.categories == ["conversational"]:
+            if _return_debug:
+                return "", _injected_ids
             return ""
 
         # identity-only → skip general search, use existing identity path below
@@ -295,6 +308,8 @@ class ContextBuilder:
             search_results = self.engine.recall_search_structured(**search_kwargs)
         except Exception as e:
             logger.warning("Whisper search failed: %s", e)
+            if _return_debug:
+                return "", _injected_ids
             return ""
 
         # Per-intent adjustments: temporal queries rely on the created_after
@@ -428,6 +443,7 @@ class ContextBuilder:
 
         # Cap to max_nodes (already ordered by relevance score, or by recency for temporal queries)
         search_results = search_results[:max_nodes]
+        _injected_ids = [r["node"]["id"] for r in search_results]
 
         # Build flat ranked list — top full_content_count get full content,
         # rest get title + type + node ID only.
@@ -539,4 +555,6 @@ class ContextBuilder:
             except Exception as e:
                 logger.warning("Review mechanism failed: %s", e)
 
+        if _return_debug:
+            return result, _injected_ids
         return result
