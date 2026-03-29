@@ -51,10 +51,11 @@ ormah.db
 # Deleted memories
 memory/deleted/
 
-# Eval scripts and snapshots (local dev only)
-scripts/eval_*.py
-scripts/eval_snapshots/
-scripts/release.sh
+# Local scripts (not part of the repo)
+scripts/
+
+# Whisper eval scratch DB (created by `ormah eval whisper run`)
+eval/whisper/eval_db/
 
 # Git worktrees
 .worktrees/
@@ -65,3 +66,4 @@ GRAPH_IMPROVEMENTS.md
 REVIEW_FINDINGS.md
 docs/plans/
 .mcp.json
+AGENTS.md
