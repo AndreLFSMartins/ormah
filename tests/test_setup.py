@@ -932,7 +932,7 @@ class TestInstallCodexAgents:
         agent_file = tmp_path / ".codex" / "agents" / "ormah-maintenance.toml"
         content = agent_file.read_text()
         assert 'name = "ormah-maintenance"' in content
-        assert 'mcp_servers = ["ormah"]' in content
+        assert 'mcp_servers = ["ormah"]' not in content
         assert 'sandbox_mode = "read-only"' in content
 
         captured = capsys.readouterr()
