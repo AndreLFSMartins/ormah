@@ -1,21 +1,29 @@
 # Ormah
 
-A whispering memory system for AI agents. Ormah gives LLM agents persistent, self-maintaining memory that lives locally on your machine, a knowledge graph that grows as you work, forgets what no longer matters, and whispers relevant context before you even ask.
+Ormah is a local-first memory system for AI agents and the humans who work with them.
 
-Runs entirely on your machine. No cloud, no subscription. Your memories never leave unless you configure an external LLM.
+The core idea is simple: memory should be involuntary. You should not have to tell your agent what to remember, what to recall, or when to go looking for context. Ormah lets your agent learn your preferences, decisions, patterns, mistakes, and ongoing work, then whisper the right context before the next prompt.
 
-The name comes from the Malayalam word ഓർമ (ormah), meaning "memory" or "remember." The system is designed around one idea: memory should be involuntary. You shouldn't have to tell your AI what to remember or what to recall. It should just know.
+Search, embeddings, storage, and retrieval run on your machine by default. Your memory stays local. Add an LLM only for the parts that require judgment, like extracting memories from transcripts or doing graph maintenance.
 
-## How it feels
+For humans, Ormah feels like your AI finally remembers.
 
-You open a new session with your AI agent. Before you type anything, it already knows your name, your preferences, the architectural decisions you made last week, and the bug you were debugging yesterday. You didn't ask for any of this. Ormah whispered it.
+For agents, Ormah is a memory substrate with whisper hooks, MCP tools, a CLI, an HTTP API, and a live graph UI.
 
-As you work, decisions get stored. Preferences get stored. That surprising bug cause gets stored. When you come back tomorrow, the context is already there. Over weeks, a knowledge graph forms: facts linked to decisions, decisions to projects, projects to people. The graph maintains itself: stale memories fade, contradictions surface, duplicates merge.
+The name comes from the Malayalam word ഓർമ (`ormah`), meaning "memory" or "remember."
 
-You can see it all in a live visualization at `localhost:8787`, a live constellation of everything your AI knows about you and your work.
+## The Whisper Experience
+
+You open a new session with your AI agent and it already knows who you are, how you like to work, what you decided last week, what went wrong yesterday, and what matters in this repo right now.
+
+You did not paste notes into the prompt. You did not ask it to "recall." You did not even have to know that the missing piece of context existed. Ormah whispered it before the model ever saw your message.
+
+Over time, your agent learns more about you: what you prefer, what you believe, what you dislike, where you tend to make mistakes, which patterns keep repeating, which decisions still matter, and which ones no longer do. That context comes back when it is useful, not when you remember to ask for it.
+
+And when you want to see what your agent actually knows, you can open the graph at `http://localhost:8787` and inspect it directly.
 
 <p align="center">
-  <img src="docs/graph.png" alt="Ormah knowledge graph — 1013 nodes" width="100%">
+  <img src="docs/graph.png" alt="Ormah knowledge graph" width="100%">
 </p>
 
 ## Install
@@ -24,63 +32,92 @@ You can see it all in a live visualization at `localhost:8787`, a live constella
 bash <(curl -fsSL https://ormah.me/install.sh)
 ```
 
-`ormah setup` handles everything:
+One command gets you to a working setup.
 
-1. Detects available API keys and prompts for LLM provider (Anthropic, OpenAI, Google, Ollama, or none)
-2. Starts the server and configures it to auto-start on login (launchd on macOS, systemd on Linux)
-3. Installs into `~/.claude/`: ormah instructions into `CLAUDE.md`, background maintenance agent at `~/.claude/agents/ormah-maintenance.md`, and `/ormah-maintenance` slash command at `~/.claude/commands/ormah-maintenance.md`
-4. Registers with supported clients: Claude Code, Claude Desktop (macOS only), and any MCP-compatible tool
+`ormah setup` will:
 
-All paths are resolved to absolutes; hooks work in any terminal, no venv activation required.
+1. Start the Ormah server and install auto-start so it runs in the background on login (`launchd` on macOS, `systemd` on Linux)
+2. Preload the local embedding models Ormah uses for search and whisper retrieval
+3. Detect supported clients and wire them up automatically:
+   - Claude Code: whisper hooks, MCP tools, instructions, maintenance agent, slash command
+   - Codex: whisper hooks, MCP tools, instructions, maintenance agent
+   - Claude Desktop (macOS): MCP tools
+4. Offer transcript backfill for Claude Code so you can bootstrap memory from earlier sessions
 
-No API key required for core functionality — embeddings and search run entirely locally. An LLM is only needed for background maintenance jobs, and Claude Code itself can serve that role (see [LLM configuration](#llm-configuration)).
+If Claude Code, Codex, or Claude Desktop are already installed, Ormah connects itself to them automatically.
 
-## The whisper system
+No API key is required for local search, embeddings, storage, graph UI, or whisper retrieval. LLM-backed features like transcript extraction and graph maintenance can use a configured provider, and supported coding agents can help with maintenance without a separate LLM API key. Automatic transcript extraction still uses the configured LLM path.
 
-This is the core of ormah: involuntary memory injection and extraction.
+## Why the whisper matters
 
-Whisper exposes its retrieval via `POST /agent/whisper`, so any tool with pre-prompt hooks can tap into it. `ormah setup` handles hook wiring automatically. The underlying retrieval is tool-agnostic.
+This is the thing Ormah is built around.
 
-### Whisper inject (before every prompt)
+Before the model sees your prompt, Ormah decides what from your memory graph matters right now and quietly prepends just that context. Not a dashboard you have to open. Not a note you have to remember to paste. A whisper.
 
-When you type a prompt, ormah intercepts it and decides what memories are relevant, before the LLM ever sees your message. The process:
+You usually never see it. Your agent just knows.
 
-1. **Intent classification**: The query is compared against four named archetypes — `temporal`, `identity`, `continuation`, and `conversational` — using embedding similarity. Temporal queries ("what did I do last week") trigger dynamic phrase extraction ("last 4 days", "past 2 weeks") and rolling window logic, with time phrases stripped from the query before semantic search runs. Identity queries ("what's my preference for...") route to the user node. Each archetype activates a different retrieval strategy.
+Whisper is available three ways:
 
-2. **Hybrid search**: Candidates are retrieved using hybrid search, blending semantic and keyword matching into a single ranked list.
+- Hooks: `ormah setup` wires supported clients to run whisper automatically before each prompt
+- CLI: `ormah whisper inject` and `ormah whisper store`
+- HTTP: `POST /agent/whisper`
 
-3. **Spreading activation**: Direct search hits are seeds. The system walks the knowledge graph along typed edges, surfacing related memories that don't match the query directly. Stronger relationship types carry more weight.
+### Whisper inject
 
-4. **Cross-encoder reranking**: A second model rescores candidates, blending precision ranking with semantic similarity to prevent over-filtering.
+`ormah whisper inject` is the pre-prompt path.
 
-5. **Topic shift detection**: If the conversation hasn't shifted direction, recently-injected context is skipped. No point whispering the same thing twice.
+Before every prompt, Ormah:
 
-6. **Injection gate**: Only memories that clear a relevance threshold make the cut. Silence is better than noise.
+1. Classifies the prompt intent
+2. Runs hybrid retrieval across semantic search and keyword search
+3. Spreads from direct hits across the graph to find related context
+4. Reranks candidates for precision
+5. Avoids repeating recently-whispered context when the topic has not shifted
+6. Applies a relevance gate so silence beats noise
 
-The result is a block of relevant context prepended to your conversation as system context. You never see it unless you look.
+The result is a compact block of context added before the model sees your message.
 
-### Whisper store (on conversation end)
+### Whisper store
 
-When a session compacts or ends, ormah extracts memorable information from the transcript (decisions, preferences, facts, corrections) via LLM and stores them as new memories. Deduplication runs against existing memories to avoid redundancy.
+`ormah whisper store` is the post-conversation path.
+
+When a session compacts, ends, or reaches a configured extraction interval, Ormah can read the transcript, extract durable memories, deduplicate them, and add them to the graph. This is how your agent gradually learns your preferences, decisions, corrections, facts, and patterns over time.
+
+Automatic transcript extraction uses an LLM. If you do not want that, Ormah still works as a local memory system and you can store memories explicitly with `remember` or `ormah remember`.
+
+## The graph UI
+
+Open `http://localhost:8787` and you can see the memory graph as a live force-directed visualization instead of treating memory as a black box.
+
+The graph is not just decoration. It lets you inspect what the system knows, how memories connect, what is becoming central, and where contradictions or belief changes are forming.
+
+The UI includes:
+
+- Search with graph highlighting
+- Filters for tier, type, space, and edge type
+- A node detail panel with metadata and connections
+- An insights view for contradictions and belief evolution
+- A review queue for proposed merges and conflicts
+- An admin panel for running or pausing background jobs
+
+Identity-related nodes are rendered in teal, so your self node and the memories it defines are easy to spot.
 
 ## The knowledge graph
 
-Memories aren't isolated records. They're nodes in a typed knowledge graph.
+Ormah stores memories as typed nodes connected by typed edges.
 
 ### Node types
 
-Every memory has a type that determines how it's stored, retrieved, and maintained:
-
 | Type | What it captures |
 |------|-----------------|
-| `fact` | Objective information ("caffeine has a half-life of about 5 hours") |
-| `decision` | Choices and their reasoning ("went async-first because the team is spread across time zones") |
-| `preference` | User preferences ("prefers written summaries over long meetings") |
-| `event` | Things that happened ("shipped the redesign on March 5th") |
-| `person` | People and their roles ("Alice, the design lead, based in Berlin") |
+| `fact` | Objective information |
+| `decision` | Choices and their reasoning |
+| `preference` | User preferences and working style |
+| `event` | Things that happened |
+| `person` | People and their roles |
 | `project` | Project metadata and context |
 | `concept` | Abstract ideas and mental models |
-| `procedure` | How-to knowledge ("to prep for the weekly: pull metrics then draft the agenda") |
+| `procedure` | How-to knowledge |
 | `goal` | Objectives and intentions |
 | `observation` | Patterns and insights noticed over time |
 
@@ -88,243 +125,194 @@ Every memory has a type that determines how it's stored, retrieved, and maintain
 
 Memories live in three tiers:
 
-- **Core**: Always loaded into context. Your identity, key preferences, critical decisions. Capped at 50 nodes to keep context tight.
-- **Working**: Active project memories. Searchable, subject to decay. This is where most memories live.
-- **Archival**: Faded memories. Low retrieval priority, but still searchable. Old working memories naturally migrate here.
+- `core`: the highest-priority long-lived memories. This is where identity and the most durable facts tend to live. Ormah enforces a cap so core stays tight.
+- `working`: active memories for current projects, ongoing collaboration, and recently useful context
+- `archival`: faded but still searchable history
+
+`get_self` does not dump every identity memory into context. It returns a compact identity profile, prioritising the most useful memories first.
 
 ### Edge types
-
-Nodes are connected by 8 typed edges:
 
 | Edge | Meaning |
 |------|---------|
 | `supports` | Evidence or reasoning that strengthens another memory |
 | `contradicts` | A tension or disagreement between two beliefs |
-| `part_of` | Hierarchical containment (feature is part_of project) |
-| `defines` | Identity edges (user node → preference/trait nodes) |
-| `evolved_from` | A belief that superseded an older one |
+| `part_of` | Hierarchical containment |
+| `defines` | Identity edges from the self node to preferences and traits |
+| `evolved_from` | A newer belief superseded an older one |
 | `depends_on` | Logical or practical dependency |
-| `derived_from` | One memory was extracted or synthesized from another |
-| `related_to` | General semantic similarity (auto-created by embedding proximity) |
+| `derived_from` | One memory was synthesized from another |
+| `related_to` | General semantic relatedness |
 
 ### Confidence
 
-Every memory carries a confidence score (0.0–1.0) representing belief strength. A fact read from documentation gets 1.0. Something inferred from a single conversation might get 0.7. Confidence affects retrieval ranking; uncertain memories surface less prominently.
+Every memory carries a confidence score from `0.0` to `1.0`. Confident memories rank higher. Uncertain memories stay searchable but are surfaced more carefully.
 
 ### Spaces
 
-Memories are automatically scoped to the project you're working in (detected from the git repo name). Cross-project recall still works: current project memories rank highest, then global memories (identity, preferences), then other projects. You never have to manage this manually.
+Memories are automatically scoped to the project you are working in, usually from the git repo name. Current-project memories rank highest, then global identity memories, then other spaces.
 
-## Hippocampus
+## Bring your notes with Hippocampus
 
-The hippocampus is ormah's file watcher, a way to feed it from your existing knowledge without any manual effort.
+Hippocampus is Ormah's file watcher.
 
-Point it at directories containing markdown files and it automatically extracts memories from them. As you add or edit files, the graph updates in seconds. Useful for:
+Point it at directories full of markdown and it will ingest them into memory automatically. This is useful for:
 
-- **Obsidian / Notion exports / personal knowledge bases**: your notes become memories
-- **Journals and half-formed thoughts**: things you wrote down but never explicitly "remembered"
-- **Project documentation**: decision logs, ADRs, notes that should inform your AI context
-- **Past conversations**: exported chat logs saved as markdown
+- Obsidian vaults and note exports
+- Project docs and ADRs
+- Journals and scratch notes
+- Archived chat transcripts
 
-### How it works
+It does a catch-up scan on startup, then watches for changes in real time.
 
-On startup, hippocampus does a catch-up scan of every configured directory: any file it hasn't seen before (or that has changed since last time) gets ingested. Then it watches in real time: create or modify a `.md` file and ormah ingests it within 2 seconds.
-
-Hash-based change detection means unchanged files are never re-processed, even across restarts. State is persisted in a `.hippocampus_state` file inside each watched directory.
-
-Space is auto-detected from the git repo the file lives in (falls back to the parent directory name), so notes in a project folder are scoped to that project automatically.
-
-### Configuration
+### Hippocampus configuration
 
 ```env
 # Comma-separated list of directories to watch
 ORMAH_HIPPOCAMPUS_WATCH_DIRS=~/notes,~/obsidian/vault,~/Documents/journal
 
-# Debounce delay before ingesting a changed file (default: 2s)
+# Debounce delay before ingesting a changed file
 ORMAH_HIPPOCAMPUS_DEBOUNCE_SECONDS=2.0
 
-# Glob patterns to exclude (comma-separated)
+# Glob patterns to exclude
 ORMAH_HIPPOCAMPUS_IGNORE_PATTERNS=**/templates/**,**/.trash/**
 
 # Disable entirely
 ORMAH_HIPPOCAMPUS_ENABLED=false
 ```
 
-You can also trigger a manual scan from the admin panel at `localhost:8787` without restarting the server.
+You can also trigger a manual scan from the admin panel.
 
 ## Self-maintenance
 
-Ormah runs 8 background jobs that keep the knowledge graph healthy without human intervention:
+Ormah does not just collect memories. It keeps the graph healthy.
 
-**Auto-linker**: Finds semantically similar memories and creates typed edges between them. LLM-confirmed: the model decides whether two memories are truly related and what edge type fits. Cross-space pairs face a similarity penalty to avoid spurious links.
+Background jobs:
 
-**Conflict detector**: Identifies contradictions between memories and distinguishes between *evolutions* (your view changed over time; the newer belief supersedes the older) and *tensions* (genuinely incompatible beliefs held simultaneously). Creates `evolved_from` or `contradicts` edges accordingly.
+- link related memories
+- detect contradictions and belief evolution
+- merge near-duplicates
+- score importance from access, centrality, and recency
+- decay stale memories with FSRS-style retrievability
+- consolidate overlapping working memories
+- assign spaces to orphaned memories
+- refresh indexes incrementally
 
-**Duplicate merger**: Finds near-duplicate memories and merges them automatically, keeping the knowledge graph free of redundancy.
+### Agent-in-the-loop maintenance
 
-**Importance scorer**: Recomputes importance from three dynamic signals: access frequency (how often a memory is used), edge centrality (how connected it is), and recency. Memories that are frequently accessed, well-connected, and recently touched score highest.
+Some maintenance decisions need judgment. Ormah can delegate those to the agent you are already using.
 
-**Decay manager**: Implements **FSRS (Free Spaced Repetition Scheduler)** for memory. New memories decay quickly unless accessed; each access strengthens stability. When retrievability drops low enough and importance is low, the memory demotes from working to archival. High-importance memories are protected.
+Supported today:
 
-**Consolidator**: Clusters similar working-tier memories and merges redundant clusters via LLM. Keeps the working tier lean.
+- Claude Code
+- Codex
 
-**Auto-cluster**: Assigns unspaced memories to a project space via neighbor majority vote. If most of a memory's connections belong to project X, the memory probably belongs there too.
+More first-class agent integrations are planned.
 
-**Index updater**: Runs every minute. Incrementally updates the full-text and vector indexes for any nodes created or modified since the last run. Keeps search results fresh without a full rebuild.
+When maintenance is enabled, whisper can append a `maintenance_due` signal. The installed `ormah-maintenance` agent can then run the two-call `run_maintenance` flow in the background without interrupting normal conversation.
 
-### Claude-in-the-loop maintenance
+You can also trigger maintenance manually:
 
-Background jobs use an LLM to make linking, conflict, merge, and consolidation decisions. If you don't have a separate API key, you can use Claude Code itself as the intelligence layer.
+- Claude Code: `/ormah-maintenance`
+- Codex: the installed `ormah-maintenance` agent
 
-This is one of ormah's most distinctive capabilities: Claude Code silently manages your memory graph in the background, without interrupting your conversation.
+`run_maintenance` uses a two-step flow:
 
-Enable it during `ormah setup` (or set `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` in `~/.config/ormah/.env`). When enabled, the whisper context includes an `unprocessed_memories: N` signal when recently-added unlinked nodes exceed a threshold.
-
-When Claude detects this signal, it silently spawns a dedicated **ormah-maintenance background agent** — a custom Claude Code subagent installed by `ormah setup` into `~/.claude/agents/`. The agent runs the two-call `run_maintenance` protocol autonomously in the background without interrupting your conversation.
-
-You can also trigger it manually with the `/ormah-maintenance` slash command (also installed by `ormah setup` into `~/.claude/commands/`).
-
-`run_maintenance` uses a two-call protocol:
-
-**Phase 1** — call with no arguments to get pending work:
-- `link_candidates`: node pairs to classify with a relationship type
-- `conflict_candidates`: belief pairs to check for contradictions or evolutions
-- `merge_candidates`: near-duplicate pairs to collapse
-- `consolidation_clusters`: groups of related nodes to synthesize into one
-
-**Phase 2** — analyze the batches in-context, then call again with your decisions:
-```
-run_maintenance(results={
-  edges: [{node_a_id, node_b_id, edge_type, reason}],   // use "none" to skip
-  merges: [{keep_id, discard_id, merged_title, merged_content}],
-  consolidations: [{node_ids, title, content, type}]
-})
-```
-
-Claude Code Pro/Max users get this for free — no API key needed, Claude is the LLM.
-
-## The graph UI
-
-Open `http://localhost:8787` to see your knowledge graph rendered as a live force-directed visualization.
-
-The graph is a constellation, a window into the shape of your knowledge. Nodes are colored by tier (warm gold for core, dark gray for working, dashed borders for archival). The self node (your identity) glows green at the center, with `defines` edges radiating out to your preferences and traits.
-
-Edges are colored by type: green for `supports`, red for `contradicts`, purple for `evolved_from`. Hover over any node to see its neighborhood light up. Drag nodes and watch the graph respond with elastic physics.
-
-The UI includes:
-- **Search**: Hybrid search with graph highlighting. Results glow in the graph as you navigate them.
-- **Filter drawer**: Filter by tier, node type, space, and edge type.
-- **Node detail panel**: Click any node to see its full content, connections, metadata, and history.
-- **Insights panel**: Belief evolutions and active contradictions detected by the system.
-- **Review queue**: Pending conflicts and belief tensions flagged by the system.
-- **Admin panel**: Pause, resume, or manually trigger background jobs.
+1. Call it with no arguments to get four batches: link candidates, conflict candidates, merge candidates, and consolidation clusters.
+2. Call it again with your decisions to apply new edges, merges, and consolidations.
 
 ## Integrations
 
-Ormah is designed to work with any LLM agent through multiple integration points:
+Ormah is designed to work with both humans and agents through several surfaces.
 
-### MCP (Model Context Protocol)
+### Supported clients today
 
-Any MCP-compatible client gets 5 focused tools:
+- Claude Code: hooks, MCP, transcript backfill, session watcher support, maintenance agent
+- Codex: hooks, MCP, maintenance agent
+- Claude Desktop (macOS): MCP
+- Any MCP-compatible client: memory tools
+- Any local tool that can make HTTP requests: direct API access
 
-| Tool | What it does |
-|------|-------------|
-| `remember` | Store a memory with type, tier, confidence, tags, and space. Set `about_self: true` for identity memories. Pass `links` to explicitly connect the new memory to existing nodes at store time. |
-| `recall` | Search by natural language. Hybrid search with spreading activation. Filterable by type, space, tags, and date range. |
-| `get_self` | Get the user's identity profile: all memories linked via `defines` edges from the user node. Triggers onboarding nudge on first use if identity is empty. |
-| `mark_outdated` | Demote a memory as no longer valid. Optionally provide a reason. Heavily deprioritized in future searches. |
-| `run_maintenance` | Claude-in-the-loop graph maintenance. See below. |
+### MCP
+
+Primary MCP tools:
+
+- `remember`
+- `recall`
+- `get_self`
+- `mark_outdated`
+- `submit_feedback`
+- `run_maintenance`
+
+This is the main agent-facing surface for durable memory operations.
 
 ### HTTP API
 
-The full API runs at `localhost:8787`:
+The API runs at `http://localhost:8787`.
 
-- **Agent endpoints** (`/agent/*`): remember, recall, whisper, context, identity, connect (manual edge creation)
-- **Admin endpoints** (`/admin/*`): job control (pause, resume, run), index rebuild, stats
-- **Ingest endpoints** (`/ingest/*`): conversation and file ingestion
-- **UI endpoints** (`/ui/*`): graph data, node details, search, insights
+- `/agent/*`: remember, recall, whisper, self, feedback, maintenance
+- `/admin/*`: job control, stats, review actions
+- `/ingest/*`: conversation and file ingestion
+- `/ui/*`: graph data, search, node details, insights
 
-Any tool that can make HTTP requests can use ormah as a memory backend.
+### CLI
 
-### OpenAI function-calling
+The CLI is useful both for direct use and for hook-driven automation.
 
-Any agent using the OpenAI SDK can use ormah via the OpenAI function-calling adapter. Tools are exposed in OpenAI format, enabling integration with any OpenAI SDK-compatible framework without any additional configuration.
+```bash
+ormah setup                     # one-shot setup
+ormah uninstall                 # remove integrations and data
 
-### Hooks
+ormah server start              # start server in foreground
+ormah server start -d           # start server as a background service
+ormah server stop               # stop background service
+ormah server status             # check if the server is running
 
-The whisper system uses pre-prompt hooks for involuntary memory injection. Any tool with hook support can call `POST /agent/whisper` to get context-aware memory retrieval. See the [Claude Code](#claude-code) section for the current out-of-the-box integration.
+ormah remember "..."            # store a memory
+ormah recall "query"            # search memories
+ormah self                      # show identity profile
+ormah node <id>                 # inspect a specific memory
+ormah outdated <id>             # mark a memory as outdated
+ormah stats                     # show store statistics
 
-## Claude Code
+ormah ingest <file>             # ingest a conversation log
+ormah ingest-session <path>     # ingest a Claude Code JSONL transcript
 
-Ormah has deep integration with Claude Code today. Support for other tools (Cursor, Windsurf, etc.) is planned.
+ormah whisper inject            # pre-prompt whisper hook
+ormah whisper store             # transcript extraction hook
 
-### Using Claude Code as the LLM
-
-Claude Code Pro/Max users can use Claude Code itself as the intelligence layer for all background maintenance jobs — no separate API key needed. Enable during `ormah setup` or set `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` in `~/.config/ormah/.env`. See [Claude-in-the-loop maintenance](#claude-in-the-loop-maintenance) for details.
-
-### Whisper hooks
-
-`ormah setup` registers three Claude Code hooks automatically:
-
-- **UserPromptSubmit**: Runs `ormah whisper inject` before every prompt. Retrieves relevant memories and injects them as additional context. 10s timeout, fails silently if the server is down.
-- **PreCompact**: Runs `ormah whisper store` before session compaction. Extracts memorable information from the transcript via LLM.
-- **SessionEnd**: Runs `ormah whisper store` on session close. Final memory extraction.
-
-### Session backfill
-
-New users face a cold start problem: whisper is most useful when memories exist, but you start with an empty graph. During `ormah setup`, ormah discovers your existing Claude Code transcripts in `~/.claude/projects/` and offers to backfill:
-
-- Scans all historical transcripts, filters by minimum turn count
-- Lets you choose scope: last 20 sessions, last 15% of sessions, all, or skip
-- Shows an estimated cost in dollars (e.g. "Estimated cost: $0.42") before proceeding for paid LLM providers
-- Ingests with deduplication so re-running is safe
-
-### Session watcher
-
-Disabled by default. Set `ORMAH_SESSION_WATCHER_ENABLED=true` to have ormah continuously monitor `~/.claude/projects/` for new transcripts and auto-ingest them. This captures memories from every session going forward without manual intervention. Configurable debounce (60s), minimum turn count (5), and lookback window (72h) on startup.
-
-## CLI
-
-```
-ormah setup                    # One-shot setup (hooks, MCP, server)
-ormah uninstall                # Remove all integrations, data, and the package
-ormah uninstall -y             # Same, skip confirmation prompts
-
-ormah server start             # Start server (foreground)
-ormah server start -d          # Start as daemon (launchd on macOS, systemd on Linux)
-ormah server stop              # Stop daemon
-ormah server status            # Check if running
-
-ormah recall <query>           # Search memories
-ormah remember <text>          # Store a memory
-ormah context [--task HINT]    # Get context (for piping into prompts)
-ormah node <id>                # Inspect a specific memory
-ormah self                     # Show your identity profile
-ormah outdated <id>            # Mark a memory as outdated
-ormah stats                    # Show memory store statistics
-ormah ingest <file>            # Ingest a conversation log
-ormah ingest-session <path>    # Ingest a JSONL transcript
-
-ormah whisper inject           # Hook: inject memories into current prompt
-ormah whisper store            # Hook: extract and store from transcript
-
-ormah mcp                      # Run MCP stdio server
+ormah mcp                       # run MCP stdio server
 ```
 
-Key flags:
-- `recall`: `--limit N`, `--types TYPE,...`, `--json`, `--space NAME`
-- `ingest-session`: `--dry-run` (extract but don't store), `--min-turns N`
-- Most commands accept `--space NAME` to override auto-detection
+### OpenAI function calling
 
-## LLM configuration
+If you are building on the OpenAI SDK, Ormah also exposes tool schemas in OpenAI-compatible format.
 
-Background jobs (auto-linker, conflict detector, duplicate merger, consolidator) use an LLM. Four provider modes:
+## LLM-backed features
 
-### Claude Code (no API key required)
+Local retrieval does not need an API key. LLM-backed features are:
 
-Claude Code Pro/Max users can skip external LLM configuration entirely. Enable Claude-in-the-loop maintenance during `ormah setup` and Claude Code will handle graph maintenance automatically as a background agent. No additional env vars needed.
+- transcript and conversation extraction
+- graph maintenance decisions
+- consolidation and conflict classification
 
-### Ollama (local, no API key)
+You can run those features in different ways.
+
+### Agent-backed maintenance
+
+Ormah can use a supported coding agent for maintenance without a separate LLM API key.
+
+Today that means Claude Code and Codex.
+
+Enable the maintenance signal during `ormah setup` or set:
+
+```env
+ORMAH_CLAUDE_MAINTENANCE_ENABLED=true
+```
+
+This covers maintenance decisions, not transcript extraction.
+
+### Ollama
 
 ```bash
 ollama pull llama3.2
@@ -336,34 +324,37 @@ ORMAH_LLM_MODEL=llama3.2
 ORMAH_LLM_BASE_URL=http://localhost:11434
 ```
 
-### LiteLLM (any cloud provider)
+### LiteLLM
 
-Use any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers): Anthropic, OpenAI, Google, Azure, Bedrock, and more. LiteLLM is included in the default install.
+Use any provider supported by LiteLLM.
 
-**Anthropic:**
+Anthropic:
+
 ```env
 ORMAH_LLM_PROVIDER=litellm
 ORMAH_LLM_MODEL=claude-haiku-4-5-20251001
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-**OpenAI:**
+OpenAI:
+
 ```env
 ORMAH_LLM_PROVIDER=litellm
 ORMAH_LLM_MODEL=gpt-4o-mini
 OPENAI_API_KEY=sk-...
 ```
 
-**Google Gemini:**
+Google Gemini:
+
 ```env
 ORMAH_LLM_PROVIDER=litellm
 ORMAH_LLM_MODEL=gemini/gemini-2.0-flash
 GEMINI_API_KEY=...
 ```
 
-### None (disable LLM jobs)
+### None
 
-Background jobs that need an LLM skip gracefully. Embedding-based similarity still works for search and auto-linking, but no edges, conflict detections, or merges are created without LLM confirmation.
+If you disable the LLM provider entirely, Ormah still works for local storage, search, whisper retrieval, MCP, CLI, and the graph UI. Automatic extraction and LLM-backed maintenance decisions will be unavailable.
 
 ```env
 ORMAH_LLM_PROVIDER=none
@@ -371,7 +362,7 @@ ORMAH_LLM_PROVIDER=none
 
 ## Configuration
 
-Ormah is configured via environment variables (prefixed `ORMAH_`) loaded from `~/.config/ormah/.env` and local `.env` overrides.
+Ormah reads `ORMAH_*` environment variables from `~/.config/ormah/.env` and local `.env` overrides.
 
 Key settings:
 
@@ -379,63 +370,61 @@ Key settings:
 # Server
 ORMAH_PORT=8787
 
-# Embeddings (local FastEmbed/ONNX by default — no API key, runs offline)
+# Embeddings (local by default)
 ORMAH_EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
 ORMAH_EMBEDDING_DIM=768
 
 # Search tuning
-ORMAH_FTS_WEIGHT=0.4               # Full-text search weight in RRF
-ORMAH_VECTOR_WEIGHT=0.6            # Vector similarity weight in RRF
-ORMAH_SIMILARITY_THRESHOLD=0.4     # Minimum score to return
+ORMAH_FTS_WEIGHT=0.4
+ORMAH_VECTOR_WEIGHT=0.6
+ORMAH_SIMILARITY_THRESHOLD=0.4
 
 # Whisper
-ORMAH_WHISPER_MAX_NODES=8          # Max memories injected per prompt
-ORMAH_WHISPER_INJECTION_GATE=0.55  # Min score to justify injection
+ORMAH_WHISPER_MAX_NODES=8
+ORMAH_WHISPER_INJECTION_GATE=0.55
 ORMAH_WHISPER_RERANKER_ENABLED=true
 
 # FSRS decay
-ORMAH_FSRS_INITIAL_STABILITY=1.0   # Days; new nodes decay fast
-ORMAH_FSRS_DECAY_THRESHOLD=0.3     # Retrievability below this = decay candidate
-ORMAH_FSRS_STABILITY_GROWTH=1.5    # Multiplier on access
-ORMAH_FSRS_MAX_STABILITY=365.0     # Cap at 1 year
+ORMAH_FSRS_INITIAL_STABILITY=1.0
+ORMAH_FSRS_DECAY_THRESHOLD=0.3
+ORMAH_FSRS_STABILITY_GROWTH=1.5
+ORMAH_FSRS_MAX_STABILITY=365.0
 
 # Background job intervals
 ORMAH_AUTO_LINK_INTERVAL_MINUTES=1440
 ORMAH_DECAY_INTERVAL_HOURS=24
 ORMAH_CONFLICT_CHECK_INTERVAL_MINUTES=1440
 
-# Tier limits
+# Core cap
 ORMAH_CORE_MEMORY_CAP=50
 
-# Space detection override (default: auto-detected from git repo)
+# Space detection override
 # ORMAH_SPACE=my-project
 
-# Session watcher (disabled by default; enable to auto-ingest all future Claude Code sessions)
+# Session watcher (Claude Code transcripts)
 ORMAH_SESSION_WATCHER_ENABLED=false
 ```
 
-See `config.py` for the full list of ~100 configurable parameters.
-
 ## Architecture
 
-```
+```text
 ormah/
-  engine/          # MemoryEngine facade, context builder, whisper, tier management
-  index/           # SQLite + sqlite-vec: FTS5, vector store, graph edges, schema
-  store/           # Markdown file storage (source of truth) + file watcher
-  embeddings/      # Hybrid search, RRF fusion, cross-encoder reranking
-  background/      # APScheduler jobs: linker, decay, conflicts, consolidation
-  adapters/        # MCP adapter, CLI adapter, OpenAI adapter, space detection
-  agents/          # Claude Code background agent definition (ormah-maintenance)
-  commands/        # Claude Code slash command definition (/ormah-maintenance)
-  api/             # FastAPI routes: agent, admin, ingest, UI, WebSocket
-  models/          # Pydantic models: MemoryNode, EdgeType, Tier
-  transcript/      # Conversation transcript parser
+  engine/          # memory engine, whisper, tiering, maintenance logic
+  index/           # SQLite + vector + graph data
+  store/           # markdown file store and watchers
+  embeddings/      # hybrid retrieval and reranking
+  background/      # jobs for linking, decay, conflicts, consolidation
+  adapters/        # CLI, MCP, OpenAI, space detection
+  agents/          # maintenance agent definitions
+  commands/        # slash commands
+  api/             # FastAPI routes for agents, admin, ingest, UI
+  models/          # pydantic models
+  transcript/      # session transcript parsing
 
-ui/                # React + TypeScript + Cytoscape.js graph visualization
+ui/                # React + TypeScript graph UI
 ```
 
-Memories are stored as markdown files with YAML frontmatter in `~/.local/share/ormah/memory/nodes/`, human-readable, git-friendly, and portable. The SQLite database is a derived index — if it's ever lost or corrupted, it can be fully rebuilt from the markdown files.
+Memories are stored as markdown files with YAML frontmatter in `~/.local/share/ormah/memory/nodes/`. The SQLite database is a derived index and can be rebuilt from the markdown source of truth.
 
 ## Development
 
