@@ -239,6 +239,7 @@ Primary MCP tools:
 
 - `remember`
 - `recall`
+- `recall_node` — fetch full content and connections for a specific memory by ID
 - `get_self`
 - `mark_outdated`
 - `submit_feedback`

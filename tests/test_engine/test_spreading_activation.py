@@ -1,7 +1,5 @@
 """Tests for spreading activation in recall."""
 
-from datetime import datetime, timezone
-
 from ormah.engine.traversal import format_search_results
 from ormah.models.node import (
     ConnectRequest,
@@ -212,4 +210,24 @@ def test_merged_sort_order(engine):
     scores = [(r["node"]["id"], r["score"]) for r in enriched]
     neighbor_pos = next(i for i, (nid, _) in enumerate(scores) if nid == neighbor_id)
     low_pos = next(i for i, (nid, _) in enumerate(scores) if nid == low_hit)
-    assert neighbor_pos < low_pos, f"Activated neighbor should rank above low-score direct hit"
+    assert neighbor_pos < low_pos, "Activated neighbor should rank above low-score direct hit"
+
+
+def test_spread_activation_honors_total_limit(engine):
+    """Activated results compete within the requested total result budget."""
+    low_hit = _remember(engine, "Low relevance node")
+    seed_id = _remember(engine, "High relevance seed")
+    neighbor_id = _remember(engine, "Well-connected neighbor")
+    _connect(engine, seed_id, neighbor_id, EdgeType.supports, weight=0.95)
+
+    results = [
+        _make_result(engine, seed_id, score=0.9),
+        _make_result(engine, low_hit, score=0.05),
+    ]
+    enriched = _filter_user_node(engine._spread_activation(results, limit=2), engine)
+
+    ids = [r["node"]["id"] for r in enriched]
+    assert len(enriched) == 2
+    assert seed_id in ids
+    assert neighbor_id in ids
+    assert low_hit not in ids

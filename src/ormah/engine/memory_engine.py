@@ -9,6 +9,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from ormah.config import Settings
 from ormah.engine.context_builder import ContextBuilder
@@ -985,8 +986,6 @@ class MemoryEngine:
 
             # Remap edges: point removed→kept (skip self-loops and duplicates)
             # Done AFTER index_single since that wipes and rebuilds edges for kept node.
-            from ormah.models.node import Connection, EdgeType
-
             affected_node_ids: set[str] = set()
             for edge in original_edges:
                 new_source = kept.id if edge["source_id"] == removed.id else edge["source_id"]
@@ -1625,7 +1624,7 @@ class MemoryEngine:
         merged = results + activated_results
         merged.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-        return merged
+        return merged[:limit]
 
     def _get_hybrid_search(self):
         if self._hybrid_search is not None:

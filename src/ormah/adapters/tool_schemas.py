@@ -1,11 +1,29 @@
 """Canonical tool definitions shared across MCP and OpenAI adapters.
 
 TOOLS: The core set of tools exposed via MCP to AI agents (7 tools).
-ADMIN_TOOLS: Tools for human administration via CLI/API only (9 tools).
+ADMIN_TOOLS: Tools for human administration via CLI/API only (7 tools).
 ALL_TOOLS: Combined list for adapters that want the full set.
 """
 
 from __future__ import annotations
+
+_RECALL_NODE_TOOL = {
+    "name": "recall_node",
+    "description": (
+        "Get a specific memory by its ID, including its connections to other memories. "
+        "Use this to dive deeper into a memory found via search."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "node_id": {
+                "type": "string",
+                "description": "The UUID of the memory to retrieve.",
+            },
+        },
+        "required": ["node_id"],
+    },
+}
 
 TOOLS = [
     {
@@ -131,6 +149,7 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    _RECALL_NODE_TOOL,
     {
         "name": "get_self",
         "description": (
@@ -214,7 +233,7 @@ TOOLS = [
             "  - edges: list of {node_a_id, node_b_id, edge_type, reason} — use 'none' to skip\n"
             "  - merges: list of {keep_id, discard_id, merged_content, merged_title}\n"
             "  - consolidations: list of {node_ids, title, content, type}\n\n"
-            "Use when get_context signals unprocessed_memories. "
+            "Use when whisper or another Ormah signal indicates maintenance is due. "
             "No separate API key needed — the calling LLM performs the analysis."
         ),
         "parameters": {
@@ -285,23 +304,6 @@ TOOLS = [
 # Admin tools — available via CLI and HTTP API but not exposed to AI agents via MCP.
 # These are for human review and administration of the memory system.
 ADMIN_TOOLS = [
-    {
-        "name": "recall_node",
-        "description": (
-            "Get a specific memory by its ID, including its connections to other memories. "
-            "Use this to dive deeper into a memory found via search."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "node_id": {
-                    "type": "string",
-                    "description": "The UUID of the memory to retrieve.",
-                },
-            },
-            "required": ["node_id"],
-        },
-    },
     {
         "name": "update_memory",
         "description": (
