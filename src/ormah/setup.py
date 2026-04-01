@@ -218,7 +218,6 @@ def configure_claude_desktop(ormah_bin: str) -> bool:
 def configure_codex_hooks(ormah_bin: str) -> None:
     """Write Codex hook config to ~/.codex/hooks.json and enable the feature flag."""
     hooks_path = Path.home() / ".codex" / "hooks.json"
-    config_path = Path.home() / ".codex" / "config.toml"
     hooks_path.parent.mkdir(parents=True, exist_ok=True)
 
     hooks: dict = {
@@ -247,10 +246,7 @@ def configure_codex_hooks(ormah_bin: str) -> None:
     }
 
     _merge_json_file(str(hooks_path), {"hooks": hooks})
-
-    existing = config_path.read_text() if config_path.exists() else ""
-    updated = _upsert_toml_table_key(existing, "features", "codex_hooks", "true")
-    config_path.write_text(updated)
+    _enable_codex_feature("codex_hooks")
     ok("Codex hooks installed — memories flow before every message")
 
 
@@ -321,6 +317,16 @@ def _upsert_toml_table_key(text: str, table_name: str, key: str, rendered_value:
 
     updated = "".join(lines[:start] + block_lines + lines[end:])
     return updated
+
+
+def _enable_codex_feature(feature_name: str) -> None:
+    """Enable a Codex feature flag in ~/.codex/config.toml."""
+    config_path = Path.home() / ".codex" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = config_path.read_text() if config_path.exists() else ""
+    updated = _upsert_toml_table_key(existing, "features", feature_name, "true")
+    config_path.write_text(updated)
 
 
 def _upsert_codex_mcp_config(ormah_bin: str) -> None:
@@ -967,14 +973,24 @@ def backfill_transcripts() -> None:
     ok(f"Backfill complete: {total_memories} memories from {len(selected)} transcripts")
 
 
-def configure_claude_maintenance() -> bool:
-    """Ask whether to use Claude Code as the LLM for memory maintenance.
+def configure_agent_maintenance(has_claude_code: bool, has_codex: bool) -> bool:
+    """Ask whether to enable automatic agent-backed maintenance.
 
     Returns True if maintenance was enabled, False if skipped.
     """
-    print("\n  Use Claude for memory maintenance?")
-    print("  (Recommended for Pro/Max users — links memories, detects conflicts,")
-    print("   merges duplicates. No API key needed — Claude is the LLM.)")
+    if has_claude_code and has_codex:
+        agent_label = "Claude Code or Codex"
+    elif has_claude_code:
+        agent_label = "Claude Code"
+    elif has_codex:
+        agent_label = "Codex"
+    else:
+        return False
+
+    print(f"\n  Use {agent_label} for automatic memory maintenance?")
+    print("  (Runs judgment-heavy graph maintenance in the background when due,")
+    print("   at most once every 24 hours by default. No separate API key needed.)")
+    print("   This covers maintenance decisions, not transcript extraction.")
     try:
         answer = input("\n  Enable? (Y/n) ").strip().lower()
     except EOFError:
@@ -983,10 +999,12 @@ def configure_claude_maintenance() -> bool:
         env = _read_env_file()
         env["ORMAH_CLAUDE_MAINTENANCE_ENABLED"] = "true"
         _write_env_file(env)
-        ok("Claude maintenance enabled — run_maintenance via MCP when signalled")
+        if has_codex:
+            _enable_codex_feature("multi_agent")
+        ok(f"Automatic maintenance enabled — {agent_label} can run run_maintenance when signalled")
         return True
     else:
-        info("Skipped — run 'ormah setup' again to enable later")
+        info("Skipped automatic maintenance — run 'ormah setup' again to enable later")
         return False
 
 
@@ -1414,15 +1432,20 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
     else:
         user_name = configure_identity()
 
-    # 3. Detect Claude Code and offer maintenance upfront — no API key needed
+    # 3. Detect supported coding agents and offer maintenance upfront — no API key needed
     has_claude_code = shutil.which("claude") is not None
     has_codex = shutil.which("codex") is not None or (Path.home() / ".codex").exists()
-    claude_maintenance = False
-    if has_claude_code and not ci and not update:
-        step("Claude Code detected")
-        claude_maintenance = configure_claude_maintenance()
+    agent_maintenance = False
+    if (has_claude_code or has_codex) and not ci and not update:
+        if has_claude_code and has_codex:
+            step("Claude Code and Codex detected")
+        elif has_claude_code:
+            step("Claude Code detected")
+        else:
+            step("Codex detected")
+        agent_maintenance = configure_agent_maintenance(has_claude_code, has_codex)
 
-    # 4. Configure LLM — skip if Claude maintenance is handling background jobs
+    # 4. Configure LLM — skip if agent-backed maintenance is handling background jobs
     if ci:
         env = _read_env_file()
         env["ORMAH_LLM_PROVIDER"] = "none"
@@ -1430,7 +1453,7 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
         info("CI mode — LLM set to none")
     elif update:
         pass  # keep existing LLM config
-    elif claude_maintenance:
+    elif agent_maintenance:
         env = _read_env_file()
         env["ORMAH_LLM_PROVIDER"] = "none"
         _write_env_file(env)

@@ -41,6 +41,7 @@ from ormah.setup import (
     configure_claude_hooks,
     configure_claude_code_mcp,
     configure_claude_desktop,
+    configure_agent_maintenance,
     configure_codex_hooks,
     configure_codex_mcp,
     configure_identity,
@@ -950,6 +951,74 @@ class TestInstallCodexAgents:
         content = agent_file.read_text()
         assert 'name = "ormah-maintenance"' in content
         assert 'name = "old"' not in content
+
+
+class TestConfigureAgentMaintenance:
+    def test_enables_claude_code_maintenance(self, tmp_path, monkeypatch, capsys):
+        env_path = tmp_path / ".env"
+        monkeypatch.setattr("builtins.input", lambda _: "")
+
+        with (
+            patch("ormah.setup.ENV_PATH", env_path),
+            patch("ormah.setup.ENV_DIR", tmp_path),
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+        ):
+            result = configure_agent_maintenance(has_claude_code=True, has_codex=False)
+
+        assert result is True
+        assert "ORMAH_CLAUDE_MAINTENANCE_ENABLED=true" in env_path.read_text()
+        assert not (tmp_path / ".codex" / "config.toml").exists()
+
+        captured = capsys.readouterr()
+        assert "Claude Code" in captured.out
+
+    def test_enables_codex_multi_agent_without_clobbering_existing_config(self, tmp_path, monkeypatch):
+        env_path = tmp_path / ".env"
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        config_path = codex_dir / "config.toml"
+        config_path.write_text(
+            '[projects."/tmp/demo"]\n'
+            'trust_level = "trusted"\n\n'
+            '[features]\n'
+            'multi_agent = false\n'
+            'foo = true\n'
+        )
+        monkeypatch.setattr("builtins.input", lambda _: "")
+
+        with (
+            patch("ormah.setup.ENV_PATH", env_path),
+            patch("ormah.setup.ENV_DIR", tmp_path),
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+        ):
+            result = configure_agent_maintenance(has_claude_code=False, has_codex=True)
+
+        assert result is True
+        assert "ORMAH_CLAUDE_MAINTENANCE_ENABLED=true" in env_path.read_text()
+        content = config_path.read_text()
+        assert '[projects."/tmp/demo"]' in content
+        assert 'trust_level = "trusted"' in content
+        assert 'foo = true' in content
+        assert 'multi_agent = true' in content
+        assert 'multi_agent = false' not in content
+
+    def test_mentions_both_clients_when_available(self, tmp_path, monkeypatch, capsys):
+        env_path = tmp_path / ".env"
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        with (
+            patch("ormah.setup.ENV_PATH", env_path),
+            patch("ormah.setup.ENV_DIR", tmp_path),
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+        ):
+            result = configure_agent_maintenance(has_claude_code=True, has_codex=True)
+
+        assert result is False
+        assert not env_path.exists()
+
+        captured = capsys.readouterr()
+        assert "Claude Code or Codex" in captured.out
+        assert "Skipped automatic maintenance" in captured.out
 
 
 # --- Uninstall tests ---

@@ -42,7 +42,8 @@ One command gets you to a working setup.
    - Claude Code: whisper hooks, MCP tools, instructions, maintenance agent, slash command
    - Codex: whisper hooks, MCP tools, instructions, maintenance agent
    - Claude Desktop (macOS): MCP tools
-4. Offer transcript backfill for Claude Code so you can bootstrap memory from earlier sessions
+4. Ask whether to enable automatic agent-backed maintenance when Claude Code, Codex, or both are detected
+5. Offer transcript backfill for Claude Code so you can bootstrap memory from earlier sessions
 
 If Claude Code, Codex, or Claude Desktop are already installed, Ormah connects itself to them automatically.
 
@@ -209,7 +210,7 @@ Supported today:
 
 More first-class agent integrations are planned.
 
-When maintenance is enabled, whisper can append a `maintenance_due` signal. The installed `ormah-maintenance` agent can then run the two-call `run_maintenance` flow in the background without interrupting normal conversation.
+When maintenance is enabled, whisper can append a `maintenance_due` signal. The installed `ormah-maintenance` agent can then run the two-call `run_maintenance` flow in the background without interrupting normal conversation. The automatic signal is opt-in during `ormah setup` and runs at most once every 24 hours by default.
 
 You can also trigger maintenance manually:
 
@@ -310,6 +311,8 @@ Enable the maintenance signal during `ormah setup` or set:
 ```env
 ORMAH_CLAUDE_MAINTENANCE_ENABLED=true
 ```
+
+If you are using Codex for automatic maintenance, `ormah setup` will also ask before enabling Codex's `multi_agent` feature in `~/.codex/config.toml`.
 
 This covers maintenance decisions, not transcript extraction.
 
