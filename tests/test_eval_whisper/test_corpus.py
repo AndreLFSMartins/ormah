@@ -55,13 +55,21 @@ class TestValidateCase:
         with pytest.raises(CorpusError, match="duplicate node_id"):
             validate_case(bad)
 
-    def test_invalid_category_raises(self):
+    def test_category_is_freeform_string(self):
+        ok = {
+            "id": "x",
+            "memories": [_MEM],
+            "prompts": [{"text": "q", "category": "my_custom_bucket", "expected": {"should_inject": ["m-1"]}}],
+        }
+        validate_case(ok)  # no exception
+
+    def test_empty_category_raises(self):
         bad = {
             "id": "x",
             "memories": [_MEM],
-            "prompts": [{"text": "q", "category": "bogus", "expected": {}}],
+            "prompts": [{"text": "q", "category": "   ", "expected": {}}],
         }
-        with pytest.raises(CorpusError, match="invalid category"):
+        with pytest.raises(CorpusError, match="category must be a non-empty string"):
             validate_case(bad)
 
     def test_unknown_node_ref_in_should_inject_raises(self):

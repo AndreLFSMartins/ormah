@@ -68,9 +68,13 @@ def format_report(result: WhisperEvalResult, show_failures: bool = False) -> str
             lines.append(f"FAILURES ({len(failures)}):")
             for f in failures:
                 lines.append(f"  {f['case_id']:20s}  [{f['category']}]  \"{f['prompt']}\"")
-                expected_str = str(f['should_inject']) if f['should_inject'] else "(suppress)"
+                expected_str = str(f['should_inject']) if f['should_inject'] else ("(silent)" if f.get("should_suppress") else "[]")
                 got_str = str(f['injected_ids']) if f['injected_ids'] else "[]"
-                lines.append(f"    expected: {expected_str}  injected: {got_str}")
+                extra = f.get("extra_injected_ids") or []
+                if extra:
+                    lines.append(f"    expected: {expected_str}  injected: {got_str}  extra: {extra}")
+                else:
+                    lines.append(f"    expected: {expected_str}  injected: {got_str}")
 
     return "\n".join(lines)
 
@@ -81,6 +85,7 @@ def _collect_failures(result: WhisperEvalResult) -> list[dict]:
         m = r.metrics
         is_failure = (
             (m["injection_recall"] is not None and m["injection_recall"] < 1.0)
+            or (m.get("extra_injected_count") or 0) > 0
             or m["false_positive_present"]
             or m["suppression_correct"] is False
         )
@@ -90,6 +95,8 @@ def _collect_failures(result: WhisperEvalResult) -> list[dict]:
                 "category": r.category,
                 "prompt": r.prompt,
                 "should_inject": r.should_inject,
+                "should_suppress": getattr(r, "should_suppress", False),
                 "injected_ids": r.injected_ids,
+                "extra_injected_ids": m.get("extra_injected_ids", []),
             })
     return failures

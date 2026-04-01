@@ -27,7 +27,13 @@ def cmd_eval_whisper_run(args):
     from eval.whisper.runner import run_whisper_eval
     from eval.whisper.report import format_report
 
-    corpus_path = _CORPUS_DIR / "golden" / "golden.jsonl"
+    corpus_arg = getattr(args, "corpus", None)
+    if corpus_arg:
+        corpus_path = Path(corpus_arg)
+        if not corpus_path.is_absolute():
+            corpus_path = _CORPUS_DIR / corpus_arg
+    else:
+        corpus_path = _CORPUS_DIR / "golden" / "golden.jsonl"
     try:
         cases = load_corpus(corpus_path)
     except CorpusError as e:
@@ -46,7 +52,12 @@ def cmd_eval_whisper_run(args):
 
     engine = _make_engine()
     try:
-        result = run_whisper_eval(cases, engine)
+        result = run_whisper_eval(
+            cases,
+            engine,
+            simulate_session=bool(getattr(args, "simulate_session", False)),
+            preserve_self=True if getattr(args, "preserve_self", False) else None,
+        )
     finally:
         engine.shutdown()
 

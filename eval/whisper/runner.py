@@ -16,6 +16,13 @@ class PromptResult:
     should_inject: list[str]
     injected_ids: list[str]
     metrics: dict
+    may_include: list[str] = field(default_factory=list)
+    should_not_inject: list[str] = field(default_factory=list)
+    should_suppress: bool = False
+    intent_categories: list[str] | None = None
+    has_temporal_phrases: bool | None = None
+    session_id: str | None = None
+    recent_prompts: list[str] | None = None
 
 
 @dataclass
@@ -25,29 +32,70 @@ class WhisperEvalResult:
     category_aggregates: dict = field(default_factory=dict)
 
 
-def run_whisper_eval(cases: list[dict], engine) -> WhisperEvalResult:
+def run_whisper_eval(
+    cases: list[dict],
+    engine,
+    *,
+    simulate_session: bool = False,
+    preserve_self: bool | None = None,
+) -> WhisperEvalResult:
     """Run the whisper eval pipeline over *cases*."""
     prompt_results: list[PromptResult] = []
 
     for case in cases:
-        seed_case(engine, case)
+        effective_preserve_self = (
+            bool(case.get("preserve_self", False)) if preserve_self is None else preserve_self
+        )
+        seed_case(engine, case, preserve_self=effective_preserve_self)
         space = case.get("space")
+        case_simulate_session = bool(case.get("simulate_session", False)) or simulate_session
+        case_session_id = case.get("session_id")
+        session_buf: list[str] = []
 
         for prompt_obj in case.get("prompts", []):
             text = prompt_obj["text"]
             category = prompt_obj.get("category", "general")
             expected = prompt_obj.get("expected", {})
-            should_inject = expected.get("should_inject", [])
-            should_not_inject = expected.get("should_not_inject", [])
-            should_suppress = expected.get("should_suppress", False)
+            should_inject = expected.get("must_include") or expected.get("should_inject", [])
+            may_include = expected.get("may_include", [])
+            should_not_inject = expected.get("must_not_include") or expected.get("should_not_inject", [])
+            should_suppress = expected.get("must_be_silent", expected.get("should_suppress", False))
+
+            # Capture intent classification (same one used by whisper) for analysis.
+            intent_categories = None
+            has_temporal_phrases = None
+            try:
+                classifier = engine.context_builder._get_classifier()
+                if classifier is not None:
+                    intent_categories = classifier.classify(text).categories
+                from ormah.engine.prompt_classifier import has_temporal_phrases as _htp
+                has_temporal_phrases = _htp(text)
+            except Exception:
+                pass
+
+            # Session simulation: mimic /agent/whisper route behavior.
+            session_id = prompt_obj.get("session_id") or case_session_id
+            if "recent_prompts" in prompt_obj:
+                recent_prompts = prompt_obj.get("recent_prompts")
+            elif case_simulate_session and session_id and text.strip():
+                # First message: None; subsequent: all prior prompts (bounded by settings buffer size).
+                if session_buf:
+                    buf_size = getattr(engine.settings, "whisper_context_buffer_size", 5)
+                    recent_prompts = session_buf[-buf_size:]
+                else:
+                    recent_prompts = None
+            else:
+                recent_prompts = []
 
             whisper_text, injected_ids = engine.get_whisper_context(
                 prompt=text,
                 space=space,
-                recent_prompts=[],
-                session_id=None,
+                recent_prompts=recent_prompts,
+                session_id=session_id,
                 _return_debug=True,
             )
+            if case_simulate_session and session_id and text.strip():
+                session_buf.append(text.strip())
 
             metrics = compute_prompt_metrics(
                 should_inject=should_inject,
@@ -55,6 +103,7 @@ def run_whisper_eval(cases: list[dict], engine) -> WhisperEvalResult:
                 should_suppress=should_suppress,
                 injected_ids=injected_ids,
                 injection_fired=bool(whisper_text.strip()),
+                may_include=may_include,
             )
 
             prompt_results.append(PromptResult(
@@ -62,6 +111,13 @@ def run_whisper_eval(cases: list[dict], engine) -> WhisperEvalResult:
                 prompt=text,
                 category=category,
                 should_inject=should_inject,
+                may_include=may_include,
+                should_not_inject=should_not_inject,
+                should_suppress=should_suppress,
+                intent_categories=intent_categories,
+                has_temporal_phrases=has_temporal_phrases,
+                session_id=session_id,
+                recent_prompts=recent_prompts,
                 injected_ids=injected_ids,
                 metrics=metrics,
             ))

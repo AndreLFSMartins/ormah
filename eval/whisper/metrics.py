@@ -11,13 +11,22 @@ def injection_recall(should_inject: list[str], injected_ids: list[str]) -> Optio
     return sum(1 for nid in should_inject if nid in injected_set) / len(should_inject)
 
 
-def injection_precision(should_inject: list[str], injected_ids: list[str]) -> Optional[float]:
-    """Fraction of injected nodes that were in should_inject."""
-    if not should_inject:
+def injection_precision(
+    should_inject: list[str],
+    injected_ids: list[str],
+    may_include: list[str] | None = None,
+) -> Optional[float]:
+    """Fraction of injected nodes that were relevant.
+
+    By default, relevance is defined as membership in *should_inject*.
+    When *may_include* is provided, those nodes are treated as acceptable
+    extra injections (useful when multiple answers are reasonable).
+    """
+    if not should_inject and not (may_include or []):
         return None
     if not injected_ids:
         return 0.0
-    relevant = set(should_inject)
+    relevant = set(should_inject) | set(may_include or [])
     return sum(1 for nid in injected_ids if nid in relevant) / len(injected_ids)
 
 
@@ -56,9 +65,14 @@ def compute_prompt_metrics(
     should_suppress: bool,
     injected_ids: list[str],
     injection_fired: bool,
+    may_include: list[str] | None = None,
 ) -> dict:
     rec = injection_recall(should_inject, injected_ids)
-    prec = injection_precision(should_inject, injected_ids)
+    prec = injection_precision(should_inject, injected_ids, may_include=may_include)
+    injected_set = set(injected_ids)
+    must_set = set(should_inject)
+    allowed_set = must_set | set(may_include or [])
+    extras = [nid for nid in injected_ids if nid not in allowed_set]
     return {
         "injection_recall": rec,
         "injection_precision": prec,
@@ -67,4 +81,8 @@ def compute_prompt_metrics(
         "suppression_correct": suppression_correct(should_suppress, injection_fired),
         "false_positive_present": has_false_positive(should_not_inject, injected_ids),
         "injection_fired": injection_fired,
+        "injected_count": len(injected_ids),
+        "missing_must_count": sum(1 for nid in should_inject if nid not in injected_set),
+        "extra_injected_count": len(extras),
+        "extra_injected_ids": extras,
     }
