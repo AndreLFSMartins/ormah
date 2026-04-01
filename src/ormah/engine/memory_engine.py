@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 import re
@@ -443,17 +444,85 @@ class MemoryEngine:
                 formatted += f"\n  → {link_title} ({sim:.0%} similar)"
         return node.id, formatted
 
-    def recall_node(self, node_id: str) -> str | None:
+    def _encode_feedback_prompt_vec(self, prompt_text: str) -> bytes:
+        """Best-effort prompt vector for feedback affinity matching."""
+        try:
+            search = self._get_hybrid_search()
+            if search is None:
+                return b""
+            prompt_vec = search.encoder.encode(prompt_text)
+            return prompt_vec.astype("float32").tobytes()
+        except Exception as e:
+            logger.warning("Failed to encode feedback prompt %r: %s", prompt_text[:80], e)
+            return b""
+
+    def _log_feedback_candidates(
+        self,
+        prompt_text: str,
+        node_scores: list[tuple[str, float]],
+        *,
+        session_id: str | None = None,
+        space: str | None = None,
+    ) -> None:
+        """Log surfaced memories so submit_feedback can learn from them later."""
+        if not node_scores:
+            return
+
+        unique_scores: dict[str, float] = {}
+        for candidate_node_id, score in node_scores:
+            if candidate_node_id and candidate_node_id not in unique_scores:
+                unique_scores[candidate_node_id] = float(score)
+        if not unique_scores:
+            return
+
+        prompt_hash = hashlib.sha256(prompt_text.encode()).hexdigest()
+        prompt_vec_blob = self._encode_feedback_prompt_vec(prompt_text)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self.db.transaction() as conn:
+            for candidate_node_id, score in unique_scores.items():
+                conn.execute(
+                    """
+                    INSERT INTO whisper_log
+                        (
+                            session_id, space, prompt_hash, prompt_text, prompt_vec,
+                            node_id, score, was_injected, logged_at
+                        )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id or "",
+                        space,
+                        prompt_hash,
+                        prompt_text,
+                        prompt_vec_blob,
+                        candidate_node_id,
+                        score,
+                        1,
+                        now_iso,
+                    ),
+                )
+
+    def recall_node(self, node_id: str, session_id: str | None = None) -> str | None:
         """Get a specific node with its neighbors, formatted as text."""
         node = self.graph.get_node(node_id)
         if node is None:
             return None
 
-        # Touch access
-        self._touch_access(node_id)
+        resolved_node_id = node["id"]
 
-        edges = self.graph.get_edges_for(node_id)
-        neighbors = self.graph.get_neighbors(node_id, depth=1)
+        # Touch access
+        self._touch_access(resolved_node_id)
+
+        edges = self.graph.get_edges_for(resolved_node_id)
+        neighbors = self.graph.get_neighbors(resolved_node_id, depth=1)
+        self._log_feedback_candidates(
+            f"recall_node:{resolved_node_id}",
+            [(resolved_node_id, 1.0)] + [
+                (neighbor["id"], 0.5) for neighbor in neighbors if neighbor.get("id")
+            ],
+            session_id=session_id,
+            space=node.get("space"),
+        )
         return format_node_with_neighbors(node, edges, neighbors)
 
     # Stop words for detecting "pure temporal" queries (no topical signal).
@@ -561,7 +630,14 @@ class MemoryEngine:
 
         return enriched
 
-    def recall_search(self, query: str, limit: int = 10, default_space: str | None = None, **filters) -> str:
+    def recall_search(
+        self,
+        query: str,
+        limit: int = 10,
+        default_space: str | None = None,
+        session_id: str | None = None,
+        **filters,
+    ) -> str:
         """Search memories and return formatted results.
 
         If default_space is set and no explicit spaces filter is provided,
@@ -569,6 +645,7 @@ class MemoryEngine:
         global results are scaled by space_boost_global, and other-project
         results by space_boost_other.
         """
+        query_for_log = query
         # Auto-extract temporal filters from query when none provided
         if not filters.get("created_after") and not filters.get("created_before"):
             from ormah.engine.prompt_classifier import (
@@ -606,6 +683,16 @@ class MemoryEngine:
             for r in results:
                 if r.get("source") not in ("activated", "conflict"):
                     self._touch_access(r["node"]["id"])
+            self._log_feedback_candidates(
+                query_for_log,
+                [
+                    (r["node"]["id"], r.get("score", 0.0))
+                    for r in results
+                    if r.get("node", {}).get("id")
+                ],
+                session_id=session_id,
+                space=default_space,
+            )
             return format_search_results(results)
 
         # Fallback to FTS only
@@ -637,6 +724,16 @@ class MemoryEngine:
         for r in enriched:
             if r.get("source") not in ("activated", "conflict"):
                 self._touch_access(r["node"]["id"])
+        self._log_feedback_candidates(
+            query_for_log,
+            [
+                (r["node"]["id"], r.get("score", 0.0))
+                for r in enriched
+                if r.get("node", {}).get("id")
+            ],
+            session_id=session_id,
+            space=default_space,
+        )
 
         return format_search_results(enriched)
 
@@ -1867,6 +1964,47 @@ class MemoryEngine:
                 "Pass pre-extracted memories via the 'memories' parameter instead."
             )
 
+    def _resolve_feedback_node_id(self, node_id: str) -> tuple[str | None, str | None]:
+        """Resolve a feedback node ID against whisper_log.
+
+        Whisper output exposes short 8-character IDs, but whisper_log stores
+        full UUIDs. Accept an exact match first, then fall back to a unique
+        prefix match so feedback works with whispered IDs.
+        """
+        exact = self.db.conn.execute(
+            """
+            SELECT node_id
+            FROM whisper_log
+            WHERE node_id = ?
+            ORDER BY logged_at DESC
+            LIMIT 1
+            """,
+            (node_id,),
+        ).fetchone()
+        if exact is not None:
+            return exact["node_id"], None
+
+        if len(node_id) >= 36:
+            return None, f"No whisper_log entry found for node {node_id}"
+
+        matches = self.db.conn.execute(
+            """
+            SELECT node_id, MAX(logged_at) AS last_logged_at
+            FROM whisper_log
+            WHERE node_id LIKE ?
+            GROUP BY node_id
+            ORDER BY last_logged_at DESC
+            LIMIT 2
+            """,
+            (node_id + "%",),
+        ).fetchall()
+        if not matches:
+            return None, f"No whisper_log entry found for node {node_id}"
+        if len(matches) > 1:
+            matched = ", ".join(row["node_id"][:8] for row in matches)
+            return None, f"Ambiguous node ID prefix {node_id}; matched {matched}"
+        return matches[0]["node_id"], None
+
     def submit_feedback(self, node_id: str, signal: int, source: str = "explicit") -> str:
         """Record explicit or implicit feedback signal for a whisper candidate.
 
@@ -1874,6 +2012,10 @@ class MemoryEngine:
         affinity row, and (for explicit feedback) marks any open review_log
         entry as answered.
         """
+        resolved_node_id, error = self._resolve_feedback_node_id(node_id)
+        if error is not None:
+            return error
+
         row = self.db.conn.execute(
             """
             SELECT prompt_vec, prompt_text, session_id, space
@@ -1882,7 +2024,7 @@ class MemoryEngine:
             ORDER BY logged_at DESC
             LIMIT 1
             """,
-            (node_id,),
+            (resolved_node_id,),
         ).fetchone()
 
         if row is None:
@@ -1901,7 +2043,7 @@ class MemoryEngine:
                 VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?)
                 ON CONFLICT (node_id, session_id) DO NOTHING
                 """,
-                (prompt_vec, prompt_text, node_id, signal, source, space, session_id),
+                (prompt_vec, prompt_text, resolved_node_id, signal, source, space, session_id),
             )
             if source != "implicit":
                 conn.execute(
@@ -1913,10 +2055,10 @@ class MemoryEngine:
                         ORDER BY surfaced_at DESC LIMIT 1
                     )
                     """,
-                    (node_id,),
+                    (resolved_node_id,),
                 )
 
-        return f"Feedback recorded for node {node_id[:8]}..."
+        return f"Feedback recorded for node {resolved_node_id[:8]}..."
 
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""
