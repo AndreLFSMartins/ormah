@@ -16,6 +16,7 @@ class SearchQuery(BaseModel):
     limit: int = Field(default=10, ge=1, le=100)
     created_after: str | None = None
     created_before: str | None = None
+    session_id: str | None = None
 
 
 class SearchResult(BaseModel):

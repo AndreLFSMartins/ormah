@@ -62,15 +62,23 @@ async def recall_search(
         tags=req.tags,
         created_after=req.created_after,
         created_before=req.created_before,
+        session_id=req.session_id,
     )
     return TextResponse(text=text)
 
 
 @router.get("/recall/{node_id}", response_model=TextResponse)
-async def recall_node(node_id: str, request: Request):
+async def recall_node(
+    node_id: str,
+    request: Request,
+    session_id: str | None = Query(
+        None,
+        description="Optional session ID for feedback logging",
+    ),
+):
     """Get a specific memory with its connections."""
     engine = request.app.state.engine
-    text = engine.recall_node(node_id)
+    text = engine.recall_node(node_id, session_id=session_id)
     if text is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     return TextResponse(text=text, node_id=node_id)

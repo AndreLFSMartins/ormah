@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import pytest
 
+from ormah.models.node import CreateNodeRequest
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _insert_whisper_log(conn, node_id: str, session_id: str = "sess-abc", space: str = "myspace") -> None:
+def _insert_whisper_log(
+    conn,
+    node_id: str,
+    session_id: str = "sess-abc",
+    space: str = "myspace",
+) -> None:
     conn.execute(
         "INSERT INTO whisper_log "
         "(node_id, score, session_id, space, prompt_text, prompt_vec, prompt_hash, was_injected, logged_at) "
@@ -64,6 +71,28 @@ class TestSubmitFeedbackBasic:
         assert row is not None
         assert row["source"] == "implicit"
 
+    def test_short_id_feedback_resolves_full_whisper_log_node_id(self, engine):
+        node_id = "72a9ea26-1111-2222-3333-444444444444"
+        _insert_whisper_log(engine.db.conn, node_id)
+
+        engine.submit_feedback("72a9ea26", 1, "implicit")
+
+        row = engine.db.conn.execute(
+            "SELECT * FROM affinity WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        assert row is not None
+        assert row["source"] == "implicit"
+
+    def test_short_id_feedback_returns_ambiguity_error_for_multiple_matches(self, engine):
+        _insert_whisper_log(engine.db.conn, "72a9ea26-1111-2222-3333-444444444444")
+        _insert_whisper_log(engine.db.conn, "72a9ea26-aaaa-bbbb-cccc-555555555555")
+
+        result = engine.submit_feedback("72a9ea26", 1, "implicit")
+
+        assert "Ambiguous node ID prefix 72a9ea26" in result
+        rows = engine.db.conn.execute("SELECT * FROM affinity").fetchall()
+        assert rows == []
+
     def test_idempotent_same_session(self, engine):
         node_id = "node-idempotent-001"
         _insert_whisper_log(engine.db.conn, node_id, session_id="sess-1")
@@ -104,6 +133,56 @@ class TestSubmitFeedbackBasic:
         _insert_whisper_log(engine.db.conn, node_id)
         result = engine.submit_feedback(node_id, 1, "explicit")
         assert "Feedback recorded" in result
+
+    def test_recall_search_logs_memory_for_feedback(self, engine):
+        node_id, _ = engine.remember(CreateNodeRequest(
+            content="FastAPI is a web framework.",
+            type="fact",
+            title="FastAPI",
+        ))
+
+        text = engine.recall_search("FastAPI", session_id="recall-search-session")
+
+        assert "FastAPI" in text
+        row = engine.db.conn.execute(
+            "SELECT session_id, prompt_text, was_injected FROM whisper_log WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["session_id"] == "recall-search-session"
+        assert row["prompt_text"] == "FastAPI"
+        assert row["was_injected"] == 1
+
+        engine.submit_feedback(node_id, 1, "implicit")
+        affinity = engine.db.conn.execute(
+            "SELECT * FROM affinity WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        assert affinity is not None
+
+    def test_recall_node_logs_memory_for_feedback(self, engine):
+        node_id, _ = engine.remember(CreateNodeRequest(
+            content="SQLite is used for the graph index.",
+            type="fact",
+            title="SQLite choice",
+        ))
+
+        text = engine.recall_node(node_id, session_id="recall-node-session")
+
+        assert "SQLite choice" in text
+        row = engine.db.conn.execute(
+            "SELECT session_id, prompt_text, was_injected FROM whisper_log WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["session_id"] == "recall-node-session"
+        assert row["prompt_text"] == f"recall_node:{node_id}"
+        assert row["was_injected"] == 1
+
+        engine.submit_feedback(node_id, 1, "implicit")
+        affinity = engine.db.conn.execute(
+            "SELECT * FROM affinity WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        assert affinity is not None
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +225,10 @@ class TestSubmitFeedbackRoute:
         node_id = "route-node-001"
         _insert_whisper_log(eng.db.conn, node_id)
 
-        resp = c.post("/agent/feedback", json={"node_id": node_id, "signal": 1, "source": "explicit"})
+        resp = c.post(
+            "/agent/feedback",
+            json={"node_id": node_id, "signal": 1, "source": "explicit"},
+        )
         assert resp.status_code == 200
         assert "Feedback recorded" in resp.json()["text"]
 
@@ -155,3 +237,81 @@ class TestSubmitFeedbackRoute:
         ).fetchone()
         assert row is not None
         assert row["signal"] == 1
+
+    def test_route_short_id_feedback(self, client):
+        c, eng = client
+        node_id = "72a9ea26-1111-2222-3333-444444444444"
+        _insert_whisper_log(eng.db.conn, node_id)
+
+        resp = c.post(
+            "/agent/feedback",
+            json={"node_id": "72a9ea26", "signal": 1, "source": "implicit"},
+        )
+        assert resp.status_code == 200
+        assert "Feedback recorded" in resp.json()["text"]
+
+        row = eng.db.conn.execute(
+            "SELECT * FROM affinity WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        assert row is not None
+        assert row["signal"] == 1
+
+    def test_route_feedback_after_recall_search(self, client):
+        c, eng = client
+        node_id, _ = eng.remember(CreateNodeRequest(
+            content="FastAPI is a web framework.",
+            type="fact",
+            title="FastAPI",
+        ))
+
+        recall_resp = c.post(
+            "/agent/recall",
+            json={"query": "FastAPI", "session_id": "route-recall-session"},
+        )
+        assert recall_resp.status_code == 200
+        assert "FastAPI" in recall_resp.json()["text"]
+
+        feedback_resp = c.post(
+            "/agent/feedback",
+            json={"node_id": node_id, "signal": 1, "source": "implicit"},
+        )
+        assert feedback_resp.status_code == 200
+        assert "Feedback recorded" in feedback_resp.json()["text"]
+
+        row = eng.db.conn.execute(
+            "SELECT session_id, prompt_text FROM affinity WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["session_id"] == "route-recall-session"
+        assert row["prompt_text"] == "FastAPI"
+
+    def test_route_feedback_after_recall_node(self, client):
+        c, eng = client
+        node_id, _ = eng.remember(CreateNodeRequest(
+            content="SQLite is used for the graph index.",
+            type="fact",
+            title="SQLite choice",
+        ))
+
+        recall_resp = c.get(
+            f"/agent/recall/{node_id}",
+            params={"session_id": "route-recall-node-session"},
+        )
+        assert recall_resp.status_code == 200
+        assert "SQLite choice" in recall_resp.json()["text"]
+
+        feedback_resp = c.post(
+            "/agent/feedback",
+            json={"node_id": node_id, "signal": 1, "source": "implicit"},
+        )
+        assert feedback_resp.status_code == 200
+        assert "Feedback recorded" in feedback_resp.json()["text"]
+
+        row = eng.db.conn.execute(
+            "SELECT session_id, prompt_text FROM affinity WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["session_id"] == "route-recall-node-session"
+        assert row["prompt_text"] == f"recall_node:{node_id}"
