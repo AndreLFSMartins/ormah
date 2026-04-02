@@ -240,7 +240,11 @@ def main():
     wh_setup.set_defaults(func=cmd_whisper_setup)
 
     # eval
-    from eval.whisper.cli import cmd_eval_whisper_run
+    from eval.whisper.cli import (
+        cmd_eval_whisper_mine_transcripts,
+        cmd_eval_whisper_promote_candidates,
+        cmd_eval_whisper_run,
+    )
     ev = sub.add_parser("eval", help="Run evaluation harnesses")
     ev_sub = ev.add_subparsers(dest="eval_cmd", required=True)
 
@@ -251,8 +255,90 @@ def main():
     ev_wh_run.add_argument("--category", help="Filter by category (e.g. preference, factual)")
     ev_wh_run.add_argument("--show-failures", action="store_true", dest="show_failures",
                            help="Print failure details")
+    ev_wh_run.add_argument(
+        "--include-mined",
+        action="store_true",
+        help="Explicitly include the mined corpus lane in the eval run",
+    )
+    ev_wh_run.add_argument(
+        "--mined-corpus",
+        help="Path to mined corpus JSONL (default: eval/whisper/corpus/mined/mined.jsonl)",
+    )
     ev_wh_run.add_argument("--json", action="store_true", help="Output as JSON")
     ev_wh_run.set_defaults(func=cmd_eval_whisper_run)
+
+    ev_wh_mine = ev_wh_sub.add_parser(
+        "mine-transcripts",
+        help="Mine real transcripts into reviewable whisper-eval candidates",
+    )
+    ev_wh_mine.add_argument(
+        "--root",
+        help="Transcript root directory (default: ~/.claude/projects)",
+    )
+    ev_wh_mine.add_argument(
+        "--output",
+        help="Output JSONL path for mined candidates",
+    )
+    ev_wh_mine.add_argument(
+        "--space",
+        help="Space/project hint to use when replaying whisper against mined prompts",
+    )
+    ev_wh_mine.add_argument(
+        "--max-sessions",
+        type=int,
+        help="Maximum number of transcript files to scan",
+    )
+    ev_wh_mine.add_argument(
+        "--max-candidates",
+        type=int,
+        default=100,
+        help="Maximum number of candidates to write (default: 100)",
+    )
+    ev_wh_mine.add_argument(
+        "--recent-prompt-count",
+        type=int,
+        default=2,
+        help="How many recent prompts to carry into mined follow-up cases (default: 2)",
+    )
+    ev_wh_mine.add_argument(
+        "--min-user-turns",
+        type=int,
+        default=5,
+        help="Minimum user turns required to mine a transcript (default: 5)",
+    )
+    ev_wh_mine.add_argument(
+        "--include-whisper-text",
+        action="store_true",
+        help="Include rendered whisper text in candidate output",
+    )
+    ev_wh_mine.add_argument("--json", action="store_true", help="Output summary as JSON")
+    ev_wh_mine.set_defaults(func=cmd_eval_whisper_mine_transcripts)
+
+    ev_wh_promote = ev_wh_sub.add_parser(
+        "promote-candidates",
+        help="Promote mined whisper candidates into an eval corpus lane",
+    )
+    ev_wh_promote.add_argument(
+        "--input",
+        required=True,
+        help="Input mined candidate JSONL path",
+    )
+    ev_wh_promote.add_argument(
+        "--output",
+        help="Output promoted corpus JSONL path (default: eval/whisper/corpus/mined/mined.jsonl)",
+    )
+    ev_wh_promote.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of candidates to promote",
+    )
+    ev_wh_promote.add_argument(
+        "--replace-output",
+        action="store_true",
+        help="Overwrite the output corpus instead of appending with duplicate checks",
+    )
+    ev_wh_promote.add_argument("--json", action="store_true", help="Output summary as JSON")
+    ev_wh_promote.set_defaults(func=cmd_eval_whisper_promote_candidates)
 
     args = p.parse_args()
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 from unittest.mock import MagicMock, patch
 import pytest
-from eval.whisper.runner import run_whisper_eval, _aggregate, _aggregate_by_category
+from eval.whisper.runner import run_whisper_eval, _aggregate
 
 
 _CASES = [
@@ -93,6 +93,43 @@ class TestRunWhisperEval:
         with patch("eval.whisper.runner.seed_case") as mock_seed:
             run_whisper_eval(_CASES, mock_engine)
         assert mock_seed.call_count == 2
+
+    def test_simulate_session_passes_prior_prompts_to_follow_up_turns(self):
+        mock_engine = MagicMock()
+        mock_engine.settings.whisper_context_buffer_size = 5
+        mock_engine.get_whisper_context.side_effect = [
+            ("first", ["mem-001"]),
+            ("second", ["mem-002"]),
+        ]
+        cases = [{
+            "id": "session-case",
+            "space": "ormah",
+            "simulate_session": True,
+            "session_id": "sess-123",
+            "memories": [],
+            "prompts": [
+                {
+                    "text": "how does the pipeline work?",
+                    "category": "technical",
+                    "expected": {"should_inject": ["mem-001"], "should_suppress": False},
+                },
+                {
+                    "text": "what about the report format?",
+                    "category": "continuation",
+                    "expected": {"should_inject": ["mem-002"], "should_suppress": False},
+                },
+            ],
+        }]
+
+        with patch("eval.whisper.runner.seed_case"):
+            run_whisper_eval(cases, mock_engine)
+
+        first_call = mock_engine.get_whisper_context.call_args_list[0]
+        second_call = mock_engine.get_whisper_context.call_args_list[1]
+        assert first_call.kwargs["recent_prompts"] is None
+        assert first_call.kwargs["session_id"] == "sess-123"
+        assert second_call.kwargs["recent_prompts"] == ["how does the pipeline work?"]
+        assert second_call.kwargs["session_id"] == "sess-123"
 
     def test_category_aggregates_split_by_category(self):
         mock_engine = MagicMock()

@@ -68,7 +68,7 @@ def create_mcp_server(
             return [
                 TextContent(
                     type="text",
-                    text="Ormah server not running. Start it with: ormah serve",
+                    text="Ormah server not running. Start it with: ormah server start",
                 )
             ]
         except Exception as e:

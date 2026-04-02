@@ -283,6 +283,12 @@ ormah ingest-session <path>     # ingest a Claude Code JSONL transcript
 ormah whisper inject            # pre-prompt whisper hook
 ormah whisper store             # transcript extraction hook
 
+ormah eval whisper run          # run whisper eval corpus
+ormah eval whisper mine-transcripts \
+  --root ~/.claude/projects     # mine real transcripts into candidate JSONL
+ormah eval whisper promote-candidates \
+  --input candidates.jsonl      # promote mined candidates into a corpus lane
+
 ormah mcp                       # run MCP stdio server
 ```
 

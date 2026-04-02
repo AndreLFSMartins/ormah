@@ -180,7 +180,7 @@ class TestWhisperNodeLimit:
             {"node": n, "score": 0.9, "source": "hybrid"} for n in nodes
         ]
 
-        result = builder.build_whisper_context(
+        builder.build_whisper_context(
             prompt="test",
             max_nodes=3,
             min_score=0.1,
@@ -1005,11 +1005,109 @@ class TestWhisperIdentityGating:
         assert result == ""
 
 
+class TestWhisperPrecisionGuards:
+    """Precision helpers should favor the most relevant whisper candidate."""
+
+    def test_identity_intent_prefers_global_identity_results(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        mock_classifier = MagicMock()
+        mock_classifier.classify.return_value = PromptIntent(categories=["identity"])
+        builder._classifier = mock_classifier
+
+        identity = _make_node_dict("id-1", "User lives in Dublin")
+        identity["space"] = None
+        project_fact = _make_node_dict("fact-1", "Ormah runs on port 8787")
+        project_fact["space"] = "ormah"
+        mock_engine.recall_search_structured.return_value = [
+            {"node": identity, "score": 0.82, "source": "hybrid"},
+            {"node": project_fact, "score": 0.79, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="where does the user live",
+            min_score=0.1,
+            injection_gate=0.5,
+        )
+
+        assert "User lives in Dublin" in result
+        assert "port 8787" not in result
+
+    def test_preference_prompt_boosts_preference_and_drops_fact_extra(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        preference = _make_node_dict("pref-1", "Use a dark theme", node_type="preference")
+        preference["content"] = "Dark theme, monospace fonts, gold accent."
+        preference["space"] = None
+        fact = _make_node_dict("fact-1", "Ormah core memory cap is 50 nodes")
+        fact["space"] = "ormah"
+        mock_engine.recall_search_structured.return_value = [
+            {"node": fact, "score": 0.56, "source": "hybrid"},
+            {"node": preference, "score": 0.41, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="build a graph visualisation component",
+            min_score=0.1,
+            injection_gate=0.5,
+        )
+
+        assert "Use a dark theme" in result
+        assert "50 nodes" not in result
+
+    def test_preference_prompt_skips_reranker(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        preference = _make_node_dict("pref-1", "Use a dark theme", node_type="preference")
+        preference["space"] = None
+        mock_engine.recall_search_structured.return_value = [
+            {"node": preference, "score": 0.8, "source": "hybrid"},
+        ]
+
+        with patch("ormah.embeddings.reranker.rerank") as mock_rerank:
+            result = builder.build_whisper_context(
+                prompt="build a graph visualisation component",
+                min_score=0.1,
+                injection_gate=0.5,
+                reranker_enabled=True,
+            )
+
+        mock_rerank.assert_not_called()
+        assert "Use a dark theme" in result
+
+    def test_topical_overlap_guard_drops_unrelated_extra_result(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        relevant = _make_node_dict("fact-1", "FSRS decay algorithm")
+        relevant["content"] = "Memory decay uses FSRS stability and retrievability."
+        unrelated = _make_node_dict("fact-2", "MCP exposes six tools")
+        unrelated["content"] = "remember, recall, get_self, mark_outdated."
+        mock_engine.recall_search_structured.return_value = [
+            {"node": relevant, "score": 0.78, "source": "hybrid"},
+            {"node": unrelated, "score": 0.74, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="how does memory decay work in ormah",
+            min_score=0.1,
+            injection_gate=0.5,
+        )
+
+        assert "FSRS decay algorithm" in result
+        assert "MCP exposes six tools" not in result
+
+
 class TestWhisperContextBuffer:
     """Context-enhanced search using recent prompts."""
 
     def test_recent_prompts_enhance_search_query(self, mock_graph):
-        """recent_prompts should be joined with current prompt for search."""
+        """Underspecified follow-up prompts should use recent context in search."""
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
@@ -1019,7 +1117,7 @@ class TestWhisperContextBuffer:
         ]
 
         builder.build_whisper_context(
-            prompt="closer to you liking it more?",
+            prompt="what about the metrics side?",
             min_score=0.1,
             recent_prompts=["how's whisper quality?", "show me the eval results"],
         )
@@ -1029,7 +1127,24 @@ class TestWhisperContextBuffer:
         # Query should contain context from recent prompts
         assert "whisper quality" in query
         assert "eval results" in query
-        assert "closer to you liking it more?" in query
+        assert "what about the metrics side?" in query
+
+    def test_explicit_prompt_with_recent_context_uses_raw_prompt(self, mock_graph):
+        """Fully specified prompts should not be polluted by recent context."""
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        mock_engine.recall_search_structured.return_value = []
+
+        builder.build_whisper_context(
+            prompt="how does auth work",
+            min_score=0.1,
+            recent_prompts=["how's whisper quality?", "show me the eval results"],
+        )
+
+        call_kwargs = mock_engine.recall_search_structured.call_args
+        query = call_kwargs.kwargs.get("query") or call_kwargs[1].get("query")
+        assert query == "how does auth work"
 
     def test_no_recent_prompts_uses_raw_prompt(self, mock_graph):
         """Without recent_prompts, search query should be the raw prompt."""
@@ -1065,28 +1180,28 @@ class TestWhisperContextBuffer:
         query = call_kwargs.kwargs.get("query") or call_kwargs[1].get("query")
         assert query == "how does auth work"
 
-    def test_recent_prompts_capped_at_3(self, mock_graph):
-        """Only the last 3 recent prompts should be used."""
+    def test_recent_prompts_capped_at_2_for_followups(self, mock_graph):
+        """Only the last 2 recent prompts should be used for follow-up prompts."""
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         mock_engine.recall_search_structured.return_value = []
 
         builder.build_whisper_context(
-            prompt="current",
+            prompt="what about this part?",
             min_score=0.1,
             recent_prompts=["old1", "old2", "old3", "old4", "old5"],
         )
 
         call_kwargs = mock_engine.recall_search_structured.call_args
         query = call_kwargs.kwargs.get("query") or call_kwargs[1].get("query")
-        # Should only contain last 3 + current
+        # Should only contain last 2 + current
         assert "old1" not in query
         assert "old2" not in query
-        assert "old3" in query
+        assert "old3" not in query
         assert "old4" in query
         assert "old5" in query
-        assert "current" in query
+        assert "what about this part?" in query
 
 
 class TestSessionBufferRoute:
@@ -1200,6 +1315,36 @@ class TestWhisperTopicShift:
         )
 
         assert "Auth details" in result
+        mock_engine.recall_search_structured.assert_called_once()
+
+    def test_follow_up_prompt_bypasses_same_topic_skip(self, mock_graph):
+        """Underspecified follow-up prompts should still search even on same topic."""
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        mock_encoder = MagicMock()
+        same_vec = np.array([1.0, 0.0, 0.0])
+        mock_encoder.encode.return_value = same_vec
+        mock_encoder.encode_batch.return_value = np.array([same_vec, same_vec])
+
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+
+        nodes = [_make_node_dict("node-0", "Metrics details")]
+        mock_engine.recall_search_structured.return_value = [
+            {"node": nodes[0], "score": 0.8, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="what about the metrics side?",
+            min_score=0.1,
+            recent_prompts=["how does the whisper eval pipeline work?"],
+            topic_shift_enabled=True,
+            topic_shift_threshold=0.75,
+        )
+
+        assert "Metrics details" in result
         mock_engine.recall_search_structured.assert_called_once()
 
     def test_cold_start_always_injects(self, mock_graph):

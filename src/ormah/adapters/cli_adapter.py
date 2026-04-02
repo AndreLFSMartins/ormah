@@ -26,7 +26,7 @@ def _api(fn):
     try:
         return fn()
     except httpx.ConnectError:
-        print("Ormah server not running. Start it with: ormah", file=sys.stderr)
+        print("Ormah server not running. Start it with: ormah server start", file=sys.stderr)
         sys.exit(1)
     except httpx.HTTPStatusError as e:
         print(f"Error: {e.response.status_code} {e.response.text}", file=sys.stderr)
@@ -367,12 +367,23 @@ def cmd_whisper_inject(args):
 
 
 def _resolve_transcript_path(session_id: str) -> Path | None:
-    """Find Claude Code transcript JSONL for a session ID."""
-    claude_projects = Path("~/.claude/projects").expanduser()
-    if not claude_projects.is_dir():
+    """Find a transcript JSONL for a session ID across supported clients."""
+    if not session_id:
         return None
-    matches = list(claude_projects.glob(f"*/{session_id}.jsonl"))
-    return matches[0] if matches else None
+
+    claude_projects = Path("~/.claude/projects").expanduser()
+    if claude_projects.is_dir():
+        matches = sorted(claude_projects.glob(f"*/{session_id}.jsonl"))
+        if matches:
+            return matches[0]
+
+    codex_sessions = Path("~/.codex/sessions").expanduser()
+    if codex_sessions.is_dir():
+        matches = sorted(codex_sessions.rglob(f"*{session_id}*.jsonl"))
+        if matches:
+            return matches[-1]
+
+    return None
 
 
 def _spawn_background_store(transcript_path: Path, cwd: str, session_id: str) -> None:
@@ -433,6 +444,10 @@ def cmd_whisper_store(args):
     transcript_path = hook_data.get("transcript_path", "")
     cwd = hook_data.get("cwd", "")
     session_id = hook_data.get("session_id", "")
+
+    if not transcript_path and session_id:
+        resolved = _resolve_transcript_path(session_id)
+        transcript_path = str(resolved) if resolved else ""
 
     if not transcript_path:
         sys.exit(0)

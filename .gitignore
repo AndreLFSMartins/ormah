@@ -67,3 +67,8 @@ REVIEW_FINDINGS.md
 docs/plans/
 .mcp.json
 AGENTS.md
+
+# OMX / Codex local runtime artifacts
+.omx/
+.codex
+.codex/

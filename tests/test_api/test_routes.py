@@ -79,6 +79,25 @@ def test_search(client):
     assert resp.status_code == 200
 
 
+def test_context(client):
+    client.post("/agent/remember", json={
+        "content": "Use SQLite for the graph index in this project.",
+        "type": "decision",
+        "title": "SQLite graph index",
+        "tier": "core",
+        "space": "ormah",
+    })
+
+    resp = client.get("/agent/context", params={"task_hint": "sqlite graph", "space": "ormah"})
+    assert resp.status_code == 200
+    text = resp.json()["text"]
+    assert (
+        "About the User" in text
+        or "No user identity information stored yet." in text
+    )
+    assert "SQLite graph index" in text
+
+
 def test_connect(client):
     r1 = client.post("/agent/remember", json={"content": "A", "type": "fact"})
     r2 = client.post("/agent/remember", json={"content": "B", "type": "fact"})

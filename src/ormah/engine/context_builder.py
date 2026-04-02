@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -31,6 +31,46 @@ _REVIEW_FRAMING = (
     "this won't be surfaced again for 14 days."
 )
 
+_TOPIC_STOP_WORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
+    "they", "them", "this", "that", "these", "those", "am", "not", "no",
+    "nor", "so", "if", "or", "and", "but", "for", "of", "to", "in",
+    "on", "at", "by", "with", "from", "as", "into", "about", "what",
+    "which", "who", "whom", "when", "where", "why", "how", "all", "any",
+    "each", "every", "both", "few", "more", "most", "other", "some",
+    "such", "than", "too", "very", "just", "because", "also", "let",
+    "lets", "please", "explain", "implemented", "build", "design", "new",
+    "feature", "component", "page", "work", "working", "user",
+})
+
+_PREFERENCE_HINT_RE = re.compile(
+    r"\b(build|design|implement|implemented|ui|ux|page|component|layout|theme|style|settings|visuali[sz]ation)\b",
+    re.IGNORECASE,
+)
+_FOLLOW_UP_RE = re.compile(
+    r"^(?:"
+    r"and\b|"
+    r"continue\b|"
+    r"pick up\b|"
+    r"where were we\b|"
+    r"what about\b|"
+    r"how about\b|"
+    r"go deeper\b|"
+    r"more on\b|"
+    r"same for\b|"
+    r"what changed\b|"
+    r"for [a-z0-9_-]+\??$|"
+    r"and the\b|"
+    r"that\b|"
+    r"those\b|"
+    r"it\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _truncate_at_word_boundary(text: str, max_len: int = 300) -> str:
     """Return *text* truncated to *max_len* characters at a word boundary."""
@@ -47,6 +87,44 @@ def _prompt_log_snippet(text: str, max_len: int = 80) -> str:
     """Compact single-line prompt snippet for diagnostics."""
     compact = " ".join(text.split())
     return _truncate_at_word_boundary(compact, max_len=max_len)
+
+
+def _topic_tokens(text: str) -> set[str]:
+    """Extract meaningful topical tokens from text."""
+    tokens = {tok.lower() for tok in re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{2,}\b", text)}
+    return {tok for tok in tokens if tok not in _TOPIC_STOP_WORDS}
+
+
+def _looks_preference_prompt(prompt: str) -> bool:
+    """Heuristic: prompt is asking how work should be shaped, not just what happened."""
+    return bool(_PREFERENCE_HINT_RE.search(prompt))
+
+
+def _is_follow_up_prompt(prompt: str) -> bool:
+    """Return True when prompt looks underspecified without recent context."""
+    compact = " ".join(prompt.strip().split())
+    if not compact:
+        return False
+    if _FOLLOW_UP_RE.search(compact):
+        return True
+    tokens = compact.split()
+    if len(tokens) <= 6 and any(
+        token.lower().strip("?.!,")
+        in {"that", "this", "it", "there", "too", "also", "one", "side"}
+        for token in tokens
+    ):
+        return True
+    return False
+
+
+def _has_topical_overlap(prompt_tokens: set[str], node: dict) -> bool:
+    """Return True when prompt tokens overlap node title/content tokens."""
+    if not prompt_tokens:
+        return False
+    node_text = " ".join(
+        part for part in (node.get("title"), node.get("content")) if isinstance(part, str)
+    )
+    return bool(prompt_tokens & _topic_tokens(node_text))
 
 
 def _find_review_candidate(conn, threshold: float) -> dict | None:
@@ -244,8 +322,15 @@ class ContextBuilder:
                 return "", _injected_ids
             return ""
 
+        follow_up_mode = bool(recent_prompts) and _is_follow_up_prompt(prompt)
+
         # Topic-shift detection: skip injection when topic hasn't changed
-        if topic_shift_enabled and recent_prompts and len(recent_prompts) >= 1:
+        if (
+            topic_shift_enabled
+            and recent_prompts
+            and len(recent_prompts) >= 1
+            and not follow_up_mode
+        ):
             try:
                 hybrid_search = self.engine._get_hybrid_search()
                 if hybrid_search is not None:
@@ -294,6 +379,22 @@ class ContextBuilder:
 
         # identity-only → skip general search, use existing identity path below
         identity_only = intent is not None and intent.categories == ["identity"]
+        identity_intent = intent is not None and "identity" in intent.categories
+        preference_mode = _looks_preference_prompt(prompt)
+        identity_linked_ids: set[str] = set()
+        if user_node_id:
+            try:
+                identity_linked_ids = {
+                    node["id"]
+                    for node in self.graph.get_neighbors(
+                        user_node_id,
+                        depth=1,
+                        edge_types=["defines"],
+                    )
+                    if node.get("id")
+                }
+            except Exception as e:
+                logger.warning("Failed to load identity-linked nodes: %s", e)
 
         # Compute prompt_vec early — needed for affinity boost and whisper_log
         prompt_vec: np.ndarray | None = None
@@ -306,10 +407,10 @@ class ContextBuilder:
 
         # Build context-enhanced search query from recent prompts
         search_query = prompt
-        if recent_prompts:
-            # Join last few prompts with current to give embedding model
-            # topic context for vague follow-ups like "continue" or "more"
-            context_parts = recent_prompts[-3:] + [prompt]
+        if recent_prompts and follow_up_mode:
+            # Use recent context only for underspecified follow-ups so we
+            # improve ambiguous prompts without polluting explicit ones.
+            context_parts = recent_prompts[-2:] + [prompt]
             search_query = " ".join(context_parts)
 
         # Build search kwargs, merging any intent-derived params
@@ -354,7 +455,10 @@ class ContextBuilder:
         # temporal relevance).  Temporal-supplement results (source="temporal")
         # are always kept — they were fetched by SQL recency, not semantic
         # similarity, so their low base score (0.001) is not meaningful.
-        effective_min_score = min(min_score, 0.30) if has_temporal else min_score
+        if has_temporal or preference_mode:
+            effective_min_score = min(min_score, 0.30)
+        else:
+            effective_min_score = min_score
         search_results = [
             r for r in search_results
             if r.get("score", 0) >= effective_min_score or r.get("source") == "temporal"
@@ -363,7 +467,7 @@ class ContextBuilder:
         # Cross-encoder reranking — always pass min_score=0.0 so affinity boost
         # can rescue candidates before any floor is applied (spec: reranker_min_score
         # is now applied as a post-boost floor, not inside rerank())
-        if reranker_enabled and search_results and not identity_only:
+        if reranker_enabled and search_results and not identity_only and not preference_mode:
             try:
                 from ormah.embeddings.reranker import rerank
 
@@ -407,6 +511,79 @@ class ContextBuilder:
             except Exception as e:
                 logger.warning("Affinity boost failed, using unmodified scores: %s", e)
 
+        if search_results:
+            if identity_intent:
+                global_results = [
+                    r for r in search_results
+                    if r["node"].get("space") in (None, "null")
+                ]
+                if global_results:
+                    search_results = global_results
+                    pre_gate_candidates = [
+                        r for r in pre_gate_candidates
+                        if r["node"].get("space") in (None, "null")
+                    ] or pre_gate_candidates
+
+            if preference_mode:
+                boosted_results = []
+                for result in search_results:
+                    node = result["node"]
+                    boosted_score = result.get("score", 0.0)
+                    if node.get("type") == "preference":
+                        boosted_score += 0.12
+                    elif node.get("space") in (None, "null"):
+                        boosted_score += 0.03
+                    boosted_results.append({**result, "score": boosted_score})
+                search_results = sorted(
+                    boosted_results,
+                    key=lambda r: r.get("score", 0.0),
+                    reverse=True,
+                )
+                if pre_gate_candidates:
+                    boosted_pre_gate = []
+                    for result in pre_gate_candidates:
+                        node = result["node"]
+                        boosted_score = result.get("score", 0.0)
+                        if node.get("type") == "preference":
+                            boosted_score += 0.12
+                        elif node.get("space") in (None, "null"):
+                            boosted_score += 0.03
+                        boosted_pre_gate.append({**result, "score": boosted_score})
+                    pre_gate_candidates = sorted(
+                        boosted_pre_gate,
+                        key=lambda r: r.get("score", 0.0),
+                        reverse=True,
+                    )
+
+            prompt_tokens = _topic_tokens(prompt)
+            if space:
+                prompt_tokens.discard(space.lower())
+            overlapping_ids = {
+                r["node"]["id"]
+                for r in search_results
+                if _has_topical_overlap(prompt_tokens, r["node"])
+            }
+            if overlapping_ids:
+                search_results = [
+                    r for r in search_results
+                    if (
+                        r["node"]["id"] in overlapping_ids
+                        or r["node"]["id"] in identity_linked_ids
+                        or (identity_intent and r["node"].get("space") in (None, "null"))
+                        or (preference_mode and r["node"].get("type") == "preference")
+                    )
+                ]
+                if pre_gate_candidates:
+                    pre_gate_candidates = [
+                        r for r in pre_gate_candidates
+                        if (
+                            r["node"]["id"] in overlapping_ids
+                            or r["node"]["id"] in identity_linked_ids
+                            or (identity_intent and r["node"].get("space") in (None, "null"))
+                            or (preference_mode and r["node"].get("type") == "preference")
+                        )
+                    ]
+
         # Injection gate: require at least one result with a strong enough
         # blended score to justify injection.  Temporal queries are exempt
         # (they rely on time filtering, not semantic relevance).
@@ -425,6 +602,13 @@ class ContextBuilder:
                 # injection gate.  Weak queries naturally get fewer results
                 # instead of padding to max_nodes with marginal matches.
                 search_results = [r for r in search_results if r.get("score", 0) >= injection_gate]
+
+        if preference_mode and search_results:
+            preference_results = [
+                r for r in search_results if r["node"].get("type") == "preference"
+            ]
+            if preference_results:
+                search_results = preference_results
 
         # Exploration slot: inject one unconfirmed gated-out candidate to
         # surface false negatives and collect affinity signal for them.
@@ -581,8 +765,10 @@ class ContextBuilder:
                     last_run = row[0] if row else None
                     due = True
                     if last_run:
-                        from dateutil.parser import parse as parse_dt
-                        elapsed = datetime.now(timezone.utc) - parse_dt(last_run)
+                        parsed_last_run = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
+                        if parsed_last_run.tzinfo is None:
+                            parsed_last_run = parsed_last_run.replace(tzinfo=timezone.utc)
+                        elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
                         due = elapsed.total_seconds() > interval_hours * 3600
                     if due:
                         result = result + "\nmaintenance_due"

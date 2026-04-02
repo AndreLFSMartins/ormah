@@ -67,6 +67,42 @@ def _extract_assistant_text(content) -> str | None:
     return "\n".join(texts) if texts else None
 
 
+def extract_user_prompts(path: Path, start_offset: int = 0) -> list[str]:
+    """Extract only user text turns from a Claude Code JSONL transcript."""
+    path = Path(path)
+    prompts: list[str] = []
+
+    with open(path) as f:
+        if start_offset > 0:
+            f.seek(start_offset)
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                entry = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            if entry.get("type") != "user":
+                continue
+
+            message = entry.get("message")
+            if not isinstance(message, dict):
+                continue
+
+            content = message.get("content")
+            if content is None:
+                continue
+
+            text = _extract_user_text(content)
+            if text:
+                prompts.append(text)
+
+    return prompts
+
+
 def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
     """Parse a Claude Code JSONL transcript into cleaned conversation text.
 

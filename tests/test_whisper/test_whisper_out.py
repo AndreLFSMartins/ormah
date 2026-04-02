@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-import sys
-import tempfile
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import httpx
@@ -163,6 +160,37 @@ class TestWhisperStoreSkips:
         assert code == 0
         assert len(captured_requests) == 0  # No HTTP call made
 
+    def test_whisper_store_resolves_transcript_from_session_id(self, monkeypatch, tmp_path):
+        """When transcript_path is absent, resolve it from session_id."""
+        transcript = tmp_path / "resolved.jsonl"
+        transcript.write_text(_make_transcript(6))
+
+        captured_requests = []
+
+        def handler(request):
+            captured_requests.append(request)
+            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(
+            "ormah.adapters.cli_adapter._whisper_store_client",
+            lambda: httpx.Client(transport=transport, base_url="http://test"),
+        )
+        monkeypatch.setattr(
+            "ormah.adapters.cli_adapter._resolve_transcript_path",
+            lambda session_id: transcript if session_id == "abc" else None,
+        )
+
+        hook_input = json.dumps({
+            "cwd": "/tmp",
+            "session_id": "abc",
+            "trigger": "auto",
+        })
+
+        code, out, err = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+        assert code == 0
+        assert len(captured_requests) == 1
+
 
 class TestWhisperStoreSilentOnError:
     def test_whisper_store_silent_on_error(self, monkeypatch, tmp_path):
@@ -188,6 +216,32 @@ class TestWhisperStoreSilentOnError:
 
         code, out, err = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
         assert code == 0
+
+
+class TestResolveTranscriptPath:
+    def test_resolve_transcript_path_prefers_claude_exact_match(self, monkeypatch, tmp_path):
+        claude_root = tmp_path / ".claude" / "projects" / "proj"
+        claude_root.mkdir(parents=True)
+        transcript = claude_root / "sess-123.jsonl"
+        transcript.write_text(_make_transcript(1))
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        from ormah.adapters.cli_adapter import _resolve_transcript_path
+
+        assert _resolve_transcript_path("sess-123") == transcript
+
+    def test_resolve_transcript_path_finds_codex_rollout_file(self, monkeypatch, tmp_path):
+        codex_root = tmp_path / ".codex" / "sessions" / "2026" / "04" / "02"
+        codex_root.mkdir(parents=True)
+        transcript = codex_root / "rollout-2026-04-02T17-34-35-sess-456.jsonl"
+        transcript.write_text(_make_transcript(1))
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        from ormah.adapters.cli_adapter import _resolve_transcript_path
+
+        assert _resolve_transcript_path("sess-456") == transcript
 
 
 class TestWhisperStoreSpace:

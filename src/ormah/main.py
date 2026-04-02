@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -27,6 +28,11 @@ setup_logging(
     log_file=LOG_DIR / "ormah.log",
 )
 logger = logging.getLogger(__name__)
+
+try:
+    APP_VERSION = pkg_version("ormah")
+except PackageNotFoundError:
+    APP_VERSION = "0.0.0"
 
 
 @asynccontextmanager
@@ -89,7 +95,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Ormah",
     description="Local-first, LLM-agnostic memory system for AI agents",
-    version="0.1.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
