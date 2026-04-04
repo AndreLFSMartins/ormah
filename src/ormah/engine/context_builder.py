@@ -463,7 +463,7 @@ class ContextBuilder:
                 logger.warning("Affinity boost failed, using unmodified scores: %s", e)
 
         if search_results:
-            if identity_intent:
+            if identity_only:
                 global_results = [
                     r for r in search_results
                     if r["node"].get("space") in (None, "null")
@@ -489,7 +489,7 @@ class ContextBuilder:
                     if (
                         r["node"]["id"] in overlapping_ids
                         or r["node"]["id"] in identity_linked_ids
-                        or (identity_intent and r["node"].get("space") in (None, "null"))
+                        or (identity_only and r["node"].get("space") in (None, "null"))
                     )
                 ]
                 if pre_gate_candidates:
@@ -498,7 +498,7 @@ class ContextBuilder:
                         if (
                             r["node"]["id"] in overlapping_ids
                             or r["node"]["id"] in identity_linked_ids
-                            or (identity_intent and r["node"].get("space") in (None, "null"))
+                            or (identity_only and r["node"].get("space") in (None, "null"))
                         )
                     ]
 

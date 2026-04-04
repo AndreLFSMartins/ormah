@@ -1008,7 +1008,7 @@ class TestWhisperIdentityGating:
 class TestWhisperPrecisionGuards:
     """Precision helpers should favor the most relevant whisper candidate."""
 
-    def test_identity_intent_prefers_global_identity_results(self, mock_graph):
+    def test_identity_only_prefers_global_identity_results(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
@@ -1035,6 +1035,36 @@ class TestWhisperPrecisionGuards:
 
         assert "User lives in Dublin" in result
         assert "port 8787" not in result
+
+    def test_mixed_identity_prompt_keeps_topical_project_result(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        mock_classifier = MagicMock()
+        mock_classifier.classify.return_value = PromptIntent(categories=["identity", "general"])
+        builder._classifier = mock_classifier
+
+        global_pref = _make_node_dict("id-1", "Prefers dark mode")
+        global_pref["space"] = None
+        global_pref["content"] = "Use a dark theme with gold accent."
+        project_fact = _make_node_dict("fact-1", "Auth uses JWT tokens")
+        project_fact["space"] = "ormah"
+        project_fact["content"] = "The auth flow uses JWT access tokens and refresh tokens."
+        mock_engine.recall_search_structured.return_value = [
+            {"node": global_pref, "score": 0.82, "source": "hybrid"},
+            {"node": project_fact, "score": 0.79, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="what's my preference for how ormah handles auth?",
+            min_score=0.1,
+            injection_gate=0.5,
+        )
+
+        assert "Auth uses JWT tokens" in result
+        assert "Prefers dark mode" not in result
 
     def test_technical_theme_prompt_keeps_factual_memory(self, mock_graph):
         mock_engine = MagicMock()
