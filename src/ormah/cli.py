@@ -251,6 +251,16 @@ def main():
     ev_wh_run.add_argument("--category", help="Filter by category (e.g. preference, factual)")
     ev_wh_run.add_argument("--show-failures", action="store_true", dest="show_failures",
                            help="Print failure details")
+    ev_wh_run.add_argument(
+        "--simulate-session",
+        action="store_true",
+        help="Force session simulation for all prompts in the corpus",
+    )
+    ev_wh_run.add_argument(
+        "--preserve-self",
+        action="store_true",
+        help="Preserve the self node when reseeding eval cases",
+    )
     ev_wh_run.add_argument("--json", action="store_true", help="Output as JSON")
     ev_wh_run.set_defaults(func=cmd_eval_whisper_run)
 

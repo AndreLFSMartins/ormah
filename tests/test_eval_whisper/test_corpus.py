@@ -79,6 +79,84 @@ class TestValidateCase:
         with pytest.raises(CorpusError, match="unknown node_id"):
             validate_case(bad)
 
+    def test_new_expectation_fields_are_accepted(self):
+        case = {
+            "id": "x",
+            "memories": [_MEM],
+            "prompts": [
+                {
+                    "text": "q",
+                    "category": "factual",
+                    "expected": {
+                        "must_include": ["m-1"],
+                        "may_include": ["m-1"],
+                        "must_not_include": [],
+                        "must_be_silent": False,
+                    },
+                }
+            ],
+        }
+        validate_case(case)  # no exception
+
+    def test_unknown_node_ref_in_must_not_include_raises(self):
+        bad = {
+            "id": "x",
+            "memories": [_MEM],
+            "prompts": [{"text": "q", "category": "factual", "expected": {"must_not_include": ["unknown-id"]}}],
+        }
+        with pytest.raises(CorpusError, match="unknown node_id"):
+            validate_case(bad)
+
+    def test_unknown_node_ref_in_may_include_raises(self):
+        bad = {
+            "id": "x",
+            "memories": [_MEM],
+            "prompts": [{"text": "q", "category": "factual", "expected": {"may_include": ["unknown-id"]}}],
+        }
+        with pytest.raises(CorpusError, match="unknown node_id"):
+            validate_case(bad)
+
+    def test_valid_connections_are_accepted(self):
+        case = {
+            "id": "x",
+            "memories": [
+                {**_MEM, "node_id": "m-1", "connections": [{"target": "m-2", "edge": "supports"}]},
+                {"node_id": "m-2", "title": "T2", "content": "C2", "type": "fact", "tier": "working"},
+            ],
+            "prompts": [],
+        }
+        validate_case(case)  # no exception
+
+    def test_connection_target_must_exist(self):
+        bad = {
+            "id": "x",
+            "memories": [{**_MEM, "connections": [{"target": "missing", "edge": "supports"}]}],
+            "prompts": [],
+        }
+        with pytest.raises(CorpusError, match="references unknown node_id"):
+            validate_case(bad)
+
+    def test_connection_edge_must_be_valid(self):
+        bad = {
+            "id": "x",
+            "memories": [
+                {**_MEM, "connections": [{"target": "m-2", "edge": "bogus"}]},
+                {"node_id": "m-2", "title": "T2", "content": "C2", "type": "fact", "tier": "working"},
+            ],
+            "prompts": [],
+        }
+        with pytest.raises(CorpusError, match="invalid edge"):
+            validate_case(bad)
+
+    def test_connection_entry_must_be_object(self):
+        bad = {
+            "id": "x",
+            "memories": [{**_MEM, "connections": ["m-2"]}],
+            "prompts": [],
+        }
+        with pytest.raises(CorpusError, match="must be an object"):
+            validate_case(bad)
+
     def test_all_valid_categories_accepted(self):
         for cat in VALID_CATEGORIES:
             case = {

@@ -142,6 +142,57 @@ class TestRunWhisperEval:
         assert "factual" in result.category_aggregates
         assert "noise" in result.category_aggregates
 
+    def test_runner_understands_new_expectation_fields(self):
+        mock_engine = MagicMock()
+        mock_engine.get_whisper_context.return_value = ("text", ["mem-001", "mem-002"])
+        cases = [{
+            "id": "w-new-fields",
+            "space": "ormah",
+            "memories": [],
+            "prompts": [
+                {
+                    "text": "q",
+                    "category": "technical",
+                    "expected": {
+                        "must_include": ["mem-001"],
+                        "may_include": ["mem-002"],
+                        "must_not_include": ["mem-003"],
+                        "must_be_silent": False,
+                    },
+                }
+            ],
+        }]
+
+        with patch("eval.whisper.runner.seed_case"):
+            result = run_whisper_eval(cases, mock_engine)
+
+        prompt_result = result.prompt_results[0]
+        assert prompt_result.should_inject == ["mem-001"]
+        assert prompt_result.may_include == ["mem-002"]
+        assert prompt_result.should_not_inject == ["mem-003"]
+        assert prompt_result.should_suppress is False
+        assert prompt_result.metrics["injection_precision"] == 1.0
+
+    def test_preserve_self_flows_to_seed_case(self):
+        mock_engine = MagicMock()
+        mock_engine.get_whisper_context.return_value = ("", [])
+        cases = [{"id": "x", "space": "ormah", "memories": [], "prompts": []}]
+
+        with patch("eval.whisper.runner.seed_case") as mock_seed:
+            run_whisper_eval(cases, mock_engine, preserve_self=True)
+
+        assert mock_seed.call_args.kwargs["preserve_self"] is True
+
+    def test_case_level_preserve_self_used_when_no_override(self):
+        mock_engine = MagicMock()
+        mock_engine.get_whisper_context.return_value = ("", [])
+        cases = [{"id": "x", "space": "ormah", "preserve_self": True, "memories": [], "prompts": []}]
+
+        with patch("eval.whisper.runner.seed_case") as mock_seed:
+            run_whisper_eval(cases, mock_engine)
+
+        assert mock_seed.call_args.kwargs["preserve_self"] is True
+
 
 class TestAggregate:
     def _make_result(self, category, recall, suppression_correct=None):

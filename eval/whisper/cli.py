@@ -9,14 +9,57 @@ _EVAL_DIR = Path(__file__).parent
 _CORPUS_DIR = _EVAL_DIR / "corpus"
 _EVAL_DB_DIR = _EVAL_DIR / "eval_db"
 
+_EVAL_SETTINGS_OVERRIDES = {
+    # Search / hybrid retrieval used by whisper
+    "embedding_provider": "local",
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_dim": 768,
+    "fts_weight": 0.4,
+    "vector_weight": 0.6,
+    "similarity_threshold": 0.4,
+    "rrf_k": 60,
+    "fts_only_dampening": 0.5,
+    "min_result_score": 0.1,
+    "rrf_min_spread_ratio": 0.05,
+    "question_fts_weight_scale": 0.3,
+    "question_vector_weight_scale": 1.5,
+    "question_similarity_blend_weight": 0.85,
+    "similarity_blend_weight": 0.5,
+    "title_match_boost": 2.0,
+    "length_penalty_threshold": 300,
+    # Whisper pipeline
+    "whisper_out_enabled": False,
+    "claude_maintenance_enabled": False,
+    "whisper_max_nodes": 6,
+    "whisper_min_relevance_score": 0.45,
+    "whisper_reranker_enabled": True,
+    "whisper_reranker_model": "Xenova/ms-marco-MiniLM-L-6-v2",
+    "whisper_reranker_min_score": 0.40,
+    "whisper_reranker_blend_alpha": 0.6,
+    "whisper_reranker_max_doc_chars": 512,
+    "whisper_context_buffer_size": 5,
+    "whisper_session_gap_minutes": 10,
+    "whisper_intent_threshold": 0.65,
+    "whisper_topic_shift_enabled": True,
+    "whisper_topic_shift_threshold": 0.75,
+    "whisper_injection_gate": 0.50,
+    "whisper_exploration_enabled": True,
+    # Ranking adjustments used by whisper post-processing
+    "space_boost_global": 1.0,
+    "space_boost_other": 0.6,
+    "affinity_similarity_threshold": 0.70,
+    "affinity_half_life_days": 30.0,
+    "affinity_max_boost": 0.15,
+    "affinity_implicit_weight": 0.8,
+}
+
 
 def _make_engine():
     from ormah.config import Settings
     from ormah.engine.memory_engine import MemoryEngine
 
     (_EVAL_DB_DIR / "nodes").mkdir(parents=True, exist_ok=True)
-    # Disable maintenance signal so it doesn't pollute injection_fired for noise cases
-    settings = Settings(memory_dir=_EVAL_DB_DIR, claude_maintenance_enabled=False)
+    settings = Settings(memory_dir=_EVAL_DB_DIR, **_EVAL_SETTINGS_OVERRIDES)
     engine = MemoryEngine(settings)
     engine.startup()
     return engine
