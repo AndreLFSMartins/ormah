@@ -86,7 +86,8 @@ def test_run_whisper_eval_end_to_end_with_real_engine(tmp_path):
         factual = next(r for r in result.prompt_results if r.case_id == "fact-case")
         noise = next(r for r in result.prompt_results if r.case_id == "noise-case")
 
-        assert factual.injected_ids == ["fact-hit"]
+        assert "fact-hit" in factual.injected_ids
+        assert "fact-miss" not in factual.injected_ids
         assert factual.metrics["injection_recall"] == 1.0
         assert factual.metrics["injection_precision"] == 1.0
         assert factual.metrics["false_positive_present"] is False
