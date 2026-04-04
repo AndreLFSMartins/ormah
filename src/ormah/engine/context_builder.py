@@ -46,32 +46,6 @@ _TOPIC_STOP_WORDS = frozenset({
     "feature", "component", "page", "work", "working", "user",
 })
 
-_PREFERENCE_HINT_RE = re.compile(
-    r"\b(build|design|implement|implemented|ui|ux|page|component|layout|theme|style|settings|visuali[sz]ation)\b",
-    re.IGNORECASE,
-)
-_FOLLOW_UP_RE = re.compile(
-    r"^(?:"
-    r"and\b|"
-    r"continue\b|"
-    r"pick up\b|"
-    r"where were we\b|"
-    r"what about\b|"
-    r"how about\b|"
-    r"go deeper\b|"
-    r"more on\b|"
-    r"same for\b|"
-    r"what changed\b|"
-    r"for [a-z0-9_-]+\??$|"
-    r"and the\b|"
-    r"that\b|"
-    r"those\b|"
-    r"it\b"
-    r")",
-    re.IGNORECASE,
-)
-
-
 def _truncate_at_word_boundary(text: str, max_len: int = 300) -> str:
     """Return *text* truncated to *max_len* characters at a word boundary."""
     if len(text) <= max_len:
@@ -93,30 +67,6 @@ def _topic_tokens(text: str) -> set[str]:
     """Extract meaningful topical tokens from text."""
     tokens = {tok.lower() for tok in re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{2,}\b", text)}
     return {tok for tok in tokens if tok not in _TOPIC_STOP_WORDS}
-
-
-def _looks_preference_prompt(prompt: str) -> bool:
-    """Heuristic: prompt is asking how work should be shaped, not just what happened."""
-    return bool(_PREFERENCE_HINT_RE.search(prompt))
-
-
-def _is_follow_up_prompt(prompt: str) -> bool:
-    """Return True when prompt looks underspecified without recent context."""
-    compact = " ".join(prompt.strip().split())
-    if not compact:
-        return False
-    if _FOLLOW_UP_RE.search(compact):
-        return True
-    tokens = compact.split()
-    if len(tokens) <= 6 and any(
-        token.lower().strip("?.!,")
-        in {"that", "this", "it", "there", "too", "also", "one", "side"}
-        for token in tokens
-    ):
-        return True
-    return False
-
-
 def _has_topical_overlap(prompt_tokens: set[str], node: dict) -> bool:
     """Return True when prompt tokens overlap node title/content tokens."""
     if not prompt_tokens:
@@ -322,7 +272,28 @@ class ContextBuilder:
                 return "", _injected_ids
             return ""
 
-        follow_up_mode = bool(recent_prompts) and _is_follow_up_prompt(prompt)
+        # Classify prompt intent before searching
+        intent = None
+        classifier = self._get_classifier()
+        if classifier is not None:
+            try:
+                intent = classifier.classify(prompt)
+            except Exception as e:
+                logger.warning("Prompt classification failed, using default search: %s", e)
+
+        # conversational-only → inject nothing
+        if intent is not None and intent.categories == ["conversational"]:
+            logger.info(
+                "Whisper diagnostics: prompt=%r conversational_intent -> skip",
+                prompt_snippet,
+            )
+            if _return_debug:
+                return "", _injected_ids
+            return ""
+
+        follow_up_mode = bool(recent_prompts) and (
+            intent is not None and "continuation" in intent.categories
+        )
 
         # Topic-shift detection: skip injection when topic hasn't changed
         if (
@@ -358,29 +329,9 @@ class ContextBuilder:
             except Exception as e:
                 logger.warning("Topic-shift detection failed, proceeding with whisper: %s", e)
 
-        # Classify prompt intent before searching
-        intent = None
-        classifier = self._get_classifier()
-        if classifier is not None:
-            try:
-                intent = classifier.classify(prompt)
-            except Exception as e:
-                logger.warning("Prompt classification failed, using default search: %s", e)
-
-        # conversational-only → inject nothing
-        if intent is not None and intent.categories == ["conversational"]:
-            logger.info(
-                "Whisper diagnostics: prompt=%r conversational_intent -> skip",
-                prompt_snippet,
-            )
-            if _return_debug:
-                return "", _injected_ids
-            return ""
-
         # identity-only → skip general search, use existing identity path below
         identity_only = intent is not None and intent.categories == ["identity"]
         identity_intent = intent is not None and "identity" in intent.categories
-        preference_mode = _looks_preference_prompt(prompt)
         identity_linked_ids: set[str] = set()
         if user_node_id:
             try:
@@ -455,7 +406,7 @@ class ContextBuilder:
         # temporal relevance).  Temporal-supplement results (source="temporal")
         # are always kept — they were fetched by SQL recency, not semantic
         # similarity, so their low base score (0.001) is not meaningful.
-        if has_temporal or preference_mode:
+        if has_temporal:
             effective_min_score = min(min_score, 0.30)
         else:
             effective_min_score = min_score
@@ -467,7 +418,7 @@ class ContextBuilder:
         # Cross-encoder reranking — always pass min_score=0.0 so affinity boost
         # can rescue candidates before any floor is applied (spec: reranker_min_score
         # is now applied as a post-boost floor, not inside rerank())
-        if reranker_enabled and search_results and not identity_only and not preference_mode:
+        if reranker_enabled and search_results and not identity_only:
             try:
                 from ormah.embeddings.reranker import rerank
 
@@ -524,37 +475,6 @@ class ContextBuilder:
                         if r["node"].get("space") in (None, "null")
                     ] or pre_gate_candidates
 
-            if preference_mode:
-                boosted_results = []
-                for result in search_results:
-                    node = result["node"]
-                    boosted_score = result.get("score", 0.0)
-                    if node.get("type") == "preference":
-                        boosted_score += 0.12
-                    elif node.get("space") in (None, "null"):
-                        boosted_score += 0.03
-                    boosted_results.append({**result, "score": boosted_score})
-                search_results = sorted(
-                    boosted_results,
-                    key=lambda r: r.get("score", 0.0),
-                    reverse=True,
-                )
-                if pre_gate_candidates:
-                    boosted_pre_gate = []
-                    for result in pre_gate_candidates:
-                        node = result["node"]
-                        boosted_score = result.get("score", 0.0)
-                        if node.get("type") == "preference":
-                            boosted_score += 0.12
-                        elif node.get("space") in (None, "null"):
-                            boosted_score += 0.03
-                        boosted_pre_gate.append({**result, "score": boosted_score})
-                    pre_gate_candidates = sorted(
-                        boosted_pre_gate,
-                        key=lambda r: r.get("score", 0.0),
-                        reverse=True,
-                    )
-
             prompt_tokens = _topic_tokens(prompt)
             if space:
                 prompt_tokens.discard(space.lower())
@@ -570,7 +490,6 @@ class ContextBuilder:
                         r["node"]["id"] in overlapping_ids
                         or r["node"]["id"] in identity_linked_ids
                         or (identity_intent and r["node"].get("space") in (None, "null"))
-                        or (preference_mode and r["node"].get("type") == "preference")
                     )
                 ]
                 if pre_gate_candidates:
@@ -580,7 +499,6 @@ class ContextBuilder:
                             r["node"]["id"] in overlapping_ids
                             or r["node"]["id"] in identity_linked_ids
                             or (identity_intent and r["node"].get("space") in (None, "null"))
-                            or (preference_mode and r["node"].get("type") == "preference")
                         )
                     ]
 
@@ -602,13 +520,6 @@ class ContextBuilder:
                 # injection gate.  Weak queries naturally get fewer results
                 # instead of padding to max_nodes with marginal matches.
                 search_results = [r for r in search_results if r.get("score", 0) >= injection_gate]
-
-        if preference_mode and search_results:
-            preference_results = [
-                r for r in search_results if r["node"].get("type") == "preference"
-            ]
-            if preference_results:
-                search_results = preference_results
 
         # Exploration slot: inject one unconfirmed gated-out candidate to
         # surface false negatives and collect affinity signal for them.

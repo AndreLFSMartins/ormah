@@ -51,6 +51,12 @@ ARCHETYPES: dict[str, list[str]] = {
         "pick up from last time",
         "let's keep going",
         "as we discussed earlier",
+        "what about that",
+        "what about this part",
+        "and for that",
+        "and the other side",
+        "what changed there",
+        "same for the other one",
     ],
     "conversational": [
         "hello how are you",

@@ -122,11 +122,8 @@ class TestClassificationLogic:
         dim = 8
         encoder = ControlledEncoder(dim=dim)
 
-        # We need to set up batch results for all archetype categories
-        # temporal (8), identity (7), continuation (6), conversational (8) = 29 total
+        # We need to set up batch results for all archetype categories.
         from ormah.engine.prompt_classifier import ARCHETYPES
-
-        total_archetypes = sum(len(v) for v in ARCHETYPES.values())
 
         # All archetype vectors point in different directions (orthogonal-ish)
         # Use the first position for temporal archetypes

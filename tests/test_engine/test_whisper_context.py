@@ -1036,49 +1036,26 @@ class TestWhisperPrecisionGuards:
         assert "User lives in Dublin" in result
         assert "port 8787" not in result
 
-    def test_preference_prompt_boosts_preference_and_drops_fact_extra(self, mock_graph):
+    def test_technical_theme_prompt_keeps_factual_memory(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
-        preference = _make_node_dict("pref-1", "Use a dark theme", node_type="preference")
-        preference["content"] = "Dark theme, monospace fonts, gold accent."
-        preference["space"] = None
-        fact = _make_node_dict("fact-1", "Ormah core memory cap is 50 nodes")
-        fact["space"] = "ormah"
+        factual = _make_node_dict("fact-1", "Theme system implementation")
+        factual["content"] = "The theme system loads tokens, merges overrides, and hydrates CSS variables."
+        preference = _make_node_dict("pref-1", "Prefers dark theme", node_type="preference")
+        preference["content"] = "Use a dark theme with gold accent."
         mock_engine.recall_search_structured.return_value = [
-            {"node": fact, "score": 0.56, "source": "hybrid"},
-            {"node": preference, "score": 0.41, "source": "hybrid"},
+            {"node": factual, "score": 0.81, "source": "hybrid"},
+            {"node": preference, "score": 0.78, "source": "hybrid"},
         ]
 
         result = builder.build_whisper_context(
-            prompt="build a graph visualisation component",
+            prompt="how is the theme system implemented?",
             min_score=0.1,
             injection_gate=0.5,
         )
 
-        assert "Use a dark theme" in result
-        assert "50 nodes" not in result
-
-    def test_preference_prompt_skips_reranker(self, mock_graph):
-        mock_engine = MagicMock()
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-
-        preference = _make_node_dict("pref-1", "Use a dark theme", node_type="preference")
-        preference["space"] = None
-        mock_engine.recall_search_structured.return_value = [
-            {"node": preference, "score": 0.8, "source": "hybrid"},
-        ]
-
-        with patch("ormah.embeddings.reranker.rerank") as mock_rerank:
-            result = builder.build_whisper_context(
-                prompt="build a graph visualisation component",
-                min_score=0.1,
-                injection_gate=0.5,
-                reranker_enabled=True,
-            )
-
-        mock_rerank.assert_not_called()
-        assert "Use a dark theme" in result
+        assert "Theme system implementation" in result
 
     def test_topical_overlap_guard_drops_unrelated_extra_result(self, mock_graph):
         mock_engine = MagicMock()
@@ -1110,6 +1087,10 @@ class TestWhisperContextBuffer:
         """Underspecified follow-up prompts should use recent context in search."""
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        builder._classifier = MagicMock()
+        builder._classifier.classify.return_value = PromptIntent(categories=["continuation"])
 
         nodes = [_make_node_dict("node-0", "Whisper quality metrics")]
         mock_engine.recall_search_structured.return_value = [
@@ -1184,6 +1165,10 @@ class TestWhisperContextBuffer:
         """Only the last 2 recent prompts should be used for follow-up prompts."""
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        builder._classifier = MagicMock()
+        builder._classifier.classify.return_value = PromptIntent(categories=["continuation"])
 
         mock_engine.recall_search_structured.return_value = []
 
@@ -1321,6 +1306,10 @@ class TestWhisperTopicShift:
         """Underspecified follow-up prompts should still search even on same topic."""
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        builder._classifier = MagicMock()
+        builder._classifier.classify.return_value = PromptIntent(categories=["continuation"])
 
         mock_encoder = MagicMock()
         same_vec = np.array([1.0, 0.0, 0.0])
