@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json
 import pytest
-from eval.whisper.corpus import load_corpora, load_corpus, validate_case, CorpusError, VALID_CATEGORIES
+from eval.whisper.corpus import load_corpus, validate_case, CorpusError, VALID_CATEGORIES
 
 
 def _write_jsonl(tmp_path, cases):
@@ -31,15 +31,6 @@ class TestLoadCorpus:
     def test_raises_on_missing_file(self, tmp_path):
         with pytest.raises(CorpusError, match="not found"):
             load_corpus(tmp_path / "missing.jsonl")
-
-    def test_load_corpora_concatenates(self, tmp_path):
-        f1 = tmp_path / "one.jsonl"
-        f2 = tmp_path / "two.jsonl"
-        f1.write_text(json.dumps(_VALID) + "\n")
-        f2.write_text(json.dumps({**_VALID, "id": "w-002"}) + "\n")
-        cases = load_corpora([f1, f2])
-        assert [case["id"] for case in cases] == ["w-001", "w-002"]
-
 
 class TestValidateCase:
     def test_valid_case_passes(self):

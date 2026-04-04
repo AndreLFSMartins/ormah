@@ -7,14 +7,6 @@ class TestEvalWhisperCLI:
         from eval.whisper.cli import cmd_eval_whisper_run
         assert callable(cmd_eval_whisper_run)
 
-    def test_cmd_eval_whisper_mine_transcripts_importable(self):
-        from eval.whisper.cli import cmd_eval_whisper_mine_transcripts
-        assert callable(cmd_eval_whisper_mine_transcripts)
-
-    def test_cmd_eval_whisper_promote_candidates_importable(self):
-        from eval.whisper.cli import cmd_eval_whisper_promote_candidates
-        assert callable(cmd_eval_whisper_promote_candidates)
-
     def test_cli_module_has_make_engine(self):
         import eval.whisper.cli as cli_module
         assert callable(cli_module._make_engine)

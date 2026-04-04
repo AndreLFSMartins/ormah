@@ -29,16 +29,6 @@ def load_corpus(path: Path) -> list[dict]:
         validate_case(obj)
         cases.append(obj)
     return cases
-
-
-def load_corpora(paths: list[Path]) -> list[dict]:
-    """Load and concatenate multiple corpus JSONL files."""
-    cases: list[dict] = []
-    for path in paths:
-        cases.extend(load_corpus(path))
-    return cases
-
-
 def validate_case(case: dict) -> None:
     """Validate a single corpus case. Raises CorpusError on structural issues."""
     case_id = case.get("id", "<unknown>")
