@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ormah.transcript.parser import parse_transcript
+from ormah.transcript.parser import extract_user_prompts, parse_transcript
 
 
 def _write_jsonl(tmp_path: Path, lines: list[dict], name: str = "abc123.jsonl") -> Path:
@@ -213,3 +213,89 @@ class TestParseTranscript:
         ]
         result = parse_transcript(_write_jsonl(tmp_path, lines))
         assert result.conversation == "User: Q1\n\nAssistant: A1\n\nUser: Q2\n\nAssistant: A2"
+
+    def test_codex_response_item_messages_extracted(self, tmp_path):
+        lines = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "How does whisper work?"}],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "It injects relevant memory context."}],
+                },
+            },
+        ]
+        result = parse_transcript(_write_jsonl(tmp_path, lines, name="codex.jsonl"))
+        assert "User: How does whisper work?" in result.conversation
+        assert "Assistant: It injects relevant memory context." in result.conversation
+        assert result.user_turn_count == 1
+
+    def test_codex_bootstrap_user_message_skipped(self, tmp_path):
+        lines = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "# AGENTS.md instructions for /tmp/demo\n\n<INSTRUCTIONS>...</INSTRUCTIONS>\n<environment_context>...</environment_context>",
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Please review the diff"}],
+                },
+            },
+        ]
+        path = _write_jsonl(tmp_path, lines, name="codex-bootstrap.jsonl")
+        result = parse_transcript(path)
+        prompts = extract_user_prompts(path)
+        assert result.user_turn_count == 1
+        assert result.conversation == "User: Please review the diff"
+        assert prompts == ["Please review the diff"]
+
+    def test_codex_turn_aborted_wrapper_skipped(self, tmp_path):
+        lines = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>",
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Show me the current metrics"}],
+                },
+            },
+        ]
+        path = _write_jsonl(tmp_path, lines, name="codex-turn-aborted.jsonl")
+        result = parse_transcript(path)
+        prompts = extract_user_prompts(path)
+        assert result.user_turn_count == 1
+        assert result.conversation == "User: Show me the current metrics"
+        assert prompts == ["Show me the current metrics"]

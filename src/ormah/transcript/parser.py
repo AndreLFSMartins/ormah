@@ -1,4 +1,4 @@
-"""Parse Claude Code JSONL session transcripts into clean conversation text."""
+"""Parse Claude Code and Codex JSONL session transcripts into clean conversation text."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TranscriptResult:
-    """Result of parsing a Claude Code JSONL transcript."""
+    """Result of parsing a supported agent JSONL transcript."""
 
     conversation: str  # "User: ...\n\nAssistant: ...\n\n..."
     user_turn_count: int  # User messages with actual text (not tool_result)
@@ -37,7 +37,7 @@ def _extract_user_text(content) -> str | None:
         for block in content:
             if not isinstance(block, dict):
                 continue
-            if block.get("type") == "text":
+            if block.get("type") in ("text", "input_text"):
                 has_text = True
                 text = block.get("text", "").strip()
                 if text:
@@ -59,7 +59,7 @@ def _extract_assistant_text(content) -> str | None:
     for block in content:
         if not isinstance(block, dict):
             continue
-        if block.get("type") == "text":
+        if block.get("type") in ("text", "output_text"):
             text = block.get("text", "").strip()
             if text:
                 texts.append(text)
@@ -67,8 +67,41 @@ def _extract_assistant_text(content) -> str | None:
     return "\n".join(texts) if texts else None
 
 
+def _coerce_entry(entry: dict) -> tuple[str | None, object | None]:
+    """Normalize Claude Code and Codex transcript records to (role, content)."""
+    entry_type = entry.get("type")
+    if entry_type in ("user", "assistant"):
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            return None, None
+        return entry_type, message.get("content")
+
+    if entry_type == "response_item":
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            return None, None
+        if payload.get("type") != "message":
+            return None, None
+        role = payload.get("role")
+        if role not in ("user", "assistant"):
+            return None, None
+        return role, payload.get("content")
+
+    return None, None
+
+
+def _is_bootstrap_user_text(text: str) -> bool:
+    """Return True when text is client/bootstrap context, not a real user turn."""
+    stripped = text.strip()
+    return (
+        stripped.startswith("# AGENTS.md instructions for ")
+        or stripped.startswith("<environment_context>")
+        or stripped.startswith("<turn_aborted>")
+    )
+
+
 def extract_user_prompts(path: Path, start_offset: int = 0) -> list[str]:
-    """Extract only user text turns from a Claude Code JSONL transcript."""
+    """Extract only user text turns from a supported agent JSONL transcript."""
     path = Path(path)
     prompts: list[str] = []
 
@@ -85,26 +118,21 @@ def extract_user_prompts(path: Path, start_offset: int = 0) -> list[str]:
             except (json.JSONDecodeError, ValueError):
                 continue
 
-            if entry.get("type") != "user":
+            entry_type, content = _coerce_entry(entry)
+            if entry_type != "user":
                 continue
-
-            message = entry.get("message")
-            if not isinstance(message, dict):
-                continue
-
-            content = message.get("content")
             if content is None:
                 continue
 
             text = _extract_user_text(content)
-            if text:
+            if text and not _is_bootstrap_user_text(text):
                 prompts.append(text)
 
     return prompts
 
 
 def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
-    """Parse a Claude Code JSONL transcript into cleaned conversation text.
+    """Parse a supported JSONL transcript into cleaned conversation text.
 
     Reads line by line, extracting only user text and assistant text blocks.
     Skips tool_use, thinking, tool_result, progress, system, and other
@@ -133,21 +161,15 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
             except (json.JSONDecodeError, ValueError):
                 continue
 
-            entry_type = entry.get("type")
+            entry_type, content = _coerce_entry(entry)
             if entry_type not in ("user", "assistant"):
                 continue
-
-            message = entry.get("message")
-            if not isinstance(message, dict):
-                continue
-
-            content = message.get("content")
             if content is None:
                 continue
 
             if entry_type == "user":
                 text = _extract_user_text(content)
-                if text:
+                if text and not _is_bootstrap_user_text(text):
                     turns.append(f"User: {text}")
                     user_turn_count += 1
 
