@@ -169,7 +169,8 @@ def test_get_self_empty(engine):
     assert "No user identity" in text
     assert "asking what they prefer to be called" in text
     assert "LinkedIn, GitHub, CV, or a personal site" in text
-    assert "family, friends, or close relationships" in text
+    assert "How they like people to work with them" in text
+    assert "ask before making big changes" in text
 
 
 def test_get_self_with_identity(engine):
