@@ -44,14 +44,12 @@ from ormah.setup import (
     configure_agent_maintenance,
     configure_codex_hooks,
     configure_codex_mcp,
-    configure_identity,
     configure_llm,
     generate_server_wrapper,
     install_claude_md,
     install_codex_agents,
     install_codex_md,
     run_uninstall,
-    seed_identity,
 )
 
 
@@ -631,74 +629,6 @@ class TestGenerateServerWrapper:
         content = wrapper.read_text()
         assert '.config/ormah/.env' in content
         assert "set -a" in content
-
-
-# --- Identity tests ---
-
-
-class TestConfigureIdentity:
-    def test_returns_name(self, monkeypatch):
-        monkeypatch.setattr("builtins.input", lambda _: "Rishi")
-        name = configure_identity()
-        assert name == "Rishi"
-
-    def test_empty_returns_none(self, monkeypatch, capsys):
-        monkeypatch.setattr("builtins.input", lambda _: "")
-        name = configure_identity()
-        assert name is None
-        captured = capsys.readouterr()
-        assert "learn your name naturally" in captured.out
-        assert "ormah will learn your name" in captured.out
-
-    def test_eof_returns_none(self, monkeypatch, capsys):
-        def raise_eof(_):
-            raise EOFError
-        monkeypatch.setattr("builtins.input", raise_eof)
-        name = configure_identity()
-        assert name is None
-
-    def test_strips_whitespace(self, monkeypatch):
-        monkeypatch.setattr("builtins.input", lambda _: "  Rishi  ")
-        name = configure_identity()
-        assert name == "Rishi"
-
-
-class TestSeedIdentity:
-    def test_posts_to_server(self, capsys):
-        mock_resp = MagicMock()
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_resp
-
-        with patch("ormah.setup.httpx.Client", return_value=mock_client):
-            seed_identity("Rishi")
-
-        mock_client.post.assert_called_once()
-        call_args = mock_client.post.call_args
-        assert "remember" in call_args[0][0]
-        body = call_args[1]["json"]
-        assert body["content"] == "User's name is Rishi"
-        assert body["type"] == "person"
-        assert body["tier"] == "core"
-        assert body["about_self"] is True
-
-        captured = capsys.readouterr()
-        assert "Ormah now knows your name" in captured.out
-
-    def test_handles_server_error_gracefully(self, capsys):
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.side_effect = Exception("connection refused")
-
-        with patch("ormah.setup.httpx.Client", return_value=mock_client):
-            seed_identity("Rishi")
-
-        captured = capsys.readouterr()
-        assert "Could not seed identity" in captured.out
-        assert "learn your name naturally" in captured.out
-        assert "ormah will learn your name" in captured.out
 
 
 # --- LLM configuration tests ---

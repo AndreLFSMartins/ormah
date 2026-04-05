@@ -654,39 +654,6 @@ def _prompt_choice(prompt: str, options: list[str], allow_skip: bool = False) ->
         print("  Invalid choice, try again.")
 
 
-def configure_identity() -> str | None:
-    """Ask the user for their name. Returns the name or None if skipped."""
-    try:
-        name = input("  What should ormah call you? ").strip()
-    except EOFError:
-        name = ""
-
-    if not name:
-        info("Skipped \u2014 ormah will learn your name naturally")
-        return None
-    return name
-
-
-def seed_identity(name: str) -> None:
-    """Store the user's name in ormah via the running server."""
-    try:
-        with httpx.Client(timeout=5.0) as client:
-            client.post(
-                f"http://localhost:{settings.port}/agent/remember",
-                json={
-                    "content": f"User's name is {name}",
-                    "type": "person",
-                    "tier": "core",
-                    "about_self": True,
-                    "title": "User's name",
-                },
-            )
-        ok("Ormah now knows your name")
-    except Exception:
-        warn("Could not seed identity \u2014 server may not be ready yet")
-        info("No worries, ormah will learn your name naturally")
-
-
 _MONTHLY_COST_HINT: dict[str, str] = {
     "claude-haiku": "~$1-3/month with typical use",
     "gpt-4.1-mini": "~$1-3/month with typical use",
@@ -1426,13 +1393,7 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
     # 1. Find absolute path to ormah binary
     ormah_bin = get_ormah_bin_path()
 
-    # 2. Ask for name (store in variable, seed after server is up)
-    if ci or update:
-        user_name = None
-    else:
-        user_name = configure_identity()
-
-    # 3. Detect supported coding agents and offer maintenance upfront — no API key needed
+    # 2. Detect supported coding agents and offer maintenance upfront — no API key needed
     has_claude_code = shutil.which("claude") is not None
     has_codex = shutil.which("codex") is not None or (Path.home() / ".codex").exists()
     agent_maintenance = False
@@ -1445,7 +1406,7 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
             step("Codex detected")
         agent_maintenance = configure_agent_maintenance(has_claude_code, has_codex)
 
-    # 4. Configure LLM — skip if agent-backed maintenance is handling background jobs
+    # 3. Configure LLM — skip if agent-backed maintenance is handling background jobs
     if ci:
         env = _read_env_file()
         env["ORMAH_LLM_PROVIDER"] = "none"
@@ -1460,10 +1421,10 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
     else:
         configure_llm()
 
-    # 4.5 Generate server wrapper
+    # 4. Generate server wrapper
     wrapper_path = generate_server_wrapper(ormah_bin)
 
-    # 4.6 Preload local models into Ormah's shared model cache
+    # 4.5 Preload local models into Ormah's shared model cache
     _preload_local_models()
 
     # 5. Start server + install auto-start
@@ -1480,10 +1441,6 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
         else:
             _diagnose_server_failure()
             server_ok = False
-
-    # 5. Seed identity memory via API (needs server running)
-    if user_name and server_ok:
-        seed_identity(user_name)
 
     # 6. Hook up Claude integrations
     has_claude_desktop = os.path.exists(
