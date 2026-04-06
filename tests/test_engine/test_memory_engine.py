@@ -159,9 +159,12 @@ def test_whisper_onboarding_nudge(engine):
     assert "What should I call you?" in text
     assert "LinkedIn may be blocked" in text
     assert "authenticated access" in text
+    assert "mine it thoroughly" in text
+    assert "not just a short summary" in text
+    assert "5-15 self-contained memories" in text
     assert "do not infer details" in text
     assert "short bio instead" in text
-    assert "Name + optional profile link or short bio" in text
+    assert "Name + optional onboarding material" in text
     assert text.index("What should I call you?") < text.index("GitHub")
     assert "working with AI agents" not in text
     assert "User skipped onboarding" in text
