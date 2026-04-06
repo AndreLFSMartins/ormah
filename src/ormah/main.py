@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +28,13 @@ setup_logging(
     log_file=LOG_DIR / "ormah.log",
 )
 logger = logging.getLogger(__name__)
+
+_RESERVED_API_PREFIXES = {"agent", "admin", "ingest", "ui"}
+
+
+def _is_reserved_api_path(full_path: str) -> bool:
+    return full_path.split("/", 1)[0] in _RESERVED_API_PREFIXES
+
 
 try:
     APP_VERSION = pkg_version("ormah")
@@ -123,6 +130,8 @@ if _ui_dist.is_dir():
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
         """Serve the SPA index.html for all non-API routes."""
+        if _is_reserved_api_path(full_path):
+            raise HTTPException(status_code=404, detail="Not found")
         file = (_ui_dist / full_path).resolve()
         try:
             file.relative_to(_ui_dist_resolved)
