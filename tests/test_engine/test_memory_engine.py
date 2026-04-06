@@ -148,8 +148,14 @@ def test_whisper_onboarding_nudge(engine):
     with patch.object(engine.context_builder, "build_whisper_context", return_value=""):
         text = engine.get_whisper_context("hello")
     assert "onboarding" in text.lower()
-    assert text.index("prefer to be called") < text.index("LinkedIn")
-    assert text.index("LinkedIn") < text.index("how they like people to work with them")
+    assert "STOP" in text
+    assert "do not start any work" in text
+    assert "What should I call you?" in text
+    assert "as a shortcut" in text
+    assert "Name + optional profile link" in text
+    assert text.index("What should I call you?") < text.index("LinkedIn")
+    assert text.index("LinkedIn") < text.index("working with AI agents")
+    assert "User skipped onboarding" in text
 
     with patch.object(engine.context_builder, "build_whisper_context", return_value=""):
         text2 = engine.get_whisper_context("hello again")
