@@ -975,6 +975,15 @@ def configure_agent_maintenance(has_claude_code: bool, has_codex: bool) -> bool:
         return False
 
 
+def _print_setup_summary(ormah_bin: str) -> None:
+    ok("Ormah is ready.")
+    info("Installed locations:")
+    print(f"    CLI: {ormah_bin}")
+    print(f"    Config: {ENV_PATH}")
+    print(f"    Memory: {settings.memory_dir}")
+    print(f"    Graph UI: http://localhost:{settings.port}")
+
+
 def _diagnose_server_failure() -> None:
     """Print a helpful error when the server fails to start."""
     port = settings.port
@@ -1473,6 +1482,6 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
     step("Setup complete")
     if not ci:
         play_finale()
-    ok('Ormah is ready! Try asking your AI: "What do you know about me?"')
+    _print_setup_summary(ormah_bin)
     if server_ok and not ci:
         webbrowser.open(f"http://localhost:{settings.port}")

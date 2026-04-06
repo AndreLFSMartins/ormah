@@ -24,6 +24,7 @@ from ormah.setup import (
     CLAUDE_MD_SENTINEL_START,
     _merge_json_file,
     _preload_local_models,
+    _print_setup_summary,
     _remove_codex_hooks,
     _remove_codex_md_block,
     _remove_codex_mcp_config,
@@ -483,6 +484,18 @@ class TestConfigureCodexHooks:
 
 
 # --- CLI tests ---
+
+
+def test_setup_summary_prints_install_locations(capsys):
+    _print_setup_summary("/abs/path/ormah")
+
+    out = capsys.readouterr().out
+    assert "Ormah is ready." in out
+    assert 'What do you know about me?' not in out
+    assert "CLI: /abs/path/ormah" in out
+    assert "Config:" in out
+    assert "Memory:" in out
+    assert "Graph UI:" in out
 
 
 class TestCliEntryPoint:

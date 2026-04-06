@@ -148,6 +148,8 @@ def test_whisper_onboarding_nudge(engine):
     with patch.object(engine.context_builder, "build_whisper_context", return_value=""):
         text = engine.get_whisper_context("hello")
     assert "onboarding" in text.lower()
+    assert text.index("prefer to be called") < text.index("LinkedIn")
+    assert text.index("LinkedIn") < text.index("how they like people to work with them")
 
     with patch.object(engine.context_builder, "build_whisper_context", return_value=""):
         text2 = engine.get_whisper_context("hello again")
@@ -155,6 +157,7 @@ def test_whisper_onboarding_nudge(engine):
 
 
 def test_whisper_onboarding_debug_keeps_injected_ids(engine):
+    engine.settings.whisper_reranker_enabled = False
     with patch.object(
         engine.context_builder,
         "build_whisper_context",
@@ -163,6 +166,7 @@ def test_whisper_onboarding_debug_keeps_injected_ids(engine):
         text, injected_ids = engine.get_whisper_context("hello", _return_debug=True)
 
     assert "whisper text" in text
+    assert "whisper text\n\n## Ormah" in text
     assert "onboarding" in text.lower()
     assert injected_ids == ["mem-1"]
 

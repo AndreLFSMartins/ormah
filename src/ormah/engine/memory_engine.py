@@ -885,9 +885,13 @@ class MemoryEngine:
                 prompt[:80],
                 session_id,
             )
+            maintenance_due = self._maybe_get_maintenance_due_signal()
+            text = "\n\n".join(
+                section for section in (maintenance_due, onboarding) if section
+            )
             if _return_debug:
-                return onboarding, []
-            return onboarding
+                return text, []
+            return text
 
         result = self.context_builder.build_whisper_context(
             prompt=prompt,
@@ -914,10 +918,33 @@ class MemoryEngine:
 
         if _return_debug:
             text, injected_ids = result
-            text = f"{text}\n{onboarding}" if text else onboarding
+            text = f"{text.rstrip()}\n\n{onboarding}" if text else onboarding
             return text, injected_ids
 
-        return f"{result}\n{onboarding}" if result else onboarding
+        return f"{result.rstrip()}\n\n{onboarding}" if result else onboarding
+
+    def _maybe_get_maintenance_due_signal(self) -> str:
+        if not getattr(self.settings, "claude_maintenance_enabled", False):
+            return ""
+
+        interval_hours = getattr(self.settings, "claude_maintenance_interval_hours", 24)
+        try:
+            row = self.graph.conn.execute(
+                "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
+            ).fetchone()
+            last_run = row[0] if row else None
+            if not last_run:
+                return "maintenance_due"
+
+            parsed_last_run = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
+            if parsed_last_run.tzinfo is None:
+                parsed_last_run = parsed_last_run.replace(tzinfo=timezone.utc)
+            elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
+            if elapsed.total_seconds() > interval_hours * 3600:
+                return "maintenance_due"
+        except Exception as e:
+            logger.warning("Failed to compute maintenance_due: %s", e)
+        return ""
 
     def mark_outdated(self, node_id: str, reason: str | None = None) -> str | None:
         """Mark a memory as outdated: set valid_until to now, optionally append reason."""
@@ -1463,17 +1490,22 @@ class MemoryEngine:
         """Return the one-time first-session onboarding nudge when identity is empty."""
         onboarding_nudge = (
             "## Ormah: Action required — initiate first-session onboarding\n"
+            "\n"
             "This is the user's first session with ormah. No user-related memories are stored yet. "
             "Your very first response MUST acknowledge what the user said, then briefly pivot to onboarding "
-            "before returning to their task. Keep it short and human. Ask one question at a time. Start by "
-            "asking what they prefer to be called. Then gather a few useful facts naturally, such as:\n"
-            "- What they do, what they are focused on these days, or what kind of work they care about\n"
-            "- How they like people to work with them, with examples like short answers, don't "
+            "before returning to their task. Keep it short and human. Ask one question at a time; do not "
+            "ask the whole list at once.\n\n"
+            "Suggested order:\n"
+            "1. Ask what they prefer to be called.\n"
+            "2. Ask whether they want to share a useful profile link such as LinkedIn, GitHub, a CV, "
+            "or a personal site. If they share one, use that as enough profile context and avoid making "
+            "them describe everything manually.\n"
+            "3. If no profile link is shared, ask what they do, what they are focused on these days, "
+            "or what kind of work they care about.\n"
+            "4. Ask how they like people to work with them, with examples like short answers, don't "
             "over-explain, give me the direct version, ask before making big changes, or give me "
             "a plan before changing code\n"
-            "- Optional profile links such as LinkedIn, GitHub, CV, or a personal site if that is easier "
-            "than describing everything from scratch\n"
-            "- Light personal interests only if it fits naturally\n\n"
+            "5. Ask about light personal interests only if it fits naturally.\n\n"
             "After you have 2-4 useful facts or one good profile link, wrap up warmly with "
             "\"I have enough context to get started — I'll keep learning as we work together.\" "
             "Then continue with the user's original task. "
