@@ -3,7 +3,7 @@
 from unittest.mock import patch
 
 from ormah.engine.memory_engine import _embedding_text, _generate_title
-from ormah.models.node import CreateNodeRequest, NodeType, Tier, ConnectRequest, EdgeType, UpdateNodeRequest
+from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, NodeType, UpdateNodeRequest
 
 
 # ---------------------------------------------------------------------------
@@ -143,15 +143,43 @@ def test_connect(engine):
     assert "Connected" in text
 
 
-def test_get_self_onboarding_nudge(engine):
-    """get_self fires onboarding nudge exactly once when identity is empty."""
-    # First call: no user node → nudge should appear
-    text = engine.get_self()
+def test_whisper_onboarding_nudge(engine):
+    """whisper fires onboarding nudge exactly once when identity is empty."""
+    with patch.object(engine.context_builder, "build_whisper_context", return_value=""):
+        text = engine.get_whisper_context("hello")
     assert "onboarding" in text.lower()
 
-    # Second call: nudge must NOT fire again (tracked by meta key)
-    text2 = engine.get_self()
+    with patch.object(engine.context_builder, "build_whisper_context", return_value=""):
+        text2 = engine.get_whisper_context("hello again")
     assert "onboarding" not in text2.lower()
+
+
+def test_whisper_onboarding_debug_keeps_injected_ids(engine):
+    with patch.object(
+        engine.context_builder,
+        "build_whisper_context",
+        return_value=("whisper text", ["mem-1"]),
+    ):
+        text, injected_ids = engine.get_whisper_context("hello", _return_debug=True)
+
+    assert "whisper text" in text
+    assert "onboarding" in text.lower()
+    assert injected_ids == ["mem-1"]
+
+
+def test_whisper_onboarding_suppressed_when_identity_exists(engine):
+    req = CreateNodeRequest(
+        content="User's name is Alice.",
+        type=NodeType.fact,
+        title="User name",
+        about_self=True,
+    )
+    engine.remember(req)
+
+    with patch.object(engine.context_builder, "build_whisper_context", return_value=""):
+        text = engine.get_whisper_context("hello")
+
+    assert "onboarding" not in text.lower()
 
 
 def test_stats(engine):
@@ -201,9 +229,28 @@ def test_get_whisper_context_uses_reranker_when_available(engine):
 def test_get_whisper_context_returns_empty_when_reranker_required_but_unavailable(engine):
     engine.settings.whisper_reranker_enabled = True
     engine._whisper_reranker_available = False
+    engine.db.conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
+    )
+    engine.db.conn.commit()
 
-    with patch.object(engine.context_builder, "build_whisper_context", return_value="unused") as build:
+    with patch.object(
+        engine.context_builder, "build_whisper_context", return_value="unused"
+    ) as build:
         result = engine.get_whisper_context("auth prompt")
 
     assert result == ""
+    build.assert_not_called()
+
+
+def test_whisper_onboarding_works_when_reranker_unavailable(engine):
+    engine.settings.whisper_reranker_enabled = True
+    engine._whisper_reranker_available = False
+
+    with patch.object(
+        engine.context_builder, "build_whisper_context", return_value="unused"
+    ) as build:
+        result = engine.get_whisper_context("auth prompt")
+
+    assert "onboarding" in result.lower()
     build.assert_not_called()

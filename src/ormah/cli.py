@@ -142,7 +142,6 @@ def main():
         cmd_outdated,
         cmd_recall,
         cmd_remember,
-        cmd_self,
         cmd_stats,
         cmd_whisper_inject,
         cmd_whisper_store,
@@ -205,11 +204,6 @@ def main():
     nd.add_argument("id", help="Memory UUID")
     nd.add_argument("--json", action="store_true", help="Output raw JSON")
     nd.set_defaults(func=cmd_node)
-
-    # self
-    slf = sub.add_parser("self", help="Show your identity profile")
-    slf.add_argument("--json", action="store_true", help="Output raw JSON")
-    slf.set_defaults(func=cmd_self)
 
     # outdated
     out = sub.add_parser("outdated", help="Mark a memory as outdated")

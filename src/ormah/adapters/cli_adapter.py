@@ -208,19 +208,6 @@ def cmd_node(args):
     _api(call)
 
 
-def cmd_self(args):
-    def call():
-        with _client() as c:
-            r = c.get("/agent/self")
-            r.raise_for_status()
-            if args.json:
-                print(json.dumps(r.json(), indent=2))
-            else:
-                print(r.json()["text"])
-
-    _api(call)
-
-
 def cmd_outdated(args):
     body: dict = {}
     if args.reason:
@@ -623,11 +610,6 @@ def main():
     nd.add_argument("id", help="Memory UUID")
     nd.add_argument("--json", action="store_true", help="Output raw JSON")
     nd.set_defaults(func=cmd_node)
-
-    # --- self ---
-    slf = sub.add_parser("self", help="Show your identity profile")
-    slf.add_argument("--json", action="store_true", help="Output raw JSON")
-    slf.set_defaults(func=cmd_self)
 
     # --- outdated ---
     out = sub.add_parser("outdated", help="Mark a memory as outdated")

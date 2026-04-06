@@ -1094,7 +1094,7 @@ class TestWhisperPrecisionGuards:
         relevant = _make_node_dict("fact-1", "FSRS decay algorithm")
         relevant["content"] = "Memory decay uses FSRS stability and retrievability."
         unrelated = _make_node_dict("fact-2", "MCP exposes six tools")
-        unrelated["content"] = "remember, recall, get_self, mark_outdated."
+        unrelated["content"] = "remember, recall, recall_node, mark_outdated."
         mock_engine.recall_search_structured.return_value = [
             {"node": relevant, "score": 0.78, "source": "hybrid"},
             {"node": unrelated, "score": 0.74, "source": "hybrid"},

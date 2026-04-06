@@ -877,6 +877,7 @@ class MemoryEngine:
         _return_debug: bool = False,
     ) -> str | tuple[str, list[str]]:
         """Get compact whisper context for involuntary recall injection."""
+        onboarding = self._maybe_get_onboarding_nudge(space=space)
         if self.settings.whisper_reranker_enabled and not self._whisper_reranker_available:
             logger.error(
                 "Whisper reranker is required but unavailable; returning empty whisper context. "
@@ -885,10 +886,10 @@ class MemoryEngine:
                 session_id,
             )
             if _return_debug:
-                return "", []
-            return ""
+                return onboarding, []
+            return onboarding
 
-        return self.context_builder.build_whisper_context(
+        result = self.context_builder.build_whisper_context(
             prompt=prompt,
             space=space,
             max_nodes=self.settings.whisper_max_nodes,
@@ -908,6 +909,15 @@ class MemoryEngine:
             session_id=session_id,
             _return_debug=_return_debug,
         )
+        if not onboarding:
+            return result
+
+        if _return_debug:
+            text, injected_ids = result
+            text = f"{text}\n{onboarding}" if text else onboarding
+            return text, injected_ids
+
+        return f"{result}\n{onboarding}" if result else onboarding
 
     def get_context(
         self,
@@ -918,15 +928,11 @@ class MemoryEngine:
         """Get broader agent context for session bootstrap or CLI inspection.
 
         This is intentionally less aggressive than whisper injection:
-        - include the identity section when available
         - include task-relevant memories when a task hint is given
         - otherwise fall back to a compact slice of core memories
         """
         max_nodes = max_nodes or self.settings.context_max_nodes
         sections: list[str] = []
-
-        identity = self.get_self(space=space)
-        sections.append(identity)
 
         context_results: list[dict[str, Any]] = []
         if task_hint:
@@ -1501,17 +1507,23 @@ class MemoryEngine:
             return (a, b) if len(a.content) >= len(b.content) else (b, a)
         return (a, b) if a.updated >= b.updated else (b, a)
 
-    def get_self(self, space: str | None = None) -> str:
-        """Get formatted identity profile for the user.
+    def _get_identity_nodes_for_space(self, space: str | None = None) -> list[dict[str, Any]]:
+        """Return non-expired identity-linked memories for a project/global scope."""
+        identity_nodes = self.graph.get_neighbors(
+            self.user_node_id, depth=1, edge_types=["defines"]
+        ) if self.user_node_id else []
+        if space:
+            identity_nodes = [
+                n for n in identity_nodes
+                if n.get("space") in (space, "null", None)
+            ]
+        return identity_nodes
 
-        Returns the top 15 identity nodes, filtered to same-space and global
-        ('null'-space) nodes only, sorted by type utility then importance.
-        Type priority: preference > goal > decision > observation > person >
-        fact > procedure > event.
-        """
-        _ONBOARDING_NUDGE = (
-            "\n\n## Ormah: Action required — initiate first-session onboarding\n"
-            "This is the user's first session with ormah. The identity profile is empty. "
+    def _maybe_get_onboarding_nudge(self, space: str | None = None) -> str:
+        """Return the one-time first-session onboarding nudge when identity is empty."""
+        onboarding_nudge = (
+            "## Ormah: Action required — initiate first-session onboarding\n"
+            "This is the user's first session with ormah. No user-related memories are stored yet. "
             "Your very first response MUST acknowledge what the user said, then briefly pivot to onboarding "
             "before returning to their task. Keep it short and human. Ask one question at a time. Start by "
             "asking what they prefer to be called. Then gather a few useful facts naturally, such as:\n"
@@ -1529,70 +1541,21 @@ class MemoryEngine:
             "This message will not appear again."
         )
 
-        if self.user_node_id:
-            self._touch_access(self.user_node_id)
-
-        # Get all nodes linked via defines edges from self node
-        identity_nodes = self.graph.get_neighbors(
-            self.user_node_id, depth=1, edge_types=["defines"]
-        ) if self.user_node_id else []
-
-        # Filter to same-space and global ('null'-space) nodes only
-        if space:
-            identity_nodes = [
-                n for n in identity_nodes
-                if n.get("space") in (space, "null", None)
-            ]
-
-        # Reserved slots: top 8 preferences + top 7 non-preferences
-        # Preferences are the behavioral briefing; the rest provide directional context.
-        _TYPE_PRIORITY = {
-            "preference": 0,
-            "goal": 1,
-            "decision": 2,
-            "observation": 3,
-            "person": 4,
-            "fact": 5,
-            "procedure": 6,
-            "event": 7,
-        }
-        prefs = sorted(
-            [n for n in identity_nodes if n.get("type") == "preference"],
-            key=lambda n: -(n.get("importance") or 0.0),
-        )[:8]
-        others = sorted(
-            [n for n in identity_nodes if n.get("type") != "preference"],
-            key=lambda n: (
-                _TYPE_PRIORITY.get(n.get("type", ""), 5),
-                -(n.get("importance") or 0.0),
-            ),
-        )[:7]
-        identity_nodes = prefs + others
-
-        # Touch access on each identity node
-        for n in identity_nodes:
-            self._touch_access(n["id"])
-
-        from ormah.engine.traversal import format_identity_section
-
-        result = format_identity_section(identity_nodes)
-
-        # One-time onboarding nudge: fires when identity is empty and not yet prompted
+        identity_nodes = self._get_identity_nodes_for_space(space)
         if not identity_nodes:
             try:
                 row = self.graph.conn.execute(
                     "SELECT value FROM meta WHERE key = 'onboarding_prompted'"
                 ).fetchone()
                 if row is None:
-                    result = result + _ONBOARDING_NUDGE
                     with self.db.transaction() as conn:
                         conn.execute(
                             "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
                         )
+                    return onboarding_nudge
             except Exception as e:
                 logger.warning("Onboarding nudge check failed: %s", e)
-
-        return result
+        return ""
 
     def _link_to_self(self, node: MemoryNode) -> None:
         """Create a defines edge from self node to the given node."""
@@ -2198,7 +2161,7 @@ GOOD: "Decided to use JWT tokens over session cookies for the API because the cl
 
 2. **User corrections and "no" moments** (type: "preference" or "decision") — When the user pushed back, said "no", or corrected the AI. These reveal unstated preferences. Set about_self=true.
 
-3. **Preferences and opinions** (type: "preference") — Must be specific. "Prefers map/filter over for loops, avoids classes unless modeling state" not "prefers functional style". Set about_self=true — this links the memory to the user's identity profile.
+3. **Preferences and opinions** (type: "preference") — Must be specific. "Prefers map/filter over for loops, avoids classes unless modeling state" not "prefers functional style". Set about_self=true — this marks the memory as user-related for recall and whisper.
 
 4. **Architecture and design patterns** (type: "fact" or "concept") — HOW the system works, not just what it does. Include the constraints that shaped the design. Name specific files, modules, patterns.
 
@@ -2231,7 +2194,7 @@ For each memory:
 - "type": One of: fact, decision, preference, event, person, project, concept, procedure, goal, observation. Choose carefully — type affects how the memory is weighted, stored, and retrieved.
 - "title": 5-12 words. Must be specific enough to distinguish this memory from related ones. The title is heavily weighted in search — make it count. BAD: "Database choice". GOOD: "Chose SQLite over Postgres for local-first single-user index".
 - "tags": 2-5 tags. Include the project name if mentioned, technology names, and domain terms. Tags are indexed for search.
-- "about_self": true if about the user's identity, preferences, or personal information. This triggers special handling: person types get promoted to core memory; preferences are linked to the user's identity profile.
+- "about_self": true if about the user's identity, preferences, or personal information. This triggers special handling: person types get promoted to core memory; user-related memories are marked for recall and whisper.
 - "confidence": 0.0-1.0. Use 1.0 for explicit statements by the user. Use 0.7-0.9 for clear but unstated implications. Use 0.4-0.6 for inferences you're less sure about. Low confidence memories are penalized in search ranking, so be honest.
 
 Return: {{"memories": [...]}}

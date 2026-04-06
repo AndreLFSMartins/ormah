@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
 
 import httpx
-import pytest
 
 from ormah.adapters.cli_adapter import main
 
@@ -14,7 +12,6 @@ from ormah.adapters.cli_adapter import main
 def _run_cli(args: list[str], monkeypatch, stdin_text: str | None = None):
     """Run the CLI with given args, returning (exit_code, stdout, stderr)."""
     import io
-    import sys
 
     monkeypatch.setattr("sys.argv", ["ormah-cli"] + args)
     if stdin_text is not None:
@@ -354,42 +351,6 @@ def test_node_json(monkeypatch):
     assert code == 0
     parsed = json.loads(out)
     assert parsed["node"]["id"] == "abc-123"
-
-
-# --- self ---
-
-
-def test_self_text(monkeypatch):
-    def handler(request):
-        assert "/agent/self" in str(request.url)
-        return _mock_response({"text": "# About the User\n\n- **[preference]** Prefers concise responses"})
-
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(
-        "ormah.adapters.cli_adapter._client",
-        lambda: httpx.Client(transport=transport, base_url="http://test"),
-    )
-    code, out, err = _run_cli(["self"], monkeypatch)
-    assert code == 0
-    assert "About the User" in out
-
-
-def test_self_json(monkeypatch):
-    response_data = {"text": "# About the User\n", "node_id": None}
-
-    def handler(request):
-        return _mock_response(response_data)
-
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(
-        "ormah.adapters.cli_adapter._client",
-        lambda: httpx.Client(transport=transport, base_url="http://test"),
-    )
-    code, out, err = _run_cli(["self", "--json"], monkeypatch)
-    assert code == 0
-    parsed = json.loads(out)
-    assert "text" in parsed
-
 
 # --- outdated ---
 

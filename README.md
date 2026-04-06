@@ -130,7 +130,7 @@ Memories live in three tiers:
 - `working`: active memories for current projects, ongoing collaboration, and recently useful context
 - `archival`: faded but still searchable history
 
-`get_self` does not dump every identity memory into context. It returns a compact identity profile, prioritising the most useful memories first.
+Identity and preference memories are marked with `about_self` metadata so `recall` and whisper can surface them when they are relevant.
 
 ### Edge types
 
@@ -241,7 +241,6 @@ Primary MCP tools:
 - `remember`
 - `recall`
 - `recall_node` — fetch full content and connections for a specific memory by ID
-- `get_self`
 - `mark_outdated`
 - `submit_feedback`
 - `run_maintenance`
@@ -252,7 +251,7 @@ This is the main agent-facing surface for durable memory operations.
 
 The API runs at `http://localhost:8787`.
 
-- `/agent/*`: remember, recall, whisper, self, feedback, maintenance
+- `/agent/*`: remember, recall, whisper, feedback, maintenance
 - `/admin/*`: job control, stats, review actions
 - `/ingest/*`: conversation and file ingestion
 - `/ui/*`: graph data, search, node details, insights
@@ -272,7 +271,6 @@ ormah server status             # check if the server is running
 
 ormah remember "..."            # store a memory
 ormah recall "query"            # search memories
-ormah self                      # show identity profile
 ormah node <id>                 # inspect a specific memory
 ormah outdated <id>             # mark a memory as outdated
 ormah stats                     # show store statistics

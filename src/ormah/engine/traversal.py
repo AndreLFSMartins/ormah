@@ -117,30 +117,6 @@ def format_search_results(results: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-def format_identity_section(
-    identity_nodes: list[dict[str, Any]],
-    max_content_len: int = 300,
-    header_prefix: str = "#",
-    include_ids: bool = False,
-) -> str:
-    """Format identity-linked nodes as an 'About the User' section."""
-    if not identity_nodes:
-        return "No user identity information stored yet."
-
-    lines = [f"{header_prefix} About the User\n"]
-    for node in identity_nodes:
-        title = node.get("title") or _excerpt(node.get("content", ""))
-        id_suffix = f" (id: {node['id'][:8]})" if include_ids and node.get("id") else ""
-        lines.append(f"- **[{node['type']}]** {title}{id_suffix}")
-        content = node.get("content", "").strip()
-        if content and content != title:
-            lines.append(f"  {content[:max_content_len]}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-
 def _excerpt(text: str, max_len: int = 60) -> str:
     text = text.strip().replace("\n", " ")
     if len(text) <= max_len:

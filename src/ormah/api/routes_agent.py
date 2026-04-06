@@ -112,14 +112,6 @@ async def connect(req: ConnectRequest, request: Request):
     return TextResponse(text=text)
 
 
-@router.get("/self", response_model=TextResponse)
-async def get_self(request: Request, space: str | None = None):
-    """Get the user's identity profile — name, preferences, and personal facts."""
-    engine = request.app.state.engine
-    text = engine.get_self(space=space)
-    return TextResponse(text=text)
-
-
 @router.get("/context", response_model=TextResponse)
 async def get_context(
     request: Request,

@@ -91,10 +91,6 @@ def test_context(client):
     resp = client.get("/agent/context", params={"task_hint": "sqlite graph", "space": "ormah"})
     assert resp.status_code == 200
     text = resp.json()["text"]
-    assert (
-        "About the User" in text
-        or "No user identity information stored yet." in text
-    )
     assert "SQLite graph index" in text
 
 

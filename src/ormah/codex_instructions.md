@@ -10,7 +10,7 @@ Ormah is your persistent memory system. It stores, recalls, and surfaces memorie
 
 3. **Notice what stands out**: Humans form strong memories around novelty, mistakes, and emotion. Use the same instincts: something unexpected happened → remember the lesson. The user corrected you → remember what they wanted and why. You tried something and it failed → remember what didn't work. The user repeated themselves → they said it twice because it matters, store it carefully and judge the tier on actual importance — not every repeated fact is core. A pattern is emerging (user keeps preferring X over Y, a codebase follows a convention, a recurring frustration surfaces) → name the pattern and store it. A milestone or emotional moment surfaces (user says "wow", expresses delight, or marks something as significant) → capture it immediately without waiting to be asked.
 
-4. **Check before assuming**: Use `recall` to search for relevant context before making assumptions about past conversations. For personal info (name, location, preferences), prefer `get_self` — it returns all identity-linked memories directly.
+4. **Check before assuming**: Use `recall` to search for relevant context before making assumptions about past conversations, including personal info such as name, location, and preferences.
 
 5. **Memory supports the flow, not the other way around**: Don't let recalled memories override or derail the current working context. If you're mid-task and `recall` returns something from a different context, let it go — stay in the flow. Use `recall` when you're genuinely unsure or the user asks about something from a prior session. Memory should feel like a natural extension of your knowledge, not an interruption. A whisper, not a shout. The same applies in reverse: when something worth remembering surfaces mid-conversation — a bug, a decision, an observation, something the user said in passing — store it with `remember` and keep going. Don't let it become a detour. Ormah is the place to park insights so the current thread stays intact.
 
@@ -18,12 +18,12 @@ Ormah is your persistent memory system. It stores, recalls, and surfaces memorie
 
 7. **Use appropriate tiers**: `core` for always-relevant info (user identity, preferences, key architectural decisions), `working` for anything actively relevant now, `archival` for historical/reference data.
 
-8. **Start with context**: Call `get_context` at the beginning of conversations to load core memories. Use `task_hint` when the task is known to get focused context.
+8. **Avoid broad startup loading**: Do not perform broad context loading at the beginning of conversations by default. Use `recall` only when you need explicit prior context for the current task.
 
 9. **Mark outdated info**: When a memory is wrong or outdated, call `mark_outdated` with a reason so it gets demoted in future searches.
 
 10. **Set confidence**: When storing information you're not fully certain about, set `confidence` below 1.0. This affects how prominently the memory appears in search results.
 
-11. **Run maintenance off the critical path**: When `get_context` returns `unprocessed_memories` with a non-zero value, handle maintenance separately from the user-facing turn. If the `ormah-maintenance` custom agent is available, spawn it to run the two-call `run_maintenance` flow instead of doing it inline. Otherwise, defer maintenance to the next safe point rather than interrupting the current response.
+11. **Run maintenance off the critical path**: When whisper outputs `maintenance_due`, handle maintenance separately from the user-facing turn. If the `ormah-maintenance` custom agent is available, spawn it to run the two-call `run_maintenance` flow instead of doing it inline. Otherwise, defer maintenance to the next safe point rather than interrupting the current response.
 
 12. **Submit implicit feedback on whispered memories**: If a whispered memory is genuinely useful and you actively draw on it in your response, call `submit_feedback(node_id=<id>, signal=1, source="implicit")`. If you explicitly decide a whispered memory is not relevant, call `submit_feedback(node_id=<id>, signal=-1, source="implicit")`. Do not call `submit_feedback` for silence — only call it when you actively use a memory or actively decide it's irrelevant.

@@ -342,13 +342,6 @@ async def _dispatch(
                 return _handle_error(resp)
             return resp.json()["text"]
 
-        elif name == "get_self":
-            params = {"space": default_space} if default_space else {}
-            resp = await client.get("/agent/self", params=params)
-            if not resp.is_success:
-                return _handle_error(resp)
-            return resp.json()["text"]
-
         elif name == "submit_feedback":
             body = {
                 "node_id": args["node_id"],

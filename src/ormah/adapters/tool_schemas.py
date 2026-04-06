@@ -1,6 +1,6 @@
 """Canonical tool definitions shared across MCP and OpenAI adapters.
 
-TOOLS: The core set of tools exposed via MCP to AI agents (7 tools).
+TOOLS: The core set of tools exposed via MCP to AI agents (6 tools).
 ADMIN_TOOLS: Tools for human administration via CLI/API only (7 tools).
 ALL_TOOLS: Combined list for adapters that want the full set.
 """
@@ -83,8 +83,8 @@ TOOLS = [
                     "type": "boolean",
                     "description": (
                         "Set to true if this memory is about the user's identity, "
-                        "personal information, or preferences. This links the memory "
-                        "to the user's identity profile."
+                        "personal information, or preferences. This marks the memory "
+                        "as user-related for recall and whisper."
                     ),
                     "default": False,
                 },
@@ -112,8 +112,8 @@ TOOLS = [
             "Search memories by natural language query. Returns the most relevant memories "
             "using hybrid full-text + semantic search. Results are automatically prioritized "
             "for the current project, then global memories, then other projects. "
-            "Use this when you need to find information from past conversations or stored knowledge. "
-            "For personal info (name, location, preferences), prefer get_self over recall."
+            "Use this when you need to find information from past conversations or stored knowledge, "
+            "including personal facts, preferences, and prior project context."
         ),
         "parameters": {
             "type": "object",
@@ -150,19 +150,6 @@ TOOLS = [
         },
     },
     _RECALL_NODE_TOOL,
-    {
-        "name": "get_self",
-        "description": (
-            "Get the user's identity profile — preferences, goals, decisions, and key facts. "
-            "Returns the top 15 most relevant identity memories for the current project, "
-            "prioritising preferences and goals over biographical facts. "
-            "Use recall for anything not found here. No parameters required."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-        },
-    },
     {
         "name": "mark_outdated",
         "description": (

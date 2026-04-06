@@ -161,29 +161,3 @@ def test_self_node_skipped_by_decay(engine):
         (f"%{engine.user_node_id}%",),
     ).fetchall()
     assert len(proposals) == 0
-
-
-def test_get_self_empty(engine):
-    """get_self with no identity nodes returns appropriate message."""
-    text = engine.get_self()
-    assert "No user identity" in text
-    assert "asking what they prefer to be called" in text
-    assert "LinkedIn, GitHub, CV, or a personal site" in text
-    assert "How they like people to work with them" in text
-    assert "ask before making big changes" in text
-
-
-def test_get_self_with_identity(engine):
-    """get_self returns formatted identity nodes."""
-    req = CreateNodeRequest(
-        content="User's name is Alice.",
-        type=NodeType.fact,
-        title="User name",
-        about_self=True,
-    )
-    engine.remember(req)
-
-    text = engine.get_self()
-    assert "About the User" in text
-    assert "User name" in text
-    assert "Action required — initiate first-session onboarding" not in text
