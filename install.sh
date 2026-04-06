@@ -96,12 +96,11 @@ fi
 step "Installing ormah"
 
 INSTALL_SOURCE="${ORMAH_INSTALL_SOURCE:-ormah[litellm]}"
-UV_FLAGS=(--python 3.11)
+UV_FLAGS=(--python 3.11 --upgrade --force)
 IS_UPGRADE=false
 
-if uv tool list 2>/dev/null | grep -q '^ormah '; then
+if command -v ormah >/dev/null 2>&1 || uv tool list 2>/dev/null | grep -q '^ormah '; then
     info "Existing install found — upgrading"
-    UV_FLAGS+=(--upgrade)
     IS_UPGRADE=true
 
     # Back up memory before upgrading so it can be recovered if something goes wrong
