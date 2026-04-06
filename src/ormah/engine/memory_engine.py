@@ -138,6 +138,7 @@ class MemoryEngine:
 
         self._ensure_self_node()
         self._migrate_identity_tiers()
+        self._seed_initial_maintenance_grace_period()
         self._warmup_embedder()
         self._warmup_reranker()
 
@@ -180,6 +181,25 @@ class MemoryEngine:
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
             )
         logger.info("FSRS data migration complete: seeded %d nodes from access_count", len(rows))
+
+    def _seed_initial_maintenance_grace_period(self) -> None:
+        """Avoid firing agent-backed maintenance immediately on fresh installs."""
+        if not getattr(self.settings, "claude_maintenance_enabled", False):
+            return
+
+        row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
+        ).fetchone()
+        if row is not None:
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_run', ?)",
+                (now,),
+            )
+        logger.info("Seeded initial maintenance grace period at %s", now)
 
     def _ensure_self_node(self) -> None:
         """Load or create the user self node."""
@@ -1513,9 +1533,7 @@ class MemoryEngine:
             "fetch it if accessible and extract profile context such as role, background, focus "
             "areas, and skills. If the page is blocked or low-confidence, do not infer details; "
             "ask for a CV, GitHub profile, personal site, or short bio instead.\n"
-            "2. If no link: ask what they do and what they are currently focused on.\n"
-            "3. Ask how they like working with AI agents — examples: short answers, give me "
-            "a plan before making changes, ask before big decisions, don't over-explain.\n\n"
+            "2. If no link or bio is shared, ask what they do and what they are currently focused on.\n\n"
             "When done, say \"Got it — I have enough to get started. I'll keep learning as we "
             "work together.\" Then execute the user's original request.\n\n"
             "Skip path: if the user says 'skip' or 'later' at any point, say \"No problem\" "

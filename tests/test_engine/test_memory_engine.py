@@ -2,7 +2,7 @@
 
 from unittest.mock import patch
 
-from ormah.engine.memory_engine import _embedding_text, _generate_title
+from ormah.engine.memory_engine import MemoryEngine, _embedding_text, _generate_title
 from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, NodeType, UpdateNodeRequest
 
 
@@ -163,7 +163,7 @@ def test_whisper_onboarding_nudge(engine):
     assert "short bio instead" in text
     assert "Name + optional profile link or short bio" in text
     assert text.index("What should I call you?") < text.index("GitHub")
-    assert text.index("LinkedIn") < text.index("working with AI agents")
+    assert "working with AI agents" not in text
     assert "User skipped onboarding" in text
 
     with patch.object(engine.context_builder, "build_whisper_context", return_value=""):
@@ -244,6 +244,38 @@ def test_get_whisper_context_uses_reranker_when_available(engine):
         engine.get_whisper_context("auth prompt")
 
     assert build.call_args.kwargs["reranker_enabled"] is True
+
+
+def test_startup_seeds_maintenance_grace_period(settings):
+    settings.claude_maintenance_enabled = True
+    engine = MemoryEngine(settings)
+    try:
+        engine.startup()
+        row = engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
+        ).fetchone()
+        assert row is not None
+    finally:
+        engine.shutdown()
+
+
+def test_startup_preserves_existing_maintenance_timestamp(settings):
+    settings.claude_maintenance_enabled = True
+    existing = "2026-01-01T00:00:00+00:00"
+    engine = MemoryEngine(settings)
+    try:
+        engine.db.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_run', ?)",
+            (existing,),
+        )
+        engine.db.conn.commit()
+        engine.startup()
+        row = engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
+        ).fetchone()
+        assert row["value"] == existing
+    finally:
+        engine.shutdown()
 
 
 def test_get_whisper_context_returns_empty_when_reranker_required_but_unavailable(engine):
