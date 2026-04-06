@@ -885,7 +885,7 @@ class MemoryEngine:
                 prompt[:80],
                 session_id,
             )
-            maintenance_due = self._maybe_get_maintenance_due_signal()
+            maintenance_due = "" if onboarding else self._maybe_get_maintenance_due_signal()
             text = "\n\n".join(
                 section for section in (maintenance_due, onboarding) if section
             )
@@ -918,9 +918,11 @@ class MemoryEngine:
 
         if _return_debug:
             text, injected_ids = result
+            text = self._strip_maintenance_due_signal(text)
             text = f"{text.rstrip()}\n\n{onboarding}" if text else onboarding
             return text, injected_ids
 
+        result = self._strip_maintenance_due_signal(result)
         return f"{result.rstrip()}\n\n{onboarding}" if result else onboarding
 
     def _maybe_get_maintenance_due_signal(self) -> str:
@@ -945,6 +947,11 @@ class MemoryEngine:
         except Exception as e:
             logger.warning("Failed to compute maintenance_due: %s", e)
         return ""
+
+    @staticmethod
+    def _strip_maintenance_due_signal(text: str) -> str:
+        lines = [line for line in text.splitlines() if line.strip() != "maintenance_due"]
+        return "\n".join(lines).rstrip()
 
     def mark_outdated(self, node_id: str, reason: str | None = None) -> str | None:
         """Mark a memory as outdated: set valid_until to now, optionally append reason."""
@@ -1497,13 +1504,15 @@ class MemoryEngine:
             "\"Looks like this is your first time using Ormah. Want to spend 30 seconds "
             "giving me a bit of context about you? You can skip at any time and I'll jump "
             "straight to your task.\n\n"
-            "What should I call you? If it's easier, you can also drop a LinkedIn, GitHub, "
-            "CV, or personal site link and I'll use that as a shortcut — it means I can skip "
-            "most other questions.\"\n\n"
+            "What should I call you? If it's easier, you can also drop a GitHub profile, CV, "
+            "personal site, short bio, or LinkedIn link. GitHub, CVs, and personal sites are "
+            "usually easiest to read; LinkedIn may be blocked unless you have authenticated "
+            "access.\"\n\n"
             "If the user continues onboarding, follow this flow — one exchange at a time:\n"
-            "1. Name + optional profile link (already asked above). If they share a URL, "
-            "fetch it immediately and extract profile context such as role, background, focus "
-            "areas, and skills. A link replaces steps 2 and 3.\n"
+            "1. Name + optional profile link or short bio (already asked above). If they share a URL, "
+            "fetch it if accessible and extract profile context such as role, background, focus "
+            "areas, and skills. If the page is blocked or low-confidence, do not infer details; "
+            "ask for a CV, GitHub profile, personal site, or short bio instead.\n"
             "2. If no link: ask what they do and what they are currently focused on.\n"
             "3. Ask how they like working with AI agents — examples: short answers, give me "
             "a plan before making changes, ask before big decisions, don't over-explain.\n\n"

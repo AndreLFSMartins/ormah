@@ -145,15 +145,24 @@ def test_connect(engine):
 
 def test_whisper_onboarding_nudge(engine):
     """whisper fires onboarding nudge exactly once when identity is empty."""
-    with patch.object(engine.context_builder, "build_whisper_context", return_value=""):
+    engine.settings.claude_maintenance_enabled = True
+    with patch.object(
+        engine.context_builder,
+        "build_whisper_context",
+        return_value="# Ormah whispers\nmaintenance_due",
+    ):
         text = engine.get_whisper_context("hello")
     assert "onboarding" in text.lower()
+    assert "maintenance_due" not in text
     assert "STOP" in text
     assert "do not start any work" in text
     assert "What should I call you?" in text
-    assert "as a shortcut" in text
-    assert "Name + optional profile link" in text
-    assert text.index("What should I call you?") < text.index("LinkedIn")
+    assert "LinkedIn may be blocked" in text
+    assert "authenticated access" in text
+    assert "do not infer details" in text
+    assert "short bio instead" in text
+    assert "Name + optional profile link or short bio" in text
+    assert text.index("What should I call you?") < text.index("GitHub")
     assert text.index("LinkedIn") < text.index("working with AI agents")
     assert "User skipped onboarding" in text
 
@@ -167,12 +176,13 @@ def test_whisper_onboarding_debug_keeps_injected_ids(engine):
     with patch.object(
         engine.context_builder,
         "build_whisper_context",
-        return_value=("whisper text", ["mem-1"]),
+        return_value=("whisper text\nmaintenance_due", ["mem-1"]),
     ):
         text, injected_ids = engine.get_whisper_context("hello", _return_debug=True)
 
     assert "whisper text" in text
     assert "whisper text\n\n## Ormah" in text
+    assert "maintenance_due" not in text
     assert "onboarding" in text.lower()
     assert injected_ids == ["mem-1"]
 
@@ -239,6 +249,7 @@ def test_get_whisper_context_uses_reranker_when_available(engine):
 def test_get_whisper_context_returns_empty_when_reranker_required_but_unavailable(engine):
     engine.settings.whisper_reranker_enabled = True
     engine._whisper_reranker_available = False
+    engine.settings.claude_maintenance_enabled = False
     engine.db.conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
     )
@@ -256,6 +267,7 @@ def test_get_whisper_context_returns_empty_when_reranker_required_but_unavailabl
 def test_whisper_onboarding_works_when_reranker_unavailable(engine):
     engine.settings.whisper_reranker_enabled = True
     engine._whisper_reranker_available = False
+    engine.settings.claude_maintenance_enabled = True
 
     with patch.object(
         engine.context_builder, "build_whisper_context", return_value="unused"
@@ -263,4 +275,5 @@ def test_whisper_onboarding_works_when_reranker_unavailable(engine):
         result = engine.get_whisper_context("auth prompt")
 
     assert "onboarding" in result.lower()
+    assert "maintenance_due" not in result
     build.assert_not_called()

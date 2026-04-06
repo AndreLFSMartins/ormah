@@ -260,6 +260,12 @@ class TestWhisperSignal:
         """Signal appears when no maintenance has ever been run."""
         engine.settings.claude_maintenance_enabled = True
         engine.settings.claude_maintenance_interval_hours = 24
+        engine.remember(CreateNodeRequest(
+            content="User completed onboarding.",
+            type=NodeType.preference,
+            title="Onboarding complete",
+            about_self=True,
+        ))
         # Ensure no last_maintenance_run in meta (never ran)
         engine.db.conn.execute("DELETE FROM meta WHERE key = 'last_maintenance_run'")
         engine.db.conn.commit()
