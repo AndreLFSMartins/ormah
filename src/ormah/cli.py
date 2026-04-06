@@ -10,7 +10,6 @@ Usage:
     ormah mcp               Run MCP stdio server
     ormah recall <query>    Search memories
     ormah remember <text>   Store a memory
-    ormah context           Get context for agent prompts
     ormah ingest <file>     Ingest a conversation log
     ormah ingest-session <path>  Ingest a Claude Code session
     ormah node <id>         Get a specific memory
@@ -135,7 +134,6 @@ def main():
 
     # --- CLI commands (delegated to cli_adapter) ---
     from ormah.adapters.cli_adapter import (
-        cmd_context,
         cmd_ingest,
         cmd_ingest_session,
         cmd_node,
@@ -147,12 +145,6 @@ def main():
         cmd_whisper_store,
         cmd_whisper_setup,
     )
-
-    # context
-    ctx = sub.add_parser("context", help="Get context for piping into agent prompts")
-    ctx.add_argument("--task", help="Task hint to filter context")
-    ctx.add_argument("--space", help="Override space detection")
-    ctx.set_defaults(func=cmd_context)
 
     # recall
     rec = sub.add_parser("recall", help="Search memories")

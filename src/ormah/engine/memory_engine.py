@@ -919,66 +919,6 @@ class MemoryEngine:
 
         return f"{result}\n{onboarding}" if result else onboarding
 
-    def get_context(
-        self,
-        task_hint: str | None = None,
-        space: str | None = None,
-        max_nodes: int | None = None,
-    ) -> str:
-        """Get broader agent context for session bootstrap or CLI inspection.
-
-        This is intentionally less aggressive than whisper injection:
-        - include task-relevant memories when a task hint is given
-        - otherwise fall back to a compact slice of core memories
-        """
-        max_nodes = max_nodes or self.settings.context_max_nodes
-        sections: list[str] = []
-
-        context_results: list[dict[str, Any]] = []
-        if task_hint:
-            context_results = self.recall_search_structured(
-                task_hint,
-                limit=max_nodes,
-                default_space=space,
-                touch_access=False,
-            )
-            context_results = [
-                result for result in context_results
-                if result.get("node", {}).get("id") != self.user_node_id
-            ]
-
-        if not context_results:
-            core_nodes = [
-                n for n in self.graph.get_nodes_by_tier("core")
-                if n.get("id") != self.user_node_id
-            ]
-
-            def _priority(node: dict[str, Any]) -> tuple[int, float, str]:
-                node_space = node.get("space")
-                if space and node_space == space:
-                    bucket = 0
-                elif node_space in (None, "null"):
-                    bucket = 1
-                else:
-                    bucket = 2
-                return (
-                    bucket,
-                    -(node.get("importance") or 0.0),
-                    node.get("updated") or "",
-                )
-
-            core_nodes = sorted(core_nodes, key=_priority)[:max_nodes]
-            context_results = [
-                {"node": node, "score": 1.0, "source": "core_context"}
-                for node in core_nodes
-            ]
-
-        if context_results:
-            header = "# Relevant Memories" if task_hint else "# Core Memories"
-            sections.append(header + "\n\n" + format_search_results(context_results))
-
-        return "\n\n".join(section for section in sections if section.strip())
-
     def mark_outdated(self, node_id: str, reason: str | None = None) -> str | None:
         """Mark a memory as outdated: set valid_until to now, optionally append reason."""
         node = self.file_store.load(node_id)

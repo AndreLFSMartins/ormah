@@ -150,18 +150,6 @@ def test_importance_interval_zero():
         _settings(importance_recompute_interval_minutes=0)
 
 
-# --- Context max nodes ---
-
-def test_context_max_nodes_valid():
-    s = _settings(context_max_nodes=10)
-    assert s.context_max_nodes == 10
-
-
-def test_context_max_nodes_zero():
-    with pytest.raises(ValidationError, match="context_max_nodes must be >= 1"):
-        _settings(context_max_nodes=0)
-
-
 # --- Consolidation interval ---
 
 def test_consolidation_interval_zero():

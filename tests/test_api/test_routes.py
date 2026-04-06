@@ -79,19 +79,9 @@ def test_search(client):
     assert resp.status_code == 200
 
 
-def test_context(client):
-    client.post("/agent/remember", json={
-        "content": "Use SQLite for the graph index in this project.",
-        "type": "decision",
-        "title": "SQLite graph index",
-        "tier": "core",
-        "space": "ormah",
-    })
-
-    resp = client.get("/agent/context", params={"task_hint": "sqlite graph", "space": "ormah"})
-    assert resp.status_code == 200
-    text = resp.json()["text"]
-    assert "SQLite graph index" in text
+def test_context_endpoint_removed(client):
+    resp = client.get("/agent/context")
+    assert resp.status_code == 404
 
 
 def test_connect(client):

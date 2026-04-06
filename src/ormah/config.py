@@ -131,9 +131,6 @@ class Settings(BaseSettings):
     # Decay: skip nodes above this importance
     decay_importance_threshold: float = 0.5
 
-    # Adaptive context
-    context_max_nodes: int = 20
-
     # Whisper-out (involuntary storage on compaction / session end)
     whisper_out_enabled: bool = True
     whisper_out_min_turns: int = 3
@@ -374,13 +371,6 @@ class Settings(BaseSettings):
     def _enrichment_interval_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"interval must be >= 1 minute, got {v}")
-        return v
-
-    @field_validator("context_max_nodes")
-    @classmethod
-    def _context_max_nodes_positive(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"context_max_nodes must be >= 1, got {v}")
         return v
 
     @property

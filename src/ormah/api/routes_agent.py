@@ -112,18 +112,6 @@ async def connect(req: ConnectRequest, request: Request):
     return TextResponse(text=text)
 
 
-@router.get("/context", response_model=TextResponse)
-async def get_context(
-    request: Request,
-    task_hint: str | None = None,
-    space: str | None = None,
-):
-    """Get broader context for session bootstrap or CLI inspection."""
-    engine = request.app.state.engine
-    text = engine.get_context(task_hint=task_hint, space=space)
-    return TextResponse(text=text)
-
-
 @router.post("/whisper", response_model=TextResponse)
 async def whisper(request: Request):
     """Build compact whisper context for involuntary recall injection."""

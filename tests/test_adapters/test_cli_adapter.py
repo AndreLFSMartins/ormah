@@ -75,45 +75,6 @@ def test_status_with_jobs(monkeypatch):
     assert "idle" in out
 
 
-# --- context ---
-
-
-def test_context_default(monkeypatch):
-    def handler(request):
-        assert request.url.path == "/agent/context"
-        return _mock_response({"text": "# Context\nHello world"})
-
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(
-        "ormah.adapters.cli_adapter._client",
-        lambda: httpx.Client(transport=transport, base_url="http://test"),
-    )
-    monkeypatch.setattr("ormah.adapters.cli_adapter.resolve_space", lambda x: None)
-    code, out, err = _run_cli(["context"], monkeypatch)
-    assert code == 0
-    assert "Hello world" in out
-
-
-def test_context_with_task_and_space(monkeypatch):
-    def handler(request):
-        params = dict(request.url.params)
-        assert params["space"] == "myproj"
-        assert params["task_hint"] == "working on tests"
-        return _mock_response({"text": "filtered context"})
-
-    transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(
-        "ormah.adapters.cli_adapter._client",
-        lambda: httpx.Client(transport=transport, base_url="http://test"),
-    )
-    code, out, err = _run_cli(
-        ["context", "--space", "myproj", "--task", "working on tests"],
-        monkeypatch,
-    )
-    assert code == 0
-    assert "filtered context" in out
-
-
 # --- recall ---
 
 

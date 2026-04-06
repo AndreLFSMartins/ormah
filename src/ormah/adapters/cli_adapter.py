@@ -33,23 +33,6 @@ def _api(fn):
         sys.exit(1)
 
 
-def cmd_context(args):
-    space = resolve_space(args.space)
-    params = {}
-    if space:
-        params["space"] = space
-    if args.task:
-        params["task_hint"] = args.task
-
-    def call():
-        with _client() as c:
-            r = c.get("/agent/context", params=params)
-            r.raise_for_status()
-            print(r.json()["text"])
-
-    _api(call)
-
-
 def cmd_recall(args):
     space = resolve_space(args.space)
     body: dict = {"query": args.query}
@@ -564,12 +547,6 @@ def main():
         description="Terminal interface to the ormah memory system.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
-
-    # --- context ---
-    ctx = sub.add_parser("context", help="Get context for piping into agent prompts")
-    ctx.add_argument("--task", help="Task hint to filter context")
-    ctx.add_argument("--space", help="Override space detection")
-    ctx.set_defaults(func=cmd_context)
 
     # --- recall ---
     rec = sub.add_parser("recall", help="Search memories")

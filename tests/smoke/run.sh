@@ -54,10 +54,6 @@ RESULT=$(curl -sf -X POST "$API/agent/recall" \
 echo "$RESULT" | grep -qi "blue" || fail "Recall didn't find 'blue' in: $RESULT"
 ok "Recall found the memory"
 
-step "Context retrieval"
-curl -sf "$API/agent/context" --max-time 60 > /dev/null || fail "context failed"
-ok "Context endpoint works"
-
 step "Server stop"
 ormah server stop 2>/dev/null || true
 ok "Server stopped"
