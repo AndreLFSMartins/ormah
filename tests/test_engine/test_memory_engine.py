@@ -162,6 +162,8 @@ def test_whisper_onboarding_nudge(engine):
     assert "mine it thoroughly" in text
     assert "not just a short summary" in text
     assert "5-15 self-contained memories" in text
+    assert "Use 'profile' only as a tag" in text
+    assert "never as the memory type" in text
     assert "do not infer details" in text
     assert "short bio instead" in text
     assert "Name + optional onboarding material" in text
