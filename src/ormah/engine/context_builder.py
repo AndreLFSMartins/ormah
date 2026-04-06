@@ -331,7 +331,6 @@ class ContextBuilder:
 
         # identity-only → skip general search, use existing identity path below
         identity_only = intent is not None and intent.categories == ["identity"]
-        identity_intent = intent is not None and "identity" in intent.categories
         identity_linked_ids: set[str] = set()
         if user_node_id:
             try:

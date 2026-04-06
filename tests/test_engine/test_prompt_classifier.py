@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 from ormah.engine.prompt_classifier import (
     PromptClassifier,

@@ -14,7 +14,7 @@ The name comes from the Malayalam word ഓർമ (`ormah`), meaning "memory" or 
 
 ## The Whisper Experience
 
-You open a new session with your AI agent and it already knows who you are, how you like to work, what you decided last week, what went wrong yesterday, and what matters in this repo right now.
+You open a new session with a hook-supported AI agent and it already knows who you are, how you like to work, what you decided last week, what went wrong yesterday, and what matters in this repo right now.
 
 You did not paste notes into the prompt. You did not ask it to "recall." You did not even have to know that the missing piece of context existed. Ormah whispered it before the model ever saw your message.
 
@@ -53,7 +53,7 @@ No API key is required for local search, embeddings, storage, graph UI, or whisp
 
 This is the thing Ormah is built around.
 
-Before the model sees your prompt, Ormah decides what from your memory graph matters right now and quietly prepends just that context. Not a dashboard you have to open. Not a note you have to remember to paste. A whisper.
+In clients wired up with whisper hooks, before the model sees your prompt, Ormah decides what from your memory graph matters right now and quietly prepends just that context. Not a dashboard you have to open. Not a note you have to remember to paste. A whisper.
 
 You usually never see it. Your agent just knows.
 
@@ -65,9 +65,9 @@ Whisper is available three ways:
 
 ### Whisper inject
 
-`ormah whisper inject` is the pre-prompt path.
+`ormah whisper inject` is the pre-prompt path for hook-supported clients.
 
-Before every prompt, Ormah:
+Before each hooked prompt, Ormah:
 
 1. Classifies the prompt intent
 2. Runs hybrid retrieval across semantic search and keyword search
@@ -77,6 +77,8 @@ Before every prompt, Ormah:
 6. Applies a relevance gate so silence beats noise
 
 The result is a compact block of context added before the model sees your message.
+
+On a fresh memory graph, whisper can also deliver a one-time first-session onboarding nudge so the agent asks a few useful identity and working-style questions before long-term personal context exists.
 
 ### Whisper store
 
@@ -282,10 +284,8 @@ ormah whisper inject            # pre-prompt whisper hook
 ormah whisper store             # transcript extraction hook
 
 ormah eval whisper run          # run whisper eval corpus
-ormah eval whisper mine-transcripts \
-  --root ~/.claude/projects     # mine real transcripts into candidate JSONL
-ormah eval whisper promote-candidates \
-  --input candidates.jsonl      # promote mined candidates into a corpus lane
+ormah eval whisper run --category preference --show-failures
+ormah eval whisper run --simulate-session --preserve-self --json
 
 ormah mcp                       # run MCP stdio server
 ```
@@ -388,8 +388,8 @@ ORMAH_VECTOR_WEIGHT=0.6
 ORMAH_SIMILARITY_THRESHOLD=0.4
 
 # Whisper
-ORMAH_WHISPER_MAX_NODES=8
-ORMAH_WHISPER_INJECTION_GATE=0.55
+ORMAH_WHISPER_MAX_NODES=6
+ORMAH_WHISPER_INJECTION_GATE=0.50
 ORMAH_WHISPER_RERANKER_ENABLED=true
 
 # FSRS decay

@@ -1442,11 +1442,6 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
             _diagnose_server_failure()
             server_ok = False
 
-    # 6. Hook up Claude integrations
-    has_claude_desktop = os.path.exists(
-        os.path.expanduser("~/Library/Application Support/Claude")
-    )
-
     if has_claude_code:
         step("Hooking up Claude Code")
         configure_claude_hooks(ormah_bin)

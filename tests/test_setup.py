@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import stat
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,8 +22,6 @@ from ormah.setup import (
     CODEX_AGENTS_SENTINEL_START,
     CLAUDE_MD_SENTINEL_END,
     CLAUDE_MD_SENTINEL_START,
-    ENV_PATH,
-    WRAPPER_PATH,
     _merge_json_file,
     _preload_local_models,
     _remove_codex_hooks,
@@ -36,7 +33,6 @@ from ormah.setup import (
     _remove_claude_md_block,
     _remove_fastembed_cache,
     _remove_mcp_from_json,
-    _remove_mcp_registration,
     _write_env_file,
     configure_claude_hooks,
     configure_claude_code_mcp,
@@ -971,7 +967,7 @@ class TestRemoveClaudeHooks:
                 ],
             }
         }
-        settings_path = self._make_settings(tmp_path, data)
+        self._make_settings(tmp_path, data)
 
         with patch("ormah.setup.Path.home", return_value=tmp_path):
             (tmp_path / ".claude").mkdir()
