@@ -1,0 +1,148 @@
+# Setup and Installation
+
+Verified against the current repository state on 2026-04-07.
+
+Ormah ships with an interactive setup flow that configures the server, supported client integrations, and optional transcript backfill.
+
+The core server is agent-agnostic. Setup currently installs the concrete integrations that exist today: Claude Code, Codex, and Claude Desktop MCP where applicable.
+
+## Installation
+
+The published install path is still the shell installer:
+
+```bash
+bash <(curl -fsSL https://ormah.me/install.sh)
+```
+
+## Setup Wizard
+
+**Code**: `src/ormah/setup.py`
+
+`ormah setup` does several things:
+
+1. finds the `ormah` binary
+2. detects supported clients such as Claude Code / Codex
+3. optionally enables agent-backed maintenance
+4. configures LLM settings when needed
+5. generates `~/.config/ormah/start-server.sh`
+6. preloads embedding / reranker models
+7. installs auto-start
+8. waits for server health
+9. installs supported client integrations
+10. optionally offers transcript backfill
+
+## Important Correction: Agent-Backed Maintenance
+
+If the user chooses agent-backed maintenance during setup, the wizard sets:
+
+```text
+ORMAH_LLM_PROVIDER=none
+```
+
+That means setup does **not** keep a separate background LLM configured in parallel for those maintenance tasks. Older docs that imply both paths are configured together are misleading.
+
+## Default LLM Settings vs Setup Choices
+
+Repository defaults in `config.py` are:
+
+- `llm_provider = litellm`
+- `llm_model = claude-haiku-4-5-20251001`
+- `llm_base_url = http://localhost:11434`
+
+But `ormah setup` can rewrite the persisted `.env` to:
+
+- a detected remote provider
+- `ollama`
+- `none`
+
+So there is a difference between code defaults and installed-user config after setup.
+
+## Hooks
+
+The shared hook commands are `ormah whisper inject` and `ormah whisper store`; setup writes the client-specific configuration around those commands.
+
+### Claude Code
+
+Setup installs:
+
+- `UserPromptSubmit -> ormah whisper inject`
+- `PreCompact -> ormah whisper store`
+- `SessionEnd -> ormah whisper store`
+
+### Codex
+
+Setup also has Codex integration:
+
+- writes `~/.codex/hooks.json`
+- enables the `codex_hooks` feature flag
+- installs MCP/instruction support when available in the rest of setup
+
+## Logs and Auto-Start
+
+Auto-start uses:
+
+- `launchd` on macOS
+- `systemd --user` on Linux when available
+
+Important correction:
+
+- operational log path referenced by the CLI is `~/.local/share/ormah/logs/ormah.log`
+
+Older docs that point to `~/Library/Logs/ormah/` or only to `journalctl` are not aligned with the current server-manager code and CLI messaging.
+
+## Data Locations
+
+| What | Path |
+|---|---|
+| memory files | `~/.local/share/ormah/memory/nodes/*.md` |
+| SQLite db | `~/.local/share/ormah/memory/index.db` |
+| config | `~/.config/ormah/.env` |
+| wrapper | `~/.config/ormah/start-server.sh` |
+| whisper cursors | `~/.cache/ormah/whisper-cursors.json` |
+| logs | `~/.local/share/ormah/logs/ormah.log` |
+
+## Server Management
+
+Supported commands:
+
+```bash
+ormah server start
+ormah server start -d
+ormah server stop
+ormah server status
+```
+
+Health checks:
+
+```bash
+curl http://localhost:8787/admin/health
+ormah server status
+```
+
+Note: `ormah status` is not the main top-level CLI entry in `src/ormah/cli.py`; the supported server-status path is `ormah server status`.
+
+## Transcript Backfill
+
+The setup flow can optionally discover recent transcript files, estimate cost, and ingest them.
+
+This is separate from the always-on session watcher.
+
+Important nuance: some automation paths are still client-specific even though the core memory engine is not. For example, the always-on session watcher currently watches Claude's project transcript location by default.
+
+## Walkthrough Example
+
+Typical first-time setup:
+
+1. run `ormah setup`
+2. choose whether maintenance should be agent-backed
+3. if agent-backed maintenance is enabled, setup persists `ORMAH_LLM_PROVIDER=none`
+4. generate wrapper and preload local models
+5. install auto-start
+6. register MCP and hooks
+7. optionally backfill recent transcripts
+
+## Code Anchors
+
+- `src/ormah/setup.py`
+- `src/ormah/server_manager.py`
+- `src/ormah/cli.py`
