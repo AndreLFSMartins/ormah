@@ -546,6 +546,41 @@ class TestClaudePluginManifest:
         assert plugin_manifest["version"] == pyproject["project"]["version"]
 
 
+class TestClaudePluginDocs:
+    def test_setup_command_requires_plugin_safe_flag_or_upgrade(self):
+        root = Path(__file__).resolve().parents[1]
+        content = (
+            root / "integrations" / "claude-plugin" / "commands" / "setup.md"
+        ).read_text()
+
+        assert "command -v ormah" in content
+        assert "ormah --version" in content
+        assert "ormah setup --help" in content
+        assert "ormah setup --skip-client-setup" in content
+        assert "bash <(curl -fsSL https://ormah.me/install.sh) --no-setup" in content
+        assert "Do not treat `ormah setup --update` as equivalent" in content
+
+    def test_setup_playbook_matches_plugin_safe_upgrade_flow(self):
+        root = Path(__file__).resolve().parents[1]
+        content = (root / "integrations" / "claude-plugin" / "SETUP.md").read_text()
+
+        assert "ormah --version" in content
+        assert "ormah setup --help" in content
+        assert "ormah setup --skip-client-setup" in content
+        assert "bash <(curl -fsSL https://ormah.me/install.sh) --no-setup" in content
+        assert "installed runtime is too old for plugin mode" in content
+
+    def test_status_command_reports_installed_version(self):
+        root = Path(__file__).resolve().parents[1]
+        content = (
+            root / "integrations" / "claude-plugin" / "commands" / "status.md"
+        ).read_text()
+
+        assert "command -v ormah" in content
+        assert "ormah --version" in content
+        assert "ormah server status" in content
+
+
 # --- CLI tests ---
 
 

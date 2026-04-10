@@ -8,17 +8,29 @@ Set up the local Ormah runtime for this plugin.
 2. If it is missing, explain that this plugin needs the local Ormah runtime and
    ask permission to run:
    `bash <(curl -fsSL https://ormah.me/install.sh) --no-setup`
-3. After the binary is available, run:
+3. If `ormah` is present, report the installed version with:
+   `ormah --version`
+4. Check whether the installed runtime supports plugin-safe setup with:
+   `ormah setup --help`
+5. If the help output includes `--skip-client-setup`, run:
    `ormah setup --skip-client-setup`
-4. Verify that setup succeeded with:
+6. If the help output does not include `--skip-client-setup`, explain that the
+   installed runtime is too old for plugin mode and ask permission to upgrade
+   with:
+   `bash <(curl -fsSL https://ormah.me/install.sh) --no-setup`
+   After the upgrade, run `ormah --version`, re-check `ormah setup --help`,
+   and then run `ormah setup --skip-client-setup`.
+7. Verify that setup succeeded with:
    `ormah server status`
-5. If the server is healthy, tell the user the plugin is ready and point them to
+8. If the server is healthy, tell the user the plugin is ready and point them to
    `http://localhost:8787`.
-6. If any step fails, stop and summarize the exact failure plus the next manual
+9. If any step fails, stop and summarize the exact failure plus the next manual
    recovery command.
 
 Important:
 
+- Do not treat `ormah setup --update` as equivalent to `--skip-client-setup`;
+  `--update` can reapply global Claude/Codex/Desktop wiring.
 - Do not run `ormah setup` without `--skip-client-setup` in this workflow.
-- Do not silently install software; ask before running shell commands that
-  change the system.
+- Do not silently install or upgrade software; ask before running shell
+  commands that change the system.

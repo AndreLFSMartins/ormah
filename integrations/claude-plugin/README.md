@@ -42,6 +42,12 @@ The intended first-run flow is:
 2. Run `/ormah:setup`
 3. If `ormah` is missing, install it with:
    `bash <(curl -fsSL https://ormah.me/install.sh) --no-setup`
-4. Configure the local runtime with:
+4. If the installed runtime does not support `ormah setup --skip-client-setup`,
+   upgrade it with:
+   `bash <(curl -fsSL https://ormah.me/install.sh) --no-setup`
+5. Configure the local runtime with:
    `ormah setup --skip-client-setup`
-5. Let the plugin own Claude-side hooks and MCP wiring
+6. Let the plugin own Claude-side hooks and MCP wiring
+
+The plugin should never substitute `ormah setup --update` for plugin mode;
+`--update` can reapply global client wiring outside the plugin.
