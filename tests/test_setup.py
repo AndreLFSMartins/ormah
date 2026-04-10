@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import stat
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import tomllib
 
 from ormah.server_manager import (
     LAUNCHD_LABEL,
@@ -46,6 +48,7 @@ from ormah.setup import (
     install_claude_md,
     install_codex_agents,
     install_codex_md,
+    run_setup,
     run_uninstall,
 )
 
@@ -483,6 +486,66 @@ class TestConfigureCodexHooks:
         assert hooks_data["hooks"]["Stop"][0]["hooks"][0]["command"] == "/abs/path/ormah whisper store"
 
 
+class TestRunSetup:
+    def test_skip_client_setup_avoids_client_wiring(self, tmp_path):
+        def which(binary: str) -> str | None:
+            return {
+                "claude": "/usr/local/bin/claude",
+                "codex": "/usr/local/bin/codex",
+            }.get(binary)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("ormah.setup.get_ormah_bin_path", return_value="/abs/path/ormah"))
+            stack.enter_context(patch("ormah.setup.shutil.which", side_effect=which))
+            stack.enter_context(patch("ormah.setup.Path.home", return_value=tmp_path))
+            stack.enter_context(
+                patch("ormah.setup.generate_server_wrapper", return_value=tmp_path / "start-server.sh")
+            )
+            stack.enter_context(patch("ormah.setup._preload_local_models"))
+            stack.enter_context(patch("ormah.setup.is_server_running", return_value=True))
+            mock_maintenance_prompt = stack.enter_context(patch("ormah.setup.configure_agent_maintenance"))
+            mock_configure_llm = stack.enter_context(patch("ormah.setup.configure_llm"))
+            mock_claude_hooks = stack.enter_context(patch("ormah.setup.configure_claude_hooks"))
+            mock_claude_mcp = stack.enter_context(patch("ormah.setup.configure_claude_code_mcp"))
+            mock_claude_md = stack.enter_context(patch("ormah.setup.install_claude_md"))
+            mock_claude_agents = stack.enter_context(patch("ormah.setup.install_claude_agents"))
+            mock_claude_commands = stack.enter_context(patch("ormah.setup.install_claude_commands"))
+            mock_codex_hooks = stack.enter_context(patch("ormah.setup.configure_codex_hooks"))
+            mock_codex_mcp = stack.enter_context(patch("ormah.setup.configure_codex_mcp"))
+            mock_codex_md = stack.enter_context(patch("ormah.setup.install_codex_md"))
+            mock_codex_agents = stack.enter_context(patch("ormah.setup.install_codex_agents"))
+            mock_claude_desktop = stack.enter_context(patch("ormah.setup.configure_claude_desktop"))
+            stack.enter_context(patch("ormah.setup.backfill_transcripts"))
+            stack.enter_context(patch("ormah.setup.play_finale"))
+            stack.enter_context(patch("ormah.setup._print_setup_summary"))
+            stack.enter_context(patch("ormah.setup.webbrowser.open"))
+            run_setup(skip_client_setup=True)
+
+        mock_maintenance_prompt.assert_not_called()
+        mock_configure_llm.assert_called_once()
+        mock_claude_hooks.assert_not_called()
+        mock_claude_mcp.assert_not_called()
+        mock_claude_md.assert_not_called()
+        mock_claude_agents.assert_not_called()
+        mock_claude_commands.assert_not_called()
+        mock_codex_hooks.assert_not_called()
+        mock_codex_mcp.assert_not_called()
+        mock_codex_md.assert_not_called()
+        mock_codex_agents.assert_not_called()
+        mock_claude_desktop.assert_not_called()
+
+
+class TestClaudePluginManifest:
+    def test_plugin_manifest_version_matches_project_version(self):
+        root = Path(__file__).resolve().parents[1]
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text())
+        plugin_manifest = json.loads(
+            (root / "integrations" / "claude-plugin" / ".claude-plugin" / "plugin.json").read_text()
+        )
+
+        assert plugin_manifest["version"] == pyproject["project"]["version"]
+
+
 # --- CLI tests ---
 
 
@@ -515,7 +578,11 @@ class TestCliEntryPoint:
             patch("ormah.setup.run_setup") as mock_setup,
         ):
             main()
-            mock_setup.assert_called_once_with(ci=False, update=False)
+            mock_setup.assert_called_once_with(
+                ci=False,
+                update=False,
+                skip_client_setup=False,
+            )
 
     def test_setup_ci_flag(self):
         from ormah.cli import main
@@ -525,7 +592,25 @@ class TestCliEntryPoint:
             patch("ormah.setup.run_setup") as mock_setup,
         ):
             main()
-            mock_setup.assert_called_once_with(ci=True, update=False)
+            mock_setup.assert_called_once_with(
+                ci=True,
+                update=False,
+                skip_client_setup=False,
+            )
+
+    def test_setup_skip_client_setup_flag(self):
+        from ormah.cli import main
+
+        with (
+            patch("sys.argv", ["ormah", "setup", "--skip-client-setup"]),
+            patch("ormah.setup.run_setup") as mock_setup,
+        ):
+            main()
+            mock_setup.assert_called_once_with(
+                ci=False,
+                update=False,
+                skip_client_setup=True,
+            )
 
     def test_server_status_when_not_running(self):
         from ormah.cli import main
@@ -1308,8 +1393,11 @@ class TestRunUninstall:
         with (
             patch("ormah.server_manager.uninstall_autostart"),
             patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_codex_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
             patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_codex_md_block"),
+            patch("ormah.setup._remove_codex_agents"),
             patch("ormah.setup._remove_claude_agents"),
             patch("ormah.setup._remove_claude_commands"),
             patch("shutil.rmtree"),
@@ -1338,8 +1426,11 @@ class TestRunUninstall:
             patch("ormah.config.settings", fake_settings),
             patch("ormah.server_manager.uninstall_autostart"),
             patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_codex_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
             patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_codex_md_block"),
+            patch("ormah.setup._remove_codex_agents"),
             patch("ormah.setup._remove_claude_agents"),
             patch("ormah.setup._remove_claude_commands"),
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
@@ -1354,8 +1445,11 @@ class TestRunUninstall:
         with (
             patch("ormah.server_manager.uninstall_autostart"),
             patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_codex_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
             patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_codex_md_block"),
+            patch("ormah.setup._remove_codex_agents"),
             patch("ormah.setup._remove_claude_agents"),
             patch("ormah.setup._remove_claude_commands"),
             patch("shutil.rmtree"),

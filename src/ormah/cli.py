@@ -68,7 +68,11 @@ def _cmd_server_status(args):
 def _cmd_setup(args):
     from ormah.setup import run_setup
 
-    run_setup(ci=args.ci, update=args.update)
+    run_setup(
+        ci=args.ci,
+        update=args.update,
+        skip_client_setup=args.skip_client_setup,
+    )
 
 
 def _cmd_uninstall(args):
@@ -121,6 +125,11 @@ def main():
     setup_p = sub.add_parser("setup", help="One-shot setup (hooks, MCP, server)")
     setup_p.add_argument("--ci", action="store_true", help="Non-interactive mode for CI/testing")
     setup_p.add_argument("--update", action="store_true", help="Skip interactive questions, just reapply hooks and MCP config")
+    setup_p.add_argument(
+        "--skip-client-setup",
+        action="store_true",
+        help="Skip Claude/Codex/Desktop integration wiring; useful when a plugin manages the client side",
+    )
     setup_p.set_defaults(func=_cmd_setup)
 
     # --- uninstall ---

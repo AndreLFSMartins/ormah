@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v ormah >/dev/null 2>&1; then
+    echo "Ormah plugin requires the local 'ormah' runtime. Run /ormah:setup." >&2
+    exit 1
+fi
+
+exec ormah mcp "$@"

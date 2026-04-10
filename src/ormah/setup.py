@@ -1389,9 +1389,14 @@ def run_uninstall(yes: bool = False) -> None:
     ok("Ormah has been uninstalled")
 
 
-def run_setup(ci: bool = False, update: bool = False) -> None:
+def run_setup(
+    ci: bool = False,
+    update: bool = False,
+    skip_client_setup: bool = False,
+) -> None:
     """First-time setup. Pass ci=True (or set ORMAH_CI=1) for non-interactive mode.
-    Pass update=True to skip interactive questions and only reapply hooks/MCP config."""
+    Pass update=True to skip interactive questions and only reapply hooks/MCP config.
+    Pass skip_client_setup=True when integrations are managed externally (for example by a plugin)."""
     ci = ci or os.environ.get("ORMAH_CI") == "1"
 
     if update:
@@ -1406,7 +1411,7 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
     has_claude_code = shutil.which("claude") is not None
     has_codex = shutil.which("codex") is not None or (Path.home() / ".codex").exists()
     agent_maintenance = False
-    if (has_claude_code or has_codex) and not ci and not update:
+    if (has_claude_code or has_codex) and not ci and not update and not skip_client_setup:
         if has_claude_code and has_codex:
             step("Claude Code and Codex detected")
         elif has_claude_code:
@@ -1451,28 +1456,30 @@ def run_setup(ci: bool = False, update: bool = False) -> None:
             _diagnose_server_failure()
             server_ok = False
 
-    if has_claude_code:
-        step("Hooking up Claude Code")
-        configure_claude_hooks(ormah_bin)
-        configure_claude_code_mcp(ormah_bin)
-        install_claude_md()
-        install_claude_agents()
-        install_claude_commands()
+    desktop_configured = False
+    if not skip_client_setup:
+        if has_claude_code:
+            step("Hooking up Claude Code")
+            configure_claude_hooks(ormah_bin)
+            configure_claude_code_mcp(ormah_bin)
+            install_claude_md()
+            install_claude_agents()
+            install_claude_commands()
 
-    if has_codex:
-        step("Hooking up Codex")
-        configure_codex_hooks(ormah_bin)
-        configure_codex_mcp(ormah_bin)
-        install_codex_md()
-        install_codex_agents()
+        if has_codex:
+            step("Hooking up Codex")
+            configure_codex_hooks(ormah_bin)
+            configure_codex_mcp(ormah_bin)
+            install_codex_md()
+            install_codex_agents()
 
-    desktop_configured = configure_claude_desktop(ormah_bin)
+        desktop_configured = configure_claude_desktop(ormah_bin)
 
-    if not has_claude_code and not has_codex and not desktop_configured:
-        warn("No Claude Code, Claude Desktop, or Codex detected")
-        info("You can manually configure MCP in your AI client:")
-        print(f"    Command: {ormah_bin} mcp")
-        info("Or run 'ormah setup' again after installing Claude Code, Claude Desktop, or Codex")
+        if not has_claude_code and not has_codex and not desktop_configured:
+            warn("No Claude Code, Claude Desktop, or Codex detected")
+            info("You can manually configure MCP in your AI client:")
+            print(f"    Command: {ormah_bin} mcp")
+            info("Or run 'ormah setup' again after installing Claude Code, Claude Desktop, or Codex")
 
     # 7. Cold start backfill (needs server + LLM)
     if server_ok and not ci:
