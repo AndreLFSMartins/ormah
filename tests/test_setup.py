@@ -107,11 +107,11 @@ class TestPlistTemplate:
     def test_template_renders(self):
         rendered = PLIST_TEMPLATE.format(
             label=LAUNCHD_LABEL,
-            wrapper_path="/home/user/.config/ormah/start-server.sh",
+            wrapper_path="/home/user/.config/ormah/ormah-server",
             bin_dir="/usr/local/bin",
         )
         assert "<string>com.ormah.server</string>" in rendered
-        assert "<string>/home/user/.config/ormah/start-server.sh</string>" in rendered
+        assert "<string>/home/user/.config/ormah/ormah-server</string>" in rendered
         assert "<key>RunAtLoad</key><true/>" in rendered
         assert "<key>KeepAlive</key><true/>" in rendered
         assert "StandardOutPath" not in rendered
@@ -120,7 +120,7 @@ class TestPlistTemplate:
     def test_template_includes_path(self):
         rendered = PLIST_TEMPLATE.format(
             label=LAUNCHD_LABEL,
-            wrapper_path="/home/user/.config/ormah/start-server.sh",
+            wrapper_path="/home/user/.config/ormah/ormah-server",
             bin_dir="/home/user/.local/bin",
         )
         assert "<key>PATH</key><string>/home/user/.local/bin:" in rendered
@@ -129,10 +129,10 @@ class TestPlistTemplate:
 class TestSystemdTemplate:
     def test_template_renders(self):
         rendered = SYSTEMD_TEMPLATE.format(
-            wrapper_path="/home/user/.config/ormah/start-server.sh",
+            wrapper_path="/home/user/.config/ormah/ormah-server",
             bin_dir="/usr/local/bin",
         )
-        assert "ExecStart=/home/user/.config/ormah/start-server.sh" in rendered
+        assert "ExecStart=/home/user/.config/ormah/ormah-server" in rendered
         assert "Restart=on-failure" in rendered
         assert "WantedBy=default.target" in rendered
         assert "After=network.target" in rendered
@@ -143,10 +143,10 @@ class TestSystemdTemplate:
 
     def test_template_renders_with_spaces_in_path(self):
         rendered = SYSTEMD_TEMPLATE.format(
-            wrapper_path="/home/user/.config/ormah/start-server.sh",
+            wrapper_path="/home/user/.config/ormah/ormah-server",
             bin_dir="/home/user/my apps",
         )
-        assert "ExecStart=/home/user/.config/ormah/start-server.sh" in rendered
+        assert "ExecStart=/home/user/.config/ormah/ormah-server" in rendered
 
 
 # --- setup tests ---
@@ -499,7 +499,7 @@ class TestRunSetup:
             stack.enter_context(patch("ormah.setup.shutil.which", side_effect=which))
             stack.enter_context(patch("ormah.setup.Path.home", return_value=tmp_path))
             stack.enter_context(
-                patch("ormah.setup.generate_server_wrapper", return_value=tmp_path / "start-server.sh")
+                patch("ormah.setup.generate_server_wrapper", return_value=tmp_path / "ormah-server")
             )
             stack.enter_context(patch("ormah.setup._preload_local_models"))
             stack.enter_context(patch("ormah.setup.is_server_running", return_value=True))
@@ -750,28 +750,28 @@ class TestEnvFile:
 
 class TestGenerateServerWrapper:
     def test_creates_wrapper_file(self, tmp_path):
-        wrapper = tmp_path / "start-server.sh"
+        wrapper = tmp_path / "ormah-server"
         with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
             result = generate_server_wrapper("/usr/local/bin/ormah")
         assert result == wrapper
         assert wrapper.exists()
 
     def test_wrapper_has_700_permissions(self, tmp_path):
-        wrapper = tmp_path / "start-server.sh"
+        wrapper = tmp_path / "ormah-server"
         with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
             generate_server_wrapper("/usr/local/bin/ormah")
         file_mode = stat.S_IMODE(wrapper.stat().st_mode)
         assert file_mode == 0o700
 
     def test_wrapper_contains_ormah_bin(self, tmp_path):
-        wrapper = tmp_path / "start-server.sh"
+        wrapper = tmp_path / "ormah-server"
         with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
             generate_server_wrapper("/usr/local/bin/ormah")
         content = wrapper.read_text()
         assert "exec /usr/local/bin/ormah server start" in content
 
     def test_wrapper_contains_api_key_grep(self, tmp_path):
-        wrapper = tmp_path / "start-server.sh"
+        wrapper = tmp_path / "ormah-server"
         with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
             generate_server_wrapper("/usr/local/bin/ormah")
         content = wrapper.read_text()
@@ -780,7 +780,7 @@ class TestGenerateServerWrapper:
         assert "GEMINI_API_KEY" in content
 
     def test_wrapper_no_hardcoded_secrets(self, tmp_path):
-        wrapper = tmp_path / "start-server.sh"
+        wrapper = tmp_path / "ormah-server"
         with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
             generate_server_wrapper("/usr/local/bin/ormah")
         content = wrapper.read_text()
@@ -788,7 +788,7 @@ class TestGenerateServerWrapper:
         assert "sk-" not in content.replace("#!/", "")  # ignore shebang
 
     def test_idempotent(self, tmp_path):
-        wrapper = tmp_path / "start-server.sh"
+        wrapper = tmp_path / "ormah-server"
         with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
             generate_server_wrapper("/usr/local/bin/ormah")
             first_content = wrapper.read_text()
@@ -797,7 +797,7 @@ class TestGenerateServerWrapper:
         assert first_content == second_content
 
     def test_sources_env_file(self, tmp_path):
-        wrapper = tmp_path / "start-server.sh"
+        wrapper = tmp_path / "ormah-server"
         with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
             generate_server_wrapper("/usr/local/bin/ormah")
         content = wrapper.read_text()

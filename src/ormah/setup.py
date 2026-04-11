@@ -27,7 +27,7 @@ from ormah.server_manager import (
 
 ENV_DIR = Path.home() / ".config" / "ormah"
 ENV_PATH = ENV_DIR / ".env"
-WRAPPER_PATH = ENV_DIR / "start-server.sh"
+WRAPPER_PATH = ENV_DIR / "ormah-server"
 
 CLAUDE_MD_SENTINEL_START = "<!-- ormah:start -->"
 CLAUDE_MD_SENTINEL_END = "<!-- ormah:end -->"
