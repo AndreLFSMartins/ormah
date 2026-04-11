@@ -19,9 +19,17 @@ Set up the local Ormah runtime for this plugin.
    `/ormah:upgrade`.
 7. Verify that setup succeeded with:
    `ormah server status`
-8. If the server is healthy, tell the user the plugin is ready and point them to
-   `http://localhost:8787`.
-9. If any step fails, stop and summarize the exact failure plus the next manual
+8. If the server is healthy, install the shared Ormah guidance block into the
+   Claude memory file that matches this plugin's install scope so Claude
+   follows the same recall, remember, outdated, and maintenance workflow as the
+   standard Ormah install. Ask permission before running:
+   `ormah claude-md install`
+   This writes to `~/.claude/CLAUDE.md` for user-scoped plugin installs,
+   `./CLAUDE.md` for project-scoped installs, and `./CLAUDE.local.md` for
+   local-scoped installs.
+9. If guidance installation succeeds, tell the user the plugin is ready and
+   point them to `http://localhost:8787`.
+10. If any step fails, stop and summarize the exact failure plus the next manual
    recovery command.
 
 Important:
@@ -30,5 +38,7 @@ Important:
   `--update` can reapply global Claude/Codex/Desktop wiring.
 - Use `/ormah:upgrade` for plugin-safe runtime upgrades.
 - Do not run `ormah setup` without `--skip-client-setup` in this workflow.
+- Use `ormah claude-md install` to write the shared Ormah guidance block to the
+  CLAUDE.md file that matches the plugin install scope.
 - Do not silently install or upgrade software; ask before running shell
   commands that change the system.

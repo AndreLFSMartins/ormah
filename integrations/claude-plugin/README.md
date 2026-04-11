@@ -8,7 +8,7 @@ This directory contains the in-repo Claude Code plugin for Ormah.
 - Plugin-scoped hook configuration for whisper inject/store
 - Plugin-scoped MCP registration for `ormah mcp`
 - A setup playbook and explicit `/ormah:setup`, `/ormah:status`, and
-  `/ormah:upgrade` commands
+  `/ormah:upgrade`, and `/ormah:maintenance` commands
 - The Ormah maintenance agent
 
 ## What it does not bundle
@@ -30,11 +30,13 @@ Useful commands once Claude starts:
 - `/ormah:setup`
 - `/ormah:status`
 - `/ormah:upgrade`
+- `/ormah:maintenance`
 - `/reload-plugins`
 
-Maintenance does not need a dedicated slash command in plugin mode. The plugin
-keeps the `ormah-maintenance` agent available, and Ormah can trigger it
-automatically when maintenance is due.
+For the best adherence, `/ormah:setup` should also install the shared Ormah
+guidance block into the CLAUDE file that matches the plugin install scope. The
+plugin keeps hooks, MCP, and commands scoped to the plugin, while the guidance
+block reuses the exact same instructions as the standard Ormah install.
 
 ## Setup flow
 
@@ -48,7 +50,12 @@ The intended first-run flow is:
    run `/ormah:upgrade`
 5. Configure the local runtime with:
    `ormah setup --skip-client-setup`
-6. Let the plugin own Claude-side hooks and MCP wiring
+6. Install Ormah guidance with:
+   `ormah claude-md install`
+   This writes to `~/.claude/CLAUDE.md` for user-scoped installs,
+   `./CLAUDE.md` for project-scoped installs, and `./CLAUDE.local.md` for
+   local-scoped installs.
+7. Let the plugin own Claude-side hooks and MCP wiring
 
 The plugin should never substitute `ormah setup --update` for plugin mode;
 `--update` can reapply global client wiring outside the plugin.

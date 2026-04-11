@@ -558,6 +558,8 @@ class TestClaudePluginDocs:
         assert "ormah setup --help" in content
         assert "ormah setup --skip-client-setup" in content
         assert "/ormah:upgrade" in content
+        assert "ormah claude-md install" in content
+        assert "CLAUDE.local.md" in content
         assert "Do not treat `ormah setup --update` as equivalent" in content
 
     def test_setup_playbook_matches_plugin_safe_upgrade_flow(self):
@@ -568,6 +570,8 @@ class TestClaudePluginDocs:
         assert "ormah setup --help" in content
         assert "ormah setup --skip-client-setup" in content
         assert "/ormah:upgrade" in content
+        assert "ormah claude-md install" in content
+        assert "CLAUDE.local.md" in content
         assert "installed runtime is too old for plugin mode" in content
 
     def test_status_command_reports_installed_version(self):
@@ -591,6 +595,15 @@ class TestClaudePluginDocs:
         assert "ormah setup --help" in content
         assert "bash <(curl -fsSL https://ormah.me/install.sh) --no-setup" in content
         assert "Do not substitute `ormah setup --update`" in content
+
+    def test_maintenance_command_exists(self):
+        root = Path(__file__).resolve().parents[1]
+        content = (
+            root / "integrations" / "claude-plugin" / "commands" / "maintenance.md"
+        ).read_text()
+
+        assert 'subagent_type="ormah-maintenance"' in content
+        assert "run_in_background=True" in content
 
 
 # --- CLI tests ---
@@ -658,6 +671,26 @@ class TestCliEntryPoint:
                 update=False,
                 skip_client_setup=True,
             )
+
+    def test_claude_md_install_defaults_to_auto_scope(self):
+        from ormah.cli import main
+
+        with (
+            patch("sys.argv", ["ormah", "claude-md", "install"]),
+            patch("ormah.setup.install_claude_md") as mock_install,
+        ):
+            main()
+            mock_install.assert_called_once_with(scope="auto", cwd=Path.cwd())
+
+    def test_claude_md_install_user_scope(self):
+        from ormah.cli import main
+
+        with (
+            patch("sys.argv", ["ormah", "claude-md", "install", "--scope", "user"]),
+            patch("ormah.setup.install_claude_md") as mock_install,
+        ):
+            main()
+            mock_install.assert_called_once_with(scope="user", cwd=Path.cwd())
 
     def test_server_status_when_not_running(self):
         from ormah.cli import main
@@ -955,6 +988,78 @@ class TestInstallClaudeMd:
         assert content.endswith("\n# After\n")
         assert "old content" not in content
         assert "# Ormah Memory System" in content
+
+    def test_project_scope_writes_to_project_claude_md(self, tmp_path, capsys):
+        with patch("ormah.setup.Path.cwd", return_value=tmp_path):
+            install_claude_md(scope="project")
+
+        project_claude_md = tmp_path / "CLAUDE.md"
+        content = project_claude_md.read_text()
+        assert CLAUDE_MD_SENTINEL_START in content
+        assert CLAUDE_MD_SENTINEL_END in content
+        assert "# Ormah Memory System" in content
+
+        captured = capsys.readouterr()
+        assert "Instructions added to ./CLAUDE.md" in captured.out
+
+    def test_local_scope_writes_to_project_local_claude_md(self, tmp_path, capsys):
+        with patch("ormah.setup.Path.cwd", return_value=tmp_path):
+            install_claude_md(scope="local")
+
+        local_claude_md = tmp_path / "CLAUDE.local.md"
+        content = local_claude_md.read_text()
+        assert CLAUDE_MD_SENTINEL_START in content
+        assert CLAUDE_MD_SENTINEL_END in content
+        assert "# Ormah Memory System" in content
+
+        captured = capsys.readouterr()
+        assert "Instructions added to ./CLAUDE.local.md" in captured.out
+
+    def test_auto_scope_uses_local_plugin_settings_when_present(self, tmp_path, capsys):
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir()
+        (settings_dir / "settings.local.json").write_text(
+            json.dumps({"enabledPlugins": {"ormah@claude-plugins-official": True}})
+        )
+
+        install_claude_md(scope="auto", cwd=tmp_path)
+
+        local_claude_md = tmp_path / "CLAUDE.local.md"
+        assert local_claude_md.exists()
+
+        captured = capsys.readouterr()
+        assert "Instructions added to ./CLAUDE.local.md" in captured.out
+
+    def test_auto_scope_uses_project_plugin_settings_when_present(self, tmp_path, capsys):
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir()
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"ormah@claude-plugins-official": True}})
+        )
+
+        install_claude_md(scope="auto", cwd=tmp_path)
+
+        project_claude_md = tmp_path / "CLAUDE.md"
+        assert project_claude_md.exists()
+
+        captured = capsys.readouterr()
+        assert "Instructions added to ./CLAUDE.md" in captured.out
+
+    def test_auto_scope_uses_user_plugin_settings_when_present(self, tmp_path, capsys):
+        home_claude_dir = tmp_path / ".claude"
+        home_claude_dir.mkdir()
+        (home_claude_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"ormah@claude-plugins-official": True}})
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_claude_md(scope="auto", cwd=tmp_path / "repo")
+
+        user_claude_md = home_claude_dir / "CLAUDE.md"
+        assert user_claude_md.exists()
+
+        captured = capsys.readouterr()
+        assert "Instructions added to ~/.claude/CLAUDE.md" in captured.out
 
 
 class TestInstallCodexMd:

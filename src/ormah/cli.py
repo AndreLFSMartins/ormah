@@ -6,6 +6,7 @@ Usage:
     ormah server stop       Stop daemon
     ormah server status     Check if running
     ormah setup             One-shot setup (hooks, MCP, server)
+    ormah claude-md install Install shared Ormah guidance into CLAUDE.md
     ormah uninstall         Remove all ormah integrations and data
     ormah mcp               Run MCP stdio server
     ormah recall <query>    Search memories
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 
 def _cmd_server_start(args):
@@ -81,6 +83,12 @@ def _cmd_uninstall(args):
     run_uninstall(yes=args.yes)
 
 
+def _cmd_claude_md_install(args):
+    from ormah.setup import install_claude_md
+
+    install_claude_md(scope=args.scope, cwd=Path.cwd())
+
+
 def _cmd_mcp(args):
     from ormah.adapters.mcp_adapter import main as mcp_main
 
@@ -136,6 +144,22 @@ def main():
     uninstall_p = sub.add_parser("uninstall", help="Remove all ormah integrations and data")
     uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
     uninstall_p.set_defaults(func=_cmd_uninstall)
+
+    # --- claude-md ---
+    claude_md_p = sub.add_parser("claude-md", help="Manage Ormah guidance in Claude Code CLAUDE.md")
+    claude_md_sub = claude_md_p.add_subparsers(dest="claude_md_cmd", required=True)
+
+    claude_md_install = claude_md_sub.add_parser(
+        "install",
+        help="Install the Ormah guidance block into a Claude Code CLAUDE.md file",
+    )
+    claude_md_install.add_argument(
+        "--scope",
+        choices=["auto", "project", "user", "local"],
+        default="auto",
+        help="Install into the CLAUDE.md target that matches plugin scope, or override it explicitly",
+    )
+    claude_md_install.set_defaults(func=_cmd_claude_md_install)
 
     # --- mcp ---
     mcp_p = sub.add_parser("mcp", help="Run MCP stdio server")

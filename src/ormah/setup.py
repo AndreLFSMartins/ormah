@@ -409,16 +409,101 @@ def _install_markdown_block(
     target.write_text(updated)
 
 
-def install_claude_md() -> None:
-    """Install ormah instructions into ~/.claude/CLAUDE.md."""
-    target = Path.home() / ".claude" / "CLAUDE.md"
+def _plugin_enabled_in_settings(settings_path: Path, plugin_name: str) -> bool:
+    """Return True when the plugin is enabled in a Claude settings file."""
+    if not settings_path.exists():
+        return False
+    try:
+        data = json.loads(settings_path.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+    enabled_plugins = data.get("enabledPlugins", {})
+    if not isinstance(enabled_plugins, dict):
+        return False
+
+    for key, enabled in enabled_plugins.items():
+        if enabled is not True:
+            continue
+        if key == plugin_name or key.startswith(f"{plugin_name}@"):
+            return True
+    return False
+
+
+def _candidate_project_roots(cwd: Path | None = None) -> list[Path]:
+    """Return ancestor directories that may hold repo-scoped Claude settings."""
+    base = (cwd or Path.cwd()).resolve()
+    home = Path.home().resolve()
+
+    try:
+        home.relative_to(base)
+        home_is_below_base = True
+    except ValueError:
+        home_is_below_base = False
+
+    roots: list[Path] = []
+    for root in [base, *base.parents]:
+        roots.append(root)
+        if root == home and not home_is_below_base:
+            break
+
+    # User scope lives under ~/.claude/settings.json, not under a home-level
+    # ".claude/settings.json" discovered by walking ancestors from a repo cwd.
+    if roots and roots[-1] == home and not (home / ".git").exists():
+        roots.pop()
+
+    return roots
+
+
+def _detect_claude_plugin_scope(
+    plugin_name: str = "ormah",
+    cwd: Path | None = None,
+) -> tuple[str, Path]:
+    """Infer the active Claude plugin scope for the current working tree."""
+    base = cwd or Path.cwd()
+    project_roots = _candidate_project_roots(base)
+
+    for root in project_roots:
+        if _plugin_enabled_in_settings(root / ".claude" / "settings.local.json", plugin_name):
+            return "local", root
+
+    for root in project_roots:
+        if _plugin_enabled_in_settings(root / ".claude" / "settings.json", plugin_name):
+            return "project", root
+
+    if _plugin_enabled_in_settings(Path.home() / ".claude" / "settings.json", plugin_name):
+        return "user", base
+
+    info("Could not detect Ormah plugin install scope — defaulting to project CLAUDE.md")
+    return "project", base
+
+
+def _get_claude_md_target(scope: str = "user", cwd: Path | None = None) -> tuple[Path, str]:
+    """Resolve the target CLAUDE.md path for a given scope."""
+    if scope == "user":
+        return Path.home() / ".claude" / "CLAUDE.md", "~/.claude/CLAUDE.md"
+    if scope == "project":
+        base = cwd or Path.cwd()
+        return base / "CLAUDE.md", "./CLAUDE.md"
+    if scope == "local":
+        base = cwd or Path.cwd()
+        return base / "CLAUDE.local.md", "./CLAUDE.local.md"
+    if scope == "auto":
+        detected_scope, base = _detect_claude_plugin_scope(cwd=cwd)
+        return _get_claude_md_target(scope=detected_scope, cwd=base)
+    raise ValueError(f"Unsupported CLAUDE.md scope: {scope}")
+
+
+def install_claude_md(scope: str = "user", cwd: Path | None = None) -> None:
+    """Install ormah instructions into a Claude Code CLAUDE.md file."""
+    target, label = _get_claude_md_target(scope=scope, cwd=cwd)
     _install_markdown_block(
         target,
         "instructions.md",
         CLAUDE_MD_SENTINEL_START,
         CLAUDE_MD_SENTINEL_END,
     )
-    ok("Instructions added to ~/.claude/CLAUDE.md")
+    ok(f"Instructions added to {label}")
 
 
 def _codex_agents_target() -> Path:
