@@ -28,11 +28,13 @@ And when you want to see what your agent actually knows, you can open the graph 
 
 ## Install
 
+### Standard install
+
 ```bash
 bash <(curl -fsSL https://ormah.me/install.sh)
 ```
 
-One command gets you to a working setup.
+One command gets you to a working local runtime plus native client wiring.
 
 `ormah setup` will:
 
@@ -46,6 +48,41 @@ One command gets you to a working setup.
 5. Offer transcript backfill for Claude Code so you can bootstrap memory from earlier sessions
 
 If Claude Code, Codex, or Claude Desktop are already installed, Ormah connects itself to them automatically.
+
+### Claude Code plugin
+
+If you prefer Claude Code's plugin model, install the plugin from Claude Code:
+
+```text
+/plugin marketplace add r-spade/ormah
+/plugin install ormah@ormah
+```
+
+Then run:
+
+```text
+/ormah:setup
+```
+
+The plugin still depends on the local `ormah` runtime and background server. If
+the runtime is missing, `/ormah:setup` guides Claude through installing it with:
+
+```bash
+bash <(curl -fsSL https://ormah.me/install.sh) --no-setup
+```
+
+and then configuring plugin-safe setup with:
+
+```bash
+ormah setup --skip-client-setup
+```
+
+The plugin keeps hooks, MCP wiring, and commands scoped to the plugin. It also
+installs the shared Ormah guidance block into the Claude memory file that
+matches the plugin install scope.
+
+For plugin-specific details, see
+[integrations/claude-plugin/README.md](/Users/rishikeshchirammelajit/Personal/ormah/integrations/claude-plugin/README.md).
 
 No API key is required for local search, embeddings, storage, graph UI, or whisper retrieval. LLM-backed features like transcript extraction and graph maintenance can use a configured provider, and supported coding agents can help with maintenance without a separate LLM API key. Automatic transcript extraction still uses the configured LLM path.
 
@@ -216,7 +253,8 @@ When maintenance is enabled, whisper can append a `maintenance_due` signal. The 
 
 You can also trigger maintenance manually:
 
-- Claude Code: `/ormah-maintenance`
+- Claude Code native install: `/ormah-maintenance`
+- Claude Code plugin: `/ormah:maintenance`
 - Codex: the installed `ormah-maintenance` agent
 
 `run_maintenance` uses a two-step flow:
@@ -230,7 +268,8 @@ Ormah is designed to work with both humans and agents through several surfaces.
 
 ### Supported clients today
 
-- Claude Code: hooks, MCP, transcript backfill, session watcher support, maintenance agent
+- Claude Code native install: hooks, MCP, transcript backfill, session watcher support, maintenance agent
+- Claude Code plugin: plugin-scoped hooks, MCP, setup/status/upgrade/maintenance commands, scope-aware guidance install
 - Codex: hooks, MCP, maintenance agent
 - Claude Desktop (macOS): MCP
 - Any MCP-compatible client: memory tools
