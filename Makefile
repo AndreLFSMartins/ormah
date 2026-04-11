@@ -45,10 +45,11 @@ clean: ## Remove build artifacts
 logs: ## Tail the server logs (if running in background)
 	@echo "Server runs with stdout logging. Use 'make server' in foreground to see logs."
 
-release: ## Build and publish to PyPI (cleans stale dist/ artifacts first)
+release: ## Build and publish the wheel to PyPI (fresh UI build, no sdist upload)
 	rm -rf dist/
-	uv build
-	uv publish
+	cd ui && npm ci && npm run build
+	uv build --wheel --out-dir dist
+	uv publish dist/*.whl
 
 smoke: ## Run fresh-install smoke test in Docker
 	docker build -f tests/smoke/Dockerfile -t ormah-smoke .

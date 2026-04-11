@@ -71,8 +71,17 @@ artifacts = ["src/ormah/ui_dist/**"]
 
 [tool.hatch.build.hooks.custom]
 
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src/ormah",
+    "ui",
+    "integrations/claude-plugin",
+    ".claude-plugin",
+    "install.sh",
+]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/ormah", "eval"]
+packages = ["src/ormah"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

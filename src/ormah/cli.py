@@ -25,6 +25,21 @@ import sys
 from pathlib import Path
 
 
+def _cmd_eval_whisper_run(args):
+    try:
+        from eval.whisper.cli import cmd_eval_whisper_run as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.whisper", "eval.whisper.cli"}:
+            raise
+        print(
+            "The whisper eval harness is not installed in the published Ormah runtime.\n"
+            "Use a source checkout or editable dev install to run 'ormah eval whisper run'."
+        )
+        sys.exit(1)
+
+    _cmd(args)
+
+
 def _cmd_server_start(args):
     if args.daemon:
         from ormah.console import info, warn
@@ -259,8 +274,7 @@ def main():
     wh_setup.set_defaults(func=cmd_whisper_setup)
 
     # eval
-    from eval.whisper.cli import cmd_eval_whisper_run
-    ev = sub.add_parser("eval", help="Run evaluation harnesses")
+    ev = sub.add_parser("eval", help="Run development evaluation harnesses")
     ev_sub = ev.add_subparsers(dest="eval_cmd", required=True)
 
     ev_wh = ev_sub.add_parser("whisper", help="Evaluate whisper pipeline quality")
@@ -281,7 +295,7 @@ def main():
         help="Preserve the self node when reseeding eval cases",
     )
     ev_wh_run.add_argument("--json", action="store_true", help="Output as JSON")
-    ev_wh_run.set_defaults(func=cmd_eval_whisper_run)
+    ev_wh_run.set_defaults(func=_cmd_eval_whisper_run)
 
     args = p.parse_args()
 
