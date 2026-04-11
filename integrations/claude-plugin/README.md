@@ -7,7 +7,8 @@ This directory contains the in-repo Claude Code plugin for Ormah.
 - Claude plugin manifest
 - Plugin-scoped hook configuration for whisper inject/store
 - Plugin-scoped MCP registration for `ormah mcp`
-- A setup playbook and explicit `/ormah:setup` and `/ormah:status` commands
+- A setup playbook and explicit `/ormah:setup`, `/ormah:status`, and
+  `/ormah:upgrade` commands
 - The Ormah maintenance agent
 
 ## What it does not bundle
@@ -28,6 +29,7 @@ Useful commands once Claude starts:
 
 - `/ormah:setup`
 - `/ormah:status`
+- `/ormah:upgrade`
 - `/reload-plugins`
 
 Maintenance does not need a dedicated slash command in plugin mode. The plugin
@@ -43,8 +45,7 @@ The intended first-run flow is:
 3. If `ormah` is missing, install it with:
    `bash <(curl -fsSL https://ormah.me/install.sh) --no-setup`
 4. If the installed runtime does not support `ormah setup --skip-client-setup`,
-   upgrade it with:
-   `bash <(curl -fsSL https://ormah.me/install.sh) --no-setup`
+   run `/ormah:upgrade`
 5. Configure the local runtime with:
    `ormah setup --skip-client-setup`
 6. Let the plugin own Claude-side hooks and MCP wiring

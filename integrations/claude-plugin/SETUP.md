@@ -14,11 +14,8 @@ plugin is installed, enabled, or looks disconnected.
 5. If the help output includes `--skip-client-setup`, run:
    `ormah setup --skip-client-setup`
 6. If the help output does not include `--skip-client-setup`, explain that the
-   installed runtime is too old for plugin mode and ask permission to upgrade
-   with:
-   `bash <(curl -fsSL https://ormah.me/install.sh) --no-setup`
-   After the upgrade, run `ormah --version`, re-check `ormah setup --help`,
-   and then run `ormah setup --skip-client-setup`.
+   installed runtime is too old for plugin mode and recommend running
+   `/ormah:upgrade`.
 7. Verify that the local runtime is healthy with:
    `ormah server status`
 8. If the server is healthy, tell the user the plugin is ready and mention the
@@ -30,6 +27,7 @@ Important:
 
 - Do not treat `ormah setup --update` as equivalent to `--skip-client-setup`;
   `--update` can reapply global Claude/Codex/Desktop wiring.
+- Use `/ormah:upgrade` for plugin-safe runtime upgrades.
 - Do not run `ormah setup` without `--skip-client-setup` in this plugin flow.
 - Do not silently install or upgrade software; ask before running shell
   commands that change the system.

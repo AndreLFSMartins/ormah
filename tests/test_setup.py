@@ -557,7 +557,7 @@ class TestClaudePluginDocs:
         assert "ormah --version" in content
         assert "ormah setup --help" in content
         assert "ormah setup --skip-client-setup" in content
-        assert "bash <(curl -fsSL https://ormah.me/install.sh) --no-setup" in content
+        assert "/ormah:upgrade" in content
         assert "Do not treat `ormah setup --update` as equivalent" in content
 
     def test_setup_playbook_matches_plugin_safe_upgrade_flow(self):
@@ -567,7 +567,7 @@ class TestClaudePluginDocs:
         assert "ormah --version" in content
         assert "ormah setup --help" in content
         assert "ormah setup --skip-client-setup" in content
-        assert "bash <(curl -fsSL https://ormah.me/install.sh) --no-setup" in content
+        assert "/ormah:upgrade" in content
         assert "installed runtime is too old for plugin mode" in content
 
     def test_status_command_reports_installed_version(self):
@@ -579,6 +579,18 @@ class TestClaudePluginDocs:
         assert "command -v ormah" in content
         assert "ormah --version" in content
         assert "ormah server status" in content
+
+    def test_upgrade_command_exists_with_plugin_safe_installer_flow(self):
+        root = Path(__file__).resolve().parents[1]
+        content = (
+            root / "integrations" / "claude-plugin" / "commands" / "upgrade.md"
+        ).read_text()
+
+        assert "command -v ormah" in content
+        assert "ormah --version" in content
+        assert "ormah setup --help" in content
+        assert "bash <(curl -fsSL https://ormah.me/install.sh) --no-setup" in content
+        assert "Do not substitute `ormah setup --update`" in content
 
 
 # --- CLI tests ---

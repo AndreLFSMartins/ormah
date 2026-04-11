@@ -17,3 +17,5 @@ Check the current Ormah runtime status for this plugin.
    - Ormah not installed
 6. If the server is running, mention the graph UI at `http://localhost:8787`.
 7. If the server is not running, recommend `/ormah:setup`.
+8. If the user explicitly wants to update the runtime rather than just recover
+   the daemon, mention `/ormah:upgrade`.
