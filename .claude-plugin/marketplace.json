@@ -1,0 +1,16 @@
+{
+  "name": "ormah",
+  "owner": {
+    "name": "Ormah"
+  },
+  "metadata": {
+    "description": "Official Ormah Claude Code plugins."
+  },
+  "plugins": [
+    {
+      "name": "ormah",
+      "source": "./integrations/claude-plugin",
+      "description": "Local-first persistent memory system with automatic context injection and durable memory tools."
+    }
+  ]
+}
