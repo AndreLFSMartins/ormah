@@ -1,20 +1,12 @@
-# Ormah - Architecture Overview
+# Ormah Overview
 
-Verified against the current repository state on 2026-04-07.
+Verified against the current repository state on 2026-04-12.
 
-Ormah is a local-first memory system for AI agents. It stores memories as markdown files, builds a derived SQLite index for search and graph traversal, and exposes the system through FastAPI, MCP, CLI commands, and a small web UI.
+This page is the system map for Ormah. Read it when you want the shape of the runtime, where the main responsibilities live, and which deeper doc to open next.
 
-The core storage, indexing, retrieval, and maintenance model is agent-agnostic. Today, the most concrete integrations are Claude Code and Codex, but the system is structured so the same core can be used from other agent clients too.
+At a high level, Ormah is a local-first memory system for agents. Markdown node files are the durable source of truth, SQLite and vector indexes are derived state, FastAPI is the operational center, and whisper plus maintenance logic sit on top of that core.
 
-## Design Philosophy
-
-1. **Local-first**: memory data lives on the local machine.
-2. **Markdown is the source of truth**: node files are persisted under the memory directory; SQLite and vector indexes are rebuildable derivatives.
-3. **Whisper is the core feature**: the system can inject relevant memories before the agent answers.
-4. **Maintenance is split across runtime paths**: some work happens inline on writes, while background jobs and optional agent-backed maintenance handle graph cleanup.
-5. **Adapter-friendly**: MCP is the primary agent interface, while OpenAI-style tool schemas and a CLI adapter make the same core available elsewhere.
-
-## High-Level Architecture
+## System Shape
 
 ```mermaid
 flowchart LR
@@ -90,13 +82,29 @@ flowchart LR
     SESS --> ENGINE
 ```
 
+## How to Read This Diagram
+
+- Clients reach Ormah through hooks, MCP, the CLI, the HTTP API, or the web UI.
+- Adapters translate client-specific interactions into a small set of server routes.
+- The FastAPI app is the runtime center. It wires the `MemoryEngine`, background jobs, and watchers together in [`src/ormah/main.py`](../src/ormah/main.py).
+- Core components handle persistence, indexing, graph traversal, whisper building, and search.
+- Markdown files are durable state. SQLite, FTS, and vector search are rebuildable derived indexes.
+
+## Core System Assumptions
+
+1. **Local-first**: memory data lives on the local machine.
+2. **Markdown is the source of truth**: node files are durable; SQLite and vector indexes are rebuildable derivatives.
+3. **Whisper is the main retrieval path**: Ormah can surface relevant memory before the agent responds.
+4. **Maintenance is split across runtime paths**: some work happens inline on writes, while background jobs and optional agent-backed maintenance clean up the graph over time.
+5. **The core is agent-agnostic**: adapters and hooks can change without changing the storage and retrieval model.
+
 ## Runtime Boundaries
 
-- **FastAPI** is the operational center. The app starts a `MemoryEngine`, background scheduler, hippocampus watchers, and the session watcher in `src/ormah/main.py`.
-- **MemoryEngine** is the main facade. Routes delegate almost everything to it.
-- **ContextBuilder** implements whisper selection and formatting.
-- **FileStore** reads and writes markdown node files.
-- **IndexBuilder** keeps the derived SQLite / vector index synchronized for Ormah-managed writes and rebuilds.
+- **FastAPI** is the operational center. The app starts a `MemoryEngine`, background scheduler, hippocampus watchers, and the session watcher in [`src/ormah/main.py`](../src/ormah/main.py).
+- **MemoryEngine** is the main facade. Routes delegate almost everything to it in [`src/ormah/engine/memory_engine.py`](../src/ormah/engine/memory_engine.py).
+- **ContextBuilder** implements whisper selection and formatting in [`src/ormah/engine/context_builder.py`](../src/ormah/engine/context_builder.py).
+- **FileStore** reads and writes markdown node files in [`src/ormah/store`](../src/ormah/store).
+- **IndexBuilder** keeps the derived SQLite and vector index synchronized for Ormah-managed writes and rebuilds in [`src/ormah/index/builder.py`](../src/ormah/index/builder.py).
 - **GraphIndex** exposes graph traversal, FTS search, and edge retrieval on top of SQLite.
 
 ## Startup and Shutdown
@@ -116,31 +124,37 @@ At shutdown it stops the session watcher, stops hippocampus observers, shuts dow
 - Markdown node files are the durable source of truth.
 - SQLite stores nodes, edges, tags, audit tables, whisper logs, affinity rows, proposals, merge history, and vector search state.
 - Ormah-managed writes update both markdown and the derived index immediately.
-- A standalone node-file watcher utility exists in `src/ormah/store/watcher.py`, but it is **not** wired into app startup today.
+- A standalone node-file watcher utility exists in [`src/ormah/store/watcher.py`](../src/ormah/store/watcher.py), but it is not wired into app startup today.
 
-## Main Request Flows
+## Three Core Paths
 
-### Remember
+This page keeps the runtime flows short. The linked docs go deeper into retrieval, ranking, storage, and maintenance behavior.
 
-1. client calls `/agent/remember`
-2. `MemoryEngine.remember()` writes a markdown node
-3. the node is indexed into SQLite / vector search
-4. inline auto-linking may create initial edges
-5. the API returns a formatted text response plus the node id
+### Write Path
 
-### Whisper
+1. A client calls `/agent/remember`.
+2. `MemoryEngine.remember()` writes a markdown node.
+3. The node is indexed into SQLite and vector search.
+4. Inline auto-linking may create initial edges.
+5. The API returns formatted text plus the new node id.
 
-1. a supported client hook runs `ormah whisper inject`
-2. CLI adapter posts to `/agent/whisper`
-3. route builds a session-aware recent-prompt buffer
-4. `MemoryEngine.get_whisper_context()` delegates to `ContextBuilder.build_whisper_context()`
-5. whisper searches, reranks, applies affinity / gating, formats the result, and may append `maintenance_due`
+Read more: [01 - Data Model](<./01 - Data Model.md>), [02 - Storage Layer](<./02 - Storage Layer.md>)
+
+### Whisper Path
+
+1. A supported client hook runs `ormah whisper inject`.
+2. The CLI adapter posts to `/agent/whisper`.
+3. The route builds a session-aware recent-prompt buffer.
+4. `MemoryEngine.get_whisper_context()` delegates to `ContextBuilder.build_whisper_context()`.
+5. Whisper searches, reranks, applies affinity and gating, formats the result, and may append `maintenance_due`.
 
 Claude Code and Codex both install this hook path today.
 
-### Background Maintenance
+Read more: [03 - Search and Ranking](<./03 - Search and Ranking.md>), [04 - Whisper - Involuntary Recall](<./04 - Whisper - Involuntary Recall.md>), [09 - Affinity and Feedback](<./09 - Affinity and Feedback.md>)
 
-The scheduler runs:
+### Maintenance Path
+
+The scheduler runs these background jobs from [`src/ormah/background/scheduler.py`](../src/ormah/background/scheduler.py):
 
 - `importance_scorer`
 - `index_updater`
@@ -153,7 +167,9 @@ The scheduler runs:
 
 Separately, agent-backed maintenance can use `/agent/maintenance` for a two-phase human-or-agent-in-the-loop workflow.
 
-## Project Structure
+Read more: [05 - Background Jobs](<./05 - Background Jobs.md>)
+
+## Subsystem Map
 
 ```text
 src/ormah/
@@ -173,17 +189,19 @@ src/ormah/
 └── setup.py
 ```
 
-## Code Anchors
+Use this as a contributor map, not a replacement for the deeper subsystem docs.
 
-- `src/ormah/main.py` - app lifespan and startup wiring
-- `src/ormah/engine/memory_engine.py` - main facade
-- `src/ormah/engine/context_builder.py` - whisper pipeline
-- `src/ormah/index/builder.py` - markdown -> SQLite sync
-- `src/ormah/background/scheduler.py` - scheduled jobs
-- `src/ormah/adapters/mcp_adapter.py` - MCP transport
+## Where To Read Next
+
+- If you care about persistence and node shape, start with [01 - Data Model](<./01 - Data Model.md>) and [02 - Storage Layer](<./02 - Storage Layer.md>).
+- If you care about retrieval and whisper behavior, read [03 - Search and Ranking](<./03 - Search and Ranking.md>) and [04 - Whisper - Involuntary Recall](<./04 - Whisper - Involuntary Recall.md>).
+- If you care about maintenance and graph health, read [05 - Background Jobs](<./05 - Background Jobs.md>) and [09 - Affinity and Feedback](<./09 - Affinity and Feedback.md>).
+- If you care about integration surfaces, read [07 - MCP and Adapters](<./07 - MCP and Adapters.md>) and [08 - API Surface](<./08 - API Surface.md>).
+- If you care about ingestion, read [10 - Hippocampus and Session Watcher](<./10 - Hippocampus and Session Watcher.md>).
 
 ## Related Docs
 
+- [01 - Data Model](<./01 - Data Model.md>)
 - [02 - Storage Layer](<./02 - Storage Layer.md>)
 - [03 - Search and Ranking](<./03 - Search and Ranking.md>)
 - [04 - Whisper - Involuntary Recall](<./04 - Whisper - Involuntary Recall.md>)
