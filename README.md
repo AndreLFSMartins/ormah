@@ -1,90 +1,103 @@
 # Ormah
 
-Ormah is a local-first memory system for AI agents and the humans who work with them.
+Ormah is the collective, self-maintaining memory layer all your agents can tap into.
 
-The core idea is simple: memory should be involuntary. You should not have to tell your agent what to remember, what to recall, or when to go looking for context. Ormah lets your agent learn your preferences, decisions, patterns, mistakes, and ongoing work, then whisper the right context before the next prompt.
+The core idea is simple: memory should be involuntary. Your agents should not have to remember to remember. Ormah works in the background, learning your preferences, decisions, patterns, mistakes, and ongoing work, then whispering the right memory at the right time.
 
-Search, embeddings, storage, and retrieval run on your machine by default. Your memory stays local. Add an LLM only for the parts that require judgment, like extracting memories from transcripts or doing graph maintenance.
+Your memory has always been yours. Ormah helps keep it that way.
 
-For humans, Ormah feels like your AI finally remembers.
-
-For agents, Ormah is a memory substrate with whisper hooks, MCP tools, a CLI, an HTTP API, and a live graph UI.
-
-The name comes from the Malayalam word ഓർമ (`ormah`), meaning "memory" or "remember."
-
-## The Whisper Experience
-
-You open a new session with a hook-supported AI agent and it already knows who you are, how you like to work, what you decided last week, what went wrong yesterday, and what matters in this repo right now.
-
-You did not paste notes into the prompt. You did not ask it to "recall." You did not even have to know that the missing piece of context existed. Ormah whispered it before the model ever saw your message.
-
-Over time, your agent learns more about you: what you prefer, what you believe, what you dislike, where you tend to make mistakes, which patterns keep repeating, which decisions still matter, and which ones no longer do. That context comes back when it is useful, not when you remember to ask for it.
-
-And when you want to see what your agent actually knows, you can open the graph at `http://localhost:8787` and inspect it directly.
+Local. Private. Portable.
+Yours to keep. Yours to move.
 
 <p align="center">
   <img src="docs/graph.png" alt="Ormah knowledge graph" width="100%">
 </p>
 
-## Install
+The name comes from the Malayalam word ഓർമ (`ormah`), meaning "memory" or "remember."
 
-### Standard install
+## Memory Should Whisper
+
+In real life, memory does not work like search. When something in front of you connects to something you already know, the memory surfaces on its own. You do not stop and decide to remember.
+
+Ormah is built around that idea. Instead of waiting for an agent to ask for context, Ormah looks at what is happening and whispers the right memory before the agent processes the next prompt, so it starts with the context, preferences, constraints, and hints that matter.
+
+That is what makes Ormah feel like memory instead of search. Search waits to be asked. Memory shows up when it matters.
+
+Silence is better than noise. Ormah should whisper, not shout.
+
+## Install
 
 ```bash
 bash <(curl -fsSL https://ormah.me/install.sh)
 ```
 
-One command gets you to a working local runtime plus native client wiring.
+One command gets you a working local Ormah runtime with setup for supported clients.
+
+Ormah is agent-agnostic by design. It can be wired into any agent that exposes the right hook or prompt-injection path, and it also exposes CLI, MCP, and HTTP surfaces.
 
 `ormah setup` will:
 
-1. Start the Ormah server and install auto-start so it runs in the background on login (`launchd` on macOS, `systemd` on Linux)
-2. Preload the local embedding models Ormah uses for search and whisper retrieval
-3. Detect supported clients and wire them up automatically:
-   - Claude Code: whisper hooks, MCP tools, instructions, maintenance agent, slash command
-   - Codex: whisper hooks, MCP tools, instructions, maintenance agent
-   - Claude Desktop (macOS): MCP tools
-4. Ask whether to enable automatic agent-backed maintenance when Claude Code, Codex, or both are detected
-5. Offer transcript backfill for Claude Code so you can bootstrap memory from earlier sessions
+1. Start the Ormah server and install auto-start
+2. Preload the local models used for search and whisper retrieval
+3. Detect supported clients and wire them up automatically
+4. Offer agent-backed maintenance when Claude Code or Codex are available
+5. Offer transcript backfill to help bootstrap memory from earlier sessions
 
-If Claude Code, Codex, or Claude Desktop are already installed, Ormah connects itself to them automatically.
+Today, setup can wire up:
 
-### Claude Code plugin
+- Claude Code
+- Codex
+- Claude Desktop (MCP)
 
-If you prefer Claude Code's plugin model, install the plugin from Claude Code:
+Local search, embeddings, storage, the graph UI, and whisper retrieval do not require an API key. If you want Ormah's LLM-backed features to run independently of your agent, you can configure your own provider and API key.
 
-```text
-/plugin marketplace add r-spade/ormah
-/plugin install ormah@ormah
-```
+## Features
 
-Then run:
+### Recall and Whisper
 
-```text
-/ormah:setup
-```
+Ormah supports both deliberate recall and involuntary recall.
 
-The plugin still depends on the local `ormah` runtime and background server. If
-the runtime is missing, `/ormah:setup` guides Claude through installing it with:
+When an agent knows it needs something, it can explicitly search memory. But memory should not always wait to be asked. Ormah is built to whisper the right memory at the right time, before the next prompt, so the agent starts with context instead of having to go looking for it.
 
-```bash
-bash <(curl -fsSL https://ormah.me/install.sh) --no-setup
-```
+Read more: [Whisper - Involuntary Recall](<docs/04 - Whisper - Involuntary Recall.md>), [Search and Ranking](<docs/03 - Search and Ranking.md>), [Affinity and Feedback](<docs/09 - Affinity and Feedback.md>)
 
-and then configuring plugin-safe setup with:
+### Memory Capture
 
-```bash
-ormah setup --skip-client-setup
-```
+Memory is only useful if it keeps growing with you.
 
-The plugin keeps hooks, MCP wiring, and commands scoped to the plugin. It also
-installs the shared Ormah guidance block into the Claude memory file that
-matches the plugin install scope.
+Ormah can capture memory from ongoing sessions, stored transcripts, and external markdown sources. `whisper store` turns conversations into durable memory, the session watcher ingests completed sessions automatically, and Hippocampus watches note directories so project docs, journals, and markdown knowledge can flow into the graph over time.
 
-For plugin-specific details, see
-[integrations/claude-plugin/README.md](/Users/rishikeshchirammelajit/Personal/ormah/integrations/claude-plugin/README.md).
+Read more: [Hippocampus and Session Watcher](<docs/10 - Hippocampus and Session Watcher.md>), [Storage Layer](<docs/02 - Storage Layer.md>)
 
-No API key is required for local search, embeddings, storage, graph UI, or whisper retrieval. LLM-backed features like transcript extraction and graph maintenance can use a configured provider, and supported coding agents can help with maintenance without a separate LLM API key. Automatic transcript extraction still uses the configured LLM path.
+### Self-Maintaining Memory
+
+Memory should not become a junk drawer.
+
+Ormah continuously maintains the graph in the background: linking related memories, detecting contradictions, merging duplicates, consolidating overlap, scoring importance, and decaying stale context. Some of that work is automatic, and some of it can be delegated to an agent when judgment is required.
+
+Read more: [Background Jobs](<docs/05 - Background Jobs.md>)
+
+### Agent-Agnostic Surfaces
+
+Ormah is not tied to a single agent.
+
+It can integrate wherever there is a usable hook or interface. Ormah exposes multiple surfaces for that: hooks for whisper, MCP for tool-calling agents, a CLI for direct workflows, and an HTTP API for custom integrations. The memory layer stays the same even when the agent changes.
+
+Read more: [MCP and Adapters](<docs/07 - MCP and Adapters.md>), [API Surface](<docs/08 - API Surface.md>), [Setup and Installation](<docs/11 - Setup and Installation.md>)
+
+### Agent-Assisted or Independent
+
+Ormah can use the intelligence of the agents you already work with, like Codex or Claude Code, for judgment-heavy tasks such as maintenance. But it does not have to depend on them. If you want Ormah to run those features independently, you can configure your own provider and API key.
+
+Read more: [Configuration Reference](<docs/12 - Configuration Reference.md>), [Setup and Installation](<docs/11 - Setup and Installation.md>)
+
+### Graph UI
+
+Memory should be inspectable.
+
+Ormah includes a graph UI so you can see what it knows, how memories connect, what is becoming central, and where conflicts or belief changes are forming. That makes the system easier to trust, debug, and improve.
+
+Read more: [Web UI](<docs/14 - Web UI.md>)
 
 ## Why the whisper matters
 
