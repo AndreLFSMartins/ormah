@@ -31,12 +31,15 @@ flowchart TB
 
 ## Candidate Pool Size
 
-The search widens retrieval candidates like this:
+Ormah does not retrieve only the final `limit` immediately. It first gathers a larger pool of possible matches, then filters, reranks, and trims that pool down to the final result set.
 
-- default: `3 x limit`
-- with temporal filters (`created_after` / `created_before`): `10 x limit`
+By default, search retrieves up to `3 x limit` candidates from each retrieval path.
 
-That widening is tied to temporal filtering, not to question detection.
+When temporal filters like `created_after` or `created_before` are present, search widens that pool to `10 x limit`. This gives the post-filter enough recent candidates to work with after older matches are removed.
+
+Example: if `limit=10`, a normal query considers up to `30` initial matches from FTS and vector search, while a temporal query considers up to `100`.
+
+This widening is tied to temporal filtering, not to question detection.
 
 ## FTS + Vector Retrieval
 
@@ -63,7 +66,13 @@ But the candidate-pool multiplier stays tied to temporal filters, not to questio
 
 ### 1. RRF + raw similarity blend
 
-RRF captures ranking agreement between retrievers. Raw similarity restores magnitude.
+Ormah first normalizes the fused RRF score, then blends it with raw vector similarity. This matters because RRF preserves ranking agreement between retrievers, but discards score magnitude.
+
+For nodes that have vector similarity, the score becomes:
+
+```python
+final_score = (1 - similarity_blend_weight) * normalized_rrf + similarity_blend_weight * raw_sim
+```
 
 Before raw vector similarity is blended back in, Ormah applies a **long-document penalty**:
 
@@ -85,6 +94,8 @@ Why this exists:
 - without this penalty, broad architecture docs can outrank short, specific memories too easily
 
 This penalty affects the **raw vector similarity contribution**, not BM25 / FTS ranking directly.
+
+If a result is FTS-only and has no vector similarity, Ormah does not blend. It dampens the RRF score instead.
 
 ### 2. Title boost
 
