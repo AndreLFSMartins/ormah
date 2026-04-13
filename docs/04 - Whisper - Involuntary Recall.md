@@ -1,16 +1,16 @@
 # Whisper - Involuntary Recall
 
-Verified against the current repository state on 2026-04-07.
+Verified against the current repository state on 2026-04-13.
 
 Whisper is Ormah's pre-response memory injection path. A client asks for context before the agent answers, and Ormah decides whether any memories are relevant enough to inject.
 
-The important implementation detail is that whisper is not a fixed 11-step pipeline anymore. The current code is a branching pipeline with early exits, session-aware query enhancement, hybrid retrieval, reranking, affinity boosting, gating, and a flat markdown formatter.
+The current implementation is a branching pipeline with early exits, session-aware query enhancement, hybrid retrieval, reranking, affinity boosting, gating, and a flat markdown formatter.
 
-The core whisper logic is agent harness agnostic. Today, both Claude Code and Codex wire into the same `ormah whisper inject` / `ormah whisper store` CLI commands, while other clients can call the HTTP route directly.
+The core whisper logic is agent-harness agnostic. Clients can invoke whisper through the `ormah whisper inject` and `ormah whisper store` CLI commands, or call the HTTP route directly.
 
 ## Entry Points
 
-- Shared hook command used by Claude Code and Codex: `src/ormah/adapters/cli_adapter.py:cmd_whisper_inject()`
+- CLI hook command: `src/ormah/adapters/cli_adapter.py:cmd_whisper_inject()`
 - API route: `src/ormah/api/routes_agent.py:/agent/whisper`
 - Engine entry: `src/ormah/engine/memory_engine.py:get_whisper_context()`
 - Builder: `src/ormah/engine/context_builder.py:build_whisper_context()`
@@ -19,7 +19,7 @@ The core whisper logic is agent harness agnostic. Today, both Claude Code and Co
 
 ```mermaid
 flowchart TB
-    START[Supported client hook] --> CLI[ormah whisper inject]
+    START[Client hook] --> CLI[ormah whisper inject]
     CLI --> API[POST /agent/whisper]
     API --> BUFFER[Build recent_prompts buffer from session_id]
     BUFFER --> ENGINE[MemoryEngine.get_whisper_context]
@@ -100,8 +100,6 @@ The builder calls structured recall with:
 - `tiers = [core, working]`
 - `touch_access = False`
 
-This is one of the biggest doc changes from older notes that described an expanded `limit=13` search.
-
 ### 7. Thresholds and reranking
 
 - base whisper min relevance score: `0.45`
@@ -162,7 +160,7 @@ full content and related memories.
   The eval pipeline builds an isolated engine, runs whisper, and records
   injected ids for scoring.
 
-- **[concept]** Session watcher ingests Claude Code transcripts (id: e5f6g7h8)
+- **[concept]** Session watcher ingests transcript files into memory (id: e5f6g7h8)
 
 maintenance_due
 ```
@@ -199,7 +197,7 @@ sequenceDiagram
 - every `whisper_nudge_interval` prompts, it appends a reminder to use `remember`
 - every `whisper_out_interval` prompts, it can spawn `ormah whisper store` in the background to extract memories from the transcript
 
-Those behaviors are outside the selection logic in `ContextBuilder`, but they are part of the end-to-end whisper hook path used by the supported hook integrations.
+Those behaviors are outside the selection logic in `ContextBuilder`, but they are part of the end-to-end whisper hook path used by hook-based integrations.
 
 ## Walkthrough Example
 
