@@ -29,7 +29,7 @@ connections: list[Connection]  # Outgoing edges to other nodes
 
 # Scoring
 confidence: float           # [0.0-1.0] How certain we are (default: 1.0)
-importance: float           # [0.0-1.0] Computed by importance_scorer job
+importance: float           # [0.0-1.0] Computed by importance_scorer job; see 05 - Background Jobs
 access_count: int           # Times this node has been accessed/recalled
 
 # Temporal
@@ -106,7 +106,7 @@ graph LR
 | **working** | Unlimited | FSRS-based auto-demotion | +0.00 | Active context: current project info, recent decisions |
 | **archival** | Unlimited | No further decay | -0.10 | Historical: still searchable but deprioritized |
 
-**Core cap enforcement** (`engine/tier_manager.py:enforce_core_cap()`): When core exceeds 50 nodes, the least important ones (by `importance` score) are demoted to working, skipping protected nodes like the self node.
+**Core cap enforcement** (`engine/tier_manager.py:enforce_core_cap()`): When core exceeds 50 nodes, the least important ones (by `importance` score, not raw access count) are demoted to working, skipping protected nodes like the self node. See [05 - Background Jobs](<./05 - Background Jobs.md>) for how importance is calculated.
 
 ## Edge Types (8 types)
 

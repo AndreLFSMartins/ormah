@@ -128,6 +128,31 @@ It does not do embedding clustering or hierarchical clustering despite the name.
 
 High-importance nodes are protected from decay.
 
+### Importance Scorer
+
+`importance_scorer` recomputes node importance from three dynamic signals:
+
+1. **Access signal**: how often the node has been recalled, based on `access_count`
+2. **Edge signal**: how connected the node is in the graph, based on total edge count
+3. **Recency signal**: how retrievable the node currently is, using FSRS-style `exp(-days_ago / stability)`
+
+With the default configuration, those signals are weighted almost evenly:
+
+- access weight: `0.34`
+- edge weight: `0.33`
+- recency weight: `0.33`
+
+Access and edge counts are log-normalized against reference values, then the weighted score is normalized into the `0.0-1.0` range. By default:
+
+- access reference: `50`
+- edge reference: `20`
+
+The scorer runs every `120` minutes by default and only writes a new value when the change is meaningful.
+
+This score is not static. Recall and search hits update `access_count`, `last_accessed`, `last_review`, and `stability`, so a memory's importance changes over time as it is used, connected, or left untouched.
+
+Important current nuance: `importance_recency_half_life_days` exists in configuration, but the current scorer implementation uses FSRS stability for the recency term instead.
+
 ## Walkthrough Example
 
 Imagine two memories:
