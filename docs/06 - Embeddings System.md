@@ -1,6 +1,8 @@
 # Embeddings System
 
-The embeddings subsystem powers vector search, similarity detection, intent classification, and cross-encoder reranking. Everything lives in `src/ormah/embeddings/`.
+Verified against the current repository state on 2026-04-13.
+
+The embeddings subsystem powers vector search, similarity detection, and cross-encoder reranking. It also provides the encoder used by prompt-intent classification. Most of the implementation lives in `src/ormah/embeddings/`.
 
 ## Architecture
 
@@ -52,8 +54,9 @@ class EmbeddingAdapter(ABC):
     def encode(self, text: str) -> np.ndarray:
         """Single text → L2-normalized vector"""
 
-    def encode_batch(self, texts: list[str]) -> list[np.ndarray]:
-        """Batch encoding (default: sequential)"""
+    @abstractmethod
+    def encode_batch(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
+        """Batch encoding → normalized vectors"""
 
     def encode_query(self, text: str) -> np.ndarray:
         """Query-specific encoding (may add prefix)"""
@@ -125,25 +128,39 @@ response = litellm.embedding(model="text-embedding-3-small", input=[text])
 
 ## Encoder Factory
 
-**Code**: `embeddings/encoder.py`
+**Code**: `embeddings/encoder.py`, `embeddings/__init__.py`
 
 ```python
-def get_encoder(settings: Settings) -> EmbeddingAdapter:
+def get_encoder(settings=None) -> EmbeddingAdapter:
+    if settings is None:
+        settings = default_settings
+    return get_adapter(settings)
+
+def get_adapter(settings) -> EmbeddingAdapter:
     if settings.embedding_provider == "local":
-        return LocalAdapter(model=settings.embedding_model)
-    elif settings.embedding_provider == "ollama":
-        return OllamaEmbeddingAdapter(model=settings.embedding_model)
-    elif settings.embedding_provider == "litellm":
-        return LiteLLMEmbeddingAdapter(model=settings.embedding_model)
+        return LocalAdapter(model_name=settings.embedding_model)
+    if settings.embedding_provider == "ollama":
+        return OllamaEmbeddingAdapter(
+            model=settings.embedding_model,
+            base_url=settings.llm_base_url,
+            dim=settings.embedding_dim,
+        )
+    if settings.embedding_provider == "litellm":
+        return LiteLLMEmbeddingAdapter(
+            model=settings.embedding_model,
+            dim=settings.embedding_dim,
+        )
 ```
 
-Module-level `_adapter_cache` keyed by `id(settings)` ensures a singleton per settings object.
+The current implementation caches one adapter per settings-object identity in a module-level `_adapter_cache`.
 
 ## Vector Store
 
 **Code**: `embeddings/vector_store.py`
 
 Wraps the `sqlite-vec` extension for vector storage and KNN search:
+
+The backing store is the `node_vectors` sqlite-vec virtual table in the derived SQLite index.
 
 ```python
 class VectorStore:
@@ -252,3 +269,9 @@ Say we store: "Chose SQLite over Postgres because local-first doesn't need a ser
 6. **Convert**: `cosine_sim = 1 - (distance² / 2)` → 0.82 for "Chose SQLite..."
 7. **Threshold**: 0.82 > 0.4 → passes
 8. **Feed into HybridSearch**: Combined with FTS5 results via RRF (see [03 - Search and Ranking](<./03 - Search and Ranking.md>))
+
+## Related Docs
+
+- [03 - Search and Ranking](<./03 - Search and Ranking.md>)
+- [04 - Whisper - Involuntary Recall](<./04 - Whisper - Involuntary Recall.md>)
+- [12 - Configuration Reference](<./12 - Configuration Reference.md>)
