@@ -1,13 +1,13 @@
 # Hippocampus and Session Watcher
 
-Verified against the current repository state on 2026-04-07.
+Verified against the current repository state on 2026-04-13.
 
 These are two separate watcher systems:
 
 - **Hippocampus** watches configured markdown directories and ingests changed files
 - **Session watcher** watches transcript directories and ingests completed sessions
 
-They are different from the unused node-store watcher in `src/ormah/store/watcher.py`.
+They are separate from the node-store watcher in `src/ormah/store/watcher.py`, which is not started by the app runtime.
 
 ## Hippocampus
 
@@ -39,6 +39,8 @@ So the effective out-of-the-box behavior is "enabled in principle, but inactive 
 6. persists a `.hippocampus_state` file per watch dir
 7. starts real-time watchdog observers
 
+Ignored-path filtering is configurable through `hippocampus_ignore_patterns`.
+
 ## Session Watcher
 
 **Code**: `src/ormah/background/session_watcher.py`
@@ -60,7 +62,7 @@ Current defaults:
 - `session_watcher_min_turns = 5`
 - `session_watcher_lookback_hours = 72`
 
-So the older wording "auto-detected session watcher dir" is inaccurate as a config default. The code has a concrete default path.
+The current default watch directory is a concrete Claude Code path, not an auto-detected one.
 
 ### What it does
 
@@ -78,6 +80,8 @@ So the older wording "auto-detected session watcher dir" is inaccurate as a conf
 **Code**: `src/ormah/transcript/parser.py`
 
 The parser now supports **both Claude Code and Codex-style JSONL transcripts**.
+
+That parser support is broader than the session watcher's current default setup: the parser can normalize both formats, while the watcher's default directory and space-decoding logic are still Claude-Code-shaped.
 
 Supported normalized sources:
 
