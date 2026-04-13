@@ -94,7 +94,7 @@ flowchart LR
 
 1. **Local-first**: memory data lives on the local machine.
 2. **Markdown is the source of truth**: node files are durable; SQLite and vector indexes are rebuildable derivatives.
-3. **Whisper is the main retrieval path**: Ormah can surface relevant memory before the agent responds.
+3. **Recall and whisper are the two main retrieval paths**: recall is deliberate memory lookup, while whisper surfaces relevant memory before the agent responds.
 4. **Maintenance is split across runtime paths**: some work happens inline on writes, while background jobs and optional agent-backed maintenance clean up the graph over time.
 5. **The core is agent-agnostic**: adapters and hooks can change without changing the storage and retrieval model.
 
@@ -193,11 +193,13 @@ Use this as a contributor map, not a replacement for the deeper subsystem docs.
 
 ## Where To Read Next
 
-- If you care about persistence and node shape, start with [01 - Data Model](<./01 - Data Model.md>) and [02 - Storage Layer](<./02 - Storage Layer.md>).
-- If you care about retrieval and whisper behavior, read [03 - Search and Ranking](<./03 - Search and Ranking.md>) and [04 - Whisper - Involuntary Recall](<./04 - Whisper - Involuntary Recall.md>).
-- If you care about maintenance and graph health, read [05 - Background Jobs](<./05 - Background Jobs.md>) and [09 - Affinity and Feedback](<./09 - Affinity and Feedback.md>).
-- If you care about integration surfaces, read [07 - MCP and Adapters](<./07 - MCP and Adapters.md>) and [08 - API Surface](<./08 - API Surface.md>).
-- If you care about ingestion, read [10 - Hippocampus and Session Watcher](<./10 - Hippocampus and Session Watcher.md>).
+| To understand... | Read next |
+| --- | --- |
+| Persistence and node shape | [01 - Data Model](<./01 - Data Model.md>), [02 - Storage Layer](<./02 - Storage Layer.md>) |
+| Retrieval and whisper behavior | [03 - Search and Ranking](<./03 - Search and Ranking.md>), [04 - Whisper - Involuntary Recall](<./04 - Whisper - Involuntary Recall.md>) |
+| Maintenance and graph health | [05 - Background Jobs](<./05 - Background Jobs.md>), [09 - Affinity and Feedback](<./09 - Affinity and Feedback.md>) |
+| Integration surfaces | [07 - MCP and Adapters](<./07 - MCP and Adapters.md>), [08 - API Surface](<./08 - API Surface.md>) |
+| Ingestion | [10 - Hippocampus and Session Watcher](<./10 - Hippocampus and Session Watcher.md>) |
 
 ## Related Docs
 
