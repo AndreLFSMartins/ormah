@@ -54,7 +54,7 @@ Important table families:
 - `nodes`
 - `edges`
 - `node_tags`
-- FTS tables for full-text search
+- FTS tables for full-text search. FTS tables are SQLite's full-text search indexes. Ormah uses them to do fast, ranked keyword retrieval over memory titles, content, and tags. Unlike normal tables, which store rows for exact lookup and filtering, FTS tables are optimized for searching natural-language text.
 - vector-search storage used by `sqlite-vec`
 - maintenance/audit tables such as `proposals`, `merge_history`, `audit_log`
 - whisper / feedback tables such as `whisper_log`, `review_log`, `affinity`
@@ -111,7 +111,7 @@ Operationally this happens through:
 - `POST /admin/rebuild`
 - startup / maintenance paths that invoke index-building logic
 
-## Important Correction: Node File Watcher
+## Manual Edits and Rebuild Behavior
 
 There is a watcher implementation in:
 
@@ -127,14 +127,8 @@ However, in the current app runtime this watcher is **not wired into startup**. 
 
 It does **not** start `store.watcher.start_watcher()`.
 
-So this statement is not currently safe:
-
-- "manual edits to node markdown automatically update SQLite"
-
-Today, the reliable guarantee is narrower:
-
 - Ormah-managed writes update both markdown and the derived index
-- manual node-file edits can be picked up by rebuild/incremental index operations
+- manual node-file edits can be picked up by rebuild or incremental index operations
 - there is currently no app-started live node-file watcher for the node store itself
 
 ## Walkthrough Example
