@@ -91,7 +91,7 @@ Instead it:
 5. soft-deletes the removed markdown node
 6. records merge history
 
-That distinction matters in presentations: duplicate merging is currently a "keep one node and rewrite around it" flow, not a "create a third canonical merged node" flow.
+In other words, duplicate merging keeps one existing node, updates it if needed, and removes the other; it does not create a separate canonical merged node.
 
 ## Consolidator
 
