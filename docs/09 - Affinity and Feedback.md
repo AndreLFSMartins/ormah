@@ -1,23 +1,27 @@
 # Affinity and Feedback
 
-Verified against the current repository state on 2026-04-07.
+Verified against the current repository state on 2026-04-13.
 
 Affinity is Ormah's feedback-based score adjustment layer for whisper. It learns whether a memory tends to be useful in prompts similar to the current one.
 
-## Important Behavioral Correction
+## How Feedback Enters the System
 
-The current system does **not** automatically infer feedback just because a whispered memory appeared or was ignored.
+Affinity learning is driven by feedback submitted through `submit_feedback(...)`. That feedback can be explicit or implicit.
 
-Affinity rows are created when `submit_feedback(...)` is called.
+In this system:
 
-That means:
+- `explicit` feedback means a direct judgment is submitted because the user or agent intentionally marks a memory as useful or not useful
+- `implicit` feedback means the client or agent infers usefulness from the interaction and submits that judgment without the user explicitly rating it
 
-- explicit feedback: definitely supported
-- implicit feedback: supported as a tool/API concept, but still must be submitted explicitly by the client / agent
+In both cases, Ormah learns through `submit_feedback(...)`; the difference is where the judgment came from, not how it is stored.
+
+Ormah does not currently infer negative feedback from silence alone. Affinity rows are created when `submit_feedback(...)` is called.
 
 ## Where Feedback Comes From
 
 **Code**: `src/ormah/engine/memory_engine.py:submit_feedback()`
+
+Feedback is learned from previously logged whisper candidates, not from arbitrary node ids in isolation.
 
 When feedback is submitted:
 
@@ -26,9 +30,11 @@ When feedback is submitted:
 3. it inserts an `affinity` row using that stored prompt context
 4. explicit feedback also marks relevant `review_log` entries as answered
 
+Whispered short ids work here too: the resolver accepts full ids first, then falls back to a unique prefix match against `whisper_log`.
+
 ## How Candidates Get Populated
 
-This is the missing bridge in many mental models: affinity does **not** choose its own candidates. It learns from candidates that whisper already surfaced and logged.
+Affinity does **not** choose its own candidates. It learns from candidates that whisper already surfaced and logged.
 
 ### Step 1: whisper builds a candidate set
 
@@ -84,8 +90,6 @@ Current stored affinity rows include:
 - `space`
 - `session_id`
 
-Older notes that mention `prompt_embedding` and `created` are stale field names.
-
 ## How Boost Is Computed
 
 **Code**: `src/ormah/engine/affinity.py`
@@ -109,8 +113,6 @@ For each candidate node:
 | `affinity_half_life_days` | `30.0` |
 | `affinity_max_boost` | `0.15` |
 | `affinity_implicit_weight` | `0.8` |
-
-The `0.8` implicit weight is a meaningful correction from older docs that described it as `0.3`.
 
 ## Math
 
