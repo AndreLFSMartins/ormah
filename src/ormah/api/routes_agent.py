@@ -8,9 +8,10 @@ import time
 from collections import deque
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
+from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.models.node import ConnectRequest, CreateNodeRequest, UpdateNodeRequest
 from ormah.models.proposals import ResolveProposalRequest
 from ormah.models.search import SearchQuery
@@ -22,6 +23,13 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 # Per-session prompt ring buffer for context-enhanced whisper search.
 # Key: session_id, Value: deque of (prompt, timestamp) tuples.
 _session_buffers: dict[str, deque[tuple[str, float]]] = {}
+
+
+def _maintenance_manager(request: Request) -> MaintenanceManager:
+    manager = getattr(request.app.state, "maintenance_manager", None)
+    if manager is None:
+        raise RuntimeError("Maintenance manager is not configured")
+    return manager
 
 
 class TextResponse(BaseModel):
@@ -323,23 +331,44 @@ async def resolve_proposal(proposal_id: str, body: ResolveProposalRequest, reque
     }
 
 
+class MaintenanceRequest(BaseModel):
+    results: dict | None = None
+    job_id: str | None = None
+
+
+@router.get("/maintenance")
+async def get_maintenance_status(request: Request, job_id: str | None = Query(None)):
+    """Get current maintenance job status and any ready results."""
+    manager = _maintenance_manager(request)
+    return manager.get_status(job_id=job_id)
+
+
 @router.post("/maintenance")
-async def run_maintenance(request: Request):
+async def run_maintenance(request: Request, body: MaintenanceRequest, response: Response):
     """Claude-in-the-loop maintenance: get pending work or apply Claude's decisions.
 
     Phase 1 — call with no body (or ``{}``):
-        Returns four batches of candidates (link, conflict, merge, consolidation).
+        Starts background batch generation and returns job status immediately.
 
     Phase 2 — call with ``{"results": {...}}``:
-        Claude submits its analysis; ormah applies edges/merges/consolidations.
+        Starts background application of Claude's decisions and returns job status immediately.
     """
-    body = await request.json()
-    engine = request.app.state.engine
-    if "results" in body:
-        counts = engine.apply_maintenance_results(body["results"])
-        return {"status": "applied", "summary": counts}
-    batches = engine.get_maintenance_batches()
-    return batches
+    manager = _maintenance_manager(request)
+    try:
+        if body.results is not None:
+            payload = manager.submit_results(body.results, job_id=body.job_id)
+            response.status_code = 202
+            return payload
+
+        payload = manager.start_phase1()
+        response.status_code = 200 if payload["status"] == "awaiting_results" else 202
+        return payload
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @router.get("/merges")

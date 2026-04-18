@@ -17,6 +17,7 @@ from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
 from ormah.api.routes_ingest import router as ingest_router
 from ormah.api.routes_ui import router as ui_router
+from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.config import settings
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.logging_setup import setup_logging
@@ -60,9 +61,13 @@ async def lifespan(app: FastAPI):
         scheduler, tracker = start_scheduler(engine)
         app.state.scheduler = scheduler
         app.state.job_tracker = tracker
+        app.state.maintenance_manager = MaintenanceManager(engine, tracker=tracker)
         logger.info("Background scheduler ready.")
     except Exception as e:
         logger.warning("Background scheduler not started: %s", e)
+
+    if not hasattr(app.state, "maintenance_manager"):
+        app.state.maintenance_manager = MaintenanceManager(engine)
 
     # Start hippocampus file watchers
     try:

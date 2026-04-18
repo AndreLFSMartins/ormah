@@ -49,6 +49,9 @@ async def health(request: Request):
     result: dict = {"status": "ok"}
     if tracker is not None:
         result["jobs"] = tracker.snapshot()
+    manager = getattr(request.app.state, "maintenance_manager", None)
+    if manager is not None:
+        result["maintenance"] = manager.get_status()
     return result
 
 
@@ -56,6 +59,14 @@ async def health(request: Request):
 async def stats(request: Request):
     engine = request.app.state.engine
     return engine.stats()
+
+
+@router.get("/maintenance-status")
+async def maintenance_status(request: Request):
+    manager = getattr(request.app.state, "maintenance_manager", None)
+    if manager is None:
+        return {"status": "idle"}
+    return manager.get_status()
 
 
 @router.post("/rebuild")

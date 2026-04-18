@@ -1,5 +1,8 @@
 """Tests for API routes."""
 
+import threading
+import time
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -7,6 +10,7 @@ from fastapi.testclient import TestClient
 from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
 from ormah.api.routes_ui import router as ui_router
+from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.config import Settings
 from ormah.engine.memory_engine import MemoryEngine
 
@@ -24,6 +28,7 @@ def client(tmp_memory_dir):
     test_app.include_router(admin_router)
     test_app.include_router(ui_router)
     test_app.state.engine = engine
+    test_app.state.maintenance_manager = MaintenanceManager(engine)
 
     with TestClient(test_app) as c:
         yield c
@@ -95,3 +100,138 @@ def test_connect(client):
     })
     assert resp.status_code == 200
     assert "Connected" in resp.json()["text"]
+
+
+def test_maintenance_runs_in_background_and_stats_stay_available(client):
+    app = client.app
+    started = threading.Event()
+    release = threading.Event()
+    original = app.state.engine.get_maintenance_batches
+
+    def slow_batches():
+        started.set()
+        release.wait(timeout=5)
+        return {
+            "link_candidates": [],
+            "conflict_candidates": [],
+            "merge_candidates": [],
+            "consolidation_clusters": [],
+            "summary": "nothing to process",
+        }
+
+    app.state.engine.get_maintenance_batches = slow_batches
+    try:
+        resp = client.post("/agent/maintenance", json={})
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "running_phase1"
+        assert started.wait(timeout=1)
+
+        stats = client.get("/admin/stats")
+        assert stats.status_code == 200
+
+        release.set()
+        deadline = time.time() + 2
+        status = None
+        while time.time() < deadline:
+            poll = client.get("/agent/maintenance", params={"job_id": resp.json()["job_id"]})
+            status = poll.json()
+            if status["status"] == "awaiting_results":
+                break
+            time.sleep(0.05)
+        assert status is not None
+        assert status["status"] == "awaiting_results"
+        assert "batches" in status
+    finally:
+        app.state.engine.get_maintenance_batches = original
+        release.set()
+
+
+def test_maintenance_reuses_single_inflight_job(client):
+    app = client.app
+    release = threading.Event()
+    original = app.state.engine.get_maintenance_batches
+
+    def slow_batches():
+        release.wait(timeout=5)
+        return {
+            "link_candidates": [],
+            "conflict_candidates": [],
+            "merge_candidates": [],
+            "consolidation_clusters": [],
+            "summary": "nothing to process",
+        }
+
+    app.state.engine.get_maintenance_batches = slow_batches
+    try:
+        first = client.post("/agent/maintenance", json={})
+        second = client.post("/agent/maintenance", json={})
+
+        assert first.status_code == 202
+        assert second.status_code == 202
+        assert first.json()["job_id"] == second.json()["job_id"]
+    finally:
+        app.state.engine.get_maintenance_batches = original
+        release.set()
+
+
+def test_maintenance_phase2_apply_completes_via_routes(client):
+    app = client.app
+    original_batches = app.state.engine.get_maintenance_batches
+    original_apply = app.state.engine.apply_maintenance_results
+
+    def ready_batches():
+        return {
+            "link_candidates": [],
+            "conflict_candidates": [],
+            "merge_candidates": [],
+            "consolidation_clusters": [],
+            "summary": "nothing to process",
+        }
+
+    def apply_results(results):
+        assert results == {"edges": []}
+        return {"edges": 1, "merges": 0, "consolidations": 0, "skipped": 0}
+
+    app.state.engine.get_maintenance_batches = ready_batches
+    app.state.engine.apply_maintenance_results = apply_results
+    try:
+        start = client.post("/agent/maintenance", json={})
+        assert start.status_code in {200, 202}
+        job_id = start.json()["job_id"]
+        phase1 = start.json()
+        deadline = time.time() + 2
+        while phase1["status"] != "awaiting_results" and time.time() < deadline:
+            poll = client.get("/agent/maintenance", params={"job_id": job_id})
+            phase1 = poll.json()
+            if phase1["status"] == "awaiting_results":
+                break
+            time.sleep(0.05)
+        assert phase1 is not None
+        assert phase1["status"] == "awaiting_results"
+
+        phase2 = client.post(
+            "/agent/maintenance",
+            json={"job_id": job_id, "results": {"edges": []}},
+        )
+        assert phase2.status_code == 202
+        assert phase2.json()["status"] in {"running_phase2", "completed"}
+
+        deadline = time.time() + 2
+        final = phase2.json()
+        while final["status"] != "completed" and time.time() < deadline:
+            poll = client.get("/agent/maintenance", params={"job_id": job_id})
+            final = poll.json()
+            if final["status"] == "completed":
+                break
+            time.sleep(0.05)
+        assert final is not None
+        assert final["status"] == "completed"
+        assert final["apply_summary"] == {
+            "edges": 1,
+            "merges": 0,
+            "consolidations": 0,
+            "skipped": 0,
+        }
+    finally:
+        app.state.engine.get_maintenance_batches = original_batches
+        app.state.engine.apply_maintenance_results = original_apply
