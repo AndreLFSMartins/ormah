@@ -1,6 +1,7 @@
 {
   "mcpServers": {
     "ormah": {
+      "type": "stdio",
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/ormah-mcp"
     }
   }
