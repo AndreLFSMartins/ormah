@@ -27,11 +27,24 @@ Silence is better than noise. Ormah should whisper, not shout.
 
 ## Install
 
+### Terminal
+
 ```bash
 bash <(curl -fsSL https://ormah.me/install.sh)
 ```
 
 One command gets you a working local Ormah runtime with setup for supported clients.
+
+### Claude Code Plugin
+
+1. Add the marketplace and install the plugin:
+   ```
+   /plugin marketplace add r-spade/ormah
+   /plugin install ormah@ormah
+   ```
+2. Reload: `/reload-plugins`
+3. Run `/ormah:setup`
+4. Check that the Ormah MCP server is enabled via `/mcp` — if not, enable it there
 
 Ormah is agent-agnostic by design. It can be wired into any agent that exposes the right hook or prompt-injection path, and it also exposes CLI, MCP, and HTTP surfaces.
 

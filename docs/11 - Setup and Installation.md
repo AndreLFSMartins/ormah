@@ -8,11 +8,26 @@ The core server is agent-agnostic. Setup currently installs the concrete integra
 
 ## Installation
 
-The published install path is still the shell installer:
+### Terminal
 
 ```bash
 bash <(curl -fsSL https://ormah.me/install.sh)
 ```
+
+### Claude Code Plugin
+
+Install entirely from within Claude Code — no terminal required:
+
+1. Add the marketplace and install the plugin:
+   ```
+   /plugin marketplace add r-spade/ormah
+   /plugin install ormah@ormah
+   ```
+2. Reload: `/reload-plugins`
+3. Run `/ormah:setup`
+4. Check that the Ormah MCP server is enabled via `/mcp` — if not, enable it there
+
+`/ormah:setup` checks whether the `ormah` runtime is installed. If it is missing, it asks permission to run the shell installer with `--no-setup`, then runs `ormah setup --skip-client-setup` to start the server without overwriting any global Claude wiring. The plugin owns hooks, MCP, commands, and the maintenance agent — `ormah setup` only handles the server and models.
 
 ## Setup Wizard
 
