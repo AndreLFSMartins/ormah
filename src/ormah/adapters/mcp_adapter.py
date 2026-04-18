@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
+import time
 import uuid
 
 import httpx
@@ -18,6 +20,10 @@ from ormah.config import settings
 logger = logging.getLogger(__name__)
 
 _BASE_URL = f"http://localhost:{settings.port}"
+_DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+_MAINTENANCE_TIMEOUT_SECONDS = 300.0
+_MAINTENANCE_POLL_INTERVAL_SECONDS = 1.0
+_MAINTENANCE_JOB_IDS: dict[str, str] = {}
 
 
 def _coerce_list(value):
@@ -32,6 +38,23 @@ def _coerce_list(value):
         except (json.JSONDecodeError, ValueError):
             pass
     return value
+
+
+def _timeout_for_tool(name: str) -> float:
+    """Return an HTTP timeout suitable for the given MCP tool."""
+    if name == "run_maintenance":
+        return _MAINTENANCE_TIMEOUT_SECONDS
+    return _DEFAULT_TOOL_TIMEOUT_SECONDS
+
+
+def _format_timeout_error(name: str) -> str:
+    """Return a user-facing timeout message for a tool call."""
+    timeout = _timeout_for_tool(name)
+    return f"Error: request to Ormah server timed out after {timeout:.0f}s while running tool '{name}'"
+
+
+def _maintenance_key(session_id: str | None) -> str:
+    return session_id or "default"
 
 
 def create_mcp_server(
@@ -69,6 +92,13 @@ def create_mcp_server(
                 TextContent(
                     type="text",
                     text="Ormah server not running. Start it with: ormah server start",
+                )
+            ]
+        except httpx.ReadTimeout:
+            return [
+                TextContent(
+                    type="text",
+                    text=_format_timeout_error(name),
                 )
             ]
         except Exception as e:
@@ -166,7 +196,7 @@ async def _dispatch(
     default_space: str | None = None,
     session_id: str | None = None,
 ) -> str:
-    async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+    async with httpx.AsyncClient(base_url=base_url, timeout=_timeout_for_tool(name)) as client:
         if name == "remember":
             body = {
                 "content": args["content"],
@@ -355,23 +385,77 @@ async def _dispatch(
 
         elif name == "run_maintenance":
             body = {}
+            key = _maintenance_key(session_id)
+            if args.get("job_id"):
+                body["job_id"] = args["job_id"]
+            elif key in _MAINTENANCE_JOB_IDS:
+                body["job_id"] = _MAINTENANCE_JOB_IDS[key]
             if args.get("results"):
                 body["results"] = args["results"]
             resp = await client.post("/agent/maintenance", json=body)
             if not resp.is_success:
                 return _handle_error(resp)
+            data = resp.json()
+            job_id = data.get("job_id")
+            if job_id:
+                _MAINTENANCE_JOB_IDS[key] = job_id
+            data = await _poll_maintenance_until_ready(
+                client,
+                data,
+                expect_apply_summary="results" in args,
+            )
+            if data.get("job_id"):
+                _MAINTENANCE_JOB_IDS[key] = data["job_id"]
             if "results" in args:
-                # Phase 2: return the applied summary
-                return resp.text
-            # Phase 1: format batches as readable text so the agent can reason over them
-            import json as _json
-            try:
-                return _format_maintenance_batches(_json.loads(resp.text))
-            except Exception:
-                return resp.text
+                _MAINTENANCE_JOB_IDS.pop(key, None)
+                return json.dumps({"status": "applied", "summary": data.get("apply_summary", {})})
+            batches = data.get("batches")
+            if isinstance(batches, dict):
+                return _format_maintenance_batches(batches)
+            return resp.text
 
         else:
             return f"Unknown tool: {name}"
+
+
+async def _poll_maintenance_until_ready(
+    client: httpx.AsyncClient,
+    initial: dict,
+    *,
+    expect_apply_summary: bool,
+) -> dict:
+    """Poll maintenance status until the requested phase is ready."""
+    deadline = time.monotonic() + _MAINTENANCE_TIMEOUT_SECONDS
+    data = initial
+    job_id = data.get("job_id")
+
+    while True:
+        status = data.get("status")
+        if expect_apply_summary:
+            if status == "completed" and isinstance(data.get("apply_summary"), dict):
+                return data
+        else:
+            if status == "awaiting_results" and isinstance(data.get("batches"), dict):
+                return data
+        if status == "failed":
+            error = data.get("last_error") or "maintenance job failed"
+            raise RuntimeError(error)
+        if time.monotonic() >= deadline:
+            raise httpx.ReadTimeout(_format_timeout_error("run_maintenance"))
+        await _sleep_for_poll_interval()
+        params = {"job_id": job_id} if job_id else None
+        resp = await client.get("/agent/maintenance", params=params)
+        if not resp.is_success:
+            raise httpx.HTTPStatusError(
+                f"Unexpected maintenance polling status: {resp.status_code}",
+                request=resp.request,
+                response=resp,
+            )
+        data = resp.json()
+
+
+async def _sleep_for_poll_interval() -> None:
+    await asyncio.sleep(_MAINTENANCE_POLL_INTERVAL_SECONDS)
 
 
 async def run_mcp_stdio():
