@@ -272,24 +272,26 @@ def _find_manual_server_pids() -> list[int]:
     """Find manually-started Ormah server PIDs via token-level ps matching."""
     try:
         result = subprocess.run(
-            ["ps", "-eo", "pid=,command="],
+            ["ps", "-eo", "pid=,uid=,command="],
             capture_output=True, text=True, timeout=5,
         )
     except Exception:
         return []
 
     current_pid = os.getpid()
+    current_uid = os.getuid()
     pids: list[int] = []
     for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if not stripped:
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
             continue
-        pid_text, _, command = stripped.partition(" ")
+        pid_text, uid_text, command = parts
         try:
             pid = int(pid_text)
+            uid = int(uid_text)
         except ValueError:
             continue
-        if pid == current_pid:
+        if pid == current_pid or uid != current_uid:
             continue
         if _is_ormah_server_start_command(command):
             pids.append(pid)

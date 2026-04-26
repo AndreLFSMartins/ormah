@@ -1972,7 +1972,7 @@ class TestStopRunningServer:
         from ormah.server_manager import stop_running_server
 
         fake_pid = 99999
-        ps_output = f"    {fake_pid} ormah server start\n"
+        ps_output = f"    {fake_pid} 1000 ormah server start\n"
 
         def fake_run(cmd, **kwargs):
             m = MagicMock()
@@ -1993,6 +1993,7 @@ class TestStopRunningServer:
             patch("shutil.which", return_value=None),
             patch("subprocess.run", side_effect=fake_run),
             patch("os.getpid", return_value=0),
+            patch("os.getuid", return_value=1000),
             patch("os.kill", side_effect=fake_kill) as mock_kill,
         ):
             result = stop_running_server()
@@ -2001,6 +2002,29 @@ class TestStopRunningServer:
         assert result is True
         out = capsys.readouterr().out
         assert "Stopped Ormah server" in out
+
+    def test_ps_ignores_other_users_processes(self, capsys):
+        from ormah.server_manager import stop_running_server
+
+        ps_output = (
+            "    111 2000 /home/r2205/.local/share/uv/tools/ormah/bin/python3 "
+            "/home/r2205/.local/bin/ormah server start\n"
+        )
+
+        with (
+            patch("platform.system", return_value="Linux"),
+            patch("shutil.which", return_value=None),
+            patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=ps_output)),
+            patch("os.getpid", return_value=0),
+            patch("os.getuid", return_value=1000),
+            patch("os.kill") as mock_kill,
+        ):
+            result = stop_running_server()
+
+        assert result is False
+        mock_kill.assert_not_called()
+        out = capsys.readouterr().out
+        assert "No running Ormah server found." in out
 
     def test_false_positive_not_matched(self):
         from ormah.server_manager import _is_ormah_server_start_command
