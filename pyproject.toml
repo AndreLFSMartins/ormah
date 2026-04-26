@@ -1,6 +1,6 @@
 [project]
 name = "ormah"
-version = "0.9.9"
+version = "0.9.10"
 description = "Local-first, portable, LLM-agnostic memory system for AI agents"
 readme = "README.md"
 license = "MIT"
