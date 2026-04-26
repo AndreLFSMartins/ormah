@@ -1984,6 +1984,7 @@ class TestStopRunningServer:
         # These should NOT match
         assert not _is_ormah_server_start_command("grep ormah server start")
         assert not _is_ormah_server_start_command("bash -c 'ormah server start'")
+        assert not _is_ormah_server_start_command("python3 worker.py ormah server start")
         assert not _is_ormah_server_start_command("ormah server stop")
         assert not _is_ormah_server_start_command("ormah server status")
         assert not _is_ormah_server_start_command("")
@@ -1992,6 +1993,10 @@ class TestStopRunningServer:
         assert _is_ormah_server_start_command("ormah server start")
         assert _is_ormah_server_start_command("/usr/local/bin/ormah server start")
         assert _is_ormah_server_start_command("ormah server start --reload")
+        assert _is_ormah_server_start_command(
+            "/home/r2205/.local/share/uv/tools/ormah/bin/python3 "
+            "/home/r2205/.local/bin/ormah server start"
+        )
 
     def test_systemd_active_calls_stop(self, capsys):
         from ormah.server_manager import stop_running_server

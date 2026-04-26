@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import os
 import platform
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -235,11 +236,22 @@ class _StopServerResult:
 
 
 def _is_ormah_server_start_command(command: str) -> bool:
-    """Return True only if command tokens are exactly `ormah server start [...]`."""
-    args = command.split()
-    if len(args) < 3:
-        return False
-    return Path(args[0]).name == "ormah" and args[1:3] == ["server", "start"]
+    """Return True only for direct Ormah server-start process commands."""
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        args = command.split()
+
+    if len(args) >= 3 and Path(args[0]).name == "ormah" and args[1:3] == ["server", "start"]:
+        return True
+
+    if len(args) >= 4:
+        launcher = Path(args[0]).name
+        script = Path(args[1]).name
+        if launcher.startswith("python") and script == "ormah":
+            return args[2:4] == ["server", "start"]
+
+    return False
 
 
 def _find_manual_server_pids() -> list[int]:
