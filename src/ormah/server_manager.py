@@ -182,20 +182,34 @@ def _start_server_background(wrapper_path: str) -> None:
     )
 
 
+def _called_process_error_output(exc: subprocess.CalledProcessError) -> str:
+    """Return a concise subprocess error message for user-facing fallback output."""
+    output = exc.stderr or exc.stdout or ""
+    if isinstance(output, bytes):
+        output = output.decode(errors="replace")
+    return " ".join(str(output).strip().split())
+
+
 def install_autostart(ormah_bin: str, wrapper_path: str | None = None) -> None:
     """Install auto-start using the platform-appropriate mechanism."""
     system = platform.system()
+    effective_wrapper = wrapper_path or ormah_bin
     if system == "Darwin":
-        install_launchd_agent(ormah_bin, wrapper_path=wrapper_path)
+        install_launchd_agent(ormah_bin, wrapper_path=effective_wrapper)
     elif system == "Linux":
         if shutil.which("systemctl"):
-            install_systemd_service(ormah_bin, wrapper_path=wrapper_path)
+            try:
+                install_systemd_service(ormah_bin, wrapper_path=effective_wrapper)
+                return
+            except subprocess.CalledProcessError as exc:
+                print("User systemd is unavailable; starting server in background instead.")
+                details = _called_process_error_output(exc)
+                if details:
+                    print(f"systemctl error: {details}")
+                _start_server_background(effective_wrapper)
         else:
             # No systemd (e.g. Docker container) — start directly
-            if wrapper_path:
-                _start_server_background(wrapper_path)
-            else:
-                _start_server_background(ormah_bin)
+            _start_server_background(effective_wrapper)
     else:
         print(
             f"Auto-start not supported on {system}. "
