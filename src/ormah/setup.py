@@ -812,16 +812,13 @@ def _enable_llm(
 def configure_llm() -> None:
     """Interactive LLM provider setup for background analysis."""
 
-    print("\n  Optional: enable Ormah's own LLM features?")
-    print("  Ormah works without an API key for local storage, search, whisper recall,")
-    print("  MCP tools, and agent-backed maintenance.")
-    print("  Enabling this lets the Ormah server call a provider directly for")
-    print("  transcript extraction, backfill, and automatic background cleanup.")
-    print("  This may send memory/transcript snippets to the selected provider")
-    print("  and may cost money.")
+    print("\n  Optional: enable LLM-powered background maintenance?")
+    print("  Ormah works without an API key. If enabled, the server can use")
+    print("  an approved cloud/local provider for cleanup and backfill.")
+    print("  Memory snippets may be sent to that provider, and costs may apply.")
 
     try:
-        answer = input("\n  Enable server-side LLM? (y/N) ").strip().lower()
+        answer = input("\n  Enable LLM maintenance? (y/N) ").strip().lower()
     except EOFError:
         answer = ""
     if answer not in ("y", "yes"):
@@ -833,8 +830,7 @@ def configure_llm() -> None:
         info("Run 'ormah setup' again to enable later")
         return
 
-    print("\n  Which LLM should Ormah use for server-side background work?")
-    print("  (Links related memories, detects contradictions, cleans up duplicates)\n")
+    print("\n  Which provider should Ormah use for background maintenance?\n")
 
     display_names = [p[0] for p in LLM_PROVIDERS]
     choice = _prompt_choice("", display_names, allow_skip=False)
@@ -862,8 +858,8 @@ def configure_llm() -> None:
         if existing_key:
             print(f"\n  Found {api_key_var} in your environment.")
             print(f"  Model: {default_model} ({hint})")
-            print("  The key value will not be copied into Ormah's config file.")
-            print("  If allowed, only this selected key will be inherited by the daemon.")
+            print("  Ormah will not copy the key value into its config.")
+            print("  If allowed, the daemon inherits only this selected key.")
             try:
                 prompt = f"\n  Allow Ormah to use {api_key_var}? (y/N) "
                 key_answer = input(prompt).strip().lower()
