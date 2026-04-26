@@ -3,7 +3,7 @@
 Usage:
     ormah server start      Start server (foreground)
     ormah server start -d   Start server (daemon via launchd)
-    ormah server stop       Stop daemon
+    ormah server stop       Stop the server
     ormah server status     Check if running
     ormah setup             One-shot setup (hooks, MCP, server)
     ormah claude-md install Install shared Ormah guidance into CLAUDE.md
@@ -66,9 +66,13 @@ def _cmd_server_start(args):
 
 
 def _cmd_server_stop(args):
-    from ormah.server_manager import uninstall_autostart
+    import sys
+    from ormah.server_manager import _stop_running_server, uninstall_autostart
 
+    result = _stop_running_server()
     uninstall_autostart()
+    if result.failed:
+        sys.exit(1)
 
 
 def _cmd_server_status(args):
@@ -138,7 +142,7 @@ def main():
     )
     start_p.set_defaults(func=_cmd_server_start)
 
-    stop_p = server_sub.add_parser("stop", help="Stop the daemon")
+    stop_p = server_sub.add_parser("stop", help="Stop the server")
     stop_p.set_defaults(func=_cmd_server_stop)
 
     status_p = server_sub.add_parser("status", help="Check server status")

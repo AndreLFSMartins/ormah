@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -209,6 +211,128 @@ def uninstall_autostart() -> None:
         uninstall_systemd_service()
     else:
         print(f"Auto-start not supported on {system}.")
+
+
+def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> bool:
+    """Poll until pid exits or timeout elapses. Returns True if the process exited."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        time.sleep(0.1)
+    return False
+
+
+@dataclass
+class _StopServerResult:
+    found: bool = False
+    stopped: bool = False
+    failed: bool = False
+
+
+def _is_ormah_server_start_command(command: str) -> bool:
+    """Return True only if command tokens are exactly `ormah server start [...]`."""
+    args = command.split()
+    if len(args) < 3:
+        return False
+    return Path(args[0]).name == "ormah" and args[1:3] == ["server", "start"]
+
+
+def _find_manual_server_pids() -> list[int]:
+    """Find manually-started Ormah server PIDs via token-level ps matching."""
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return []
+
+    current_pid = os.getpid()
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, command = stripped.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == current_pid:
+            continue
+        if _is_ormah_server_start_command(command):
+            pids.append(pid)
+    return pids
+
+
+def _stop_running_server() -> _StopServerResult:
+    """Stop the Ormah server and return a structured result for failure propagation."""
+    res = _StopServerResult()
+    system = platform.system()
+
+    if system == "Linux" and shutil.which("systemctl"):
+        active = subprocess.run(
+            ["systemctl", "--user", "is-active", "ormah.service"],
+            capture_output=True, text=True,
+        )
+        if active.stdout.strip() == "active":
+            res.found = True
+            stop = subprocess.run(
+                ["systemctl", "--user", "stop", "ormah.service"],
+                capture_output=True,
+            )
+            if stop.returncode == 0:
+                print("Stopped Ormah server (systemd).")
+                res.stopped = True
+            else:
+                print("Failed to stop Ormah server via systemd.")
+                res.failed = True
+    elif system == "Darwin" and PLIST_PATH.exists():
+        res.found = True
+        stop = subprocess.run(
+            ["launchctl", "unload", str(PLIST_PATH)],
+            capture_output=True,
+        )
+        if stop.returncode == 0:
+            print("Stopped Ormah server (launchd).")
+            res.stopped = True
+        else:
+            print("Failed to stop Ormah server via launchd.")
+            res.failed = True
+
+    killed = 0
+    for pid in _find_manual_server_pids():
+        res.found = True
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            res.failed = True
+            continue
+        if _wait_for_pid_exit(pid):
+            killed += 1
+        else:
+            print(f"Warning: process {pid} did not exit after SIGTERM.")
+            res.failed = True
+
+    if killed:
+        noun = "process" if killed == 1 else "processes"
+        print(f"Stopped Ormah server ({killed} {noun}).")
+        res.stopped = True
+
+    if not res.found:
+        print("No running Ormah server found.")
+
+    return res
+
+
+def stop_running_server() -> bool:
+    """Stop the running Ormah server. Returns True if at least one process was stopped."""
+    return _stop_running_server().stopped
 
 
 def is_first_run() -> bool:
