@@ -1636,9 +1636,16 @@ def run_setup(
         backfill_transcripts()
 
     # 8. Finale animation + completion message
+    if not server_ok:
+        step("Setup incomplete")
+        warn("Ormah server did not start, so setup could not complete.")
+        info("Fix the server startup error, then run 'ormah setup --update' again.")
+        info("Check logs: ~/.local/share/ormah/logs/ormah.log")
+        raise SystemExit(1)
+
     step("Setup complete")
     if not ci:
         play_finale()
     _print_setup_summary(ormah_bin)
-    if server_ok and not ci:
+    if not ci:
         webbrowser.open(f"http://localhost:{settings.port}")

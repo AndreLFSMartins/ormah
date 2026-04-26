@@ -53,6 +53,7 @@ def _cmd_server_start(args):
         if not wait_for_server(show_progress=True):
             warn("Server did not start in time")
             info("Check ~/.local/share/ormah/logs/ormah.log")
+            sys.exit(1)
     else:
         import uvicorn
         from ormah.config import settings

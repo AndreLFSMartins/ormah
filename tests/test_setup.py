@@ -519,6 +519,40 @@ class TestConfigureCodexHooks:
 
 
 class TestRunSetup:
+    def test_server_timeout_exits_nonzero_without_success_summary(self, tmp_path, capsys):
+        with ExitStack() as stack:
+            stack.enter_context(patch("ormah.setup.get_ormah_bin_path", return_value="/abs/path/ormah"))
+            stack.enter_context(patch("ormah.setup.shutil.which", return_value=None))
+            stack.enter_context(
+                patch("ormah.setup.generate_server_wrapper", return_value=tmp_path / "ormah-server")
+            )
+            stack.enter_context(patch("ormah.setup.configure_llm"))
+            stack.enter_context(patch("ormah.setup._preload_local_models"))
+            stack.enter_context(patch("ormah.setup.is_server_running", return_value=False))
+            mock_install = stack.enter_context(patch("ormah.setup.install_autostart"))
+            stack.enter_context(patch("ormah.setup.wait_for_server", return_value=False))
+            mock_diagnose = stack.enter_context(patch("ormah.setup._diagnose_server_failure"))
+            mock_backfill = stack.enter_context(patch("ormah.setup.backfill_transcripts"))
+            mock_finale = stack.enter_context(patch("ormah.setup.play_finale"))
+            mock_summary = stack.enter_context(patch("ormah.setup._print_setup_summary"))
+            mock_browser = stack.enter_context(patch("ormah.setup.webbrowser.open"))
+
+            with pytest.raises(SystemExit) as exc_info:
+                run_setup(skip_client_setup=True)
+
+        assert exc_info.value.code == 1
+        mock_install.assert_called_once_with("/abs/path/ormah", wrapper_path=str(tmp_path / "ormah-server"))
+        mock_diagnose.assert_called_once()
+        mock_backfill.assert_not_called()
+        mock_finale.assert_not_called()
+        mock_summary.assert_not_called()
+        mock_browser.assert_not_called()
+
+        out = capsys.readouterr().out
+        assert "Setup incomplete" in out
+        assert "Setup complete" not in out
+        assert "Ormah is ready." not in out
+
     def test_skip_client_setup_avoids_client_wiring(self, tmp_path):
         def which(binary: str) -> str | None:
             return {
@@ -703,6 +737,23 @@ class TestCliEntryPoint:
                 update=False,
                 skip_client_setup=True,
             )
+
+    def test_server_start_daemon_exits_nonzero_on_timeout(self, tmp_path):
+        from ormah.cli import main
+
+        wrapper = tmp_path / "ormah-server"
+        with (
+            patch("sys.argv", ["ormah", "server", "start", "-d"]),
+            patch("ormah.setup.WRAPPER_PATH", wrapper),
+            patch("ormah.setup.generate_server_wrapper", return_value=wrapper),
+            patch("ormah.server_manager.get_ormah_bin_path", return_value="/abs/path/ormah"),
+            patch("ormah.server_manager.install_autostart"),
+            patch("ormah.server_manager.wait_for_server", return_value=False),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 1
 
     def test_claude_md_install_defaults_to_auto_scope(self):
         from ormah.cli import main
