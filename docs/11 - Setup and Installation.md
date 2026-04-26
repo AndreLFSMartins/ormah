@@ -38,8 +38,8 @@ Install entirely from within Claude Code — no terminal required:
 1. finds the `ormah` binary
 2. detects supported clients such as Claude Code / Codex
 3. optionally enables agent-backed maintenance
-4. configures LLM settings when needed
-5. generates `~/.config/ormah/start-server.sh`
+4. optionally configures server-side LLM settings
+5. generates `~/.config/ormah/ormah-server`
 6. preloads embedding / reranker models
 7. installs auto-start
 8. waits for server health
@@ -60,17 +60,18 @@ That means setup does **not** keep a separate background LLM configured in paral
 
 Repository defaults in `config.py` are:
 
-- `llm_provider = litellm`
+- `llm_provider = none`
 - `llm_model = claude-haiku-4-5-20251001`
 - `llm_base_url = http://localhost:11434`
+- `llm_inherit_api_key = false`
 
-But `ormah setup` can rewrite the persisted `.env` to:
+`ormah setup` can rewrite the persisted `.env` to:
 
-- a detected remote provider
+- an explicitly selected remote provider
 - `ollama`
 - `none`
 
-So there is a difference between code defaults and installed-user config after setup.
+Remote provider setup stores policy only. It may store `ORMAH_LLM_API_KEY_ENV_VAR=ANTHROPIC_API_KEY` and `ORMAH_LLM_INHERIT_API_KEY=true`, but it must not store the actual API key value.
 
 ## Hooks
 
@@ -112,7 +113,7 @@ Older docs that point to `~/Library/Logs/ormah/` or only to `journalctl` are not
 | memory files | `~/.local/share/ormah/memory/nodes/*.md` |
 | SQLite db | `~/.local/share/ormah/memory/index.db` |
 | config | `~/.config/ormah/.env` |
-| wrapper | `~/.config/ormah/start-server.sh` |
+| wrapper | `~/.config/ormah/ormah-server` |
 | whisper cursors | `~/.cache/ormah/whisper-cursors.json` |
 | logs | `~/.local/share/ormah/logs/ormah.log` |
 

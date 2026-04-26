@@ -31,6 +31,7 @@ setup_logging(
 logger = logging.getLogger(__name__)
 
 _RESERVED_API_PREFIXES = {"agent", "admin", "ingest", "ui"}
+_LOCAL_CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
 
 
 def _is_reserved_api_path(full_path: str) -> bool:
@@ -113,7 +114,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[],
+    allow_origin_regex=_LOCAL_CORS_ORIGIN_REGEX,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -36,12 +36,25 @@ CODEX_AGENTS_SENTINEL_END = "<!-- ormah:end -->"
 
 # Provider definitions: (display name, provider, env var for API key, default model)
 LLM_PROVIDERS = [
-    ("Anthropic (Claude)", "litellm", "ANTHROPIC_API_KEY", "claude-haiku-4-5-20251001"),
+    (
+        "Anthropic Claude Haiku 4.5 (recommended)",
+        "litellm",
+        "ANTHROPIC_API_KEY",
+        "claude-haiku-4-5-20251001",
+    ),
+    (
+        "Anthropic Claude Sonnet (higher cost)",
+        "litellm",
+        "ANTHROPIC_API_KEY",
+        "claude-sonnet-4-5-20250929",
+    ),
     ("OpenAI", "litellm", "OPENAI_API_KEY", "gpt-4.1-mini"),
     ("Google Gemini", "litellm", "GEMINI_API_KEY", "gemini/gemini-2.0-flash"),
     ("Ollama (local)", "ollama", None, "llama3.2"),
     ("None", "none", None, None),
 ]
+
+_LLM_KEY_POLICY_KEYS = ("ORMAH_LLM_API_KEY_ENV_VAR", "ORMAH_LLM_INHERIT_API_KEY")
 
 
 def _preload_local_models() -> None:
@@ -684,26 +697,41 @@ def _write_env_file(env: dict[str, str]) -> None:
 
 
 def generate_server_wrapper(ormah_bin: str) -> Path:
-    """Generate daemon wrapper that inherits API keys from user's shell."""
+    """Generate daemon wrapper with explicit, scoped API-key inheritance."""
     ENV_DIR.mkdir(parents=True, exist_ok=True)
 
     script = f"""\
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Capture API keys from user's login shell
-while IFS= read -r line; do
-    key="${{line%%=*}}"
-    value="${{line#*=}}"
-    export "$key=$value"
-done < <("${{SHELL:-/bin/bash}}" -lic 'env' 2>/dev/null \\
-    | grep -E '^(ANTHROPIC_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|GROQ_API_KEY|MISTRAL_API_KEY|COHERE_API_KEY|AZURE_API_KEY|AZURE_API_BASE|AZURE_API_VERSION|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_REGION_NAME)=' \\
-    || true)
-
-# Load ormah-specific config
+# Load Ormah config without executing arbitrary shell from the env file.
 _env_file="$HOME/.config/ormah/.env"
 if [ -f "$_env_file" ]; then
-    set -a; . "$_env_file"; set +a
+    while IFS= read -r line; do
+        case "$line" in
+            ORMAH_*=*) export "$line" ;;
+        esac
+    done < "$_env_file"
+fi
+
+# Import exactly one approved API key into the daemon, only after explicit opt-in.
+if [ "${{ORMAH_LLM_PROVIDER:-none}}" != "none" ] \\
+   && [ "${{ORMAH_LLM_INHERIT_API_KEY:-false}}" = "true" ] \\
+   && [ -n "${{ORMAH_LLM_API_KEY_ENV_VAR:-}}" ]; then
+    _allowed_llm_keys=" ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY "
+    _allowed_llm_keys="${{_allowed_llm_keys}}GROQ_API_KEY MISTRAL_API_KEY "
+    _allowed_llm_keys="${{_allowed_llm_keys}}COHERE_API_KEY AZURE_API_KEY "
+    case "$_allowed_llm_keys" in
+        *" $ORMAH_LLM_API_KEY_ENV_VAR "*)
+            while IFS= read -r line; do
+                key="${{line%%=*}}"
+                if [ "$key" = "$ORMAH_LLM_API_KEY_ENV_VAR" ]; then
+                    export "$line"
+                    break
+                fi
+            done < <("${{SHELL:-/bin/bash}}" -lic 'env' 2>/dev/null || true)
+            ;;
+    esac
 fi
 
 exec {ormah_bin} server start
@@ -755,43 +783,57 @@ def _cost_hint(model: str) -> str:
     return "varies by usage"
 
 
-def _detect_api_key() -> tuple[str, str, str, str, str] | None:
-    """Scan environment for known API keys. Returns (display, provider, var, model, key) or None."""
-    for display_name, provider, key_var, default_model in LLM_PROVIDERS:
-        if key_var is None:
-            continue
-        key = os.environ.get(key_var, "")
-        if key:
-            return (display_name, provider, key_var, default_model, key)
-    return None
+def _disable_llm(env: dict[str, str]) -> None:
+    """Disable server-side LLM use and clear any daemon key inheritance policy."""
+    env["ORMAH_LLM_PROVIDER"] = "none"
+    env.pop("ORMAH_LLM_MODEL", None)
+    for key in _LLM_KEY_POLICY_KEYS:
+        env.pop(key, None)
+
+
+def _enable_llm(
+    env: dict[str, str],
+    provider: str,
+    model: str,
+    *,
+    api_key_var: str | None = None,
+    inherit_api_key: bool = False,
+) -> None:
+    """Persist LLM policy. Never persist the actual API key value."""
+    env["ORMAH_LLM_PROVIDER"] = provider
+    env["ORMAH_LLM_MODEL"] = model
+    for key in _LLM_KEY_POLICY_KEYS:
+        env.pop(key, None)
+    if api_key_var and inherit_api_key:
+        env["ORMAH_LLM_API_KEY_ENV_VAR"] = api_key_var
+        env["ORMAH_LLM_INHERIT_API_KEY"] = "true"
 
 
 def configure_llm() -> None:
     """Interactive LLM provider setup for background analysis."""
 
-    # --- Auto-detect: check environment for existing API keys ---
-    detected = _detect_api_key()
-    if detected is not None:
-        display_name, provider, api_key_var, default_model, key = detected
-        hint = _cost_hint(default_model)
-        print(f"\n  Found {api_key_var} in your environment.")
-        print("  ormah uses a small, cheap model for background analysis")
-        print("  (linking memories, detecting contradictions, deduplication).")
-        print(f"  Default: {default_model} ({hint})")
-        try:
-            answer = input("\n  Use this key? (Y/n) ").strip().lower()
-        except EOFError:
-            answer = ""
-        if answer not in ("n", "no"):
-            env = _read_env_file()
-            env["ORMAH_LLM_PROVIDER"] = provider
-            env["ORMAH_LLM_MODEL"] = default_model
-            _write_env_file(env)
-            ok(f"Using {api_key_var} from environment with {default_model}")
-            return
+    print("\n  Optional: enable Ormah's own LLM features?")
+    print("  Ormah works without an API key for local storage, search, whisper recall,")
+    print("  MCP tools, and agent-backed maintenance.")
+    print("  Enabling this lets the Ormah server call a provider directly for")
+    print("  transcript extraction, backfill, and automatic background cleanup.")
+    print("  This may send memory/transcript snippets to the selected provider")
+    print("  and may cost money.")
 
-    # --- Manual selection: no key detected or user declined ---
-    print("\n  Which LLM should ormah use for background analysis?")
+    try:
+        answer = input("\n  Enable server-side LLM? (y/N) ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("y", "yes"):
+        env = _read_env_file()
+        _disable_llm(env)
+        _write_env_file(env)
+        print()
+        info("Server-side LLM disabled — core memory works without one")
+        info("Run 'ormah setup' again to enable later")
+        return
+
+    print("\n  Which LLM should Ormah use for server-side background work?")
     print("  (Links related memories, detects contradictions, cleans up duplicates)\n")
 
     display_names = [p[0] for p in LLM_PROVIDERS]
@@ -805,7 +847,7 @@ def configure_llm() -> None:
     # Handle "None" selection
     if provider == "none":
         env = _read_env_file()
-        env["ORMAH_LLM_PROVIDER"] = "none"
+        _disable_llm(env)
         _write_env_file(env)
         print()
         info("No LLM configured \u2014 core memory works without one")
@@ -813,22 +855,45 @@ def configure_llm() -> None:
         return
 
     env = _read_env_file()
-    env["ORMAH_LLM_PROVIDER"] = provider
-    env["ORMAH_LLM_MODEL"] = default_model
 
     if api_key_var:
-        # Check if already set in environment
+        hint = _cost_hint(default_model)
         existing_key = os.environ.get(api_key_var, "")
         if existing_key:
-            ok(f"Using {api_key_var} from environment with {default_model}")
+            print(f"\n  Found {api_key_var} in your environment.")
+            print(f"  Model: {default_model} ({hint})")
+            print("  The key value will not be copied into Ormah's config file.")
+            print("  If allowed, only this selected key will be inherited by the daemon.")
+            try:
+                prompt = f"\n  Allow Ormah to use {api_key_var}? (y/N) "
+                key_answer = input(prompt).strip().lower()
+            except EOFError:
+                key_answer = ""
+            if key_answer in ("y", "yes"):
+                _enable_llm(
+                    env,
+                    provider,
+                    default_model,
+                    api_key_var=api_key_var,
+                    inherit_api_key=True,
+                )
+                ok(f"Enabled {display_name} with {default_model}")
+            else:
+                _disable_llm(env)
+                info("Server-side LLM disabled — no API key will be inherited")
         else:
-            shell_profile = "~/.zshrc" if os.environ.get("SHELL", "").endswith("zsh") else "~/.bashrc"
+            if os.environ.get("SHELL", "").endswith("zsh"):
+                shell_profile = "~/.zshrc"
+            else:
+                shell_profile = "~/.bashrc"
             warn(f"No {api_key_var} found in your environment")
             print(f"  Add it to your shell profile ({shell_profile}):")
             print(f"    export {api_key_var}=your-key-here")
-            print("  Then restart your shell or run: source " + shell_profile)
+            print("  Then restart your shell and run 'ormah setup' again.")
+            _disable_llm(env)
     else:
         # Ollama — no key needed
+        _enable_llm(env, provider, default_model)
         ok(f"Using {display_name} with model '{default_model}'")
         info("Make sure Ollama is running: https://ollama.com")
 
@@ -1508,14 +1573,19 @@ def run_setup(
     # 3. Configure LLM — skip if agent-backed maintenance is handling background jobs
     if ci:
         env = _read_env_file()
-        env["ORMAH_LLM_PROVIDER"] = "none"
+        _disable_llm(env)
         _write_env_file(env)
         info("CI mode — LLM set to none")
     elif update:
-        pass  # keep existing LLM config
+        env = _read_env_file()
+        if (
+            env.get("ORMAH_LLM_PROVIDER") == "litellm"
+            and env.get("ORMAH_LLM_INHERIT_API_KEY") != "true"
+        ):
+            info("Cloud LLM key inheritance is disabled; run 'ormah setup' to opt in")
     elif agent_maintenance:
         env = _read_env_file()
-        env["ORMAH_LLM_PROVIDER"] = "none"
+        _disable_llm(env)
         _write_env_file(env)
     else:
         configure_llm()

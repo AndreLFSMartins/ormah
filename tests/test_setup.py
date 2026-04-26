@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -770,14 +771,17 @@ class TestGenerateServerWrapper:
         content = wrapper.read_text()
         assert "exec /usr/local/bin/ormah server start" in content
 
-    def test_wrapper_contains_api_key_grep(self, tmp_path):
+    def test_wrapper_uses_explicit_api_key_policy(self, tmp_path):
         wrapper = tmp_path / "ormah-server"
         with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", tmp_path):
             generate_server_wrapper("/usr/local/bin/ormah")
         content = wrapper.read_text()
+        assert "ORMAH_LLM_API_KEY_ENV_VAR" in content
+        assert "ORMAH_LLM_INHERIT_API_KEY" in content
         assert "ANTHROPIC_API_KEY" in content
         assert "OPENAI_API_KEY" in content
-        assert "GEMINI_API_KEY" in content
+        assert "AWS_SECRET_ACCESS_KEY" not in content
+        assert "grep -E" not in content
 
     def test_wrapper_no_hardcoded_secrets(self, tmp_path):
         wrapper = tmp_path / "ormah-server"
@@ -802,7 +806,92 @@ class TestGenerateServerWrapper:
             generate_server_wrapper("/usr/local/bin/ormah")
         content = wrapper.read_text()
         assert '.config/ormah/.env' in content
-        assert "set -a" in content
+        assert "ORMAH_*=*" in content
+        assert "set -a" not in content
+
+    def test_wrapper_imports_only_selected_api_key_at_runtime(self, tmp_path):
+        home = tmp_path / "home"
+        config_dir = home / ".config" / "ormah"
+        config_dir.mkdir(parents=True)
+        config_dir.joinpath(".env").write_text(
+            "ORMAH_LLM_PROVIDER=litellm\n"
+            "ORMAH_LLM_MODEL=claude-haiku-4-5-20251001\n"
+            "ORMAH_LLM_API_KEY_ENV_VAR=ANTHROPIC_API_KEY\n"
+            "ORMAH_LLM_INHERIT_API_KEY=true\n"
+        )
+
+        fake_shell = tmp_path / "fake-shell"
+        fake_shell.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' 'ANTHROPIC_API_KEY=sk-ant-selected-secret'\n"
+            "printf '%s\\n' 'OPENAI_API_KEY=sk-other-secret'\n"
+            "printf '%s\\n' 'AWS_SECRET_ACCESS_KEY=aws-secret'\n"
+        )
+        fake_shell.chmod(0o700)
+
+        capture = tmp_path / "env-capture.txt"
+        fake_ormah = tmp_path / "ormah"
+        fake_ormah.write_text("#!/usr/bin/env bash\nenv > \"$ENV_CAPTURE\"\n")
+        fake_ormah.chmod(0o700)
+
+        wrapper = tmp_path / "ormah-server"
+        with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", config_dir):
+            generate_server_wrapper(str(fake_ormah))
+
+        subprocess.run(
+            [str(wrapper)],
+            check=True,
+            env={
+                "HOME": str(home),
+                "SHELL": str(fake_shell),
+                "ENV_CAPTURE": str(capture),
+                "PATH": os.environ.get("PATH", ""),
+            },
+        )
+
+        captured = capture.read_text()
+        assert "ANTHROPIC_API_KEY=sk-ant-selected-secret" in captured
+        assert "OPENAI_API_KEY=" not in captured
+        assert "AWS_SECRET_ACCESS_KEY=" not in captured
+
+    def test_wrapper_imports_no_api_key_when_llm_disabled(self, tmp_path):
+        home = tmp_path / "home"
+        config_dir = home / ".config" / "ormah"
+        config_dir.mkdir(parents=True)
+        config_dir.joinpath(".env").write_text(
+            "ORMAH_LLM_PROVIDER=none\n"
+            "ORMAH_LLM_API_KEY_ENV_VAR=ANTHROPIC_API_KEY\n"
+            "ORMAH_LLM_INHERIT_API_KEY=true\n"
+        )
+
+        fake_shell = tmp_path / "fake-shell"
+        fake_shell.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' 'ANTHROPIC_API_KEY=sk-ant-selected-secret'\n"
+        )
+        fake_shell.chmod(0o700)
+
+        capture = tmp_path / "env-capture.txt"
+        fake_ormah = tmp_path / "ormah"
+        fake_ormah.write_text("#!/usr/bin/env bash\nenv > \"$ENV_CAPTURE\"\n")
+        fake_ormah.chmod(0o700)
+
+        wrapper = tmp_path / "ormah-server"
+        with patch("ormah.setup.WRAPPER_PATH", wrapper), patch("ormah.setup.ENV_DIR", config_dir):
+            generate_server_wrapper(str(fake_ormah))
+
+        subprocess.run(
+            [str(wrapper)],
+            check=True,
+            env={
+                "HOME": str(home),
+                "SHELL": str(fake_shell),
+                "ENV_CAPTURE": str(capture),
+                "PATH": os.environ.get("PATH", ""),
+            },
+        )
+
+        assert "ANTHROPIC_API_KEY=" not in capture.read_text()
 
 
 # --- LLM configuration tests ---
@@ -810,7 +899,7 @@ class TestGenerateServerWrapper:
 
 class TestConfigureLlm:
     def _clear_all_api_keys(self, monkeypatch):
-        """Remove all known API keys from env so auto-detect doesn't fire."""
+        """Remove known API keys from env so provider setup sees no key."""
         for key in (
             "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
             "GROQ_API_KEY", "MISTRAL_API_KEY", "COHERE_API_KEY",
@@ -818,11 +907,11 @@ class TestConfigureLlm:
         ):
             monkeypatch.delenv(key, raising=False)
 
-    def test_anthropic_no_key_in_env(self, tmp_path, monkeypatch):
-        """Manual selection of Anthropic without key in env stores only provider/model."""
+    def test_anthropic_no_key_in_env_disables_llm(self, tmp_path, monkeypatch):
+        """Selecting Anthropic without a key keeps server-side LLM disabled."""
         env_path = tmp_path / ".env"
         self._clear_all_api_keys(monkeypatch)
-        inputs = iter(["1"])
+        inputs = iter(["y", "1"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
 
         with (
@@ -832,15 +921,15 @@ class TestConfigureLlm:
             configure_llm()
             result = _read_env_file()
 
-        assert result["ORMAH_LLM_PROVIDER"] == "litellm"
-        assert result["ORMAH_LLM_MODEL"] == "claude-haiku-4-5-20251001"
+        assert result["ORMAH_LLM_PROVIDER"] == "none"
+        assert "ORMAH_LLM_MODEL" not in result
         assert "ANTHROPIC_API_KEY" not in result
 
-    def test_openai_no_key_in_env(self, tmp_path, monkeypatch):
-        """Manual selection of OpenAI without key in env stores only provider/model."""
+    def test_openai_no_key_in_env_disables_llm(self, tmp_path, monkeypatch):
+        """Selecting OpenAI without a key keeps server-side LLM disabled."""
         env_path = tmp_path / ".env"
         self._clear_all_api_keys(monkeypatch)
-        inputs = iter(["2"])
+        inputs = iter(["y", "3"])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
 
         with (
@@ -850,14 +939,15 @@ class TestConfigureLlm:
             configure_llm()
             result = _read_env_file()
 
-        assert result["ORMAH_LLM_PROVIDER"] == "litellm"
-        assert result["ORMAH_LLM_MODEL"] == "gpt-4.1-mini"
+        assert result["ORMAH_LLM_PROVIDER"] == "none"
+        assert "ORMAH_LLM_MODEL" not in result
         assert "OPENAI_API_KEY" not in result
 
     def test_ollama_no_key_needed(self, tmp_path, monkeypatch):
         env_path = tmp_path / ".env"
         self._clear_all_api_keys(monkeypatch)
-        monkeypatch.setattr("builtins.input", lambda _: "4")
+        inputs = iter(["y", "5"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
 
         with (
             patch("ormah.setup.ENV_PATH", env_path),
@@ -873,7 +963,8 @@ class TestConfigureLlm:
     def test_none_sets_provider_none(self, tmp_path, monkeypatch, capsys):
         env_path = tmp_path / ".env"
         self._clear_all_api_keys(monkeypatch)
-        monkeypatch.setattr("builtins.input", lambda _: "5")
+        inputs = iter(["y", "6"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
 
         with (
             patch("ormah.setup.ENV_PATH", env_path),
@@ -889,10 +980,11 @@ class TestConfigureLlm:
         assert "No LLM configured" in captured.out
         assert "Run 'ormah setup' again to add an LLM later" in captured.out
 
-    def test_auto_detect_does_not_store_key(self, tmp_path, monkeypatch):
-        """Auto-detect path stores provider/model but NOT the API key."""
+    def test_explicit_key_inheritance_does_not_store_key_value(self, tmp_path, monkeypatch):
+        """Opt-in stores key policy but never the API key value."""
         env_path = tmp_path / ".env"
-        monkeypatch.setattr("builtins.input", lambda _: "")
+        inputs = iter(["y", "1", "y"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from-env")
 
         with (
@@ -904,13 +996,37 @@ class TestConfigureLlm:
 
         assert result["ORMAH_LLM_PROVIDER"] == "litellm"
         assert result["ORMAH_LLM_MODEL"] == "claude-haiku-4-5-20251001"
+        assert result["ORMAH_LLM_API_KEY_ENV_VAR"] == "ANTHROPIC_API_KEY"
+        assert result["ORMAH_LLM_INHERIT_API_KEY"] == "true"
         assert "ANTHROPIC_API_KEY" not in result
+        assert "sk-ant-from-env" not in env_path.read_text()
+
+    def test_declining_key_inheritance_disables_llm(self, tmp_path, monkeypatch):
+        env_path = tmp_path / ".env"
+        inputs = iter(["y", "1", "n"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from-env")
+
+        with (
+            patch("ormah.setup.ENV_PATH", env_path),
+            patch("ormah.setup.ENV_DIR", tmp_path),
+        ):
+            configure_llm()
+            result = _read_env_file()
+
+        assert result["ORMAH_LLM_PROVIDER"] == "none"
+        assert "ORMAH_LLM_API_KEY_ENV_VAR" not in result
+        assert "sk-ant-from-env" not in env_path.read_text()
 
     def test_preserves_existing_env_values(self, tmp_path, monkeypatch):
         env_path = tmp_path / ".env"
-        env_path.write_text("ORMAH_PORT=9999\n")
+        env_path.write_text(
+            "ORMAH_PORT=9999\n"
+            "ORMAH_LLM_API_KEY_ENV_VAR=ANTHROPIC_API_KEY\n"
+            "ORMAH_LLM_INHERIT_API_KEY=true\n"
+        )
         self._clear_all_api_keys(monkeypatch)
-        monkeypatch.setattr("builtins.input", lambda _: "5")
+        monkeypatch.setattr("builtins.input", lambda _: "")
 
         with (
             patch("ormah.setup.ENV_PATH", env_path),
@@ -921,6 +1037,8 @@ class TestConfigureLlm:
 
         assert result["ORMAH_PORT"] == "9999"
         assert result["ORMAH_LLM_PROVIDER"] == "none"
+        assert "ORMAH_LLM_API_KEY_ENV_VAR" not in result
+        assert "ORMAH_LLM_INHERIT_API_KEY" not in result
 
 
 # --- CLAUDE.md installation tests ---
@@ -1806,3 +1924,126 @@ class TestUninstallCli:
         ):
             main()
             mock_uninstall.assert_called_once_with(yes=False)
+
+
+class TestStopRunningServer:
+    def test_no_process_found_returns_false(self, capsys):
+        from ormah.server_manager import stop_running_server
+
+        with (
+            patch("platform.system", return_value="Linux"),
+            patch("shutil.which", return_value=None),  # no systemctl
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+            result = stop_running_server()
+
+        assert result is False
+        out = capsys.readouterr().out
+        assert "No running Ormah server found." in out
+
+    def test_ps_finds_pid_sends_sigterm(self, capsys):
+        import signal as _signal
+
+        from ormah.server_manager import stop_running_server
+
+        fake_pid = 99999
+        ps_output = f"    {fake_pid} ormah server start\n"
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "ps":
+                m.stdout = ps_output
+                m.returncode = 0
+            else:
+                m.stdout = ""
+                m.returncode = 1
+            return m
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError
+
+        with (
+            patch("platform.system", return_value="Linux"),
+            patch("shutil.which", return_value=None),
+            patch("subprocess.run", side_effect=fake_run),
+            patch("os.getpid", return_value=0),
+            patch("os.kill", side_effect=fake_kill) as mock_kill,
+        ):
+            result = stop_running_server()
+
+        assert mock_kill.call_args_list[0] == ((fake_pid, _signal.SIGTERM),)
+        assert result is True
+        out = capsys.readouterr().out
+        assert "Stopped Ormah server" in out
+
+    def test_false_positive_not_matched(self):
+        from ormah.server_manager import _is_ormah_server_start_command
+
+        # These should NOT match
+        assert not _is_ormah_server_start_command("grep ormah server start")
+        assert not _is_ormah_server_start_command("bash -c 'ormah server start'")
+        assert not _is_ormah_server_start_command("ormah server stop")
+        assert not _is_ormah_server_start_command("ormah server status")
+        assert not _is_ormah_server_start_command("")
+
+        # These SHOULD match
+        assert _is_ormah_server_start_command("ormah server start")
+        assert _is_ormah_server_start_command("/usr/local/bin/ormah server start")
+        assert _is_ormah_server_start_command("ormah server start --reload")
+
+    def test_systemd_active_calls_stop(self, capsys):
+        from ormah.server_manager import stop_running_server
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if "is-active" in cmd:
+                m.stdout = "active\n"
+            elif cmd[0] == "pgrep":
+                m.stdout = ""
+            else:
+                m.stdout = ""
+            m.returncode = 0
+            return m
+
+        with (
+            patch("platform.system", return_value="Linux"),
+            patch("shutil.which", return_value="/usr/bin/systemctl"),
+            patch("subprocess.run", side_effect=fake_run),
+        ):
+            result = stop_running_server()
+
+        assert result is True
+        out = capsys.readouterr().out
+        assert "Stopped Ormah server (systemd)." in out
+
+    def test_server_stop_cli_calls_both(self):
+        from ormah.cli import main
+        from ormah.server_manager import _StopServerResult
+
+        with (
+            patch("sys.argv", ["ormah", "server", "stop"]),
+            patch("ormah.server_manager._stop_running_server", return_value=_StopServerResult()) as mock_stop,
+            patch("ormah.server_manager.uninstall_autostart") as mock_uninstall,
+        ):
+            main()
+
+        mock_stop.assert_called_once()
+        mock_uninstall.assert_called_once()
+
+    def test_server_stop_exits_nonzero_on_failure(self):
+        from ormah.cli import main
+        from ormah.server_manager import _StopServerResult
+
+        failed_result = _StopServerResult(found=True, stopped=False, failed=True)
+
+        with (
+            patch("sys.argv", ["ormah", "server", "stop"]),
+            patch("ormah.server_manager._stop_running_server", return_value=failed_result),
+            patch("ormah.server_manager.uninstall_autostart"),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main()
+
+        assert exc_info.value.code == 1

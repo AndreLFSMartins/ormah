@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
-from ormah.logging_setup import _JSONFormatter, setup_logging
+from ormah.logging_setup import _JSONFormatter, _redact_secrets, setup_logging
 
 
 def test_json_formatter_basic():
@@ -71,6 +71,36 @@ def test_json_formatter_exception():
 
     assert "exception" in obj
     assert "boom" in obj["exception"]
+
+
+def test_redact_secrets_replaces_env_values(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-secret")
+
+    text = _redact_secrets("provider failed with ANTHROPIC_API_KEY=sk-ant-test-secret")
+
+    assert "sk-ant-test-secret" not in text
+    assert "ANTHROPIC_API_KEY=[REDACTED]" in text
+
+
+def test_json_formatter_redacts_message_and_extra(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-testsecret123456")
+    formatter = _JSONFormatter()
+    record = logging.LogRecord(
+        name="test",
+        level=logging.ERROR,
+        pathname="test.py",
+        lineno=1,
+        msg="provider failed: %s",
+        args=("sk-testsecret123456",),
+        exc_info=None,
+    )
+    record.detail = {"key": "sk-testsecret123456"}
+
+    obj = json.loads(formatter.format(record))
+
+    assert "sk-testsecret123456" not in json.dumps(obj)
+    assert obj["msg"] == "provider failed: [REDACTED]"
+    assert obj["detail"]["key"] == "[REDACTED]"
 
 
 def test_setup_logging_text():

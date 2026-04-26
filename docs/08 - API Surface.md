@@ -36,7 +36,7 @@ Important nuance:
 
 ## Middleware
 
-`src/ormah/api/middleware.py` adds agent-id extraction and request logging. CORS is open for local use.
+`src/ormah/api/middleware.py` adds agent-id extraction and request logging. CORS is restricted to loopback browser origins such as `localhost`, `127.0.0.1`, and `[::1]`.
 
 ## Agent Routes
 

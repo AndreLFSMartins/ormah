@@ -40,9 +40,24 @@ def test_valid_providers():
         assert s.llm_provider == p
 
 
+def test_llm_provider_defaults_to_none():
+    s = _settings()
+    assert s.llm_provider == "none"
+
+
 def test_invalid_provider():
     with pytest.raises(ValidationError, match="llm_provider must be one of"):
         _settings(llm_provider="gpt4all")
+
+
+def test_valid_llm_api_key_env_var():
+    s = _settings(llm_api_key_env_var="ANTHROPIC_API_KEY")
+    assert s.llm_api_key_env_var == "ANTHROPIC_API_KEY"
+
+
+def test_invalid_llm_api_key_env_var():
+    with pytest.raises(ValidationError, match="llm_api_key_env_var must be one of"):
+        _settings(llm_api_key_env_var="AWS_SECRET_ACCESS_KEY")
 
 
 # --- LLM timeout ---

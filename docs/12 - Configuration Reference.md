@@ -39,12 +39,14 @@ Later files override earlier ones.
 
 | Setting | Default |
 |---|---|
-| `llm_provider` | `litellm` |
+| `llm_provider` | `none` |
 | `llm_model` | `claude-haiku-4-5-20251001` |
 | `llm_base_url` | `http://localhost:11434` |
 | `llm_timeout_seconds` | `60` |
+| `llm_api_key_env_var` | unset |
+| `llm_inherit_api_key` | `false` |
 
-Note: setup may persist different values in `.env`, including `none`.
+Note: setup may persist different values in `.env`. For remote providers, Ormah stores only key policy, such as `ORMAH_LLM_API_KEY_ENV_VAR=ANTHROPIC_API_KEY`; it does not store API key values.
 
 ## Background Intervals
 

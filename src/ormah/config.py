@@ -33,11 +33,13 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-base-en-v1.5"
     embedding_dim: int = 768
 
-    # LLM for extraction
-    llm_provider: str = "litellm"
+    # LLM for extraction. Disabled by default; setup can opt into cloud/local providers.
+    llm_provider: str = "none"
     llm_model: str = "claude-haiku-4-5-20251001"
     llm_base_url: str = "http://localhost:11434"
     llm_timeout_seconds: int = 60
+    llm_api_key_env_var: str | None = None
+    llm_inherit_api_key: bool = False
 
     # Background intervals (LLM-dependent tasks default to daily to keep costs low)
     auto_link_interval_minutes: int = 1440
@@ -218,6 +220,24 @@ class Settings(BaseSettings):
         allowed = {"ollama", "litellm", "none"}
         if v not in allowed:
             raise ValueError(f"llm_provider must be one of {allowed}, got {v!r}")
+        return v
+
+    @field_validator("llm_api_key_env_var")
+    @classmethod
+    def _llm_api_key_env_var_allowed(cls, v: str | None) -> str | None:
+        if v in (None, ""):
+            return None
+        allowed = {
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "GROQ_API_KEY",
+            "MISTRAL_API_KEY",
+            "COHERE_API_KEY",
+            "AZURE_API_KEY",
+        }
+        if v not in allowed:
+            raise ValueError(f"llm_api_key_env_var must be one of {allowed}, got {v!r}")
         return v
 
     @field_validator("embedding_provider")
