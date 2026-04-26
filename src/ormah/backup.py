@@ -12,6 +12,7 @@ import shutil
 
 from ormah.index.builder import IndexBuilder
 from ormah.index.db import Database
+from ormah.store.markdown import parse_node
 from ormah.store.file_store import FileStore
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,28 @@ def _count_markdown(path: Path) -> int:
     if not path.exists():
         return 0
     return sum(1 for item in path.glob("*.md") if item.is_file())
+
+
+def _is_system_self_node(path: Path) -> bool:
+    try:
+        node = parse_node(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return node.source == "system:self"
+
+
+def _count_backupable_markdown(path: Path, *, ignore_system_self: bool = False) -> int:
+    if not path.exists():
+        return 0
+
+    count = 0
+    for item in path.glob("*.md"):
+        if not item.is_file():
+            continue
+        if ignore_system_self and _is_system_self_node(item):
+            continue
+        count += 1
+    return count
 
 
 def _parse_backup_created_at(path: Path) -> datetime:
@@ -201,7 +224,10 @@ class BackupService:
 
     def has_backupable_memory(self) -> bool:
         """Return True when there are active or deleted memory nodes to protect."""
-        return _count_markdown(self.memory_dir / "nodes") > 0 or _count_markdown(
+        return _count_backupable_markdown(
+            self.memory_dir / "nodes",
+            ignore_system_self=True,
+        ) > 0 or _count_backupable_markdown(
             self.memory_dir / "deleted"
         ) > 0
 

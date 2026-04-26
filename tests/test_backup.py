@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from ormah.backup import BackupService, run_auto_backup
 from ormah.config import Settings
-from ormah.models.node import MemoryNode, NodeType
+from ormah.models.node import MemoryNode, NodeType, Tier
 from ormah.store.file_store import FileStore
 
 
@@ -125,6 +125,33 @@ def test_auto_backup_skips_empty_memory_store(tmp_path):
     memory_dir = tmp_path / "memory"
     backup_dir = tmp_path / "backups"
     (memory_dir / "nodes").mkdir(parents=True)
+    settings = Settings(
+        memory_dir=memory_dir,
+        backup_dir=backup_dir,
+        backup_interval_hours=24,
+        backup_retention_count=10,
+    )
+    engine = SimpleNamespace(settings=settings)
+
+    result = run_auto_backup(engine)
+
+    assert result is None
+    assert not backup_dir.exists()
+
+
+def test_auto_backup_skips_self_only_memory_store(tmp_path):
+    memory_dir = tmp_path / "memory"
+    backup_dir = tmp_path / "backups"
+    store = FileStore(memory_dir / "nodes")
+    store.save(
+        MemoryNode(
+            type=NodeType.person,
+            tier=Tier.core,
+            source="system:self",
+            title="Self",
+            content="The user's identity and personal information.",
+        )
+    )
     settings = Settings(
         memory_dir=memory_dir,
         backup_dir=backup_dir,
