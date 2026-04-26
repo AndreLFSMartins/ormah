@@ -815,7 +815,7 @@ def configure_llm() -> None:
     print("\n  Optional: enable LLM-powered background maintenance?")
     print("  Ormah works without an API key. If enabled, the server can use")
     print("  an approved cloud/local provider for cleanup and backfill.")
-    print("  Memory snippets may be sent to that provider, and costs may apply.")
+    print("  Cloud providers are called through their APIs, and API costs will apply.")
 
     try:
         answer = input("\n  Enable LLM maintenance? (y/N) ").strip().lower()
