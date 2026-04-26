@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     # Paths
     memory_dir: Path = Path.home() / ".local" / "share" / "ormah" / "memory"
 
+    # Local memory backups. Only source-of-truth memory files are backed up;
+    # SQLite/vector indexes are derived and rebuilt after restore.
+    backup_enabled: bool = True
+    backup_dir: Path = Path.home() / ".local" / "share" / "ormah" / "backups"
+    backup_interval_hours: int = 24
+    backup_retention_count: int = 10
+
     # Embeddings
     embedding_provider: str = "local"  # "local", "ollama", "litellm"
     embedding_model: str = "BAAI/bge-base-en-v1.5"
@@ -293,6 +300,20 @@ class Settings(BaseSettings):
     def _decay_hours_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"decay_interval_hours must be >= 1, got {v}")
+        return v
+
+    @field_validator("backup_interval_hours")
+    @classmethod
+    def _backup_interval_hours_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"backup_interval_hours must be >= 1, got {v}")
+        return v
+
+    @field_validator("backup_retention_count")
+    @classmethod
+    def _backup_retention_count_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"backup_retention_count must be >= 1, got {v}")
         return v
 
     @field_validator("core_memory_cap")

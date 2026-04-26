@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Verified against the current repository state on 2026-04-07.
+Verified against the current repository state on 2026-04-26.
 
 All settings live in `src/ormah/config.py` and use the `ORMAH_` prefix.
 
@@ -25,6 +25,22 @@ Later files override earlier ones.
 | Setting | Default |
 |---|---|
 | `memory_dir` | `~/.local/share/ormah/memory` |
+| `backup_dir` | `~/.local/share/ormah/backups` |
+
+## Backups
+
+| Setting | Default |
+|---|---|
+| `backup_enabled` | `true` |
+| `backup_interval_hours` | `24` |
+| `backup_retention_count` | `10` |
+
+Automatic backups are local and timestamped. The server creates them when memory
+nodes exist and the newest backup is older than the configured interval. They
+include source-of-truth memory files from `nodes/` and `deleted/`, but exclude
+derived indexes, logs, config, and API keys. Use `ormah backup create`,
+`ormah backup list`, `ormah backup status`, and `ormah backup restore <backup>`
+for manual backup workflows.
 
 ## Embeddings
 

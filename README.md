@@ -90,6 +90,14 @@ Ormah continuously maintains the graph in the background: linking related memori
 
 Read more: [Background Jobs](<docs/05 - Background Jobs.md>)
 
+### Local Backups
+
+Memories should be hard to lose.
+
+Ormah can create timestamped local backups of the source-of-truth memory files and keeps the latest 10 by default. Backups include active and deleted memory nodes, but exclude derived indexes, logs, config, and API keys. When memory nodes exist, the server checks for a due backup in the background. Manual workflows are available through `ormah backup create`, `ormah backup list`, `ormah backup status`, and `ormah backup restore`.
+
+Read more: [Configuration Reference](<docs/12 - Configuration Reference.md>)
+
 ### Agent-Agnostic Surfaces
 
 Ormah is not tied to a single agent.

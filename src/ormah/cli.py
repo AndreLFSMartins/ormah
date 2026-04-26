@@ -6,6 +6,8 @@ Usage:
     ormah server stop       Stop the server
     ormah server status     Check if running
     ormah setup             One-shot setup (hooks, MCP, server)
+    ormah backup create     Create a local memory backup
+    ormah backup restore    Restore a local memory backup
     ormah claude-md install Install shared Ormah guidance into CLAUDE.md
     ormah uninstall         Remove all ormah integrations and data
     ormah mcp               Run MCP stdio server
@@ -21,6 +23,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import json
 import sys
 from pathlib import Path
 
@@ -109,6 +113,144 @@ def _cmd_claude_md_install(args):
     install_claude_md(scope=args.scope, cwd=Path.cwd())
 
 
+def _format_bytes(size_bytes: int) -> str:
+    units = ["B", "KB", "MB", "GB"]
+    value = float(size_bytes)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _format_backup_time(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _backup_service():
+    from ormah.backup import service_from_settings
+    from ormah.config import settings
+
+    return service_from_settings(settings)
+
+
+def _print_backup_error(message: str) -> None:
+    from ormah.console import fail
+
+    fail(message)
+    sys.exit(1)
+
+
+def _backup_to_dict(backup):
+    return {
+        "name": backup.name,
+        "path": str(backup.path),
+        "created_at": backup.created_at.isoformat(),
+        "node_count": backup.node_count,
+        "deleted_count": backup.deleted_count,
+        "size_bytes": backup.size_bytes,
+    }
+
+
+def _cmd_backup_create(args):
+    from ormah.backup import BackupError
+    from ormah.console import ok
+
+    try:
+        backup = _backup_service().create(reason="manual")
+    except BackupError as exc:
+        _print_backup_error(str(exc))
+
+    if args.json:
+        print(json.dumps(_backup_to_dict(backup), indent=2, sort_keys=True))
+        return
+
+    ok(f"Created backup: {backup.name}")
+    print(f"Path: {backup.path}")
+    print(f"Nodes: {backup.node_count} active, {backup.deleted_count} deleted")
+
+
+def _cmd_backup_list(args):
+    backups = _backup_service().list()
+    if args.json:
+        print(json.dumps([_backup_to_dict(backup) for backup in backups], indent=2, sort_keys=True))
+        return
+
+    if not backups:
+        print("No Ormah memory backups found.")
+        return
+
+    for backup in backups:
+        print(
+            f"{backup.name}  "
+            f"{_format_backup_time(backup.created_at)}  "
+            f"{backup.node_count} active / {backup.deleted_count} deleted  "
+            f"{_format_bytes(backup.size_bytes)}"
+        )
+
+
+def _cmd_backup_status(args):
+    from ormah.config import settings
+
+    service = _backup_service()
+    latest = service.latest()
+    due = service.backup_due(interval_hours=settings.backup_interval_hours)
+    status = {
+        "enabled": settings.backup_enabled,
+        "backup_dir": str(settings.backup_dir),
+        "interval_hours": settings.backup_interval_hours,
+        "retention_count": settings.backup_retention_count,
+        "due": due,
+        "latest": _backup_to_dict(latest) if latest else None,
+    }
+
+    if args.json:
+        print(json.dumps(status, indent=2, sort_keys=True))
+        return
+
+    print(f"Automatic backups: {'enabled' if settings.backup_enabled else 'disabled'}")
+    print(f"Backup directory: {settings.backup_dir}")
+    print(f"Schedule: every {settings.backup_interval_hours}h, keep last {settings.backup_retention_count}")
+    if latest is None:
+        print("Latest backup: none")
+    else:
+        print(f"Latest backup: {latest.name} ({_format_backup_time(latest.created_at)})")
+    print(f"Backup due now: {'yes' if due else 'no'}")
+
+
+def _cmd_backup_restore(args):
+    from ormah.backup import BackupError
+    from ormah.console import info, ok, warn
+    from ormah.server_manager import is_server_running
+
+    if is_server_running():
+        _print_backup_error("Stop the Ormah server before restoring: ormah server stop")
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            _print_backup_error("Restore needs confirmation. Re-run with --yes in non-interactive shells.")
+        warn("Restore overwrites current memory files.")
+        answer = input(f"Restore backup {args.backup}? (y/N) ").strip().lower()
+        if answer not in {"y", "yes"}:
+            info("Restore cancelled")
+            return
+
+    try:
+        result = _backup_service().restore(args.backup, rebuild_index=not args.no_rebuild)
+    except BackupError as exc:
+        _print_backup_error(str(exc))
+
+    ok(f"Restored backup: {result.restored.name}")
+    if result.safety_backup is not None:
+        info(f"Safety backup of previous memory: {result.safety_backup.name}")
+    if result.rebuilt_nodes is not None:
+        info(f"Rebuilt search index from {result.rebuilt_nodes} nodes")
+
+
 def _cmd_mcp(args):
     from ormah.adapters.mcp_adapter import main as mcp_main
 
@@ -148,6 +290,28 @@ def main():
 
     status_p = server_sub.add_parser("status", help="Check server status")
     status_p.set_defaults(func=_cmd_server_status)
+
+    # --- backup ---
+    backup_p = sub.add_parser("backup", help="Back up and restore Ormah memories")
+    backup_sub = backup_p.add_subparsers(dest="backup_cmd", required=True)
+
+    backup_create = backup_sub.add_parser("create", help="Create a timestamped local backup")
+    backup_create.add_argument("--json", action="store_true", help="Output backup metadata as JSON")
+    backup_create.set_defaults(func=_cmd_backup_create)
+
+    backup_list = backup_sub.add_parser("list", help="List local backups")
+    backup_list.add_argument("--json", action="store_true", help="Output backups as JSON")
+    backup_list.set_defaults(func=_cmd_backup_list)
+
+    backup_status = backup_sub.add_parser("status", help="Show backup configuration and freshness")
+    backup_status.add_argument("--json", action="store_true", help="Output backup status as JSON")
+    backup_status.set_defaults(func=_cmd_backup_status)
+
+    backup_restore = backup_sub.add_parser("restore", help="Restore memory files from a local backup")
+    backup_restore.add_argument("backup", help="Backup name from `ormah backup list`")
+    backup_restore.add_argument("--yes", action="store_true", help="Skip interactive restore confirmation")
+    backup_restore.add_argument("--no-rebuild", action="store_true", help="Skip search index rebuild")
+    backup_restore.set_defaults(func=_cmd_backup_restore)
 
     # --- setup ---
     setup_p = sub.add_parser("setup", help="One-shot setup (hooks, MCP, server)")

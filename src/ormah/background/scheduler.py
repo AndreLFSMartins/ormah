@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -109,6 +110,18 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         minutes=1,
         id="index_updater",
         name="Index updater",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
+    from ormah.backup import run_auto_backup
+
+    scheduler.add_job(
+        tracked(tracker, "memory_backup", run_auto_backup, engine),
+        "interval",
+        hours=s.backup_interval_hours,
+        id="memory_backup",
+        name="Memory backup",
+        next_run_time=datetime.now(timezone.utc),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 

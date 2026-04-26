@@ -86,6 +86,23 @@ def test_decay_hours_zero():
         _settings(decay_interval_hours=0)
 
 
+def test_backup_defaults():
+    s = _settings()
+    assert s.backup_enabled is True
+    assert s.backup_interval_hours == 24
+    assert s.backup_retention_count == 10
+
+
+def test_backup_interval_zero():
+    with pytest.raises(ValidationError, match="backup_interval_hours must be >= 1"):
+        _settings(backup_interval_hours=0)
+
+
+def test_backup_retention_zero():
+    with pytest.raises(ValidationError, match="backup_retention_count must be >= 1"):
+        _settings(backup_retention_count=0)
+
+
 # --- Core cap ---
 
 def test_core_cap_zero():
