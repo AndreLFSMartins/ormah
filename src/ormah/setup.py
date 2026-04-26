@@ -812,13 +812,13 @@ def _enable_llm(
 def configure_llm() -> None:
     """Interactive LLM provider setup for background analysis."""
 
-    print("\n  Optional: enable LLM-powered background maintenance?")
-    print("  Ormah works without an API key. If enabled, the server can use")
-    print("  an approved cloud/local provider for cleanup and backfill.")
-    print("  Cloud providers are called through their APIs, and API costs will apply.")
+    print("\n  Optional: enable intelligent Ormah services?")
+    print("  Ormah works without an API key. With one, Ormah can maintain itself,")
+    print("  backfill transcripts, and keep your memory graph cleaner over time.")
+    print("  Cloud AI providers are called through their APIs, and API costs will apply.")
 
     try:
-        answer = input("\n  Enable LLM maintenance? (y/N) ").strip().lower()
+        answer = input("\n  Enable intelligent services? (y/N) ").strip().lower()
     except EOFError:
         answer = ""
     if answer not in ("y", "yes"):
@@ -1103,7 +1103,6 @@ def configure_agent_maintenance(has_claude_code: bool, has_codex: bool) -> bool:
     print(f"\n  Use {agent_label} for automatic memory maintenance?")
     print("  (Runs judgment-heavy graph maintenance in the background when due,")
     print("   at most once every 24 hours by default. No separate API key needed.)")
-    print("   This covers maintenance decisions, not transcript extraction.")
     try:
         answer = input("\n  Enable? (Y/n) ").strip().lower()
     except EOFError:
