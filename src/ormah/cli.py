@@ -44,6 +44,51 @@ def _cmd_eval_whisper_run(args):
     _cmd(args)
 
 
+def _cmd_eval_recall_run(args):
+    try:
+        from eval.recall.cli import cmd_eval_recall_run as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.recall", "eval.recall.cli"}:
+            raise
+        print(
+            "The recall eval harness is not installed in the published Ormah runtime.\n"
+            "Use a source checkout or editable dev install to run 'ormah eval recall run'."
+        )
+        sys.exit(1)
+
+    _cmd(args)
+
+
+def _cmd_eval_recall_export(args):
+    try:
+        from eval.recall.cli import cmd_eval_recall_export_for_labeling as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.recall", "eval.recall.cli"}:
+            raise
+        sys.exit(1)
+    _cmd(args)
+
+
+def _cmd_eval_recall_import(args):
+    try:
+        from eval.recall.cli import cmd_eval_recall_import_labels as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.recall", "eval.recall.cli"}:
+            raise
+        sys.exit(1)
+    _cmd(args)
+
+
+def _cmd_eval_recall_capture(args):
+    try:
+        from eval.recall.cli import cmd_eval_recall_capture_session as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.recall", "eval.recall.cli"}:
+            raise
+        sys.exit(1)
+    _cmd(args)
+
+
 def _cmd_server_start(args):
     if args.daemon:
         from ormah.console import info, warn
@@ -497,6 +542,29 @@ def main():
     )
     ev_wh_run.add_argument("--json", action="store_true", help="Output as JSON")
     ev_wh_run.set_defaults(func=_cmd_eval_whisper_run)
+
+    ev_rc = ev_sub.add_parser("recall", help="Evaluate recall/retrieval quality")
+    ev_rc_sub = ev_rc.add_subparsers(dest="eval_recall_cmd", required=True)
+
+    ev_rc_run = ev_rc_sub.add_parser("run", help="Run recall eval against golden corpus")
+    ev_rc_run.add_argument("--corpus", default="golden", choices=["golden", "synthetic", "sessions", "all"],
+                           help="Corpus to evaluate (default: golden)")
+    ev_rc_run.add_argument("--k", type=int, default=8, help="Top-k for metrics (default: 8)")
+    ev_rc_run.add_argument("--fail-below", default=None,
+                           help="Fail if metrics below threshold, e.g. recall@8=0.70")
+    ev_rc_run.add_argument("--fail-on-regression", default=None,
+                           help="Fail if metric drops more than delta vs last run, e.g. delta=0.05")
+    ev_rc_run.set_defaults(func=_cmd_eval_recall_run)
+
+    ev_rc_export = ev_rc_sub.add_parser("export-for-labeling", help="Export unlabeled pairs to pending_labels.jsonl")
+    ev_rc_export.set_defaults(func=_cmd_eval_recall_export)
+
+    ev_rc_import = ev_rc_sub.add_parser("import-labels", help="Merge labels.jsonl into corpus ground truth")
+    ev_rc_import.set_defaults(func=_cmd_eval_recall_import)
+
+    ev_rc_capture = ev_rc_sub.add_parser("capture-session", help="Copy session transcript into corpus/sessions/")
+    ev_rc_capture.add_argument("path", help="Path to Claude Code JSONL transcript")
+    ev_rc_capture.set_defaults(func=_cmd_eval_recall_capture)
 
     args = p.parse_args()
 

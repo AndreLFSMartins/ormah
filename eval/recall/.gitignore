@@ -1,0 +1,6 @@
+eval_db/
+results/
+corpus/golden/*.jsonl
+corpus/sessions/*.jsonl
+corpus/pending_labels.jsonl
+corpus/labels.jsonl
