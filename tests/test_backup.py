@@ -194,3 +194,23 @@ def test_cli_backup_create_delegates_to_service(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Created backup: memory_2026-04-26_20-45-12" in out
     assert "2 active, 1 deleted" in out
+
+
+def test_cli_backup_status_explains_empty_memory_store(capsys):
+    from ormah.cli import main
+
+    service = SimpleNamespace(
+        latest=lambda: None,
+        has_backupable_memory=lambda: False,
+        backup_due=lambda interval_hours: True,
+    )
+
+    with (
+        patch("sys.argv", ["ormah", "backup", "status"]),
+        patch("ormah.backup.service_from_settings", return_value=service),
+    ):
+        main()
+
+    out = capsys.readouterr().out
+    assert "Latest backup: none" in out
+    assert "Backup due now: no (no memory nodes yet)" in out

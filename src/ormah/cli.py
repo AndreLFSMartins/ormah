@@ -198,12 +198,14 @@ def _cmd_backup_status(args):
 
     service = _backup_service()
     latest = service.latest()
-    due = service.backup_due(interval_hours=settings.backup_interval_hours)
+    has_memory = service.has_backupable_memory()
+    due = has_memory and service.backup_due(interval_hours=settings.backup_interval_hours)
     status = {
         "enabled": settings.backup_enabled,
         "backup_dir": str(settings.backup_dir),
         "interval_hours": settings.backup_interval_hours,
         "retention_count": settings.backup_retention_count,
+        "has_backupable_memory": has_memory,
         "due": due,
         "latest": _backup_to_dict(latest) if latest else None,
     }
@@ -219,7 +221,10 @@ def _cmd_backup_status(args):
         print("Latest backup: none")
     else:
         print(f"Latest backup: {latest.name} ({_format_backup_time(latest.created_at)})")
-    print(f"Backup due now: {'yes' if due else 'no'}")
+    if not has_memory:
+        print("Backup due now: no (no memory nodes yet)")
+    else:
+        print(f"Backup due now: {'yes' if due else 'no'}")
 
 
 def _cmd_backup_restore(args):
