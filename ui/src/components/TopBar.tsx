@@ -3,7 +3,7 @@ import { searchNodes } from "../api";
 import SearchResults from "./SearchResults";
 import type { MemoryNode } from "../types";
 
-type PanelId = "filter" | "review" | "insights" | "admin";
+type PanelId = "settings" | "insights" | "admin";
 
 interface Props {
   nodeCount: number;
@@ -170,28 +170,22 @@ export default function TopBar({
       <div className="top-bar-spacer" />
       <div className="top-bar-actions">
         <button
-          className={`top-bar-btn ${activePanel === "filter" ? "active" : ""}`}
-          onClick={() => onTogglePanel("filter")}
+          className={`top-bar-btn ${activePanel === "settings" ? "active" : ""}`}
+          onClick={() => onTogglePanel("settings")}
         >
-          filter <kbd>1</kbd>
-        </button>
-        <button
-          className={`top-bar-btn ${activePanel === "review" ? "active" : ""}`}
-          onClick={() => onTogglePanel("review")}
-        >
-          review <kbd>2</kbd>
+          settings <kbd>1</kbd>
         </button>
         <button
           className={`top-bar-btn ${activePanel === "insights" ? "active" : ""}`}
           onClick={() => onTogglePanel("insights")}
         >
-          insights <kbd>3</kbd>
+          insights <kbd>2</kbd>
         </button>
         <button
           className={`top-bar-btn ${activePanel === "admin" ? "active" : ""}`}
           onClick={() => onTogglePanel("admin")}
         >
-          admin <kbd>4</kbd>
+          admin <kbd>3</kbd>
         </button>
       </div>
     </div>

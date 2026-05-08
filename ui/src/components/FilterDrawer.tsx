@@ -1,4 +1,5 @@
 import type { Filters } from "../App";
+import type { GraphAppearance, GraphTheme } from "../graphAppearance";
 import type { Edge, EdgeType, MemoryNode, NodeType, Tier } from "../types";
 
 interface Props {
@@ -8,8 +9,10 @@ interface Props {
   nodes: MemoryNode[];
   edges: Edge[];
   onToggle: <K extends keyof Filters>(key: K, value: string) => void;
-  clusterBySpace: boolean;
-  onToggleCluster: () => void;
+  appearance: GraphAppearance;
+  onThemeChange: (theme: GraphTheme) => void;
+  onTierColorChange: (tier: Tier, color: string) => void;
+  onResetAppearance: () => void;
 }
 
 const TIERS: Tier[] = ["core", "working", "archival"];
@@ -30,8 +33,10 @@ export default function FilterDrawer({
   nodes,
   edges,
   onToggle,
-  clusterBySpace,
-  onToggleCluster,
+  appearance,
+  onThemeChange,
+  onTierColorChange,
+  onResetAppearance,
 }: Props) {
   const countByTier = (t: Tier) => nodes.filter((n) => n.tier === t).length;
   const countByType = (t: NodeType) => nodes.filter((n) => n.type === t).length;
@@ -42,12 +47,50 @@ export default function FilterDrawer({
   return (
     <div className={`side-panel filter-drawer ${open ? "open" : ""}`}>
       <div className="filter-section">
-        <div className="filter-section-title">layout</div>
-        <div className="filter-option" onClick={onToggleCluster}>
-          <div className={`filter-checkbox ${clusterBySpace ? "checked" : ""}`} />
-          <span>group by space</span>
+        <div className="filter-section-title">appearance</div>
+        <div className="theme-toggle" role="group" aria-label="Theme">
+          <button
+            type="button"
+            className={`theme-toggle-btn ${appearance.theme === "dark" ? "active" : ""}`}
+            onClick={() => onThemeChange("dark")}
+          >
+            dark
+          </button>
+          <button
+            type="button"
+            className={`theme-toggle-btn ${appearance.theme === "light" ? "active" : ""}`}
+            onClick={() => onThemeChange("light")}
+          >
+            light
+          </button>
         </div>
+        <div className="color-options">
+          {TIERS.map((tier) => (
+            <label key={tier} className="color-option">
+              <span
+                className="color-swatch"
+                style={{ background: appearance.colors[tier] }}
+              />
+              <span>{tier}</span>
+              <input
+                className="color-input"
+                type="color"
+                value={appearance.colors[tier]}
+                onChange={(e) => onTierColorChange(tier, e.target.value)}
+                aria-label={`${tier} color`}
+              />
+            </label>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="appearance-reset-btn"
+          onClick={onResetAppearance}
+        >
+          reset
+        </button>
       </div>
+      <div className="drawer-section-heading">filters</div>
       <div className="filter-section">
         <div className="filter-section-title">tier</div>
         {TIERS.map((t) => (

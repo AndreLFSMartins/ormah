@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-type PanelId = "filter" | "review" | "insights" | "admin";
+type PanelId = "settings" | "insights" | "admin";
 
 interface Options {
   onTogglePanel: (id: PanelId) => void;
@@ -12,10 +12,9 @@ interface Options {
 }
 
 const PANEL_KEYS: Record<string, PanelId> = {
-  "1": "filter",
-  "2": "review",
-  "3": "insights",
-  "4": "admin",
+  "1": "settings",
+  "2": "insights",
+  "3": "admin",
 };
 
 export default function useKeyboardShortcuts({

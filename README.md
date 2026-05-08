@@ -110,6 +110,8 @@ Memory should be inspectable.
 
 Ormah includes a graph UI so you can see what it knows, how memories connect, what is becoming central, and where conflicts or belief changes are forming. That makes the system easier to trust, debug, and improve.
 
+The graph UI includes dark/light themes plus browser-persisted controls for tier colors.
+
 Read more: [Web UI](<docs/14 - Web UI.md>)
 
 ## Integrations

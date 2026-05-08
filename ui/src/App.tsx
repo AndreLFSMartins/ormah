@@ -5,11 +5,18 @@ import GraphView from "./components/GraphView";
 import TopBar from "./components/TopBar";
 import NodeDetailPanel from "./components/NodeDetail";
 import FilterDrawer from "./components/FilterDrawer";
-import ReviewQueue from "./components/ReviewQueue";
 import InsightsPanel from "./components/InsightsPanel";
 import AdminPanel from "./components/AdminPanel";
 import ToastContainer from "./components/Toast";
 import type { ToastData } from "./components/Toast";
+import {
+  DEFAULT_GRAPH_APPEARANCE,
+  applyGraphAppearance,
+  loadGraphAppearance,
+  saveGraphAppearance,
+  type GraphAppearance,
+  type GraphTheme,
+} from "./graphAppearance";
 import useKeyboardShortcuts from "./hooks/useKeyboardShortcuts";
 
 export interface Filters {
@@ -32,7 +39,7 @@ const ALL_EDGE_TYPES: EdgeType[] = [
 ];
 const DEFAULT_EDGE_TYPES = new Set<EdgeType>(ALL_EDGE_TYPES);
 
-type PanelId = "filter" | "review" | "insights" | "admin" | null;
+type PanelId = "settings" | "insights" | "admin" | null;
 
 export default function App() {
   const [graph, setGraph] = useState<GraphData | null>(null);
@@ -49,6 +56,8 @@ export default function App() {
   const [allSpaces, setAllSpaces] = useState<string[]>([]);
   const [userNodeId, setUserNodeId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastData[]>([]);
+  const [graphAppearance, setGraphAppearance] =
+    useState<GraphAppearance>(loadGraphAppearance);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const graphViewRef = useRef<{
     focusNode: (id: string) => void;
@@ -68,11 +77,11 @@ export default function App() {
   }, []);
 
   useKeyboardShortcuts({
-    onTogglePanel: togglePanel as (id: "filter" | "review" | "insights" | "admin") => void,
+    onTogglePanel: togglePanel as (id: "settings" | "insights" | "admin") => void,
     onClosePanel: useCallback(() => setActivePanel(null), []),
     onCloseDetail: useCallback(() => setSelectedDetail(null), []),
     onFocusSearch: useCallback(() => searchInputRef.current?.focus(), []),
-    activePanel: activePanel as "filter" | "review" | "insights" | "admin" | null,
+    activePanel: activePanel as "settings" | "insights" | "admin" | null,
     hasDetail: selectedDetail !== null,
   });
 
@@ -89,6 +98,11 @@ export default function App() {
       setFilters((f) => ({ ...f, spaces: new Set(spaceList) }));
     });
   }, []);
+
+  useEffect(() => {
+    applyGraphAppearance(graphAppearance);
+    saveGraphAppearance(graphAppearance);
+  }, [graphAppearance]);
 
   const handleNodeSelect = useCallback(async (nodeId: string) => {
     const detail = await fetchNodeDetail(nodeId);
@@ -142,8 +156,19 @@ export default function App() {
     []
   );
 
-  const toggleCluster = useCallback(() => {
-    setFilters((f) => ({ ...f, clusterBySpace: !f.clusterBySpace }));
+  const handleThemeChange = useCallback((theme: GraphTheme) => {
+    setGraphAppearance((appearance) => ({ ...appearance, theme }));
+  }, []);
+
+  const handleTierColorChange = useCallback((tier: Tier, color: string) => {
+    setGraphAppearance((appearance) => ({
+      ...appearance,
+      colors: { ...appearance.colors, [tier]: color },
+    }));
+  }, []);
+
+  const resetGraphAppearance = useCallback(() => {
+    setGraphAppearance(DEFAULT_GRAPH_APPEARANCE);
   }, []);
 
   if (!graph) {
@@ -154,8 +179,8 @@ export default function App() {
     <>
       <TopBar
         nodeCount={filteredNodes.length}
-        activePanel={activePanel as "filter" | "review" | "insights" | "admin" | null}
-        onTogglePanel={togglePanel as (id: "filter" | "review" | "insights" | "admin") => void}
+        activePanel={activePanel as "settings" | "insights" | "admin" | null}
+        onTogglePanel={togglePanel as (id: "settings" | "insights" | "admin") => void}
         onSearchSelect={handleSearchSelect}
         onSearchHover={(id) => graphViewRef.current?.highlightNode(id)}
         onSearchHoverEnd={() => graphViewRef.current?.clearHighlight()}
@@ -171,6 +196,7 @@ export default function App() {
             focusNodeId={focusNodeId}
             userNodeId={userNodeId}
             clusterBySpace={filters.clusterBySpace}
+            appearance={graphAppearance}
           />
         )}
       </div>
@@ -180,26 +206,20 @@ export default function App() {
         onConnectionClick={handleConnectionClick}
       />
       <FilterDrawer
-        open={activePanel === "filter"}
+        open={activePanel === "settings"}
         filters={filters}
         allSpaces={allSpaces}
         nodes={graph.nodes}
         edges={graph.edges}
         onToggle={toggleFilter}
-        clusterBySpace={filters.clusterBySpace}
-        onToggleCluster={toggleCluster}
+        appearance={graphAppearance}
+        onThemeChange={handleThemeChange}
+        onTierColorChange={handleTierColorChange}
+        onResetAppearance={resetGraphAppearance}
       />
       <InsightsPanel
         open={activePanel === "insights"}
         onClose={() => setActivePanel(null)}
-        onNodeClick={handleSearchSelect}
-        onPairHover={(ids) => graphViewRef.current?.highlightNodes(ids)}
-        onPairHoverEnd={() => graphViewRef.current?.clearHighlight()}
-      />
-      <ReviewQueue
-        open={activePanel === "review"}
-        onClose={() => setActivePanel(null)}
-        onToast={addToast}
         onNodeClick={handleSearchSelect}
         onPairHover={(ids) => graphViewRef.current?.highlightNodes(ids)}
         onPairHoverEnd={() => graphViewRef.current?.clearHighlight()}

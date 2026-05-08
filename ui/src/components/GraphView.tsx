@@ -7,7 +7,12 @@ import {
 } from "react";
 import cytoscape, { type Core } from "cytoscape";
 import cola from "cytoscape-cola";
-import type { Edge, MemoryNode } from "../types";
+import {
+  GRAPH_DISPLAY_SCALE,
+  type GraphAppearance,
+  type GraphTheme,
+} from "../graphAppearance";
+import type { Edge, MemoryNode, Tier } from "../types";
 
 try { cytoscape.use(cola); } catch (_) { /* already registered */ }
 
@@ -18,58 +23,87 @@ interface Props {
   focusNodeId: string | null;
   userNodeId: string | null;
   clusterBySpace: boolean;
+  appearance: GraphAppearance;
 }
 
-function tierColor(tier: string, selfRole: string) {
+const GRAPH_THEME_TOKENS: Record<GraphTheme, {
+  background: string;
+  label: string;
+  labelGlow: string;
+  accent: string;
+  edgeDefault: string;
+  edgeSupports: string;
+  edgeContradicts: string;
+  edgeDefines: string;
+  edgeEvolved: string;
+  glowDefault: string;
+}> = {
+  dark: {
+    background: "#0a0a0a",
+    label: "#d8dee6",
+    labelGlow: "#f3f4f6",
+    accent: "#d4a574",
+    edgeDefault: "#333",
+    edgeSupports: "#4a7a4a",
+    edgeContradicts: "#7a4a4a",
+    edgeDefines: "#5a9e8f",
+    edgeEvolved: "#6a5acd",
+    glowDefault: "#d4a574",
+  },
+  light: {
+    background: "#f6f8fb",
+    label: "#24303c",
+    labelGlow: "#111827",
+    accent: "#8a5f2d",
+    edgeDefault: "#aeb8c4",
+    edgeSupports: "#3f7d52",
+    edgeContradicts: "#a65353",
+    edgeDefines: "#3e8f82",
+    edgeEvolved: "#7265bd",
+    glowDefault: "#8a5f2d",
+  },
+};
+
+function tierColor(tier: string, selfRole: string, appearance: GraphAppearance) {
   if (selfRole === "self") return "#74b3a5";
   if (selfRole === "identity") return "#4d8a7e";
-  switch (tier) {
-    case "core":
-      return "#d4a574";
-    case "working":
-      return "#4a4a4a";
-    case "archival":
-      return "#2a2a2a";
-    default:
-      return "#4a4a4a";
-  }
+  return appearance.colors[tier as Tier] ?? appearance.colors.working;
 }
 
-function tierBorderColor(tier: string, selfRole: string) {
+function tierBorderColor(tier: string, selfRole: string, appearance: GraphAppearance) {
   if (selfRole === "self") return "#8fd4c4";
   if (selfRole === "identity") return "#6ba89a";
-  switch (tier) {
-    case "core":
-      return "#d4a574";
-    case "working":
-      return "#666";
-    case "archival":
-      return "#444";
-    default:
-      return "#666";
-  }
+  return appearance.colors[tier as Tier] ?? appearance.colors.working;
 }
 
 function nodeSize(accessCount: number): number {
-  return Math.min(56, Math.max(24, 24 + Math.log2(accessCount + 1) * 6));
+  const baseSize = Math.min(56, Math.max(24, 24 + Math.log2(accessCount + 1) * 6));
+  return Math.round(baseSize * GRAPH_DISPLAY_SCALE);
 }
 
-function edgeColor(edgeType: string): string {
+function displayNodeSize(accessCount: number, selfRole: string): number {
+  const size = nodeSize(accessCount);
+  return selfRole === "self" ? Math.max(Math.round(36 * GRAPH_DISPLAY_SCALE), size) : size;
+}
+
+function edgeColor(edgeType: string, theme: GraphTheme): string {
+  const tokens = GRAPH_THEME_TOKENS[theme];
   switch (edgeType) {
     case "supports":
-      return "#4a7a4a";
+      return tokens.edgeSupports;
     case "contradicts":
-      return "#7a4a4a";
+      return tokens.edgeContradicts;
     case "defines":
-      return "#5a9e8f";
+      return tokens.edgeDefines;
     case "evolved_from":
-      return "#6a5acd";
+      return tokens.edgeEvolved;
     default:
-      return "#333";
+      return tokens.edgeDefault;
   }
 }
 
-function edgeGlowColor(edgeType: string): string {
+function edgeGlowColor(edgeType: string, theme: GraphTheme): string {
+  const tokens = GRAPH_THEME_TOKENS[theme];
   switch (edgeType) {
     case "supports":
       return "#6abf6a";
@@ -80,7 +114,7 @@ function edgeGlowColor(edgeType: string): string {
     case "evolved_from":
       return "#9a8aef";
     default:
-      return "#d4a574";
+      return tokens.glowDefault;
   }
 }
 
@@ -90,90 +124,97 @@ function nodeLabel(n: MemoryNode): string {
   return n.id.split("-")[0];
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const styles: any[] = [
-  {
-    selector: "node",
-    style: {
-      "background-color": "data(bgColor)",
-      "border-color": "data(borderColor)",
-      "border-width": "data(borderWidth)",
-      "border-style": "solid",
-      width: "data(nodeSize)",
-      height: "data(nodeSize)",
-      label: "data(labelText)",
-      "font-size": "10px",
-      color: "#999",
-      "text-valign": "bottom" as const,
-      "text-halign": "center" as const,
-      "text-margin-y": 6,
-      "font-family": "ui-monospace, monospace",
-      "text-wrap": "wrap" as const,
-      "text-max-width": "120px",
-      "text-overflow-wrap": "anywhere" as const,
-      "overlay-opacity": 0,
-    } as cytoscape.Css.Node,
-  },
-  {
-    selector: "node[tier = 'archival'][selfRole = '']",
-    style: {
-      "border-style": "dashed" as const,
-    } as cytoscape.Css.Node,
-  },
-{
-    selector: "node:active, node:selected",
-    style: {
-      "border-color": "#d4a574",
-      "border-width": 3,
-      "overlay-opacity": 0,
-    } as cytoscape.Css.Node,
-  },
-  {
-    selector: "edge",
-    style: {
-      "line-color": "data(lineColor)",
-      width: 1,
-      opacity: "data(edgeOpacity)" as unknown as number,
-      "curve-style": "bezier",
-    } as cytoscape.Css.Edge,
-  },
-  {
-    selector: "edge[edgeType = 'related_to']",
-    style: {
-      "curve-style": "haystack",
-    } as cytoscape.Css.Edge,
-  },
-  {
-    selector: "node.glow",
-    style: {
-      "border-color": "#d4a574",
-      "border-width": 3,
-      color: "#ccc",
-      "transition-property": "border-color, border-width" as any,
-      "transition-duration": "100ms" as unknown as number,
-    } as cytoscape.Css.Node,
-  },
-  {
-    selector: "node.glow-neighbor",
-    style: {
-      "border-color": "#d4a574",
-      "border-width": 2,
-      "transition-property": "border-color, border-width" as any,
-      "transition-duration": "100ms" as unknown as number,
-    } as cytoscape.Css.Node,
-  },
-  {
-    selector: "edge.glow",
-    style: {
-      "line-color": "data(glowColor)",
-      width: 3,
-      opacity: 1,
-      "z-index": 10,
-      "transition-property": "line-color, width, opacity" as any,
-      "transition-duration": "100ms" as unknown as number,
-    } as cytoscape.Css.Edge,
-  },
-];
+function buildStyles(appearance: GraphAppearance) {
+  const tokens = GRAPH_THEME_TOKENS[appearance.theme];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const styles: any[] = [
+    {
+      selector: "node",
+      style: {
+        "background-color": "data(bgColor)",
+        "border-color": "data(borderColor)",
+        "border-width": "data(borderWidth)",
+        "border-style": "solid",
+        width: "data(nodeSize)",
+        height: "data(nodeSize)",
+        label: "data(labelText)",
+        "font-size": `${Math.round(12 * GRAPH_DISPLAY_SCALE)}px`,
+        color: "data(labelColor)",
+        "text-outline-color": "data(labelOutlineColor)",
+        "text-outline-opacity": 0.9,
+        "text-outline-width": 2,
+        "text-valign": "bottom" as const,
+        "text-halign": "center" as const,
+        "text-margin-y": Math.round(6 * GRAPH_DISPLAY_SCALE),
+        "font-family": "ui-monospace, monospace",
+        "text-wrap": "wrap" as const,
+        "text-max-width": `${Math.round(120 * GRAPH_DISPLAY_SCALE)}px`,
+        "text-overflow-wrap": "anywhere" as const,
+        "overlay-opacity": 0,
+      } as cytoscape.Css.Node,
+    },
+    {
+      selector: "node[tier = 'archival'][selfRole = '']",
+      style: {
+        "border-style": "dashed" as const,
+      } as cytoscape.Css.Node,
+    },
+    {
+      selector: "node:active, node:selected",
+      style: {
+        "border-color": tokens.accent,
+        "border-width": 3,
+        "overlay-opacity": 0,
+      } as cytoscape.Css.Node,
+    },
+    {
+      selector: "edge",
+      style: {
+        "line-color": "data(lineColor)",
+        width: 1,
+        opacity: "data(edgeOpacity)" as unknown as number,
+        "curve-style": "bezier",
+      } as cytoscape.Css.Edge,
+    },
+    {
+      selector: "edge[edgeType = 'related_to']",
+      style: {
+        "curve-style": "haystack",
+      } as cytoscape.Css.Edge,
+    },
+    {
+      selector: "node.glow",
+      style: {
+        "border-color": tokens.accent,
+        "border-width": 3,
+        color: tokens.labelGlow,
+        "transition-property": "border-color, border-width" as any,
+        "transition-duration": "100ms" as unknown as number,
+      } as cytoscape.Css.Node,
+    },
+    {
+      selector: "node.glow-neighbor",
+      style: {
+        "border-color": tokens.accent,
+        "border-width": 2,
+        "transition-property": "border-color, border-width" as any,
+        "transition-duration": "100ms" as unknown as number,
+      } as cytoscape.Css.Node,
+    },
+    {
+      selector: "edge.glow",
+      style: {
+        "line-color": "data(glowColor)",
+        width: 3,
+        opacity: 1,
+        "z-index": 10,
+        "transition-property": "line-color, width, opacity" as any,
+        "transition-duration": "100ms" as unknown as number,
+      } as cytoscape.Css.Edge,
+    },
+  ];
+  return styles;
+}
 
 /**
  * Compute initial positions that place same-space nodes near each other.
@@ -224,7 +265,10 @@ function computeClusteredPositions(nodes: MemoryNode[]): Map<string, { x: number
 }
 
 const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
-  ({ nodes, edges, onNodeSelect, focusNodeId, userNodeId, clusterBySpace }, ref) => {
+  (
+    { nodes, edges, onNodeSelect, focusNodeId, userNodeId, clusterBySpace, appearance },
+    ref
+  ) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const cyRef = useRef<Core | null>(null);
     const layoutRef = useRef<cytoscape.Layouts | null>(null);
@@ -321,10 +365,9 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
       }
 
       const nodeElements = nodes.map((n) => {
+        const themeTokens = GRAPH_THEME_TOKENS[appearance.theme];
         const sr = selfRole(n.id);
-        const size = sr === "self"
-          ? Math.max(36, nodeSize(n.access_count))
-          : nodeSize(n.access_count);
+        const size = displayNodeSize(n.access_count, sr);
         return {
           data: {
             id: n.id,
@@ -333,10 +376,12 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
             type: n.type,
             accessCount: n.access_count,
             selfRole: sr,
-            bgColor: tierColor(n.tier, sr),
-            borderColor: tierBorderColor(n.tier, sr),
+            bgColor: tierColor(n.tier, sr, appearance),
+            borderColor: tierBorderColor(n.tier, sr, appearance),
             borderWidth: sr === "self" ? 3 : n.tier === "archival" ? 1 : 2,
             nodeSize: size,
+            labelColor: themeTokens.label,
+            labelOutlineColor: themeTokens.background,
           },
         };
       });
@@ -350,8 +395,8 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
             target: e.target_id,
             edgeType: e.edge_type,
             weight: e.weight,
-            lineColor: edgeColor(e.edge_type),
-            glowColor: edgeGlowColor(e.edge_type),
+            lineColor: edgeColor(e.edge_type, appearance.theme),
+            glowColor: edgeGlowColor(e.edge_type, appearance.theme),
             edgeOpacity: Math.max(0.2, e.weight ?? 0.5),
           },
         }));
@@ -364,7 +409,7 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
       const cy = cytoscape({
         container: containerRef.current,
         elements: [...nodeElements, ...edgeElements],
-        style: styles,
+        style: buildStyles(appearance),
         layout: { name: "preset" },
         minZoom: 0.15,
         maxZoom: 4,
@@ -580,6 +625,29 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
         cyRef.current = null;
       };
     }, [nodes, edges, userNodeId, clusterBySpace]);
+
+    useEffect(() => {
+      const cy = cyRef.current;
+      if (!cy) return;
+
+      const themeTokens = GRAPH_THEME_TOKENS[appearance.theme];
+      cy.style(buildStyles(appearance));
+      cy.nodes().forEach((node) => {
+        const tier = node.data("tier") as string;
+        const selfRole = node.data("selfRole") as string;
+        const accessCount = node.data("accessCount") as number;
+        node.data("bgColor", tierColor(tier, selfRole, appearance));
+        node.data("borderColor", tierBorderColor(tier, selfRole, appearance));
+        node.data("labelColor", themeTokens.label);
+        node.data("labelOutlineColor", themeTokens.background);
+        node.data("nodeSize", displayNodeSize(accessCount, selfRole));
+      });
+      cy.edges().forEach((edge) => {
+        const edgeType = edge.data("edgeType") as string;
+        edge.data("lineColor", edgeColor(edgeType, appearance.theme));
+        edge.data("glowColor", edgeGlowColor(edgeType, appearance.theme));
+      });
+    }, [appearance]);
 
     useEffect(() => {
       if (focusNodeId && cyRef.current) {
