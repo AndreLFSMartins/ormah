@@ -65,13 +65,19 @@ def _preload_local_models() -> None:
     step("Preloading local models")
     info(f"Model cache: {cache_dir}")
 
-    try:
-        from fastembed import TextEmbedding
+    if settings.embedding_provider == "local":
+        try:
+            from fastembed import TextEmbedding
 
-        TextEmbedding(settings.embedding_model, cache_dir=str(cache_dir))
-        ok(f"Embedding model ready: {settings.embedding_model}")
-    except Exception as e:
-        warn(f"Could not preload embedding model {settings.embedding_model}: {e}")
+            TextEmbedding(settings.embedding_model, cache_dir=str(cache_dir))
+            ok(f"Embedding model ready: {settings.embedding_model}")
+        except Exception as e:
+            warn(f"Could not preload embedding model {settings.embedding_model}: {e}")
+    else:
+        info(
+            "Skipping FastEmbed embedding preload for "
+            f"{settings.embedding_provider} model: {settings.embedding_model}"
+        )
 
     if not settings.whisper_reranker_enabled:
         info("Whisper reranker disabled — skipping reranker preload")
