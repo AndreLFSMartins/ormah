@@ -40,12 +40,20 @@ const ALL_EDGE_TYPES: EdgeType[] = [
 const DEFAULT_EDGE_TYPES = new Set<EdgeType>(ALL_EDGE_TYPES);
 
 type PanelId = "settings" | "insights" | "admin" | null;
+type ThemeTransitionState = {
+  theme: GraphTheme;
+  id: number;
+};
+
+const THEME_SWAP_DELAY_MS = 260;
+const THEME_TRANSITION_TOTAL_MS = 820;
 
 export default function App() {
   const [graph, setGraph] = useState<GraphData | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<NodeDetail | null>(null);
   const [activePanel, setActivePanel] = useState<PanelId>(null);
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
+  const [themeTransition, setThemeTransition] = useState<ThemeTransitionState | null>(null);
   const [filters, setFilters] = useState<Filters>({
     tiers: new Set(ALL_TIERS),
     types: new Set(ALL_TYPES),
@@ -59,6 +67,8 @@ export default function App() {
   const [graphAppearance, setGraphAppearance] =
     useState<GraphAppearance>(loadGraphAppearance);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const themeTransitionFrameRef = useRef<number | null>(null);
+  const themeTransitionTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const graphViewRef = useRef<{
     focusNode: (id: string) => void;
     highlightNode: (id: string) => void;
@@ -156,19 +166,69 @@ export default function App() {
     []
   );
 
-  const handleThemeChange = useCallback((theme: GraphTheme) => {
-    setGraphAppearance((appearance) => ({ ...appearance, theme }));
+  const clearThemeTransition = useCallback(() => {
+    if (themeTransitionFrameRef.current !== null) {
+      cancelAnimationFrame(themeTransitionFrameRef.current);
+      themeTransitionFrameRef.current = null;
+    }
+    for (const timer of themeTransitionTimersRef.current) {
+      clearTimeout(timer);
+    }
+    themeTransitionTimersRef.current = [];
+    document.documentElement.removeAttribute("data-theme-transitioning");
   }, []);
+
+  useEffect(() => {
+    return clearThemeTransition;
+  }, [clearThemeTransition]);
+
+  const applyAppearanceWithTransition = useCallback((nextAppearance: GraphAppearance) => {
+    const themeChanged = graphAppearance.theme !== nextAppearance.theme;
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    clearThemeTransition();
+
+    if (!themeChanged || reduceMotion) {
+      setThemeTransition(null);
+      setGraphAppearance(nextAppearance);
+      return;
+    }
+
+    setThemeTransition(null);
+    document.documentElement.setAttribute("data-theme-transitioning", "true");
+    themeTransitionFrameRef.current = requestAnimationFrame(() => {
+      themeTransitionFrameRef.current = null;
+      setThemeTransition({ theme: nextAppearance.theme, id: Date.now() });
+      themeTransitionTimersRef.current = [
+        setTimeout(() => {
+          setGraphAppearance(nextAppearance);
+        }, THEME_SWAP_DELAY_MS),
+        setTimeout(() => {
+          document.documentElement.removeAttribute("data-theme-transitioning");
+          themeTransitionTimersRef.current = [];
+          setThemeTransition(null);
+        }, THEME_TRANSITION_TOTAL_MS),
+      ];
+    });
+  }, [clearThemeTransition, graphAppearance.theme]);
+
+  const handleThemeChange = useCallback((theme: GraphTheme) => {
+    if (graphAppearance.theme === theme) return;
+    applyAppearanceWithTransition({ ...graphAppearance, theme });
+  }, [applyAppearanceWithTransition, graphAppearance]);
+
+  const resetGraphAppearance = useCallback(() => {
+    applyAppearanceWithTransition(DEFAULT_GRAPH_APPEARANCE);
+  }, [applyAppearanceWithTransition]);
 
   const handleTierColorChange = useCallback((tier: Tier, color: string) => {
     setGraphAppearance((appearance) => ({
       ...appearance,
       colors: { ...appearance.colors, [tier]: color },
     }));
-  }, []);
-
-  const resetGraphAppearance = useCallback(() => {
-    setGraphAppearance(DEFAULT_GRAPH_APPEARANCE);
   }, []);
 
   if (!graph) {
@@ -229,6 +289,13 @@ export default function App() {
         onClose={() => setActivePanel(null)}
         onToast={addToast}
       />
+      {themeTransition && (
+        <div
+          key={themeTransition.id}
+          className={`theme-transition theme-transition-${themeTransition.theme}`}
+          aria-hidden="true"
+        />
+      )}
       <ToastContainer toasts={toasts} />
     </>
   );

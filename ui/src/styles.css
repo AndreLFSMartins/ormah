@@ -94,7 +94,10 @@ body {
   font-family: var(--font-sans);
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
-  transition: background var(--transition), color var(--transition);
+}
+
+:root[data-theme-transitioning="true"] *:not(.theme-transition) {
+  transition: none !important;
 }
 
 /* ---- Top Bar ---- */
@@ -1177,6 +1180,77 @@ body {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+/* ---- Theme Transition ---- */
+.theme-transition {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  pointer-events: none;
+  opacity: 0;
+  will-change: opacity, transform;
+}
+
+.theme-transition-light {
+  background:
+    radial-gradient(circle at 50% 36%,
+      rgba(255, 255, 255, 0.98) 0%,
+      rgba(255, 248, 232, 0.92) 34%,
+      rgba(246, 248, 251, 0.76) 64%,
+      rgba(246, 248, 251, 0) 100%);
+  animation: theme-light-reveal 780ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.theme-transition-dark {
+  background:
+    radial-gradient(circle at 50% 36%,
+      rgba(48, 48, 48, 0.5) 0%,
+      rgba(10, 10, 10, 0.92) 54%,
+      rgba(0, 0, 0, 0.98) 100%);
+  animation: theme-dim-reveal 780ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes theme-light-reveal {
+  0% {
+    opacity: 0;
+    transform: scale(1.03);
+  }
+  36% {
+    opacity: 1;
+    transform: scale(1.01);
+  }
+  58% {
+    opacity: 0.78;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+@keyframes theme-dim-reveal {
+  0% {
+    opacity: 0;
+    transform: scale(1.02);
+  }
+  36% {
+    opacity: 1;
+    transform: scale(1.01);
+  }
+  58% {
+    opacity: 0.82;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-transition {
+    display: none;
   }
 }
 
