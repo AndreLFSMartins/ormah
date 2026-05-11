@@ -2,6 +2,7 @@
 
 from unittest.mock import patch
 
+from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.engine.memory_engine import MemoryEngine, _embedding_text, _generate_title
 from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, NodeType, UpdateNodeRequest
 
@@ -149,7 +150,7 @@ def test_whisper_onboarding_nudge(engine):
     with patch.object(
         engine.context_builder,
         "build_whisper_context",
-        return_value="# Ormah whispers\nmaintenance_due",
+        return_value=f"# Ormah whispers\n{MAINTENANCE_DUE_SIGNAL}",
     ):
         text = engine.get_whisper_context("hello")
     assert "onboarding" in text.lower()
@@ -181,12 +182,27 @@ def test_whisper_onboarding_debug_keeps_injected_ids(engine):
     with patch.object(
         engine.context_builder,
         "build_whisper_context",
-        return_value=("whisper text\nmaintenance_due", ["mem-1"]),
+        return_value=(f"whisper text\n{MAINTENANCE_DUE_SIGNAL}", ["mem-1"]),
     ):
         text, injected_ids = engine.get_whisper_context("hello", _return_debug=True)
 
     assert "whisper text" in text
     assert "whisper text\n\n## Ormah" in text
+    assert "maintenance_due" not in text
+    assert "onboarding" in text.lower()
+    assert injected_ids == ["mem-1"]
+
+
+def test_whisper_onboarding_strips_legacy_maintenance_marker(engine):
+    engine.settings.whisper_reranker_enabled = False
+    with patch.object(
+        engine.context_builder,
+        "build_whisper_context",
+        return_value=("whisper text\nmaintenance_due", ["mem-1"]),
+    ):
+        text, injected_ids = engine.get_whisper_context("hello", _return_debug=True)
+
+    assert "whisper text" in text
     assert "maintenance_due" not in text
     assert "onboarding" in text.lower()
     assert injected_ids == ["mem-1"]

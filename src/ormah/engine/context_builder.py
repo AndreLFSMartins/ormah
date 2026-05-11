@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.index.graph import GraphIndex
 
 logger = logging.getLogger(__name__)
@@ -681,7 +682,11 @@ class ContextBuilder:
                         elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
                         due = elapsed.total_seconds() > interval_hours * 3600
                     if due:
-                        result = result + "\nmaintenance_due"
+                        result = (
+                            f"{result}\n{MAINTENANCE_DUE_SIGNAL}"
+                            if result
+                            else MAINTENANCE_DUE_SIGNAL
+                        )
                 except Exception as e:
                     logger.warning("Failed to compute maintenance_due: %s", e)
 
