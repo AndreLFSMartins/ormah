@@ -475,7 +475,8 @@ class TestConfigureCodexHooks:
 
         content = config_path.read_text()
         assert "[features]" in content
-        assert "codex_hooks = true" in content
+        assert "hooks = true" in content
+        assert "codex_hooks" not in content
 
     def test_preserves_existing_features_and_projects(self, tmp_path):
         codex_dir = tmp_path / ".codex"
@@ -496,7 +497,27 @@ class TestConfigureCodexHooks:
         assert 'trust_level = "trusted"' in content
         assert "[features]" in content
         assert "foo = true" in content
-        assert "codex_hooks = true" in content
+        assert "hooks = true" in content
+        assert "codex_hooks" not in content
+
+    def test_removes_deprecated_codex_hooks_feature(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        config_path = codex_dir / "config.toml"
+        config_path.write_text(
+            "[features]\n"
+            "codex_hooks = true\n"
+            "foo = true\n"
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            configure_codex_hooks("/abs/path/ormah")
+
+        content = config_path.read_text()
+        assert "[features]" in content
+        assert "foo = true" in content
+        assert "hooks = true" in content
+        assert "codex_hooks" not in content
 
     def test_merges_with_existing_hooks(self, tmp_path):
         codex_dir = tmp_path / ".codex"

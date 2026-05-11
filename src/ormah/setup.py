@@ -265,7 +265,7 @@ def configure_codex_hooks(ormah_bin: str) -> None:
     }
 
     _merge_json_file(str(hooks_path), {"hooks": hooks})
-    _enable_codex_feature("codex_hooks")
+    _enable_codex_feature("hooks", deprecated_feature_names=("codex_hooks",))
     ok("Codex hooks installed — memories flow before every message")
 
 
@@ -338,12 +338,48 @@ def _upsert_toml_table_key(text: str, table_name: str, key: str, rendered_value:
     return updated
 
 
-def _enable_codex_feature(feature_name: str) -> None:
+def _remove_toml_table_key(text: str, table_name: str, key: str) -> str:
+    """Remove a key from a top-level TOML table."""
+    lines = text.splitlines(keepends=True)
+    header = f"[{table_name}]"
+    start = None
+    end = None
+
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            start = i
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                stripped = lines[j].strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    end = j
+                    break
+            break
+
+    if start is None or end is None:
+        return text
+
+    key_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    block_lines = [
+        line
+        for idx, line in enumerate(lines[start:end])
+        if idx == 0 or not key_pattern.match(line)
+    ]
+    return "".join(lines[:start] + block_lines + lines[end:])
+
+
+def _enable_codex_feature(
+    feature_name: str,
+    *,
+    deprecated_feature_names: tuple[str, ...] = (),
+) -> None:
     """Enable a Codex feature flag in ~/.codex/config.toml."""
     config_path = Path.home() / ".codex" / "config.toml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     existing = config_path.read_text() if config_path.exists() else ""
+    for deprecated_feature_name in deprecated_feature_names:
+        existing = _remove_toml_table_key(existing, "features", deprecated_feature_name)
     updated = _upsert_toml_table_key(existing, "features", feature_name, "true")
     config_path.write_text(updated)
 
