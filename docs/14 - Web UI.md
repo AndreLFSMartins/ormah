@@ -1,6 +1,6 @@
 # Web UI
 
-Verified against the current repository state on 2026-04-07.
+Verified against the current repository state on 2026-05-08.
 
 Ormah includes a small React + TypeScript graph explorer served by FastAPI.
 
@@ -21,7 +21,6 @@ flowchart TB
     APP --> DETAIL[NodeDetail]
     APP --> FILTER[FilterDrawer]
     APP --> SEARCH[SearchResults]
-    APP --> REVIEW[ReviewQueue]
     APP --> INSIGHTS[InsightsPanel]
     APP --> ADMIN[AdminPanel]
 ```
@@ -32,9 +31,23 @@ flowchart TB
 2. graph data is filtered client-side
 3. node selection triggers `/ui/graph/node/{id}`
 4. search uses `/ui/search`
-5. proposals and admin actions use `/agent/*` and `/admin/*`
+5. admin actions use `/admin/*`
+6. graph appearance settings are loaded from browser `localStorage`
 
 ## Implemented Visual Rules
+
+### Appearance settings
+
+The settings drawer includes graph appearance controls:
+
+- dark / light theme
+- core node color
+- working node color
+- archival node color
+- reset to defaults
+
+Settings are browser-local and persist in `localStorage` under `ormah.graphAppearance.v1`.
+They are not written to Ormah server config.
 
 ### Node colors
 
@@ -42,9 +55,9 @@ Implemented:
 
 - self node: teal
 - identity node: darker teal
-- core: gold
-- working: dark gray
-- archival: very dark gray
+- core: configurable, default gold
+- working: configurable, default light gray
+- archival: configurable, default slate gray
 
 ### Edge colors
 
@@ -55,7 +68,7 @@ Currently special-cased:
 - `defines`
 - `evolved_from`
 
-All other edge types currently fall back to a generic dark gray line color.
+All other edge types currently fall back to a theme-aware generic line color.
 
 So docs should not claim dedicated colors for `part_of` and `depends_on` unless the UI is updated to match.
 
@@ -67,7 +80,8 @@ Node size is based on access count:
 24 + log2(access_count + 1) * 6
 ```
 
-bounded to a minimum / maximum size, with the self node forced a bit larger.
+bounded to a minimum / maximum size, scaled by `120%`, with the self node forced a bit larger.
+Labels use the same fixed `120%` display scale.
 
 ### Edge opacity
 
@@ -79,15 +93,16 @@ max(0.2, weight or 0.5)
 
 ## Panels
 
-### Filter drawer
+### Settings drawer
 
-Implemented filters:
+Implemented controls:
 
+- dark / light theme
+- core / working / archival colors
 - tier
 - type
 - space
 - edge type
-- group-by-space toggle
 
 The drawer shows per-filter counts, but there is no separate statistics overview panel rendered there today.
 
