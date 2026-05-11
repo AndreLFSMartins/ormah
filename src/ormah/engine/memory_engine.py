@@ -14,6 +14,10 @@ from typing import Any
 
 from ormah.config import Settings
 from ormah.engine.context_builder import ContextBuilder
+from ormah.engine.maintenance_signal import (
+    MAINTENANCE_DUE_SIGNAL,
+    is_maintenance_due_signal,
+)
 from ormah.engine.tier_manager import TierManager
 from ormah.engine.traversal import (
     format_node_with_neighbors,
@@ -956,21 +960,21 @@ class MemoryEngine:
             ).fetchone()
             last_run = row[0] if row else None
             if not last_run:
-                return "maintenance_due"
+                return MAINTENANCE_DUE_SIGNAL
 
             parsed_last_run = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
             if parsed_last_run.tzinfo is None:
                 parsed_last_run = parsed_last_run.replace(tzinfo=timezone.utc)
             elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
             if elapsed.total_seconds() > interval_hours * 3600:
-                return "maintenance_due"
+                return MAINTENANCE_DUE_SIGNAL
         except Exception as e:
             logger.warning("Failed to compute maintenance_due: %s", e)
         return ""
 
     @staticmethod
     def _strip_maintenance_due_signal(text: str) -> str:
-        lines = [line for line in text.splitlines() if line.strip() != "maintenance_due"]
+        lines = [line for line in text.splitlines() if not is_maintenance_due_signal(line)]
         return "\n".join(lines).rstrip()
 
     def mark_outdated(self, node_id: str, reason: str | None = None) -> str | None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.models.node import CreateNodeRequest, NodeType
 
 
@@ -65,7 +66,7 @@ class TestFindLinkCandidates:
         assert len(pairs) == len(set(pairs)), "Duplicate pairs returned"
 
     def test_already_checked_pairs_excluded(self, engine):
-        ids = _seed_similar_nodes(engine, 2)
+        _seed_similar_nodes(engine, 2)
         from ormah.background.auto_linker import _apply_edge, _find_link_candidates
 
         engine.settings.auto_link_similarity_threshold = 0.0
@@ -270,4 +271,5 @@ class TestWhisperSignal:
         engine.db.conn.execute("DELETE FROM meta WHERE key = 'last_maintenance_run'")
         engine.db.conn.commit()
         text = engine.get_whisper_context(prompt="how does Python indexing work")
-        assert "maintenance_due" in text
+        assert MAINTENANCE_DUE_SIGNAL in text
+        assert "continue the conversation without blocking the user" in text
