@@ -186,7 +186,7 @@ warn "Setup will preload the embedding and whisper reranker models into ~/.local
 if $RUN_SETUP; then
     if $IS_UPGRADE; then
         step "Reapplying integrations"
-        info "Skipping interactive questions — updating hooks and MCP config"
+        info "Skipping interactive questions — updating hooks, MCP config, and restarting the server"
         echo ""
         ormah setup --update
     else

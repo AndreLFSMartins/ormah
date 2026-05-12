@@ -19,6 +19,7 @@ from ormah.config import settings
 from ormah.console import info, ok, play_finale, step, warn
 from ormah.embeddings.cache import get_fastembed_cache_dir, get_model_cache_dirname
 from ormah.server_manager import (
+    _stop_running_server,
     get_ormah_bin_path,
     install_autostart,
     is_server_running,
@@ -1633,8 +1634,22 @@ def run_setup(
     # 4.5 Preload local models into Ormah's shared model cache
     _preload_local_models()
 
-    # 5. Start server + install auto-start
-    if is_server_running():
+    # 5. Start server + install auto-start. During updates, restart an existing
+    # daemon so newly installed backend routes match the refreshed UI assets.
+    if update and is_server_running():
+        step("Restarting server")
+        stop_result = _stop_running_server()
+        if stop_result.failed:
+            warn("Existing server did not stop cleanly; attempting restart anyway")
+        install_autostart(ormah_bin, wrapper_path=str(wrapper_path))
+        ok("Updated auto-start (launches on login)")
+
+        if wait_for_server(show_progress=True):
+            server_ok = True
+        else:
+            _diagnose_server_failure()
+            server_ok = False
+    elif is_server_running():
         ok("Server already running")
         server_ok = True
     else:

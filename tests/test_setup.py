@@ -621,6 +621,40 @@ class TestRunSetup:
         mock_codex_agents.assert_not_called()
         mock_claude_desktop.assert_not_called()
 
+    def test_update_restarts_existing_server(self, tmp_path, capsys):
+        from ormah.server_manager import _StopServerResult
+
+        wrapper = tmp_path / "ormah-server"
+        with ExitStack() as stack:
+            stack.enter_context(patch("ormah.setup.get_ormah_bin_path", return_value="/abs/path/ormah"))
+            stack.enter_context(patch("ormah.setup.shutil.which", return_value=None))
+            stack.enter_context(patch("ormah.setup._read_env_file", return_value={}))
+            stack.enter_context(patch("ormah.setup.generate_server_wrapper", return_value=wrapper))
+            stack.enter_context(patch("ormah.setup._preload_local_models"))
+            stack.enter_context(patch("ormah.setup.is_server_running", return_value=True))
+            mock_stop = stack.enter_context(
+                patch(
+                    "ormah.setup._stop_running_server",
+                    return_value=_StopServerResult(found=True, stopped=True),
+                )
+            )
+            mock_install = stack.enter_context(patch("ormah.setup.install_autostart"))
+            mock_wait = stack.enter_context(patch("ormah.setup.wait_for_server", return_value=True))
+            stack.enter_context(patch("ormah.setup.backfill_transcripts"))
+            stack.enter_context(patch("ormah.setup.play_finale"))
+            stack.enter_context(patch("ormah.setup._print_setup_summary"))
+            stack.enter_context(patch("ormah.setup.webbrowser.open"))
+
+            run_setup(update=True, skip_client_setup=True)
+
+        mock_stop.assert_called_once()
+        mock_install.assert_called_once_with("/abs/path/ormah", wrapper_path=str(wrapper))
+        mock_wait.assert_called_once_with(show_progress=True)
+
+        out = capsys.readouterr().out
+        assert "Restarting server" in out
+        assert "Server already running" not in out
+
 
 class TestClaudePluginManifest:
     def test_plugin_manifest_version_matches_project_version(self):
