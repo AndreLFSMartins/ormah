@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  createBackup,
+  fetchBackupStatus,
   fetchAdminTasks,
   runAdminTask,
   runAllTasks,
@@ -7,8 +9,9 @@ import {
   resumeTask,
   pauseAllTasks,
   resumeAllTasks,
+  updateBackupSettings,
 } from "../api";
-import type { AdminTask } from "../api";
+import type { AdminTask, BackupStatus } from "../api";
 
 interface Props {
   open: boolean;
@@ -18,15 +21,77 @@ interface Props {
 
 export default function AdminPanel({ open, onClose, onToast }: Props) {
   const [tasks, setTasks] = useState<AdminTask[]>([]);
+  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
+  const [backupStatusLoaded, setBackupStatusLoaded] = useState(false);
+  const [backupSettingsOpen, setBackupSettingsOpen] = useState(false);
+  const [backupDirInput, setBackupDirInput] = useState("");
+  const [retentionInput, setRetentionInput] = useState("10");
   const [running, setRunning] = useState<string | null>(null);
   const [runningAll, setRunningAll] = useState(false);
+  const [creatingBackup, setCreatingBackup] = useState(false);
+  const [savingBackupSettings, setSavingBackupSettings] = useState(false);
   const [toggling, setToggling] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<{ task: string; ok: boolean } | null>(null);
 
   useEffect(() => {
     if (!open) return;
     fetchAdminTasks().then((data) => setTasks(data.tasks)).catch(() => {});
+    setBackupStatusLoaded(false);
+    fetchBackupStatus()
+      .then(setBackupStatus)
+      .catch(() => setBackupStatus(null))
+      .finally(() => setBackupStatusLoaded(true));
   }, [open]);
+
+  useEffect(() => {
+    if (!backupStatus) return;
+    setBackupDirInput(backupStatus.backup_dir);
+    setRetentionInput(String(backupStatus.retention_count));
+  }, [backupStatus]);
+
+  const refreshBackupStatus = useCallback(() => {
+    fetchBackupStatus()
+      .then(setBackupStatus)
+      .catch(() => setBackupStatus(null))
+      .finally(() => setBackupStatusLoaded(true));
+  }, []);
+
+  const handleCreateBackup = useCallback(async () => {
+    setCreatingBackup(true);
+    try {
+      const result = await createBackup();
+      setBackupStatus(result.backup_status);
+      onToast(`Backup created: ${result.backup.name}`, "success");
+    } catch {
+      onToast("Backup failed", "error");
+      refreshBackupStatus();
+    } finally {
+      setCreatingBackup(false);
+    }
+  }, [onToast, refreshBackupStatus]);
+
+  const handleSaveBackupSettings = useCallback(async () => {
+    const retentionCount = Number.parseInt(retentionInput, 10);
+    if (!backupDirInput.trim() || Number.isNaN(retentionCount) || retentionCount < 1) {
+      onToast("Backup settings are invalid", "error");
+      return;
+    }
+
+    setSavingBackupSettings(true);
+    try {
+      const result = await updateBackupSettings({
+        backup_dir: backupDirInput.trim(),
+        retention_count: retentionCount,
+      });
+      setBackupStatus(result.backup_status);
+      onToast("Backup settings saved", "success");
+    } catch {
+      onToast("Failed to save backup settings", "error");
+      refreshBackupStatus();
+    } finally {
+      setSavingBackupSettings(false);
+    }
+  }, [backupDirInput, retentionInput, onToast, refreshBackupStatus]);
 
   const handleRun = useCallback(async (taskId: string) => {
     setRunning(taskId);
@@ -100,14 +165,87 @@ export default function AdminPanel({ open, onClose, onToast }: Props) {
     }
   }, [onToast, refreshTasks, allPaused]);
 
-  const busy = running !== null || runningAll;
+  const busy = running !== null || runningAll || creatingBackup || savingBackupSettings;
 
   return (
     <div className={`side-panel admin-panel ${open ? "open" : ""}`}>
       <div className="side-panel-header">
-        <div className="review-title">background tasks</div>
+        <div className="review-title">admin</div>
         <button className="node-detail-close" onClick={onClose}>×</button>
       </div>
+
+      <div className="admin-section">
+        <div className="admin-section-heading admin-backup-heading">
+          <span>local backups</span>
+          {backupStatus && (
+            <div className="admin-backup-heading-meta">
+              <span className="admin-backup-automatic">{backupAutomaticLabel(backupStatus)}</span>
+              <button
+                className="admin-backup-settings-toggle"
+                type="button"
+                aria-label="backup settings"
+                aria-expanded={backupSettingsOpen}
+                title="backup settings"
+                onClick={() => setBackupSettingsOpen((value) => !value)}
+              />
+            </div>
+          )}
+        </div>
+        {backupStatus ? (
+          <div className="admin-backup-card">
+            <div className="admin-backup-row">
+              <span>last</span>
+              <strong>
+                {backupStatus.latest ? formatDate(backupStatus.latest.created_at) : "none"}
+              </strong>
+            </div>
+            {!backupStatus.has_backupable_memory && (
+              <div className="admin-backup-note">no memory nodes to auto-backup yet</div>
+            )}
+            <button
+              className="review-btn approve admin-backup-button"
+              disabled={busy}
+              onClick={handleCreateBackup}
+            >
+              {creatingBackup ? "creating..." : "create backup"}
+            </button>
+            {backupSettingsOpen && (
+              <div className="admin-backup-settings">
+                <label className="admin-backup-field">
+                  <span>folder</span>
+                  <input
+                    value={backupDirInput}
+                    onChange={(event) => setBackupDirInput(event.target.value)}
+                  />
+                </label>
+                <label className="admin-backup-field compact">
+                  <span>keep last</span>
+                  <input
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    type="text"
+                    value={retentionInput}
+                    onChange={(event) => setRetentionInput(event.target.value)}
+                  />
+                </label>
+                <button
+                  className="review-btn approve admin-backup-save"
+                  disabled={busy}
+                  onClick={handleSaveBackupSettings}
+                >
+                  {savingBackupSettings ? "saving..." : "save settings"}
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="review-empty">
+            {backupStatusLoaded ? "backup status unavailable" : "loading backup status..."}
+          </div>
+        )}
+      </div>
+
+      <div className="admin-section-heading">background tasks</div>
       <div style={{ marginBottom: 14, display: "flex", gap: 8 }}>
         <button
           className="review-btn approve"
@@ -173,4 +311,18 @@ export default function AdminPanel({ open, onClose, onToast }: Props) {
       ))}
     </div>
   );
+}
+
+function formatDate(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(parsed);
+}
+
+function backupAutomaticLabel(status: BackupStatus): string {
+  if (!status.enabled) return "automatic backups off";
+  return `automatic backups every ${status.interval_hours}h`;
 }

@@ -860,6 +860,155 @@ body {
 }
 
 /* ---- Admin Panel ---- */
+.admin-section {
+  margin-bottom: 18px;
+}
+
+.admin-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 2px 0 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.admin-backup-heading {
+  align-items: flex-start;
+}
+
+.admin-backup-heading-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  text-align: right;
+}
+
+.admin-backup-automatic {
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.2;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.admin-backup-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.admin-backup-row {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.admin-backup-row span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.admin-backup-row strong {
+  min-width: 0;
+  color: var(--text-bright);
+  font-weight: 500;
+}
+
+.admin-backup-note {
+  margin: 2px 0 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.admin-backup-button {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.admin-backup-settings-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.admin-backup-settings-toggle::before {
+  content: "\2699";
+  font-size: 14px;
+  line-height: 1;
+}
+
+.admin-backup-settings-toggle:hover,
+.admin-backup-settings-toggle[aria-expanded="true"] {
+  border-color: var(--border-light);
+  color: var(--text);
+}
+
+.admin-backup-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.admin-backup-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.admin-backup-field span {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.admin-backup-field input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  outline: none;
+}
+
+.admin-backup-field input:focus {
+  border-color: var(--accent);
+}
+
+.admin-backup-field.compact input {
+  text-align: right;
+}
+
+.admin-backup-save {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
 .admin-task-card {
   padding: 12px;
   border: 1px solid var(--border);

@@ -57,8 +57,49 @@ export interface AdminTask {
   paused: boolean;
 }
 
+export interface BackupInfo {
+  name: string;
+  path: string;
+  created_at: string;
+  node_count: number;
+  deleted_count: number;
+  size_bytes: number;
+}
+
+export interface BackupStatus {
+  enabled: boolean;
+  backup_dir: string;
+  interval_hours: number;
+  retention_count: number;
+  has_backupable_memory: boolean;
+  due: boolean;
+  latest: BackupInfo | null;
+}
+
 export function fetchAdminTasks(): Promise<{ tasks: AdminTask[] }> {
   return get("/admin/tasks");
+}
+
+export function fetchBackupStatus(): Promise<BackupStatus> {
+  return get("/admin/backup");
+}
+
+export function createBackup(): Promise<{
+  status: string;
+  backup: BackupInfo;
+  backup_status: BackupStatus;
+}> {
+  return post("/admin/backup/create");
+}
+
+export function updateBackupSettings(settings: {
+  backup_dir: string;
+  retention_count: number;
+}): Promise<{
+  status: string;
+  backup_status: BackupStatus;
+}> {
+  return post("/admin/backup/settings", settings);
 }
 
 export function runAdminTask(taskId: string): Promise<{ status: string; task: string }> {

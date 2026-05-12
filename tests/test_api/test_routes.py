@@ -17,7 +17,7 @@ from ormah.engine.memory_engine import MemoryEngine
 
 @pytest.fixture
 def client(tmp_memory_dir):
-    settings = Settings(memory_dir=tmp_memory_dir)
+    settings = Settings(memory_dir=tmp_memory_dir, backup_dir=tmp_memory_dir.parent / "backups")
     engine = MemoryEngine(settings)
     engine.startup()
 
@@ -70,6 +70,60 @@ def test_stats(client):
     resp = client.get("/admin/stats")
     assert resp.status_code == 200
     assert "total_nodes" in resp.json()
+
+
+def test_backup_status_empty_store(client):
+    resp = client.get("/admin/backup")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["enabled"] is True
+    assert data["latest"] is None
+    assert data["has_backupable_memory"] is False
+    assert data["due"] is False
+    assert data["backup_dir"].endswith("backups")
+
+
+def test_backup_create_returns_updated_status(client):
+    resp = client.post("/admin/backup/create")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "created"
+    assert data["backup"]["name"].startswith("memory_")
+    assert data["backup_status"]["latest"]["name"] == data["backup"]["name"]
+
+
+def test_backup_settings_updates_runtime_config(client, tmp_path, monkeypatch):
+    persisted = {}
+
+    def fake_persist(backup_dir, retention_count):
+        persisted["backup_dir"] = backup_dir
+        persisted["retention_count"] = retention_count
+
+    monkeypatch.setattr("ormah.api.routes_admin._persist_backup_settings", fake_persist)
+
+    target_dir = tmp_path / "chosen-backups"
+    resp = client.post(
+        "/admin/backup/settings",
+        json={"backup_dir": str(target_dir), "retention_count": 4},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "updated"
+    assert data["backup_status"]["backup_dir"] == str(target_dir.resolve())
+    assert data["backup_status"]["retention_count"] == 4
+    assert client.app.state.engine.settings.backup_dir == target_dir.resolve()
+    assert client.app.state.engine.settings.backup_retention_count == 4
+    assert persisted == {"backup_dir": target_dir.resolve(), "retention_count": 4}
+
+
+def test_backup_settings_rejects_zero_retention(client):
+    resp = client.post(
+        "/admin/backup/settings",
+        json={"backup_dir": "/tmp/ormah-backups", "retention_count": 0},
+    )
+
+    assert resp.status_code == 422
 
 
 def test_search(client):

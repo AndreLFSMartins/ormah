@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+class BackupSettingsUpdate(BaseModel):
+    backup_dir: str = Field(min_length=1)
+    retention_count: int = Field(ge=1)
+
 
 # Map of task IDs to their runner functions (module path, function name)
 _TASK_RUNNERS = {
@@ -16,6 +25,7 @@ _TASK_RUNNERS = {
     "hippocampus": ("ormah.background.hippocampus", "run_hippocampus_scan"),
     "importance_scorer": ("ormah.background.importance_scorer", "run_importance_scoring"),
     "consolidator": ("ormah.background.consolidator", "run_consolidation"),
+    "memory_backup": ("ormah.backup", "run_auto_backup"),
 }
 
 _TASK_DESCRIPTIONS = {
@@ -28,6 +38,7 @@ _TASK_DESCRIPTIONS = {
     "consolidator": "Merges or summarizes redundant working-tier memories into consolidated entries.",
     "decay_manager": "Applies time-based decay to memory importance, demoting stale unused memories.",
     "hippocampus": "Scans for structural patterns and promotes frequently accessed working memories to core.",
+    "memory_backup": "Creates a local backup of memory source files when one is due.",
 }
 
 # Order for sleep cycle (full maintenance pass)
@@ -40,7 +51,50 @@ _SLEEP_CYCLE_ORDER = [
     "auto_cluster",
     "consolidator",
     "decay_manager",
+    "memory_backup",
 ]
+
+
+def _backup_to_dict(backup) -> dict:
+    return {
+        "name": backup.name,
+        "path": str(backup.path),
+        "created_at": backup.created_at.isoformat(),
+        "node_count": backup.node_count,
+        "deleted_count": backup.deleted_count,
+        "size_bytes": backup.size_bytes,
+    }
+
+
+def _backup_status_payload(settings, service) -> dict:
+    latest = service.latest()
+    has_memory = service.has_backupable_memory()
+    due = has_memory and service.backup_due(interval_hours=settings.backup_interval_hours)
+    return {
+        "enabled": settings.backup_enabled,
+        "backup_dir": str(settings.backup_dir),
+        "interval_hours": settings.backup_interval_hours,
+        "retention_count": settings.backup_retention_count,
+        "has_backupable_memory": has_memory,
+        "due": due,
+        "latest": _backup_to_dict(latest) if latest else None,
+    }
+
+
+def _backup_service_from_request(request: Request):
+    from ormah.backup import service_from_settings
+
+    engine = request.app.state.engine
+    return engine.settings, service_from_settings(engine.settings)
+
+
+def _persist_backup_settings(backup_dir: Path, retention_count: int) -> None:
+    from ormah.setup import _read_env_file, _write_env_file
+
+    env = _read_env_file()
+    env["ORMAH_BACKUP_DIR"] = str(backup_dir)
+    env["ORMAH_BACKUP_RETENTION_COUNT"] = str(retention_count)
+    _write_env_file(env)
 
 
 @router.get("/health")
@@ -67,6 +121,51 @@ async def maintenance_status(request: Request):
     if manager is None:
         return {"status": "idle"}
     return manager.get_status()
+
+
+@router.get("/backup")
+async def backup_status(request: Request):
+    """Return local backup configuration and latest backup metadata."""
+    settings, service = _backup_service_from_request(request)
+    return _backup_status_payload(settings, service)
+
+
+@router.post("/backup/create")
+async def create_backup(request: Request):
+    """Create a manual local backup of source-of-truth memory files."""
+    from ormah.backup import BackupError
+
+    settings, service = _backup_service_from_request(request)
+    try:
+        backup = service.create(reason="manual-ui")
+    except BackupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": "created",
+        "backup": _backup_to_dict(backup),
+        "backup_status": _backup_status_payload(settings, service),
+    }
+
+
+@router.post("/backup/settings")
+async def update_backup_settings(body: BackupSettingsUpdate, request: Request):
+    """Update local backup settings for this server and persist them to config."""
+    from ormah.backup import service_from_settings
+
+    settings = request.app.state.engine.settings
+    try:
+        backup_dir = Path(body.backup_dir).expanduser().resolve()
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid backup directory: {exc}") from exc
+
+    settings.backup_dir = backup_dir
+    settings.backup_retention_count = body.retention_count
+    _persist_backup_settings(backup_dir, body.retention_count)
+    service = service_from_settings(settings)
+    return {
+        "status": "updated",
+        "backup_status": _backup_status_payload(settings, service),
+    }
 
 
 @router.post("/rebuild")
