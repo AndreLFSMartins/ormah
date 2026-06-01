@@ -134,6 +134,32 @@ function spaceColor(space: string | null): string {
   return `hsl(${h}, 62%, 60%)`;
 }
 
+// Galaxy mode encodes two independent channels on a node:
+//   fill   = space colour (the project a memory belongs to)
+//   shape  = tier (archived = hollow ring, core = solid + white rim, working = solid)
+// Tier is shape-only (never a hue) so it never collides with the space colour,
+// regardless of how a user customises their tier palette.
+// self / identity keep the space fill (so the project still reads) but take a
+// teal ring that overrides the tier rim — it marks "this is who I am".
+const TIER_RIM = "#ffffff";
+const IDENTITY_RIM = "#6ba89a";
+const SELF_RIM = "#8fd4c4";
+function galaxyNodeStyle(
+  space: string | null,
+  tier: string,
+  background: string,
+  selfRole: string,
+): { bg: string; border: string; borderWidth: number } {
+  const sc = spaceColor(space);
+  const bg = tier === "archival" ? background : sc;
+  // self / identity ring wins over the tier rim.
+  if (selfRole === "self") return { bg, border: SELF_RIM, borderWidth: 3 };
+  if (selfRole === "identity") return { bg, border: IDENTITY_RIM, borderWidth: 2.5 };
+  if (tier === "archival") return { bg, border: sc, borderWidth: 2 };
+  if (tier === "core") return { bg, border: TIER_RIM, borderWidth: 2 };
+  return { bg, border: sc, borderWidth: 0 }; // working: solid, no rim
+}
+
 function buildStyles(appearance: GraphAppearance) {
   const tokens = GRAPH_THEME_TOKENS[appearance.theme];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -161,12 +187,6 @@ function buildStyles(appearance: GraphAppearance) {
         "text-max-width": `${Math.round(120 * GRAPH_DISPLAY_SCALE)}px`,
         "text-overflow-wrap": "anywhere" as const,
         "overlay-opacity": 0,
-      } as cytoscape.Css.Node,
-    },
-    {
-      selector: "node[tier = 'archival'][selfRole = '']",
-      style: {
-        "border-style": "dashed" as const,
       } as cytoscape.Css.Node,
     },
     {
@@ -413,6 +433,9 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
       const nodeElements = nodes.map((n) => {
         const sr = selfRole(n.id);
         const size = degreeNodeSize(degreeMap.get(n.id) ?? 0, sr);
+        const gs = clusterBySpace
+          ? galaxyNodeStyle(n.space || null, n.tier, themeTokens.background, sr)
+          : null;
         return {
           data: {
             id: n.id,
@@ -422,12 +445,9 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
             type: n.type,
             accessCount: n.access_count,
             selfRole: sr,
-            bgColor:
-              clusterBySpace && sr === ""
-                ? spaceColor(n.space || null)
-                : tierColor(n.tier, sr, appearance),
-            borderColor: tierBorderColor(n.tier, sr, appearance),
-            borderWidth: sr === "self" ? 3 : n.tier === "archival" ? 1 : 2,
+            bgColor: gs ? gs.bg : tierColor(n.tier, sr, appearance),
+            borderColor: gs ? gs.border : tierBorderColor(n.tier, sr, appearance),
+            borderWidth: gs ? gs.borderWidth : sr === "self" ? 3 : n.tier === "archival" ? 1 : 2,
             nodeSize: size,
             labelColor: themeTokens.label,
             labelOutlineColor: themeTokens.background,
@@ -840,11 +860,26 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
 
       const themeTokens = GRAPH_THEME_TOKENS[appearance.theme];
       cy.style(buildStyles(appearance));
-      cy.nodes().forEach((node) => {
+      cy.nodes().not(".hub").forEach((node) => {
         const tier = node.data("tier") as string;
         const selfRole = node.data("selfRole") as string;
-        node.data("bgColor", tierColor(tier, selfRole, appearance));
-        node.data("borderColor", tierBorderColor(tier, selfRole, appearance));
+        // In galaxy mode the fill is the space colour and the tier is encoded
+        // by shape (hollow / rim), so re-derive it here too — otherwise a theme
+        // or tier-palette change would clobber the space colours with tier hues.
+        if (clusterBySpace) {
+          const gs = galaxyNodeStyle(
+            node.data("space") || null,
+            tier,
+            themeTokens.background,
+            selfRole,
+          );
+          node.data("bgColor", gs.bg);
+          node.data("borderColor", gs.border);
+          node.data("borderWidth", gs.borderWidth);
+        } else {
+          node.data("bgColor", tierColor(tier, selfRole, appearance));
+          node.data("borderColor", tierBorderColor(tier, selfRole, appearance));
+        }
         node.data("labelColor", themeTokens.label);
         node.data("labelOutlineColor", themeTokens.background);
       });
@@ -874,6 +909,10 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
         cy.elements().not(".hub").not(".hub-edge").addClass("dim");
         if (legendFocus.kind === "space") {
           const m = cy.nodes().filter((n) => n.data("space") === legendFocus.val);
+          m.removeClass("dim").addClass("hot");
+          m.connectedEdges().removeClass("dim");
+        } else if (legendFocus.kind === "tier") {
+          const m = cy.nodes().not(".hub").filter((n) => n.data("tier") === legendFocus.val);
           m.removeClass("dim").addClass("hot");
           m.connectedEdges().removeClass("dim");
         } else {
@@ -908,6 +947,18 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
         .sort((a, b) => b[1] - a[1])
         .map(([name, count]) => ({ name: name || "(sem space)", count, c: spaceColor(name || null) }));
     }, [nodes]);
+    // Tier is shown as a shape, not a colour: the swatch mirrors the node it
+    // describes — hollow for archived, solid with a rim for core, plain solid
+    // for working. A neutral grey fill keeps the swatch space-agnostic.
+    const tierLegend = useMemo(() => {
+      const counts: Record<string, number> = { core: 0, working: 0, archival: 0 };
+      for (const n of nodes) counts[n.tier] = (counts[n.tier] ?? 0) + 1;
+      return [
+        { val: "core", label: "core", count: counts.core, hollow: false, rim: true },
+        { val: "working", label: "working", count: counts.working, hollow: false, rim: false },
+        { val: "archival", label: "archival", count: counts.archival, hollow: true, rim: false },
+      ];
+    }, [nodes]);
 
     return (
       <div style={{ width: "100%", height: "100%", position: "relative" }}>
@@ -929,6 +980,9 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
               position: "absolute",
               right: 12,
               bottom: 12,
+              // Above the cytoscape canvas — without this the canvas swallows
+              // legend clicks (elementFromPoint hits the canvas, not the row).
+              zIndex: 10,
               maxHeight: "48%",
               overflowY: "auto",
               background: "rgba(12,14,18,0.85)",
@@ -942,8 +996,52 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
               maxWidth: 230,
             }}
           >
-            <div style={{ opacity: 0.5, fontSize: 9, letterSpacing: 1, marginBottom: 4 }}>
-              LIGAÇÕES
+            {clusterBySpace && (
+              <>
+                <div style={{ opacity: 0.5, fontSize: 9, letterSpacing: 1, marginBottom: 4 }}>
+                  TIERS
+                </div>
+                {tierLegend.map((tl) => (
+                  <LegendRow
+                    key={tl.val}
+                    active={!legendFocus || (legendFocus.kind === "tier" && legendFocus.val === tl.val)}
+                    onClick={() =>
+                      setLegendFocus((f) =>
+                        f && f.kind === "tier" && f.val === tl.val ? null : { kind: "tier", val: tl.val },
+                      )
+                    }
+                  >
+                    <span
+                      style={{
+                        width: 11,
+                        height: 11,
+                        borderRadius: "50%",
+                        boxSizing: "border-box",
+                        background: tl.hollow ? "transparent" : "#9aa4b2",
+                        border: tl.hollow
+                          ? "2px solid #9aa4b2"
+                          : tl.rim
+                            ? `2px solid ${TIER_RIM}`
+                            : "none",
+                        display: "inline-block",
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span style={{ flex: 1 }}>{tl.label}</span>
+                    <span style={{ opacity: 0.4 }}>{tl.count}</span>
+                  </LegendRow>
+                ))}
+              </>
+            )}
+            <div
+              style={{
+                opacity: 0.5,
+                fontSize: 9,
+                letterSpacing: 1,
+                margin: clusterBySpace ? "9px 0 4px" : "0 0 4px",
+              }}
+            >
+              LINKS
             </div>
             {edgeLegend.map((e) => (
               <LegendRow
