@@ -127,11 +127,18 @@ function nodeLabel(n: MemoryNode): string {
 }
 
 // Deterministic hue per space so each galaxy reads as a distinct colour.
+// Cached: it's called once per node on build and again on every appearance
+// change (~2 × node count), but the hue only depends on the space name.
+const spaceColorCache = new Map<string, string>();
 function spaceColor(space: string | null): string {
   const key = space ?? "__none__";
+  const cached = spaceColorCache.get(key);
+  if (cached) return cached;
   let h = 0;
   for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 360;
-  return `hsl(${h}, 62%, 60%)`;
+  const color = `hsl(${h}, 62%, 60%)`;
+  spaceColorCache.set(key, color);
+  return color;
 }
 
 // Galaxy mode encodes two independent channels on a node:
@@ -301,6 +308,12 @@ const LEGEND_ROW_STYLE: CSSProperties = {
   gap: 7,
   cursor: "pointer",
   userSelect: "none",
+};
+
+const LEGEND_SECTION_TITLE_STYLE: CSSProperties = {
+  opacity: 0.5,
+  fontSize: 9,
+  letterSpacing: 1,
 };
 
 // One clickable legend row: swatch + content as children, dimmed when another
@@ -998,7 +1011,7 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
           >
             {clusterBySpace && (
               <>
-                <div style={{ opacity: 0.5, fontSize: 9, letterSpacing: 1, marginBottom: 4 }}>
+                <div style={{ ...LEGEND_SECTION_TITLE_STYLE, marginBottom: 4 }}>
                   TIERS
                 </div>
                 {tierLegend.map((tl) => (
@@ -1035,9 +1048,7 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
             )}
             <div
               style={{
-                opacity: 0.5,
-                fontSize: 9,
-                letterSpacing: 1,
+                ...LEGEND_SECTION_TITLE_STYLE,
                 margin: clusterBySpace ? "9px 0 4px" : "0 0 4px",
               }}
             >
@@ -1059,7 +1070,7 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
             ))}
             {clusterBySpace && (
               <>
-                <div style={{ opacity: 0.5, fontSize: 9, letterSpacing: 1, margin: "9px 0 4px" }}>
+                <div style={{ ...LEGEND_SECTION_TITLE_STYLE, margin: "9px 0 4px" }}>
                   SPACES
                 </div>
                 {spaceLegend.map((sp) => {
