@@ -2,11 +2,15 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type ReactNode,
 } from "react";
 import cytoscape, { type Core } from "cytoscape";
 import cola from "cytoscape-cola";
+import fcose from "cytoscape-fcose";
 import {
   GRAPH_DISPLAY_SCALE,
   type GraphAppearance,
@@ -15,6 +19,7 @@ import {
 import type { Edge, MemoryNode, Tier } from "../types";
 
 try { cytoscape.use(cola); } catch (_) { /* already registered */ }
+try { cytoscape.use(fcose); } catch (_) { /* already registered */ }
 
 interface Props {
   nodes: MemoryNode[];
@@ -76,14 +81,11 @@ function tierBorderColor(tier: string, selfRole: string, appearance: GraphAppear
   return appearance.colors[tier as Tier] ?? appearance.colors.working;
 }
 
-function nodeSize(accessCount: number): number {
-  const baseSize = Math.min(56, Math.max(24, 24 + Math.log2(accessCount + 1) * 6));
-  return Math.round(baseSize * GRAPH_DISPLAY_SCALE);
-}
-
-function displayNodeSize(accessCount: number, selfRole: string): number {
-  const size = nodeSize(accessCount);
-  return selfRole === "self" ? Math.max(Math.round(36 * GRAPH_DISPLAY_SCALE), size) : size;
+function degreeNodeSize(degree: number, selfRole: string): number {
+  const base = Math.min(70, Math.max(18, 18 + Math.sqrt(degree) * 7));
+  const s = Math.round(base * GRAPH_DISPLAY_SCALE);
+  if (selfRole === "self") return Math.max(Math.round(44 * GRAPH_DISPLAY_SCALE), s);
+  return s;
 }
 
 function edgeColor(edgeType: string, theme: GraphTheme): string {
@@ -124,6 +126,14 @@ function nodeLabel(n: MemoryNode): string {
   return n.id.split("-")[0];
 }
 
+// Deterministic hue per space so each galaxy reads as a distinct colour.
+function spaceColor(space: string | null): string {
+  const key = space ?? "__none__";
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 360;
+  return `hsl(${h}, 62%, 60%)`;
+}
+
 function buildStyles(appearance: GraphAppearance) {
   const tokens = GRAPH_THEME_TOKENS[appearance.theme];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -137,7 +147,7 @@ function buildStyles(appearance: GraphAppearance) {
         "border-style": "solid",
         width: "data(nodeSize)",
         height: "data(nodeSize)",
-        label: "data(labelText)",
+        label: "",
         "font-size": `${Math.round(12 * GRAPH_DISPLAY_SCALE)}px`,
         color: "data(labelColor)",
         "text-outline-color": "data(labelOutlineColor)",
@@ -165,13 +175,15 @@ function buildStyles(appearance: GraphAppearance) {
         "border-color": tokens.accent,
         "border-width": 3,
         "overlay-opacity": 0,
+        label: "data(labelText)",
+        "min-zoomed-font-size": 0,
       } as cytoscape.Css.Node,
     },
     {
       selector: "edge",
       style: {
         "line-color": "data(lineColor)",
-        width: 1,
+        width: 1.8,
         opacity: "data(edgeOpacity)" as unknown as number,
         "curve-style": "bezier",
       } as cytoscape.Css.Edge,
@@ -183,11 +195,58 @@ function buildStyles(appearance: GraphAppearance) {
       } as cytoscape.Css.Edge,
     },
     {
+      // Cross-space edges = links between galaxies. Kept thin but a touch
+      // brighter than intra edges; the *density* of many thin links reads as
+      // a bridge between galaxies without becoming spaghetti.
+      selector: "edge.cross-space",
+      style: {
+        // Individual cross-space edges are hidden; the aggregate galaxy-link
+        // line represents the whole bundle between two galaxies.
+        "line-opacity": 0,
+        events: "no",
+      } as cytoscape.Css.Edge,
+    },
+    {
+      // Aggregate galaxy-to-galaxy link: one line per connected space pair,
+      // width/brightness scaled by how many real edges connect them.
+      selector: "edge.galaxy-link",
+      style: {
+        width: "data(linkW)",
+        "line-color": tokens.accent,
+        "line-opacity": "data(linkO)" as unknown as number,
+        "curve-style": "straight",
+        "z-index": 4,
+        events: "no",
+      } as cytoscape.Css.Edge,
+    },
+    {
+      selector: ".dim",
+      style: { opacity: 0.06 } as cytoscape.Css.Node,
+    },
+    {
+      // Galaxy links carry a data-mapped line-opacity that survives the
+      // generic .dim opacity, so a dimmed gold line still reads as a strong
+      // stroke. Force it down explicitly when dimmed.
+      selector: "edge.galaxy-link.dim",
+      style: { "line-opacity": 0.04, opacity: 0.04 } as cytoscape.Css.Edge,
+    },
+    {
+      selector: "edge.hot",
+      style: { width: 4, opacity: 1, "z-index": 30 } as cytoscape.Css.Edge,
+    },
+    {
+      selector: "node.hot",
+      style: { "border-color": tokens.accent, "border-width": 4, "z-index": 30 } as cytoscape.Css.Node,
+    },
+    {
       selector: "node.glow",
       style: {
         "border-color": tokens.accent,
         "border-width": 3,
         color: tokens.labelGlow,
+        label: "data(labelText)",
+        "min-zoomed-font-size": 0,
+        "z-index": 20,
         "transition-property": "border-color, border-width" as any,
         "transition-duration": "100ms" as unknown as number,
       } as cytoscape.Css.Node,
@@ -216,52 +275,30 @@ function buildStyles(appearance: GraphAppearance) {
   return styles;
 }
 
-/**
- * Compute initial positions that place same-space nodes near each other.
- * Each space gets a centroid on a large circle; nodes scatter within.
- */
-function computeClusteredPositions(nodes: MemoryNode[]): Map<string, { x: number; y: number }> {
-  const spaceGroups = new Map<string, string[]>();
-  const ungrouped: string[] = [];
-  for (const n of nodes) {
-    if (n.space) {
-      let g = spaceGroups.get(n.space);
-      if (!g) { g = []; spaceGroups.set(n.space, g); }
-      g.push(n.id);
-    } else {
-      ungrouped.push(n.id);
-    }
-  }
+const LEGEND_ROW_STYLE: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  cursor: "pointer",
+  userSelect: "none",
+};
 
-  const spaceList = Array.from(spaceGroups.keys()).sort();
-  const hasUngrouped = ungrouped.length > 0;
-  const totalGroups = spaceList.length + (hasUngrouped ? 1 : 0);
-  // Large radius so clusters start far apart
-  const clusterRadius = Math.max(600, totalGroups * 200);
-  const positions = new Map<string, { x: number; y: number }>();
-
-  function placeGroup(group: string[], centroidAngle: number) {
-    const cx = Math.cos(centroidAngle) * clusterRadius;
-    const cy = Math.sin(centroidAngle) * clusterRadius;
-    const innerRadius = Math.max(80, Math.sqrt(group.length) * 40);
-    group.forEach((id, j) => {
-      const a = (2 * Math.PI * j) / group.length;
-      positions.set(id, {
-        x: cx + Math.cos(a) * innerRadius,
-        y: cy + Math.sin(a) * innerRadius,
-      });
-    });
-  }
-
-  spaceList.forEach((space, i) => {
-    placeGroup(spaceGroups.get(space)!, (2 * Math.PI * i) / totalGroups);
-  });
-
-  if (hasUngrouped) {
-    placeGroup(ungrouped, (2 * Math.PI * spaceList.length) / totalGroups);
-  }
-
-  return positions;
+// One clickable legend row: swatch + content as children, dimmed when another
+// row holds the focus. Shared by both the link-type and space sections.
+function LegendRow({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div onClick={onClick} style={{ ...LEGEND_ROW_STYLE, opacity: active ? 1 : 0.3 }}>
+      {children}
+    </div>
+  );
 }
 
 const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
@@ -275,6 +312,7 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
     const onNodeSelectRef = useRef(onNodeSelect);
     onNodeSelectRef.current = onNodeSelect;
     const [layoutReady, setLayoutReady] = useState(false);
+    const [legendFocus, setLegendFocus] = useState<{ kind: string; val: string } | null>(null);
 
 
     useImperativeHandle(ref, () => ({
@@ -364,19 +402,30 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
         nodeSpaceMap.set(n.id, n.space || null);
       }
 
+      const degreeMap = new Map<string, number>();
+      for (const e of edges) {
+        if (!nodeIds.has(e.source_id) || !nodeIds.has(e.target_id)) continue;
+        degreeMap.set(e.source_id, (degreeMap.get(e.source_id) ?? 0) + 1);
+        degreeMap.set(e.target_id, (degreeMap.get(e.target_id) ?? 0) + 1);
+      }
+
+      const themeTokens = GRAPH_THEME_TOKENS[appearance.theme];
       const nodeElements = nodes.map((n) => {
-        const themeTokens = GRAPH_THEME_TOKENS[appearance.theme];
         const sr = selfRole(n.id);
-        const size = displayNodeSize(n.access_count, sr);
+        const size = degreeNodeSize(degreeMap.get(n.id) ?? 0, sr);
         return {
           data: {
             id: n.id,
             labelText: nodeLabel(n),
+            space: n.space || "",
             tier: n.tier,
             type: n.type,
             accessCount: n.access_count,
             selfRole: sr,
-            bgColor: tierColor(n.tier, sr, appearance),
+            bgColor:
+              clusterBySpace && sr === ""
+                ? spaceColor(n.space || null)
+                : tierColor(n.tier, sr, appearance),
             borderColor: tierBorderColor(n.tier, sr, appearance),
             borderWidth: sr === "self" ? 3 : n.tier === "archival" ? 1 : 2,
             nodeSize: size,
@@ -388,75 +437,234 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
 
       const edgeElements = edges
         .filter((e) => nodeIds.has(e.source_id) && nodeIds.has(e.target_id))
-        .map((e) => ({
-          data: {
-            id: `${e.source_id}-${e.edge_type}-${e.target_id}`,
-            source: e.source_id,
-            target: e.target_id,
-            edgeType: e.edge_type,
-            weight: e.weight,
-            lineColor: edgeColor(e.edge_type, appearance.theme),
-            glowColor: edgeGlowColor(e.edge_type, appearance.theme),
-            edgeOpacity: Math.max(0.2, e.weight ?? 0.5),
-          },
-        }));
+        .map((e) => {
+          const crossSpace =
+            (nodeSpaceMap.get(e.source_id) ?? null) !==
+            (nodeSpaceMap.get(e.target_id) ?? null);
+          return {
+            data: {
+              id: `${e.source_id}-${e.edge_type}-${e.target_id}`,
+              source: e.source_id,
+              target: e.target_id,
+              edgeType: e.edge_type,
+              weight: e.weight,
+              lineColor: edgeColor(e.edge_type, appearance.theme),
+              glowColor: edgeGlowColor(e.edge_type, appearance.theme),
+              edgeOpacity: Math.max(crossSpace ? 0.5 : 0.7, e.weight ?? 0.5),
+            },
+            classes: crossSpace ? "cross-space" : undefined,
+          };
+        });
 
-      // Pre-compute clustered positions if needed
-      const positions = clusterBySpace
-        ? computeClusteredPositions(nodes)
-        : null;
+      // --- Galaxy layout: one invisible hub node per space ---
+      // Every member connects to its space hub so the space coheres into a
+      // dense "galaxy". Orphans get a longer hub edge → they settle on the
+      // galaxy's outer rim. Hubs repel each other (+gravity) to arrange the
+      // galaxies in a bounded circle; cross-space edges pull connected
+      // galaxies nearer (hybrid positioning). Hubs/edges are invisible but
+      // still participate in the force simulation.
+      const HUB = "__hub__";
+      const skey = (s: string | null) => s ?? "__none__";
+      const useGalaxy = clusterBySpace;
+
+      const hubElements: cytoscape.ElementDefinition[] = [];
+      const hubEdges: cytoscape.ElementDefinition[] = [];
+      const galaxyLinks: cytoscape.ElementDefinition[] = [];
+      const hubPos = new Map<string, { x: number; y: number }>();
+
+      if (useGalaxy) {
+        const sizeBySpace = new Map();
+        for (const n of nodes) {
+          const k = skey(n.space || null);
+          sizeBySpace.set(k, (sizeBySpace.get(k) ?? 0) + 1);
+        }
+        // Single pass over cross-space edges feeds two aggregates: crossDeg
+        // (per-space connectivity, for hub ordering) and pairCount (per
+        // space-pair edge count, for the aggregate galaxy links below).
+        const crossDeg = new Map();
+        const pairCount = new Map<string, number>();
+        for (const e of edgeElements) {
+          if (!e.classes) continue; // only cross-space edges carry a class
+          const sa = skey(nodeSpaceMap.get(e.data.source) ?? null);
+          const sb = skey(nodeSpaceMap.get(e.data.target) ?? null);
+          if (sa === sb) continue;
+          crossDeg.set(sa, (crossDeg.get(sa) ?? 0) + 1);
+          crossDeg.set(sb, (crossDeg.get(sb) ?? 0) + 1);
+          const key = sa < sb ? `${sa}|${sb}` : `${sb}|${sa}`;
+          pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
+        }
+        // Order galaxies by cross-space connectivity: the most-connected hub
+        // spaces sit at the centre (short links between them), isolated ones
+        // drift to the rim. Tiebreak by size.
+        const keys = Array.from(sizeBySpace.keys()).sort((x, y) => {
+          const d = (crossDeg.get(y) ?? 0) - (crossDeg.get(x) ?? 0);
+          return d !== 0 ? d : sizeBySpace.get(y) - sizeBySpace.get(x);
+        });
+        const GOLDEN = 2.399963229728653;
+        const SPACING = 340;
+        keys.forEach((k, i) => {
+          const ang = i * GOLDEN;
+          const r = SPACING * Math.sqrt(i);
+          hubPos.set(HUB + k, { x: Math.cos(ang) * r, y: Math.sin(ang) * r });
+          hubElements.push({ data: { id: HUB + k }, classes: "hub" });
+        });
+        for (const n of nodes) {
+          hubEdges.push({
+            data: {
+              id: `${HUB}e_${n.id}`,
+              source: HUB + skey(n.space || null),
+              target: n.id,
+              orphan: (degreeMap.get(n.id) ?? 0) === 0,
+            },
+            classes: "hub-edge",
+          });
+        }
+
+        // Aggregate cross-space edges into one "galaxy link" per space pair
+        // (counted above), weighted by how many real edges connect them. A
+        // handful of clean hub-to-hub lines instead of hundreds of crossings.
+        for (const [key, count] of pairCount) {
+          const [a, b] = key.split("|");
+          if (count < 6) continue;
+          galaxyLinks.push({
+            data: {
+              id: `${HUB}link_${a}_${b}`,
+              source: HUB + a,
+              target: HUB + b,
+              linkCount: count,
+              linkW: Math.min(7, 1.5 + Math.log2(count) * 1.0),
+              linkO: Math.min(0.5, 0.22 + Math.log2(count) * 0.06),
+            },
+            classes: "galaxy-link",
+          });
+        }
+      }
+
+      const intraEdges = useGalaxy ? edgeElements.filter((e) => !e.classes) : edgeElements;
 
       const cy = cytoscape({
         container: containerRef.current,
-        elements: [...nodeElements, ...edgeElements],
-        style: buildStyles(appearance),
+        elements: [...nodeElements, ...intraEdges, ...hubElements, ...hubEdges, ...galaxyLinks],
+        style: [
+          ...buildStyles(appearance),
+          { selector: ".hub", style: { width: 1, height: 1, opacity: 0, events: "no" } },
+          { selector: ".hub-edge", style: { width: 1, "line-opacity": 0, events: "no" } },
+        ] as never,
         layout: { name: "preset" },
-        minZoom: 0.15,
+        minZoom: 0.01,
         maxZoom: 4,
         wheelSensitivity: 0.3,
       });
 
-      // Apply pre-computed positions
-      if (positions) {
-        cy.nodes().forEach((node) => {
-          const pos = positions.get(node.id());
-          if (pos) node.position(pos);
+      // Seed hubs + members so fcose starts with galaxies already grouped.
+      if (useGalaxy) {
+        cy.nodes(".hub").forEach((node) => {
+          const p = hubPos.get(node.id());
+          if (p) node.position(p);
+        });
+        cy.nodes().not(".hub").forEach((node, idx) => {
+          const p = hubPos.get(HUB + skey(nodeSpaceMap.get(node.id()) ?? null));
+          if (p) {
+            const a = (idx % 12) * (Math.PI / 6);
+            node.position({ x: p.x + Math.cos(a) * 40, y: p.y + Math.sin(a) * 40 });
+          }
         });
       }
 
-      cy.nodes().grabify();
+      cy.nodes().not(".hub").grabify();
+      cy.nodes(".hub").ungrabify();
 
-      const layout = cy.layout({
-        name: "cola",
-        animate: true,
-        infinite: false,
-        maxSimulationTime: 3000,
-        fit: false,
-        ungrabifyWhileSimulating: false,
-        nodeSpacing: clusterBySpace ? 60 : 40,
-        edgeLength: (edge: cytoscape.EdgeSingular) => {
-          const w = edge.data("weight") ?? 0.5;
-          const baseLen = 120 + (1 - w) * 100;
-          if (clusterBySpace) {
-            const srcSpace = nodeSpaceMap.get(edge.source().id());
-            const tgtSpace = nodeSpaceMap.get(edge.target().id());
-            // Cross-cluster edges: very long ideal length pushes clusters apart
-            if (srcSpace !== tgtSpace) return baseLen * 5;
-          }
-          return baseLen;
-        },
-        convergenceThreshold: 0.01,
-        randomize: !positions,
-        avoidOverlap: true,
-        handleDisconnected: true,
-      } as never);
-      layout.run();
+      const layout = cy.layout(
+        useGalaxy
+          ? ({
+              name: "fcose",
+              quality: "default",
+              animate: true,
+              randomize: false, // start from the galaxy seeds
+              fit: false,
+              numIter: 2500,
+              nodeSeparation: 150,
+              // Pin each space hub at its phyllotaxis slot so galaxies stay
+              // distinct and cannot collapse into one another.
+              gravity: 0.7,
+              gravityRange: 5,
+              // Hubs are pinned; low real-node repulsion → dense, tight galaxies.
+              nodeRepulsion: (node: cytoscape.NodeSingular) =>
+                node.hasClass("hub") ? 55000 : 2800,
+              idealEdgeLength: (edge: cytoscape.EdgeSingular) => {
+                // Hub edges set galaxy radius: tight core, modest rim for orphans.
+                if (edge.hasClass("hub-edge")) {
+                  return edge.data("orphan") ? 150 : 60;
+                }
+                if (edge.hasClass("galaxy-link")) {
+                  return 520 - 160 * (edge.data("linkO") ?? 0.4);
+                }
+                const w = edge.data("weight") ?? 0.5;
+                const base = 120 + (1 - w) * 100;
+                const ss = nodeSpaceMap.get(edge.source().id());
+                const ts = nodeSpaceMap.get(edge.target().id());
+                // Long cross-space links so they draw galaxy-to-galaxy
+                // connections without yanking members out of their galaxy.
+                return ss !== ts ? base * 2.5 : base * 0.6;
+              },
+              packComponents: true,
+            } as never)
+          : ({
+              name: "fcose",
+              quality: "default",
+              animate: true,
+              randomize: true,
+              fit: false,
+              gravity: 0.25,
+              packComponents: true,
+            } as never),
+      );
       layoutRef.current = layout;
 
-      layout.on("layoutstop", () => {
-        cy.fit(undefined, 40);
-        setLayoutReady(true);
-      });
+      if (useGalaxy) {
+        // fcose builds the galaxy structure (gravity + clustering) but lets
+        // nodes pile up on the same coordinates, so the dense core reads like
+        // a flat PNG on zoom-in. Chase it with a cola pass whose only job is
+        // collision: avoidOverlap pushes every dot apart by its own radius
+        // (Obsidian-style), seeded from fcose's positions so the galaxies keep
+        // their shape. Result: the core spreads into distinct, non-touching
+        // dots that separate cleanly as you zoom in.
+        layout.one("layoutstop", () => {
+          const separate = cy.layout({
+            name: "cola",
+            animate: true,
+            randomize: false, // honour fcose's galaxy positions
+            fit: false,
+            avoidOverlap: true,
+            handleDisconnected: false, // don't relocate isolated galaxies
+            nodeSpacing: () => 12, // minimum gap between dot bounding boxes
+            edgeLength: (edge: cytoscape.EdgeSingular) => {
+              if (edge.hasClass("hub-edge")) {
+                return edge.data("orphan") ? 160 : 70;
+              }
+              if (edge.hasClass("galaxy-link")) return 480;
+              const ss = nodeSpaceMap.get(edge.source().id());
+              const ts = nodeSpaceMap.get(edge.target().id());
+              return ss !== ts ? 260 : 90;
+            },
+            maxSimulationTime: 2500,
+            convergenceThreshold: 0.01,
+            ungrabifyWhileSimulating: false,
+          } as never);
+          layoutRef.current = separate;
+          separate.one("layoutstop", () => {
+            cy.fit(cy.nodes().not(".hub"), 40);
+            setLayoutReady(true);
+          });
+          separate.run();
+        });
+      } else {
+        layout.one("layoutstop", () => {
+          cy.fit(cy.nodes().not(".hub"), 40);
+          setLayoutReady(true);
+        });
+      }
+      layout.run();
 
       cy.on("tap", "node", (e) => {
         onNodeSelectRef.current(e.target.id());
@@ -635,12 +843,10 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
       cy.nodes().forEach((node) => {
         const tier = node.data("tier") as string;
         const selfRole = node.data("selfRole") as string;
-        const accessCount = node.data("accessCount") as number;
         node.data("bgColor", tierColor(tier, selfRole, appearance));
         node.data("borderColor", tierBorderColor(tier, selfRole, appearance));
         node.data("labelColor", themeTokens.label);
         node.data("labelOutlineColor", themeTokens.background);
-        node.data("nodeSize", displayNodeSize(accessCount, selfRole));
       });
       cy.edges().forEach((edge) => {
         const edgeType = edge.data("edgeType") as string;
@@ -659,6 +865,50 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
       }
     }, [focusNodeId]);
 
+    useEffect(() => {
+      const cy = cyRef.current;
+      if (!cy) return;
+      cy.batch(() => {
+        cy.elements().removeClass("dim hot");
+        if (!legendFocus) return;
+        cy.elements().not(".hub").not(".hub-edge").addClass("dim");
+        if (legendFocus.kind === "space") {
+          const m = cy.nodes().filter((n) => n.data("space") === legendFocus.val);
+          m.removeClass("dim").addClass("hot");
+          m.connectedEdges().removeClass("dim");
+        } else {
+          const ed =
+            legendFocus.val === "__galaxy__"
+              ? cy.edges(".galaxy-link")
+              : cy.edges().filter((e) => (e.data("edgeType") || "related_to") === legendFocus.val);
+          ed.removeClass("dim").addClass("hot");
+          ed.connectedNodes().removeClass("dim");
+        }
+      });
+    }, [legendFocus, layoutReady]);
+
+    const edgeLegend = useMemo(() => {
+      const t = GRAPH_THEME_TOKENS[appearance.theme];
+      return [
+        { c: t.accent, t: "Entre spaces", k: "__galaxy__" },
+        { c: t.edgeSupports, t: "Apoia", k: "supports" },
+        { c: t.edgeContradicts, t: "Contradiz", k: "contradicts" },
+        { c: t.edgeDefines, t: "Define", k: "defines" },
+        { c: t.edgeEvolved, t: "Evoluiu de", k: "evolved_from" },
+        { c: t.edgeDefault, t: "Relacionado", k: "related_to" },
+      ];
+    }, [appearance.theme]);
+    const spaceLegend = useMemo(() => {
+      const spaceCounts = new Map<string, number>();
+      for (const n of nodes) {
+        const k = n.space || "";
+        spaceCounts.set(k, (spaceCounts.get(k) ?? 0) + 1);
+      }
+      return Array.from(spaceCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, count]) => ({ name: name || "(sem space)", count, c: spaceColor(name || null) }));
+    }, [nodes]);
+
     return (
       <div style={{ width: "100%", height: "100%", position: "relative" }}>
         {!layoutReady && (
@@ -673,6 +923,71 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
             transition: "opacity 0.4s ease-in",
           }}
         />
+        {layoutReady && (
+          <div
+            style={{
+              position: "absolute",
+              right: 12,
+              bottom: 12,
+              maxHeight: "48%",
+              overflowY: "auto",
+              background: "rgba(12,14,18,0.85)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              borderRadius: 8,
+              padding: 10,
+              fontFamily: "monospace",
+              fontSize: 11,
+              color: "#cdd6e0",
+              lineHeight: 1.7,
+              maxWidth: 230,
+            }}
+          >
+            <div style={{ opacity: 0.5, fontSize: 9, letterSpacing: 1, marginBottom: 4 }}>
+              LIGAÇÕES
+            </div>
+            {edgeLegend.map((e) => (
+              <LegendRow
+                key={e.t}
+                active={!legendFocus || (legendFocus.kind === "edge" && legendFocus.val === e.k)}
+                onClick={() =>
+                  setLegendFocus((f) =>
+                    f && f.kind === "edge" && f.val === e.k ? null : { kind: "edge", val: e.k },
+                  )
+                }
+              >
+                <span style={{ width: 16, height: 3, background: e.c, display: "inline-block", borderRadius: 2 }} />
+                <span>{e.t}</span>
+              </LegendRow>
+            ))}
+            {clusterBySpace && (
+              <>
+                <div style={{ opacity: 0.5, fontSize: 9, letterSpacing: 1, margin: "9px 0 4px" }}>
+                  SPACES
+                </div>
+                {spaceLegend.map((sp) => {
+                  const val = sp.name === "(sem space)" ? "" : sp.name;
+                  return (
+                    <LegendRow
+                      key={sp.name}
+                      active={!legendFocus || (legendFocus.kind === "space" && legendFocus.val === val)}
+                      onClick={() =>
+                        setLegendFocus((f) =>
+                          f && f.kind === "space" && f.val === val ? null : { kind: "space", val },
+                        )
+                      }
+                    >
+                      <span style={{ width: 9, height: 9, borderRadius: "50%", background: sp.c, display: "inline-block", flexShrink: 0 }} />
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                        {sp.name}
+                      </span>
+                      <span style={{ opacity: 0.4 }}>{sp.count}</span>
+                    </LegendRow>
+                  );
+                })}
+              </>
+            )}
+          </div>
+        )}
       </div>
     );
   }
