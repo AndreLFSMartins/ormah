@@ -8,7 +8,7 @@ router = APIRouter(prefix="/ui", tags=["ui"])
 
 
 @router.get("/graph")
-async def get_graph(request: Request):
+def get_graph(request: Request):
     """Get full graph data for visualization."""
     engine = request.app.state.engine
     nodes = engine.db.conn.execute("SELECT * FROM nodes").fetchall()
@@ -22,7 +22,7 @@ async def get_graph(request: Request):
 
 
 @router.get("/graph/node/{node_id}")
-async def get_node_detail(node_id: str, request: Request):
+def get_node_detail(node_id: str, request: Request):
     """Get detailed node info for the side panel."""
     engine = request.app.state.engine
     node = engine.graph.get_node(node_id)
@@ -47,7 +47,7 @@ async def get_node_detail(node_id: str, request: Request):
 
 
 @router.get("/search")
-async def search_nodes(q: str, request: Request, limit: int = 20):
+def search_nodes(q: str, request: Request, limit: int = 20):
     """Search nodes for the UI, returning structured results.
 
     Uses the same hybrid search (FTS + vector) as the MCP agent path
@@ -68,7 +68,7 @@ async def search_nodes(q: str, request: Request, limit: int = 20):
 
 
 @router.get("/insights")
-async def get_insights(request: Request):
+def get_insights(request: Request):
     """Get belief evolutions and unresolved tensions for the insights panel."""
     engine = request.app.state.engine
     conn = engine.db.conn
