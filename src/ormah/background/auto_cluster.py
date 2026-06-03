@@ -51,11 +51,13 @@ def run_auto_cluster(engine) -> None:
             assigned += 1
 
         if updates:
-            with engine.db.transaction() as conn:
-                for space_val, node_id in updates:
-                    conn.execute(
-                        "UPDATE nodes SET space = ? WHERE id = ?", (space_val, node_id)
-                    )
+            chunk_size = 100
+            for i in range(0, len(updates), chunk_size):
+                with engine.db.transaction() as conn:
+                    for space_val, node_id in updates[i : i + chunk_size]:
+                        conn.execute(
+                            "UPDATE nodes SET space = ? WHERE id = ?", (space_val, node_id)
+                        )
         if assigned:
             logger.info("Auto-cluster assigned %d nodes to spaces", assigned)
 
