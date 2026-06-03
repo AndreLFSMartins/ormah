@@ -23,7 +23,6 @@ class Database:
         self._all_conns: list[sqlite3.Connection] = []
         self._conns_lock = threading.Lock()
         self._lock = threading.RLock()  # serializes write transactions across threads
-        self._tx_depth = 0
 
     def _new_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(
@@ -63,23 +62,24 @@ class Database:
     def transaction(self):
         """Serialize write transactions across threads.
 
-        Reentrant: only the outermost call issues BEGIN/COMMIT/ROLLBACK.
-        Inner (nested) calls are pass-throughs.
+        Reentrant per thread: only the outermost call on a given thread issues
+        BEGIN/COMMIT/ROLLBACK. Inner (nested) calls are pass-throughs.
         """
         self._lock.acquire()
-        self._tx_depth += 1
+        depth = getattr(self._local, "tx_depth", 0) + 1
+        self._local.tx_depth = depth
         try:
-            if self._tx_depth == 1:
+            if depth == 1:
                 self.conn.execute("BEGIN IMMEDIATE")
             yield self.conn
-            if self._tx_depth == 1:
+            if depth == 1:
                 self.conn.execute("COMMIT")
         except BaseException:
-            if self._tx_depth == 1:
+            if depth == 1:
                 self.conn.execute("ROLLBACK")
             raise
         finally:
-            self._tx_depth -= 1
+            self._local.tx_depth = depth - 1
             self._lock.release()
 
     def init_schema(self) -> None:
