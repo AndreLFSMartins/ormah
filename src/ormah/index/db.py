@@ -65,22 +65,21 @@ class Database:
         Reentrant per thread: only the outermost call on a given thread issues
         BEGIN/COMMIT/ROLLBACK. Inner (nested) calls are pass-throughs.
         """
-        self._lock.acquire()
-        depth = getattr(self._local, "tx_depth", 0) + 1
-        self._local.tx_depth = depth
-        try:
-            if depth == 1:
-                self.conn.execute("BEGIN IMMEDIATE")
-            yield self.conn
-            if depth == 1:
-                self.conn.execute("COMMIT")
-        except BaseException:
-            if depth == 1:
-                self.conn.execute("ROLLBACK")
-            raise
-        finally:
-            self._local.tx_depth = depth - 1
-            self._lock.release()
+        with self._lock:
+            depth = getattr(self._local, "tx_depth", 0) + 1
+            self._local.tx_depth = depth
+            try:
+                if depth == 1:
+                    self.conn.execute("BEGIN IMMEDIATE")
+                yield self.conn
+                if depth == 1:
+                    self.conn.execute("COMMIT")
+            except BaseException:
+                if depth == 1:
+                    self.conn.execute("ROLLBACK")
+                raise
+            finally:
+                self._local.tx_depth = depth - 1
 
     def init_schema(self) -> None:
         """Create tables from schema.sql."""

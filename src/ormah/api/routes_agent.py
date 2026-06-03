@@ -123,7 +123,14 @@ def connect(req: ConnectRequest, request: Request):
 
 @router.post("/whisper", response_model=TextResponse)
 async def whisper(request: Request):
-    """Build compact whisper context for involuntary recall injection."""
+    """Build compact whisper context for involuntary recall injection.
+
+    Must stay ``async def``: the ``_session_buffers`` mutation below runs on the
+    event loop with no ``await`` in between, so asyncio serializes it across
+    concurrent requests. Converting this to a sync ``def`` would move it to the
+    threadpool and expose ``_session_buffers`` to a data race — guard it with a
+    lock first if you ever do.
+    """
     body = await request.json()
     prompt = body.get("prompt", "")
     space = body.get("space")
