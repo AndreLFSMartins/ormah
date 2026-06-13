@@ -130,6 +130,7 @@ function nodeLabel(n: MemoryNode): string {
 
 const OVERVIEW_PADDING = 150;
 const SPACE_FOCUS_PADDING = 110;
+const LARGE_GRAPH_FAST_LAYOUT_NODE_COUNT = 2500;
 const ZOOM_MIN = 0.03;
 const ZOOM_MAX = 4;
 const ZOOM_SLIDER_MAX = 100;
@@ -306,6 +307,129 @@ function computeClusteredPositions(nodes: MemoryNode[]): Map<string, { x: number
 
   if (hasUngrouped) {
     placeGroup(ungrouped, (2 * Math.PI * spaceList.length) / totalGroups);
+  }
+
+  return positions;
+}
+
+/**
+ * Large graphs should be inspectable immediately. Full-graph cola with collision
+ * is too expensive at 3k+ nodes, so this builds a deterministic, packed overview:
+ * spaces become packed galaxies, connected nodes occupy the interior, and orphans
+ * land on the outer rings.
+ */
+function computePackedGalaxyPositions(
+  nodes: MemoryNode[],
+  edges: Edge[],
+): Map<string, { x: number; y: number }> {
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const incidentCounts = new Map<string, number>();
+  for (const node of nodes) incidentCounts.set(node.id, 0);
+  for (const edge of edges) {
+    if (!nodeIds.has(edge.source_id) || !nodeIds.has(edge.target_id)) continue;
+    incidentCounts.set(edge.source_id, (incidentCounts.get(edge.source_id) ?? 0) + 1);
+    incidentCounts.set(edge.target_id, (incidentCounts.get(edge.target_id) ?? 0) + 1);
+  }
+
+  const groups = new Map<string, MemoryNode[]>();
+  for (const node of nodes) {
+    const key = node.space || "";
+    let group = groups.get(key);
+    if (!group) {
+      group = [];
+      groups.set(key, group);
+    }
+    group.push(node);
+  }
+
+  const nodeGap = Math.round(48 * GRAPH_DISPLAY_SCALE);
+  const groupGap = Math.round(140 * GRAPH_DISPLAY_SCALE);
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+  const packedGroups = Array.from(groups.entries())
+    .map(([space, group]) => {
+      const sorted = [...group].sort((a, b) => {
+        const aOrphan = (incidentCounts.get(a.id) ?? 0) === 0 ? 1 : 0;
+        const bOrphan = (incidentCounts.get(b.id) ?? 0) === 0 ? 1 : 0;
+        if (aOrphan !== bOrphan) return aOrphan - bOrphan;
+        if (a.access_count !== b.access_count) return b.access_count - a.access_count;
+        return a.id.localeCompare(b.id);
+      });
+
+      const localPositions = new Map<string, { x: number; y: number }>();
+      let maxRadius = 0;
+
+      if (sorted.length > 0) {
+        const first = sorted[0];
+        localPositions.set(first.id, { x: 0, y: 0 });
+        maxRadius = Math.max(maxRadius, displayNodeSize(first.access_count, "") / 2);
+      }
+
+      let index = 1;
+      let ring = 1;
+      while (index < sorted.length) {
+        const radius = ring * nodeGap;
+        const slots = Math.max(6, Math.floor((2 * Math.PI * radius) / nodeGap));
+        for (let slot = 0; slot < slots && index < sorted.length; slot += 1) {
+          const node = sorted[index];
+          const angle = (2 * Math.PI * slot) / slots + ring * 0.37;
+          const x = Math.cos(angle) * radius;
+          const y = Math.sin(angle) * radius;
+          localPositions.set(node.id, { x, y });
+          maxRadius = Math.max(
+            maxRadius,
+            Math.hypot(x, y) + displayNodeSize(node.access_count, "") / 2,
+          );
+          index += 1;
+        }
+        ring += 1;
+      }
+
+      return {
+        space,
+        count: group.length,
+        radius: Math.max(maxRadius, nodeGap * 2),
+        localPositions,
+      };
+    })
+    .sort((a, b) => b.radius - a.radius || b.count - a.count || a.space.localeCompare(b.space));
+
+  const placed: Array<{ x: number; y: number; radius: number }> = [];
+  const positions = new Map<string, { x: number; y: number }>();
+
+  for (const group of packedGroups) {
+    let center = { x: 0, y: 0 };
+    if (placed.length > 0) {
+      let found = false;
+      for (let attempt = 1; attempt < 30000; attempt += 1) {
+        const radius = Math.sqrt(attempt) * groupGap;
+        const angle = attempt * goldenAngle;
+        const candidate = { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+        const overlaps = placed.some((other) => {
+          const minDistance = other.radius + group.radius + groupGap;
+          return Math.hypot(candidate.x - other.x, candidate.y - other.y) < minDistance;
+        });
+        if (!overlaps) {
+          center = candidate;
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        const angle = placed.length * goldenAngle;
+        const radius = placed.reduce((max, other) => Math.max(max, Math.hypot(other.x, other.y) + other.radius), 0);
+        center = {
+          x: Math.cos(angle) * (radius + group.radius + groupGap),
+          y: Math.sin(angle) * (radius + group.radius + groupGap),
+        };
+      }
+    }
+
+    placed.push({ ...center, radius: group.radius });
+    for (const [id, local] of group.localPositions) {
+      positions.set(id, { x: center.x + local.x, y: center.y + local.y });
+    }
   }
 
   return positions;
@@ -563,8 +687,12 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
           };
         });
 
+      const useFastOverview =
+        clusterBySpace && nodes.length >= LARGE_GRAPH_FAST_LAYOUT_NODE_COUNT;
       const positions = clusterBySpace
-        ? computeClusteredPositions(nodes)
+        ? useFastOverview
+          ? computePackedGalaxyPositions(nodes, edges)
+          : computeClusteredPositions(nodes)
         : null;
 
       const cy = cytoscape({
@@ -595,35 +723,9 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
 
       cy.nodes().grabify();
 
-      const maxSimulationTime = Math.min(8000, 1500 + nodes.length);
-      const layout = cy.layout({
-        name: "cola",
-        animate: true,
-        infinite: false,
-        maxSimulationTime,
-        refresh: nodes.length > 2500 ? 8 : 1,
-        fit: false,
-        ungrabifyWhileSimulating: false,
-        nodeSpacing: clusterBySpace ? 60 : 40,
-        edgeLength: (edge: cytoscape.EdgeSingular) => {
-          const w = edge.data("weight") ?? 0.5;
-          const baseLen = 120 + (1 - w) * 100;
-          if (clusterBySpace) {
-            const srcSpace = nodeSpaceMap.get(edge.source().id());
-            const tgtSpace = nodeSpaceMap.get(edge.target().id());
-            if (srcSpace !== tgtSpace) return baseLen * 5;
-          }
-          return baseLen;
-        },
-        convergenceThreshold: 0.01,
-        randomize: !positions,
-        avoidOverlap: true,
-        handleDisconnected: !clusterBySpace,
-      } as never);
-      layoutRef.current = layout;
-
       let layoutSettled = false;
       let layoutWatchdog: ReturnType<typeof setTimeout> | null = null;
+      let layoutReadyFrame: number | null = null;
       const finishLayout = () => {
         if (layoutSettled) return;
         layoutSettled = true;
@@ -636,13 +738,44 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
         setLayoutReady(true);
       };
 
-      layout.one("layoutstop", finishLayout);
-      layoutWatchdog = setTimeout(() => {
-        if (layoutSettled) return;
-        layout.stop();
-        finishLayout();
-      }, maxSimulationTime + 1500);
-      layout.run();
+      if (useFastOverview) {
+        layoutReadyFrame = requestAnimationFrame(finishLayout);
+      } else {
+        const maxSimulationTime = Math.min(8000, 1500 + nodes.length);
+        const layout = cy.layout({
+          name: "cola",
+          animate: true,
+          infinite: false,
+          maxSimulationTime,
+          refresh: nodes.length > 2500 ? 8 : 1,
+          fit: false,
+          ungrabifyWhileSimulating: false,
+          nodeSpacing: clusterBySpace ? 60 : 40,
+          edgeLength: (edge: cytoscape.EdgeSingular) => {
+            const w = edge.data("weight") ?? 0.5;
+            const baseLen = 120 + (1 - w) * 100;
+            if (clusterBySpace) {
+              const srcSpace = nodeSpaceMap.get(edge.source().id());
+              const tgtSpace = nodeSpaceMap.get(edge.target().id());
+              if (srcSpace !== tgtSpace) return baseLen * 5;
+            }
+            return baseLen;
+          },
+          convergenceThreshold: 0.01,
+          randomize: !positions,
+          avoidOverlap: true,
+          handleDisconnected: !clusterBySpace,
+        } as never);
+        layoutRef.current = layout;
+
+        layout.one("layoutstop", finishLayout);
+        layoutWatchdog = setTimeout(() => {
+          if (layoutSettled) return;
+          layout.stop();
+          finishLayout();
+        }, maxSimulationTime + 1500);
+        layout.run();
+      }
 
       cy.on("tap", "node", (e) => {
         onNodeSelectRef.current(e.target.id());
@@ -803,6 +936,10 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
 
       return () => {
         if (dragRaf) { cancelAnimationFrame(dragRaf); dragRaf = null; }
+        if (layoutReadyFrame) {
+          cancelAnimationFrame(layoutReadyFrame);
+          layoutReadyFrame = null;
+        }
         if (layoutWatchdog) {
           clearTimeout(layoutWatchdog);
           layoutWatchdog = null;
