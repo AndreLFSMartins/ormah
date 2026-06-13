@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -129,6 +130,25 @@ function nodeLabel(n: MemoryNode): string {
 
 const OVERVIEW_PADDING = 150;
 const SPACE_FOCUS_PADDING = 110;
+const ZOOM_MIN = 0.03;
+const ZOOM_MAX = 4;
+const ZOOM_SLIDER_MAX = 100;
+const ZOOM_SLIDER_STEP = 8;
+
+function clampZoomSliderValue(value: number): number {
+  return Math.max(0, Math.min(ZOOM_SLIDER_MAX, value));
+}
+
+function zoomToSliderValue(zoom: number): number {
+  const normalized =
+    Math.log(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom)) / ZOOM_MIN) /
+    Math.log(ZOOM_MAX / ZOOM_MIN);
+  return Math.round(normalized * ZOOM_SLIDER_MAX);
+}
+
+function sliderValueToZoom(value: number): number {
+  return ZOOM_MIN * Math.pow(ZOOM_MAX / ZOOM_MIN, clampZoomSliderValue(value) / ZOOM_SLIDER_MAX);
+}
 
 function buildStyles(appearance: GraphAppearance) {
   const tokens = GRAPH_THEME_TOKENS[appearance.theme];
@@ -145,6 +165,7 @@ function buildStyles(appearance: GraphAppearance) {
         height: "data(nodeSize)",
         label: "data(labelText)",
         "font-size": `${Math.round(12 * GRAPH_DISPLAY_SCALE)}px`,
+        "min-zoomed-font-size": 8,
         color: "data(labelColor)",
         "text-outline-color": "data(labelOutlineColor)",
         "text-outline-opacity": 0.9,
@@ -263,7 +284,7 @@ function computeClusteredPositions(nodes: MemoryNode[]): Map<string, { x: number
   const spaceList = Array.from(spaceGroups.keys()).sort();
   const hasUngrouped = ungrouped.length > 0;
   const totalGroups = spaceList.length + (hasUngrouped ? 1 : 0);
-  const clusterRadius = Math.max(600, totalGroups * 200);
+  const clusterRadius = Math.max(600, Math.sqrt(totalGroups) * 200);
   const positions = new Map<string, { x: number; y: number }>();
 
   function placeGroup(group: string[], centroidAngle: number) {
@@ -304,6 +325,78 @@ const LEGEND_SECTION_TITLE_STYLE: CSSProperties = {
   letterSpacing: 1,
 };
 
+const RIGHT_RAIL_STYLE: CSSProperties = {
+  position: "absolute",
+  right: 12,
+  top: 56,
+  bottom: 12,
+  zIndex: 10,
+  display: "flex",
+  alignItems: "flex-end",
+  gap: 8,
+  minHeight: 0,
+  maxWidth: "calc(100% - 24px)",
+};
+
+const LEGEND_PANEL_STYLE: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  minHeight: 0,
+  maxHeight: "100%",
+  overflow: "hidden",
+  background: "rgba(12,14,18,0.85)",
+  border: "1px solid rgba(255,255,255,0.1)",
+  borderRadius: 8,
+  padding: 10,
+  fontFamily: "monospace",
+  fontSize: 11,
+  color: "#cdd6e0",
+  lineHeight: 1.7,
+  width: 230,
+  maxWidth: "calc(100vw - 78px)",
+};
+
+const SPACE_LEGEND_LIST_STYLE: CSSProperties = {
+  minHeight: 0,
+  overflowY: "auto",
+  paddingRight: 3,
+};
+
+const ZOOM_CONTROL_STYLE: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 8,
+  width: 34,
+  padding: "8px 0",
+  background: "rgba(12,14,18,0.82)",
+  border: "1px solid rgba(255,255,255,0.1)",
+  borderRadius: 8,
+  boxShadow: "0 12px 30px rgba(0,0,0,0.35)",
+};
+
+const ZOOM_BUTTON_STYLE: CSSProperties = {
+  width: 22,
+  height: 22,
+  border: "1px solid rgba(255,255,255,0.14)",
+  borderRadius: 6,
+  background: "rgba(255,255,255,0.04)",
+  color: "#d8dee6",
+  fontFamily: "monospace",
+  fontSize: 14,
+  lineHeight: "18px",
+  cursor: "pointer",
+};
+
+const ZOOM_RANGE_STYLE: CSSProperties = {
+  width: 22,
+  height: 122,
+  writingMode: "vertical-lr",
+  direction: "rtl",
+  accentColor: "#d4a574",
+  cursor: "pointer",
+};
+
 // One clickable legend row: swatch + content as children, dimmed when another
 // row holds the focus. Shared by both the link-type and space sections.
 function LegendRow({
@@ -334,6 +427,18 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
     onNodeSelectRef.current = onNodeSelect;
     const [layoutReady, setLayoutReady] = useState(false);
     const [legendFocus, setLegendFocus] = useState<{ kind: string; val: string } | null>(null);
+    const [zoomSliderValue, setZoomSliderValue] = useState(() => zoomToSliderValue(0.18));
+
+    const identityNodeIds = useMemo(() => {
+      const ids = new Set<string>();
+      if (!userNodeId) return ids;
+      for (const e of edges) {
+        if (e.edge_type === "defines" && e.source_id === userNodeId) {
+          ids.add(e.target_id);
+        }
+      }
+      return ids;
+    }, [edges, userNodeId]);
 
 
     useImperativeHandle(ref, () => ({
@@ -396,20 +501,11 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
       },
     }));
 
-    useEffect(() => {
+    useLayoutEffect(() => {
       if (!containerRef.current) return;
       setLayoutReady(false);
 
       const nodeIds = new Set(nodes.map((n) => n.id));
-
-      const identityNodeIds = new Set<string>();
-      if (userNodeId) {
-        for (const e of edges) {
-          if (e.edge_type === "defines" && e.source_id === userNodeId) {
-            identityNodeIds.add(e.target_id);
-          }
-        }
-      }
 
       function selfRole(nodeId: string): string {
         if (nodeId === userNodeId) return "self";
@@ -476,10 +572,15 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
         elements: [...nodeElements, ...edgeElements],
         style: buildStyles(appearance),
         layout: { name: "preset" },
-        minZoom: 0.03,
-        maxZoom: 4,
+        minZoom: ZOOM_MIN,
+        maxZoom: ZOOM_MAX,
         wheelSensitivity: 0.3,
       });
+
+      const syncZoomSlider = () => {
+        setZoomSliderValue(zoomToSliderValue(cy.zoom()));
+      };
+      cy.on("zoom", syncZoomSlider);
 
       if (positions) {
         cy.nodes().forEach((node) => {
@@ -487,14 +588,20 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
           if (pos) node.position(pos);
         });
       }
+      if (cy.nodes().length) {
+        cy.fit(undefined, OVERVIEW_PADDING);
+        syncZoomSlider();
+      }
 
       cy.nodes().grabify();
 
+      const maxSimulationTime = Math.min(8000, 1500 + nodes.length);
       const layout = cy.layout({
         name: "cola",
         animate: true,
         infinite: false,
-        maxSimulationTime: nodes.length > 1000 ? 1800 : 3000,
+        maxSimulationTime,
+        refresh: nodes.length > 2500 ? 8 : 1,
         fit: false,
         ungrabifyWhileSimulating: false,
         nodeSpacing: clusterBySpace ? 60 : 40,
@@ -511,14 +618,30 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
         convergenceThreshold: 0.01,
         randomize: !positions,
         avoidOverlap: true,
-        handleDisconnected: true,
+        handleDisconnected: !clusterBySpace,
       } as never);
       layoutRef.current = layout;
 
-      layout.one("layoutstop", () => {
+      let layoutSettled = false;
+      let layoutWatchdog: ReturnType<typeof setTimeout> | null = null;
+      const finishLayout = () => {
+        if (layoutSettled) return;
+        layoutSettled = true;
+        if (layoutWatchdog) {
+          clearTimeout(layoutWatchdog);
+          layoutWatchdog = null;
+        }
         cy.fit(undefined, OVERVIEW_PADDING);
+        syncZoomSlider();
         setLayoutReady(true);
-      });
+      };
+
+      layout.one("layoutstop", finishLayout);
+      layoutWatchdog = setTimeout(() => {
+        if (layoutSettled) return;
+        layout.stop();
+        finishLayout();
+      }, maxSimulationTime + 1500);
       layout.run();
 
       cy.on("tap", "node", (e) => {
@@ -680,6 +803,10 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
 
       return () => {
         if (dragRaf) { cancelAnimationFrame(dragRaf); dragRaf = null; }
+        if (layoutWatchdog) {
+          clearTimeout(layoutWatchdog);
+          layoutWatchdog = null;
+        }
         if (layoutRef.current) {
           layoutRef.current.stop();
           layoutRef.current = null;
@@ -687,7 +814,7 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
         cy.destroy();
         cyRef.current = null;
       };
-    }, [nodes, edges, userNodeId, clusterBySpace]);
+    }, [nodes, edges, userNodeId, clusterBySpace, identityNodeIds]);
 
     useEffect(() => {
       const cy = cyRef.current;
@@ -735,6 +862,10 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
           const m = cy.nodes().filter((n) => n.data("tier") === legendFocus.val);
           m.removeClass("dim").addClass("hot");
           m.connectedEdges().removeClass("dim");
+        } else if (legendFocus.kind === "role") {
+          const m = cy.nodes().filter((n) => n.data("selfRole") === legendFocus.val);
+          m.removeClass("dim").addClass("hot");
+          m.connectedEdges().removeClass("dim");
         } else {
           const ed = cy.edges().filter((e) => (e.data("edgeType") || "related_to") === legendFocus.val);
           ed.removeClass("dim").addClass("hot");
@@ -763,12 +894,18 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
         stillVisible = clusterBySpace && nodes.some((n) => (n.space || "") === legendFocus.val);
       } else if (legendFocus.kind === "tier") {
         stillVisible = clusterBySpace && nodes.some((n) => n.tier === legendFocus.val);
+      } else if (legendFocus.kind === "role") {
+        if (legendFocus.val === "self") {
+          stillVisible = !!userNodeId && nodes.some((n) => n.id === userNodeId);
+        } else {
+          stillVisible = nodes.some((n) => identityNodeIds.has(n.id));
+        }
       } else {
         stillVisible = visibleLegendTargets.edgeTypes.has(legendFocus.val);
       }
 
       if (!stillVisible) setLegendFocus(null);
-    }, [clusterBySpace, legendFocus, nodes, visibleLegendTargets]);
+    }, [clusterBySpace, identityNodeIds, legendFocus, nodes, userNodeId, visibleLegendTargets]);
 
     const edgeLegend = useMemo(() => {
       const t = GRAPH_THEME_TOKENS[appearance.theme];
@@ -801,6 +938,18 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
         { val: "archival", label: "archival", count: counts.archival, color: appearance.colors.archival, dashed: true },
       ];
     }, [nodes, appearance.colors.archival, appearance.colors.core, appearance.colors.working]);
+    const roleLegend = useMemo(() => {
+      const selfCount = userNodeId && nodes.some((n) => n.id === userNodeId) ? 1 : 0;
+      let identityCount = 0;
+      for (const n of nodes) {
+        if (identityNodeIds.has(n.id)) identityCount += 1;
+      }
+
+      return [
+        { val: "self", label: "self", count: selfCount, color: "#74b3a5" },
+        { val: "identity", label: "identity", count: identityCount, color: "#4d8a7e" },
+      ].filter((row) => row.count > 0);
+    }, [identityNodeIds, nodes, userNodeId]);
     const showLegend = clusterBySpace || edgeLegend.length > 0;
 
     const clearGraphSelection = () => {
@@ -836,6 +985,48 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
       }
     };
 
+    const focusRole = (role: string) => {
+      clearGraphSelection();
+      const nextActive = !(legendFocus && legendFocus.kind === "role" && legendFocus.val === role);
+      setLegendFocus(nextActive ? { kind: "role", val: role } : null);
+
+      const cy = cyRef.current;
+      if (!cy || !layoutReady) return;
+
+      if (!nextActive) {
+        cy.fit(undefined, OVERVIEW_PADDING);
+        return;
+      }
+
+      const roleNodes = cy.nodes().filter((node) => node.data("selfRole") === role);
+      if (roleNodes.length) {
+        cy.fit(roleNodes, SPACE_FOCUS_PADDING);
+        if (cy.zoom() > 1.6) {
+          cy.zoom(1.6);
+          cy.center(roleNodes);
+        }
+      }
+    };
+
+    const applyZoomSliderValue = (value: number) => {
+      const nextValue = clampZoomSliderValue(value);
+      setZoomSliderValue(nextValue);
+
+      const cy = cyRef.current;
+      if (!cy) return;
+
+      cy.zoom({
+        level: sliderValueToZoom(nextValue),
+        renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 },
+      } as never);
+    };
+
+    const nudgeZoom = (delta: number) => {
+      const cy = cyRef.current;
+      const currentValue = cy ? zoomToSliderValue(cy.zoom()) : zoomSliderValue;
+      applyZoomSliderValue(currentValue + delta);
+    };
+
     return (
       <div style={{ width: "100%", height: "100%", position: "relative" }}>
         {!layoutReady && (
@@ -850,28 +1041,45 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
             transition: "opacity 0.4s ease-in",
           }}
         />
-        {layoutReady && showLegend && (
-          <div
-            style={{
-              position: "absolute",
-              right: 12,
-              bottom: 12,
-              // Above the cytoscape canvas — without this the canvas swallows
-              // legend clicks (elementFromPoint hits the canvas, not the row).
-              zIndex: 10,
-              maxHeight: "48%",
-              overflowY: "auto",
-              background: "rgba(12,14,18,0.85)",
-              border: "1px solid rgba(255,255,255,0.1)",
-              borderRadius: 8,
-              padding: 10,
-              fontFamily: "monospace",
-              fontSize: 11,
-              color: "#cdd6e0",
-              lineHeight: 1.7,
-              maxWidth: 230,
-            }}
-          >
+        {layoutReady && (
+          <div style={RIGHT_RAIL_STYLE}>
+            <div
+              style={ZOOM_CONTROL_STYLE}
+              onPointerDown={(e) => e.stopPropagation()}
+              onWheel={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                style={ZOOM_BUTTON_STYLE}
+                onClick={() => nudgeZoom(ZOOM_SLIDER_STEP)}
+                aria-label="Zoom in"
+                title="Zoom in"
+              >
+                +
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={ZOOM_SLIDER_MAX}
+                value={zoomSliderValue}
+                onChange={(e) => applyZoomSliderValue(Number(e.target.value))}
+                aria-label="Graph zoom"
+                style={ZOOM_RANGE_STYLE}
+              />
+              <button
+                type="button"
+                style={ZOOM_BUTTON_STYLE}
+                onClick={() => nudgeZoom(-ZOOM_SLIDER_STEP)}
+                aria-label="Zoom out"
+                title="Zoom out"
+              >
+                -
+              </button>
+            </div>
+            {showLegend && (
+              <div
+                style={LEGEND_PANEL_STYLE}
+              >
             {clusterBySpace && (
               <>
                 <div style={{ ...LEGEND_SECTION_TITLE_STYLE, marginBottom: 4 }}>
@@ -897,6 +1105,35 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
                     />
                     <span style={{ flex: 1 }}>{tl.label}</span>
                     <span style={{ opacity: 0.4 }}>{tl.count}</span>
+                  </LegendRow>
+                ))}
+              </>
+            )}
+            {clusterBySpace && roleLegend.length > 0 && (
+              <>
+                <div style={{ ...LEGEND_SECTION_TITLE_STYLE, margin: "9px 0 4px" }}>
+                  IDENTITY
+                </div>
+                {roleLegend.map((rl) => (
+                  <LegendRow
+                    key={rl.val}
+                    active={!legendFocus || (legendFocus.kind === "role" && legendFocus.val === rl.val)}
+                    onClick={() => focusRole(rl.val)}
+                  >
+                    <span
+                      style={{
+                        width: 11,
+                        height: 11,
+                        borderRadius: "50%",
+                        boxSizing: "border-box",
+                        background: rl.color,
+                        border: "1px solid rgba(255,255,255,0.22)",
+                        display: "inline-block",
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span style={{ flex: 1 }}>{rl.label}</span>
+                    <span style={{ opacity: 0.4 }}>{rl.count}</span>
                   </LegendRow>
                 ))}
               </>
@@ -928,22 +1165,26 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
                 <div style={{ ...LEGEND_SECTION_TITLE_STYLE, margin: "9px 0 4px" }}>
                   SPACES
                 </div>
-                {spaceLegend.map((sp) => {
-                  const val = sp.name === "(no space)" ? "" : sp.name;
-                  return (
-                    <LegendRow
-                      key={sp.name}
-                      active={!legendFocus || (legendFocus.kind === "space" && legendFocus.val === val)}
-                      onClick={() => focusSpace(val)}
-                    >
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-                        {sp.name}
-                      </span>
-                      <span style={{ opacity: 0.4 }}>{sp.count}</span>
-                    </LegendRow>
-                  );
-                })}
+                <div style={SPACE_LEGEND_LIST_STYLE}>
+                  {spaceLegend.map((sp) => {
+                    const val = sp.name === "(no space)" ? "" : sp.name;
+                    return (
+                      <LegendRow
+                        key={sp.name}
+                        active={!legendFocus || (legendFocus.kind === "space" && legendFocus.val === val)}
+                        onClick={() => focusSpace(val)}
+                      >
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                          {sp.name}
+                        </span>
+                        <span style={{ opacity: 0.4 }}>{sp.count}</span>
+                      </LegendRow>
+                    );
+                  })}
+                </div>
               </>
+            )}
+              </div>
             )}
           </div>
         )}
