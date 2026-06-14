@@ -221,9 +221,9 @@ def test_batch_query_used(engine):
             tier=Tier.working,
         ))
 
-    # Patch the Database._conn with a tracking wrapper to count edge queries.
+    # Patch the thread-local connection with a tracking wrapper to count edge queries.
     db = engine.db
-    original_conn = db._conn
+    original_conn = db.conn  # ensures the thread-local conn is initialised
 
     query_log = []
 
@@ -240,11 +240,11 @@ def test_batch_query_used(engine):
         def __getattr__(self, name):
             return getattr(self._real, name)
 
-    db._conn = TrackingConnection(original_conn)
+    db._local.conn = TrackingConnection(original_conn)
     try:
         run_importance_scoring(engine)
     finally:
-        db._conn = original_conn
+        db._local.conn = original_conn
 
     # Should have at most 1 edge-related query (the batch), not N
     assert len(query_log) <= 1

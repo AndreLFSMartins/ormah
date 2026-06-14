@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
 from pydantic import BaseModel
 
@@ -16,7 +17,7 @@ class ConversationLog(BaseModel):
 
 
 @router.post("/conversation")
-async def ingest_conversation(
+def ingest_conversation(
     log: ConversationLog,
     request: Request,
     default_space: str | None = Query(None, description="Default space for extracted memories"),
@@ -56,9 +57,12 @@ async def ingest_file(request: Request, file: UploadFile = File(...)):
     if len(raw) > _MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
     content = raw.decode("utf-8")
-    result = engine.ingest_conversation(
-        content=content,
-        agent_id=f"file:{file.filename}",
+    filename = file.filename
+    result = await anyio.to_thread.run_sync(
+        lambda: engine.ingest_conversation(
+            content=content,
+            agent_id=f"file:{filename}",
+        )
     )
     if isinstance(result, str):
         return {"status": "error", "result": result, "extracted": 0, "memories": []}

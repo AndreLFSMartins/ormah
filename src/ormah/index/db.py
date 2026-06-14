@@ -14,53 +14,72 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 class Database:
-    """Manages a single SQLite connection with WAL mode and serialized writes."""
+    """Manages per-thread SQLite connections with WAL mode and serialized writes."""
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn: sqlite3.Connection | None = None
-        self._lock = threading.RLock()
-        self._tx_depth = 0
+        self._local = threading.local()
+        self._all_conns: list[sqlite3.Connection] = []
+        self._conns_lock = threading.Lock()
+        self._lock = threading.RLock()  # serializes write transactions across threads
+
+    def _new_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(
+            str(self.db_path),
+            check_same_thread=False,
+            timeout=10,
+            isolation_level=None,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        # sqlite-vec is loaded per connection: a connection without it cannot
+        # query the node_vectors (vec0) virtual table.
+        try:
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except ImportError:
+            pass  # sqlite-vec not installed — vector search disabled
+        with self._conns_lock:
+            self._all_conns.append(conn)
+        return conn
 
     @property
     def conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = sqlite3.connect(
-                str(self.db_path),
-                check_same_thread=False,
-                timeout=10,
-                isolation_level=None,
-            )
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.execute("PRAGMA busy_timeout=5000")
-        return self._conn
+        existing = getattr(self._local, "conn", None)
+        if existing is None:
+            existing = self._new_connection()
+            self._local.conn = existing
+        return existing
 
     @contextmanager
     def transaction(self):
         """Serialize write transactions across threads.
 
-        Reentrant: only the outermost call issues BEGIN/COMMIT/ROLLBACK.
-        Inner (nested) calls are pass-throughs.
+        Reentrant per thread: only the outermost call on a given thread issues
+        BEGIN/COMMIT/ROLLBACK. Inner (nested) calls are pass-throughs.
         """
-        self._lock.acquire()
-        self._tx_depth += 1
-        try:
-            if self._tx_depth == 1:
-                self.conn.execute("BEGIN IMMEDIATE")
-            yield self.conn
-            if self._tx_depth == 1:
-                self.conn.execute("COMMIT")
-        except BaseException:
-            if self._tx_depth == 1:
-                self.conn.execute("ROLLBACK")
-            raise
-        finally:
-            self._tx_depth -= 1
-            self._lock.release()
+        with self._lock:
+            depth = getattr(self._local, "tx_depth", 0) + 1
+            self._local.tx_depth = depth
+            try:
+                if depth == 1:
+                    self.conn.execute("BEGIN IMMEDIATE")
+                yield self.conn
+                if depth == 1:
+                    self.conn.execute("COMMIT")
+            except BaseException:
+                if depth == 1:
+                    self.conn.execute("ROLLBACK")
+                raise
+            finally:
+                self._local.tx_depth = depth - 1
 
     def init_schema(self) -> None:
         """Create tables from schema.sql."""
@@ -242,6 +261,11 @@ class Database:
             pass  # sqlite-vec not available, vector search disabled
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        with self._conns_lock:
+            for conn in self._all_conns:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._all_conns.clear()
+        self._local = threading.local()

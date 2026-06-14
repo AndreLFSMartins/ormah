@@ -9,10 +9,20 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 
+def _commit_updates_chunked(db, updates, chunk_size: int = 100) -> None:
+    """Apply (importance, node_id) updates in bounded write transactions so a
+    full-store batch never holds the write lock long enough to stall foreground writes."""
+    for i in range(0, len(updates), chunk_size):
+        with db.transaction() as conn:
+            for importance_val, nid in updates[i : i + chunk_size]:
+                conn.execute(
+                    "UPDATE nodes SET importance = ? WHERE id = ?",
+                    (importance_val, nid),
+                )
+
+
 def run_importance_scoring(engine) -> None:
     """Iterate all nodes, compute weighted importance, persist changes."""
-    from ormah.store.markdown import parse_node, serialize_node
-
     settings = engine.settings
     conn = engine.db.conn
 
@@ -101,11 +111,6 @@ def run_importance_scoring(engine) -> None:
         updated += 1
 
     if updates:
-        with engine.db.transaction() as conn:
-            for importance_val, nid in updates:
-                conn.execute(
-                    "UPDATE nodes SET importance = ? WHERE id = ?",
-                    (importance_val, nid),
-                )
+        _commit_updates_chunked(engine.db, updates)
     if updated:
         logger.info("Importance scorer: updated %d/%d nodes", updated, len(rows))
