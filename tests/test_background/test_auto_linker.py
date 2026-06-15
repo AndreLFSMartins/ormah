@@ -240,6 +240,17 @@ def test_watermark_roundtrip(engine):
     assert _get_watermark(engine.db.conn) == 42
 
 
+def test_select_nodes_after_seq(engine):
+    from ormah.background.auto_linker import _select_nodes_after
+    id_a, id_b = _create_pair(engine)
+    rows = _select_nodes_after(engine.db.conn, 0, limit=10)
+    assert {id_a, id_b} <= {r["id"] for r in rows}
+    last = rows[-1]
+    rows2 = _select_nodes_after(engine.db.conn, last["seq"], limit=10)
+    assert all(r["id"] != last["id"] for r in rows2)
+    assert len(_select_nodes_after(engine.db.conn, 0, limit=1)) == 1
+
+
 def test_checked_pairs_invalidated_on_update(engine):
     """Updating a node's content should clear its checked pairs so it gets re-evaluated."""
     from ormah.models.node import UpdateNodeRequest

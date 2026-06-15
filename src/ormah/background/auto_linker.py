@@ -31,6 +31,15 @@ def _set_watermark(engine, seq: int) -> None:
             (_WATERMARK_KEY, str(seq)),
         )
 
+
+def _select_nodes_after(conn, watermark: int, limit: int) -> list:
+    """Nodes with seq strictly greater than the watermark, ascending, bounded."""
+    return conn.execute(
+        "SELECT id, content, title, type, space, seq FROM nodes "
+        "WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+        (watermark, limit),
+    ).fetchall()
+
 _LLM_LINK_PROMPT = """\
 You are classifying the relationship between two memories in a knowledge graph. These edges power spreading activation during search — when a user finds Memory A, the system traverses edges to surface related context. Bad edges inject noise; good edges dilute the signal from good ones.
 
