@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<!-- rich-doc-src-sha256:8a0a93836139f673a137618381cfd5459eadd90bc27eda7f9bd1a8cf131116c4 -->
+<html lang="en" data-mode="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto-linker incremental cursor — design</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline);vertical-align:top}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);flex-wrap:wrap}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Ormah · perf</div>
+  <div class="doc-title"><em>Auto-linker incremental cursor</em></div>
+  <a href="#problem">The O(n²) problem</a>
+  <a href="#approach">Approach A — watermark in meta</a>
+  <a href="#approach" class="lvl-3">State &amp; config</a>
+  <a href="#cycle">The incremental cycle</a>
+  <a href="#run-auto-linker" class="lvl-3">run_auto_linker</a>
+  <a href="#find-candidates" class="lvl-3">_find_link_candidates</a>
+  <a href="#correctness">Why it stays correct</a>
+  <a href="#testing">Testing — TDD first</a>
+  <a href="#out-of-scope">Out of scope</a>
+</nav>
+
+<main>
+
+  <div class="eyebrow">Design spec · upstream #26</div>
+  <p class="statement">A single watermark turns an O(n²) full-table scan into a bounded incremental drain — and serves backfill and steady state with the same code.</p>
+  <p class="meta">Date 2026-06-15 &nbsp;·&nbsp; Branch <code>perf/auto-linker-incremental</code> (off 0.11.0) &nbsp;·&nbsp; Status approved design, pending implementation plan</p>
+
+  <div class="metrics">
+    <div class="metric"><div class="big">O(n²)→O(b·n)</div><div class="label">cost per run</div></div>
+    <div class="metric"><div class="big">8,355</div><div class="label">nodes in real store</div></div>
+    <div class="metric"><div class="big">57%</div><div class="label">nodes that never yield a pair</div></div>
+    <div class="metric"><div class="big">500</div><div class="label">default batch ceiling</div></div>
+  </div>
+
+  <h2 id="problem">The O(n²) <em>problem</em></h2>
+  <p><code>run_auto_linker</code> (<code>src/ormah/background/auto_linker.py</code>) scans <strong>every</strong> node each run and, per node, re-encodes its text, runs a brute-force <code>vec_store.search</code> (itself O(n)), and calls the LLM per surviving candidate. Total cost is <strong>O(n²)</strong> compute plus O(candidates) LLM calls, repeated every <code>auto_link_interval_minutes</code> (default 1440 = 24h).</p>
+  <p><code>_find_link_candidates</code> — the maintenance-protocol preview reached via <code>get_maintenance_batches</code> → <code>maintenance_manager</code> — has the <strong>same shape</strong>, and additionally sorts with <code>ORDER BY RANDOM()</code>. <a href="#find-candidates">Both sites are fixed with one technique.</a></p>
+
+  <div class="callout warn">
+    <span class="label">The skip happens too late</span>
+    <p><code>auto_link_checked</code> already skips already-evaluated pairs — but only <em>after</em> the expensive encode + search. So the scan cost stays unbounded in <code>n</code> regardless. On the real store (8,355 nodes) most of each run is spent re-encoding and re-searching nodes that yield nothing: 4,776 nodes (57%) have never produced an evaluated pair.</p>
+  </div>
+
+  <h2 id="approach">Approach A — <em>watermark</em> in meta</h2>
+  <p class="statement">One mechanism serves both backfill and incremental — they differ only in the watermark's initial value.</p>
+  <p><strong>Backfill</strong> drains the historical backlog; <strong>incremental</strong> picks up only new or changed nodes. An absent watermark behaves as epoch, so a fresh deployment naturally backfills from the oldest node and then settles into cheap incremental runs. <a href="#correctness">Correctness rests on this single invariant.</a></p>
+
+  <h3>State &amp; config</h3>
+  <table>
+    <thead><tr><th>Element</th><th>Kind</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>meta.auto_link_watermark</code></td>
+        <td>existing key-value table</td>
+        <td>ISO timestamp of the <code>updated</code> field of the last fully-processed node. Absent ⇒ treated as epoch (<code>""</code>) ⇒ backlog drains from the oldest node. The same table already holds <code>last_maintenance_run</code>.</td>
+      </tr>
+      <tr>
+        <td><code>auto_link_max_nodes_per_run</code></td>
+        <td>new setting · <code>int = 500</code></td>
+        <td>Bounds the scan — the outer loop. This is the ceiling that converts the cost from O(n²) to O(batch · n).</td>
+      </tr>
+      <tr>
+        <td><code>auto_link_max_edges_per_run</code></td>
+        <td>existing setting · <code>500</code></td>
+        <td>Stays as a secondary write guard on edges created.</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    <span class="label">No structural cost</span>
+    <p>No new table, no new dependency, no change to the <code>nodes</code> schema. The watermark rides on infrastructure that already exists.</p>
+  </div>
+
+  <h2 id="cycle">The incremental <em>cycle</em></h2>
+  <p>Each run reads the watermark, pulls one bounded, ordered window above it, processes node by node, and advances the watermark only as far as the last <em>complete</em> node. The inner per-node logic is unchanged from today — the fix is entirely in <em>which</em> nodes enter the loop and how the cursor moves.</p>
+
+  <figure>
+<svg id="my-svg" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width: 449.211px; background-color: transparent;" viewBox="0 0 449.21099853515625 1511.90625" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#my-svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;fill:#141413;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#my-svg .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#my-svg .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#my-svg .error-icon{fill:#f1f4ec;}#my-svg .error-text{fill:#0e0b13;stroke:#0e0b13;}#my-svg .edge-thickness-normal{stroke-width:1px;}#my-svg .edge-thickness-thick{stroke-width:3.5px;}#my-svg .edge-pattern-solid{stroke-dasharray:0;}#my-svg .edge-thickness-invisible{stroke-width:0;fill:none;}#my-svg .edge-pattern-dashed{stroke-dasharray:3;}#my-svg .edge-pattern-dotted{stroke-dasharray:2;}#my-svg .marker{fill:#b0aea5;stroke:#b0aea5;}#my-svg .marker.cross{stroke:#b0aea5;}#my-svg svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;}#my-svg p{margin:0;}#my-svg .label{font-family:Arial,Helvetica,sans-serif;color:#141413;}#my-svg .cluster-label text{fill:#0e0b13;}#my-svg .cluster-label span{color:#0e0b13;}#my-svg .cluster-label span p{background-color:transparent;}#my-svg .label text,#my-svg span{fill:#141413;color:#141413;}#my-svg .node rect,#my-svg .node circle,#my-svg .node ellipse,#my-svg .node polygon,#my-svg .node path{fill:#fdf0eb;stroke:#d97757;stroke-width:1px;}#my-svg .rough-node .label text,#my-svg .node .label text,#my-svg .image-shape .label,#my-svg .icon-shape .label{text-anchor:middle;}#my-svg .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#my-svg .rough-node .label,#my-svg .node .label,#my-svg .image-shape .label,#my-svg .icon-shape .label{text-align:center;}#my-svg .node.clickable{cursor:pointer;}#my-svg .root .anchor path{fill:#b0aea5!important;stroke-width:0;stroke:#b0aea5;}#my-svg .arrowheadPath{fill:#05060a;}#my-svg .edgePath .path{stroke:#b0aea5;stroke-width:1px;}#my-svg .flowchart-link{stroke:#b0aea5;fill:none;}#my-svg .edgeLabel{background-color:#eef4fa;text-align:center;}#my-svg .edgeLabel p{background-color:#eef4fa;}#my-svg .edgeLabel rect{opacity:0.5;background-color:#eef4fa;fill:#eef4fa;}#my-svg .labelBkg{background-color:rgba(238, 244, 250, 0.5);}#my-svg .cluster rect{fill:#f1f4ec;stroke:hsl(82.5, 0%, 84.1176470588%);stroke-width:1px;}#my-svg .cluster text{fill:#0e0b13;}#my-svg .cluster span{color:#0e0b13;}#my-svg div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:Arial,Helvetica,sans-serif;font-size:12px;background:#f1f4ec;border:1px solid hsl(82.5, 0%, 84.1176470588%);border-radius:2px;pointer-events:none;z-index:100;}#my-svg .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#141413;}#my-svg rect.text{fill:none;stroke-width:0;}#my-svg .icon-shape,#my-svg .image-shape{background-color:#eef4fa;text-align:center;}#my-svg .icon-shape p,#my-svg .image-shape p{background-color:#eef4fa;padding:2px;}#my-svg .icon-shape .label rect,#my-svg .image-shape .label rect{opacity:0.5;background-color:#eef4fa;fill:#eef4fa;}#my-svg .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#my-svg .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#my-svg .node .neo-node{stroke:#d97757;}#my-svg [data-look="neo"].node rect,#my-svg [data-look="neo"].cluster rect,#my-svg [data-look="neo"].node polygon{stroke:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].node path{stroke:url(#my-svg-gradient);stroke-width:1px;}#my-svg [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].node .neo-line path{stroke:#d97757;filter:none;}#my-svg [data-look="neo"].node circle{stroke:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].node circle .state-start{fill:#000000;}#my-svg [data-look="neo"].icon-shape .icon{fill:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].icon-shape .icon-neo path{stroke:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g><marker id="my-svg_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointEnd-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="11.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto"><path d="M 0 0 L 11.5 7 L 0 14 z" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointStart-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="1" refY="7" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="14" orient="auto"><polygon points="0,7 11.5,14 11.5,0" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleEnd-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refY="5" refX="12.25" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleStart-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-2" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossEnd-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="17.7" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5;"/></marker><marker id="my-svg_flowchart-v2-crossStart-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="-3.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5; stroke-dasharray: 1, 0;"/></marker><g class="root"><g class="clusters"/><g class="edgePaths"><path d="M227.617,86L227.617,90.167C227.617,94.333,227.617,102.667,227.617,110.333C227.617,118,227.617,125,227.617,128.5L227.617,132" id="my-svg-L_A_B_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_A_B_0" data-points="W3sieCI6MjI3LjYxNzE4NzUsInkiOjg2fSx7IngiOjIyNy42MTcxODc1LCJ5IjoxMTF9LHsieCI6MjI3LjYxNzE4NzUsInkiOjEzNn1d" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M227.617,286L227.617,290.167C227.617,294.333,227.617,302.667,227.617,310.333C227.617,318,227.617,325,227.617,328.5L227.617,332" id="my-svg-L_B_C_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_B_C_0" data-points="W3sieCI6MjI3LjYxNzE4NzUsInkiOjI4Nn0seyJ4IjoyMjcuNjE3MTg3NSwieSI6MzExfSx7IngiOjIyNy42MTcxODc1LCJ5IjozMzZ9XQ==" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M179.642,450.525L159.222,464.687C138.803,478.85,97.964,507.175,77.544,528.837C57.125,550.5,57.125,565.5,57.125,573L57.125,580.5" id="my-svg-L_C_Z_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_C_Z_0" data-points="W3sieCI6MTc5LjY0MTg5NzMxMzU3NzIsInkiOjQ1MC41MjQ3MDk4MTM1NzcyfSx7IngiOjU3LjEyNSwieSI6NTM1LjV9LHsieCI6NTcuMTI1LCJ5Ijo1ODQuNX1d" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M227.617,498.5L227.617,504.667C227.617,510.833,227.617,523.167,227.617,534.833C227.617,546.5,227.617,557.5,227.617,563L227.617,568.5" id="my-svg-L_C_D_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_C_D_0" data-points="W3sieCI6MjI3LjYxNzE4NzUsInkiOjQ5OC41fSx7IngiOjIyNy42MTcxODc1LCJ5Ijo1MzUuNX0seyJ4IjoyMjcuNjE3MTg3NSwieSI6NTcyLjV9XQ==" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M227.617,650.5L227.617,654.667C227.617,658.833,227.617,667.167,227.617,674.833C227.617,682.5,227.617,689.5,227.617,693L227.617,696.5" id="my-svg-L_D_E_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_D_E_0" data-points="W3sieCI6MjI3LjYxNzE4NzUsInkiOjY1MC41fSx7IngiOjIyNy42MTcxODc1LCJ5Ijo2NzUuNX0seyJ4IjoyMjcuNjE3MTg3NSwieSI6NzAwLjV9XQ==" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M227.617,778.5L227.617,782.667C227.617,786.833,227.617,795.167,227.617,802.833C227.617,810.5,227.617,817.5,227.617,821L227.617,824.5" id="my-svg-L_E_F_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_E_F_0" data-points="W3sieCI6MjI3LjYxNzE4NzUsInkiOjc3OC41fSx7IngiOjIyNy42MTcxODc1LCJ5Ijo4MDMuNX0seyJ4IjoyMjcuNjE3MTg3NSwieSI6ODI4LjV9XQ==" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M190.869,1083.158L186.724,1095.45C182.578,1107.741,174.287,1132.324,170.142,1155.282C165.996,1178.24,165.996,1199.573,165.996,1220.906C165.996,1242.24,165.996,1263.573,165.996,1284.906C165.996,1306.24,165.996,1327.573,165.996,1346.906C165.996,1366.24,165.996,1383.573,173.428,1396.099C180.86,1408.625,195.724,1416.344,203.156,1420.203L210.588,1424.063" id="my-svg-L_F_H_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_F_H_0" data-points="W3sieCI6MTkwLjg2OTM1MzEyMTQ1MjY2LCJ5IjoxMDgzLjE1ODQxNTYyMTQ1MjZ9LHsieCI6MTY1Ljk5NjA5Mzc1LCJ5IjoxMTU2LjkwNjI1fSx7IngiOjE2NS45OTYwOTM3NSwieSI6MTIyMC45MDYyNX0seyJ4IjoxNjUuOTk2MDkzNzUsInkiOjEyODQuOTA2MjV9LHsieCI6MTY1Ljk5NjA5Mzc1LCJ5IjoxMzQ4LjkwNjI1fSx7IngiOjE2NS45OTYwOTM3NSwieSI6MTQwMC45MDYyNX0seyJ4IjoyMTQuMTM3NTczMjQyMTg3NSwieSI6MTQyNS45MDYyNX1d" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M264.365,1083.158L268.511,1095.45C272.656,1107.741,280.947,1132.324,285.093,1150.115C289.238,1167.906,289.238,1178.906,289.238,1184.406L289.238,1189.906" id="my-svg-L_F_G_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_F_G_0" data-points="W3sieCI6MjY0LjM2NTAyMTg3ODU0NzM0LCJ5IjoxMDgzLjE1ODQxNTYyMTQ1MjZ9LHsieCI6Mjg5LjIzODI4MTI1LCJ5IjoxMTU2LjkwNjI1fSx7IngiOjI4OS4yMzgyODEyNSwieSI6MTE5My45MDYyNX1d" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M289.238,1247.906L289.238,1254.073C289.238,1260.24,289.238,1272.573,289.238,1284.24C289.238,1295.906,289.238,1306.906,289.238,1312.406L289.238,1317.906" id="my-svg-L_G_I_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_G_I_0" data-points="W3sieCI6Mjg5LjIzODI4MTI1LCJ5IjoxMjQ3LjkwNjI1fSx7IngiOjI4OS4yMzgyODEyNSwieSI6MTI4NC45MDYyNX0seyJ4IjoyODkuMjM4MjgxMjUsInkiOjEzMjEuOTA2MjV9XQ==" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M289.238,1375.906L289.238,1380.073C289.238,1384.24,289.238,1392.573,289.238,1400.24C289.238,1407.906,289.238,1414.906,289.238,1418.406L289.238,1421.906" id="my-svg-L_I_H_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_I_H_0" data-points="W3sieCI6Mjg5LjIzODI4MTI1LCJ5IjoxMzc1LjkwNjI1fSx7IngiOjI4OS4yMzgyODEyNSwieSI6MTQwMC45MDYyNX0seyJ4IjoyODkuMjM4MjgxMjUsInkiOjE0MjUuOTA2MjV9XQ==" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M381.847,1425.906L391.741,1421.74C401.635,1417.573,421.423,1409.24,431.317,1396.406C441.211,1383.573,441.211,1366.24,441.211,1346.906C441.211,1327.573,441.211,1306.24,441.211,1284.906C441.211,1263.573,441.211,1242.24,441.211,1220.906C441.211,1199.573,441.211,1178.24,441.211,1137.122C441.211,1096.005,441.211,1035.104,441.211,976.203C441.211,917.302,441.211,860.401,441.211,821.284C441.211,782.167,441.211,760.833,441.211,739.5C441.211,718.167,441.211,696.833,441.211,675.5C441.211,654.167,441.211,632.833,441.211,609.5C441.211,586.167,441.211,560.833,414.911,533.607C388.612,506.38,336.013,477.26,309.713,462.7L283.414,448.14" id="my-svg-L_H_C_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_H_C_0" data-points="W3sieCI6MzgxLjg0NjYxODY1MjM0Mzc1LCJ5IjoxNDI1LjkwNjI1fSx7IngiOjQ0MS4yMTA5Mzc1LCJ5IjoxNDAwLjkwNjI1fSx7IngiOjQ0MS4yMTA5Mzc1LCJ5IjoxMzQ4LjkwNjI1fSx7IngiOjQ0MS4yMTA5Mzc1LCJ5IjoxMjg0LjkwNjI1fSx7IngiOjQ0MS4yMTA5Mzc1LCJ5IjoxMjIwLjkwNjI1fSx7IngiOjQ0MS4yMTA5Mzc1LCJ5IjoxMTU2LjkwNjI1fSx7IngiOjQ0MS4yMTA5Mzc1LCJ5Ijo5NzQuMjAzMTI1fSx7IngiOjQ0MS4yMTA5Mzc1LCJ5Ijo4MDMuNX0seyJ4Ijo0NDEuMjEwOTM3NSwieSI6NzM5LjV9LHsieCI6NDQxLjIxMDkzNzUsInkiOjY3NS41fSx7IngiOjQ0MS4yMTA5Mzc1LCJ5Ijo2MTEuNX0seyJ4Ijo0NDEuMjEwOTM3NSwieSI6NTM1LjV9LHsieCI6Mjc5LjkxNDM2NzA4Mzc2NDk0LCJ5Ijo0NDYuMjAyODIwNDE2MjM1MDZ9XQ==" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/></g><g class="edgeLabels"><g class="edgeLabel"><g class="label" data-id="L_A_B_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_B_C_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(57.125, 535.5)"><g class="label" data-id="L_C_Z_0" transform="translate(-8.8984375, -12)"><foreignObject width="17.796875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>no</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(227.6171875, 535.5)"><g class="label" data-id="L_C_D_0" transform="translate(-12.453125, -12)"><foreignObject width="24.90625" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>yes</p></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_D_E_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_E_F_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(165.99609375, 1284.90625)"><g class="label" data-id="L_F_H_0" transform="translate(-8.8984375, -12)"><foreignObject width="17.796875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>no</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(289.23828125, 1156.90625)"><g class="label" data-id="L_F_G_0" transform="translate(-12.453125, -12)"><foreignObject width="24.90625" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>yes</p></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_G_I_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_I_H_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_H_C_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default" id="my-svg-flowchart-A-0" data-look="classic" transform="translate(227.6171875, 47)"><rect class="basic label-container" style="" x="-88.6875" y="-39" width="177.375" height="78"/><g class="label" style="" transform="translate(-58.6875, -24)"><rect/><foreignObject width="117.375" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Read watermark<br />from meta</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-B-1" data-look="classic" transform="translate(227.6171875, 211)"><rect class="basic label-container" style="" x="-130" y="-75" width="260" height="150"/><g class="label" style="" transform="translate(-100, -60)"><rect/><foreignObject width="200" height="120"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>SELECT nodes<br />WHERE (updated,id) &gt; watermark<br />ORDER BY updated ASC<br />LIMIT batch</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-C-3" data-look="classic" transform="translate(227.6171875, 417.25)"><polygon points="81.25,0 162.5,-81.25 81.25,-162.5 0,-81.25" class="label-container" transform="translate(-80.75, 81.25)"/><g class="label" style="" transform="translate(-42.25, -24)"><rect/><foreignObject width="84.5" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>More nodes<br />in batch?</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-Z-5" data-look="classic" transform="translate(57.125, 611.5)"><rect class="basic label-container" style="" x="-49.125" y="-27" width="98.25" height="54"/><g class="label" style="" transform="translate(-19.125, -12)"><rect/><foreignObject width="38.25" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Done</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-D-7" data-look="classic" transform="translate(227.6171875, 611.5)"><rect class="basic label-container" style="" x="-71.3671875" y="-39" width="142.734375" height="78"/><g class="label" style="" transform="translate(-41.3671875, -24)"><rect/><foreignObject width="82.734375" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Next node:<br />encode text</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-E-9" data-look="classic" transform="translate(227.6171875, 739.5)"><rect class="basic label-container" style="" x="-90.921875" y="-39" width="181.84375" height="78"/><g class="label" style="" transform="translate(-60.921875, -24)"><rect/><foreignObject width="121.84375" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>vec_store.search<br />(k nearest)</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-F-11" data-look="classic" transform="translate(227.6171875, 974.203125)"><polygon points="145.703125,0 291.40625,-145.703125 145.703125,-291.40625 0,-145.703125" class="label-container" transform="translate(-145.203125, 145.703125)"/><g class="label" style="" transform="translate(-82.703125, -48)"><rect/><foreignObject width="165.40625" height="96"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Pass filters?<br />threshold / cross-space<br />auto_link_checked<br />edge exists</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-H-13" data-look="classic" transform="translate(289.23828125, 1464.90625)"><rect class="basic label-container" style="" x="-108.03125" y="-39" width="216.0625" height="78"/><g class="label" style="" transform="translate(-78.03125, -24)"><rect/><foreignObject width="156.0625" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Advance watermark<br />to this node's updated</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-G-15" data-look="classic" transform="translate(289.23828125, 1220.90625)"><rect class="basic label-container" style="" x="-88.2421875" y="-27" width="176.484375" height="54"/><g class="label" style="" transform="translate(-58.2421875, -12)"><rect/><foreignObject width="116.484375" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>LLM classify link</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-I-17" data-look="classic" transform="translate(289.23828125, 1348.90625)"><rect class="basic label-container" style="" x="-75.8203125" y="-27" width="151.640625" height="54"/><g class="label" style="" transform="translate(-45.8203125, -12)"><rect/><foreignObject width="91.640625" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>_apply_edge</p></span></div></foreignObject></g></g></g></g></g><defs><filter id="my-svg-drop-shadow" height="130%" width="130%"><feDropShadow dx="4" dy="4" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><defs><filter id="my-svg-drop-shadow-small" height="150%" width="150%"><feDropShadow dx="2" dy="2" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><linearGradient id="my-svg-gradient" gradientUnits="objectBoundingBox" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#d97757" stop-opacity="1"/><stop offset="100%" stop-color="hsl(210, 14.5454545455%, 85.6862745098%)" stop-opacity="1"/></linearGradient></svg>
+    <figcaption>The incremental cursor cycle — watermark read, bounded window, per-node processing, advance to the last complete node</figcaption>
+  </figure>
+
+  <p>Note the two distinct exits from the filter gate: a node that passes goes through LLM classification and <code>_apply_edge</code>; a node that fails simply advances the watermark. <strong>Both paths advance the cursor</strong> — a node yielding no edge is still "fully processed" and must not be re-scanned.</p>
+
+  <h3 id="run-auto-linker">run_auto_linker</h3>
+  <p>Replace the all-rows query <code>SELECT id, content, title, type, space FROM nodes</code> with a windowed, ordered scan:</p>
+  <pre><code>-- watermark is the composite (updated, id) of the last processed node;
+-- shown here as a single column for readability (see "Timestamp ties").
+SELECT id, content, title, type, space, updated
+FROM nodes
+WHERE (updated, id) &gt; (:wm_updated, :wm_id)
+ORDER BY updated ASC, id ASC LIMIT :max_nodes_per_run</code></pre>
+  <p>The inner logic is unchanged: encode → <code>vec_store.search</code> → threshold / cross-space penalty → <code>auto_link_checked</code> / existing-edge skip → <code>_llm_classify_link</code> → <code>_apply_edge</code>. After the loop, write <code>auto_link_watermark = updated</code> of the last fully-processed node to <code>meta</code> (inside a transaction). Per-run cost: <strong>O(batch · n)</strong> instead of O(n²). <a href="#correctness">The transactional, last-complete-node write is what makes a crash safe.</a></p>
+
+  <h3 id="find-candidates">_find_link_candidates <span class="chip on">decision (a) — in scope</span></h3>
+  <p>Extract the candidate scan into a <strong>shared incremental generator</strong> used by both callers. It <em>reads</em> the same watermark but does <strong>not</strong> advance it — it is a side-effect-free preview — and replaces <code>ORDER BY RANDOM()</code> with the same deterministic <code>updated ASC</code> window. This removes the duplication the issue calls out and <a href="#problem">fixes both O(n²) sites with one technique</a>.</p>
+
+  <h2 id="correctness">Why it stays <em>correct</em></h2>
+  <p class="statement">No link is lost — every pair is discovered when the newer node of the pair is processed.</p>
+  <table>
+    <thead><tr><th>Concern</th><th>Why it holds</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>No links lost</td>
+        <td>Every possible pair is discovered when the <em>newer</em> node of the pair is processed. <code>vec_store.search</code> is symmetric and <code>auto_link_checked</code> deduplicates, so the older side need not be re-scanned.</td>
+      </tr>
+      <tr>
+        <td>Updates re-enter the delta</td>
+        <td>A node update bumps <code>updated</code> <em>and</em> deletes the node's <code>auto_link_checked</code> rows (<code>memory_engine.py</code> :806 / :850 / :1201 / :1206), so the node naturally re-appears above the watermark.</td>
+      </tr>
+      <tr>
+        <td>Partial run, crash, or <code>max_edges</code> hit mid-node</td>
+        <td>The watermark advances only to the last <em>complete</em> node. Reprocessing is idempotent — checked pairs are skipped and no duplicate edges are created. <a href="#run-auto-linker">This is why the watermark write trails the loop, not leads it.</a></td>
+      </tr>
+      <tr>
+        <td>Timestamp ties</td>
+        <td>The cursor is the composite <code>(updated, id)</code>, so equal <code>updated</code> values are neither skipped nor repeated.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="testing">Testing — <em>TDD</em> first</h2>
+  <p>Tests are written before implementation. Each one pins a single correctness or cost property of the cycle above.</p>
+  <table>
+    <thead><tr><th>#</th><th>Property under test</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>A run processes only <code>updated &gt; watermark</code>, never the full table; respects the batch limit.</td></tr>
+      <tr><td>2</td><td>The watermark advances to the last processed node's <code>updated</code>; never past unprocessed nodes.</td></tr>
+      <tr><td>3</td><td>Backlog drains across multiple runs; once the delta is empty a run is cheap — no encode, no search.</td></tr>
+      <tr><td>4</td><td>An updated node re-enters the delta; an old↔new pair is created when the new node is processed.</td></tr>
+      <tr><td>5</td><td>Absent watermark ⇒ epoch; an empty store ⇒ no-op.</td></tr>
+      <tr><td>6</td><td><code>_find_link_candidates</code> returns only candidates in the watermark window, deterministically, without advancing the watermark.</td></tr>
+      <tr><td>7</td><td>Existing <code>auto_link_checked</code> tests stay green — no re-check, invalidation on update.</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="out-of-scope">Out of <em>scope</em></h2>
+  <div class="callout warn">
+    <span class="label">Deliberately deferred</span>
+    <p>These are real concerns, but separate from this perf fix. Pulling any of them in would widen the blast radius without improving the O(n²) outcome.</p>
+  </div>
+  <table>
+    <thead><tr><th>Deferred</th><th>Why separate</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Edge-quality concern</td>
+        <td>Local gemma3:4b classifies ~90% of pairs as <code>supports</code> (~16.7k edges) — a separate issue, not this perf fix.</td>
+      </tr>
+      <tr>
+        <td>Reusing stored embeddings instead of re-encoding each delta node</td>
+        <td>A possible later optimization; with a bounded batch the re-encode is no longer the bottleneck.</td>
+      </tr>
+      <tr>
+        <td>ANN for the vector search itself (upstream #25)</td>
+        <td>Separate — the benefit compounds once added.</td>
+      </tr>
+      <tr>
+        <td>Tier-based prioritization of the drain order</td>
+        <td>Addable later via <code>ORDER BY</code> within approach A.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <span class="name">Ormah — auto-linker incremental cursor</span>
+    <span class="role">Design spec · upstream #26 · branch perf/auto-linker-incremental</span>
+  </div>
+
+</main>
+</body>
+</html>
