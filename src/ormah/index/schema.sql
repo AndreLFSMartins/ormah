@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS node_tags (
 CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
 CREATE INDEX IF NOT EXISTS idx_nodes_tier ON nodes(tier);
 CREATE INDEX IF NOT EXISTS idx_nodes_space ON nodes(space);
-CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq);
+-- idx_nodes_seq is created in Database._migrate (after the seq column is guaranteed),
+-- never here: on a legacy DB this script runs before the migration adds the column,
+-- so indexing nodes(seq) at executescript time would fail with "no such column: seq".
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
 CREATE INDEX IF NOT EXISTS idx_node_tags_tag ON node_tags(tag);

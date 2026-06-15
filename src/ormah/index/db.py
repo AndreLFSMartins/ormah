@@ -117,7 +117,6 @@ class Database:
 
             if "seq" not in node_cols:
                 conn.execute("ALTER TABLE nodes ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq)")
                 # Backfill existing rows: oldest (created ASC) gets the lowest seq,
                 # so the historical backlog drains oldest-first.
                 rows = conn.execute(
@@ -131,6 +130,11 @@ class Database:
                     "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
                     (str(len(rows) + 1),),
                 )
+
+            # Index created here (not in schema.sql): on a legacy DB schema.sql's
+            # executescript runs before the column exists. Unconditional so a fresh DB
+            # (which skips the block above) still gets the index.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq)")
 
             # Create new feedback/logging tables if missing
             existing_tables = {
