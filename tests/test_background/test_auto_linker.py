@@ -233,6 +233,13 @@ def test_metadata_update_does_not_bump_seq(engine):
     assert after == before
 
 
+def test_watermark_roundtrip(engine):
+    from ormah.background.auto_linker import _get_watermark, _set_watermark
+    assert _get_watermark(engine.db.conn) == 0
+    _set_watermark(engine, 42)
+    assert _get_watermark(engine.db.conn) == 42
+
+
 def test_checked_pairs_invalidated_on_update(engine):
     """Updating a node's content should clear its checked pairs so it gets re-evaluated."""
     from ormah.models.node import UpdateNodeRequest

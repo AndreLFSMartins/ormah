@@ -10,6 +10,27 @@ from ormah.background.llm import normalize_link_type
 
 logger = logging.getLogger(__name__)
 
+_WATERMARK_KEY = "auto_link_watermark"
+
+
+def _get_watermark(conn) -> int:
+    """Return the seq of the last fully-processed node, or 0 if unset."""
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (_WATERMARK_KEY,)).fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row["value"])
+    except (ValueError, TypeError):
+        return 0
+
+
+def _set_watermark(engine, seq: int) -> None:
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (_WATERMARK_KEY, str(seq)),
+        )
+
 _LLM_LINK_PROMPT = """\
 You are classifying the relationship between two memories in a knowledge graph. These edges power spreading activation during search — when a user finds Memory A, the system traverses edges to surface related context. Bad edges inject noise; good edges dilute the signal from good ones.
 
