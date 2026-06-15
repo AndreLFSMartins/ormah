@@ -2,7 +2,7 @@
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Task 06: §3 cap backstop (forget-score eviction)</title>
-<!-- rich-doc-src-sha256:b40591ef6f90055e5ff927efb85aed721b1cb2c3b9d8691bc6ea7f0941af2ae6 -->
+<!-- rich-doc-src-sha256:4d514ec04ad84ebad957ae97b012968426d9d0c9aba3e7e1fa6a3eab1aa95ad4 -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
@@ -54,15 +54,19 @@ pre code{color:inherit;font-size:13px}
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 1: Write the failing tests</strong></li></ul>
 <p>Append to <code>tests/test_background/test_forgetting_manager.py</code>:</p>
 <pre><code class="lang-python">def _make_archival_recent(engine, content, archived_days, importance=0.1):
-    &quot;&quot;&quot;Archival node that is NOT gate-stale (recently accessed), with a chosen age.&quot;&quot;&quot;
+    &quot;&quot;&quot;Archival node NOT gate-stale (recent access), eligible in BOTH file and index.&quot;&quot;&quot;
     node_id, _ = engine.remember(CreateNodeRequest(
         content=content, type=NodeType.fact, tier=Tier.archival, title=content))
-    recent = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
-    archived = (datetime.now(timezone.utc) - timedelta(days=archived_days)).isoformat()
-    engine.db.conn.execute(
-        &quot;UPDATE nodes SET tier=&#x27;archival&#x27;, importance=?, stability=1.0, &quot;
-        &quot;last_review=?, last_accessed=?, archived_at=? WHERE id=?&quot;,
-        (importance, recent, recent, archived, node_id))
+    recent = datetime.now(timezone.utc) - timedelta(days=3)
+    archived = datetime.now(timezone.utc) - timedelta(days=archived_days)
+    node = engine.file_store.load(node_id)
+    node.importance = importance
+    node.stability = 1.0
+    node.last_review = recent
+    node.last_accessed = recent
+    node.archived_at = archived
+    path = engine.file_store.save(node)
+    engine.builder.index_single(path)
     engine.db.conn.commit()
     return node_id
 
@@ -192,9 +196,7 @@ def test_cap_never_evicts_user_node(engine):
 
 def _cap_guard(engine, node_id: str, now: datetime):
     def guard(conn) -&gt; bool:
-        row = conn.execute(
-            f&quot;SELECT {_ROW_COLS} FROM nodes WHERE id = ? AND tier = &#x27;archival&#x27;&quot;, (node_id,)
-        ).fetchone()
+        row = _hybrid_row(engine, node_id, conn)  # source-of-truth recheck (council R3 C5)
         return row is not None and not _is_protected(engine, row, now)
 
     return guard

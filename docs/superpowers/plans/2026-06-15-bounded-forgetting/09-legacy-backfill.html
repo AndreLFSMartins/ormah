@@ -2,7 +2,7 @@
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Task 09: Lazy, atomic legacy `archived_at` file backfill</title>
-<!-- rich-doc-src-sha256:5400880fcb540e008cfd2189e5b290989e1951488f4ea3935a8b06b457d2a141 -->
+<!-- rich-doc-src-sha256:bd1bd1463e1c28abf13e3f80441436211eaa8465a5a89e1b3aba5ff6497572cc -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
@@ -138,23 +138,32 @@ def _backfill_legacy_archived_at(engine) -&gt; int:
     if done:
         return 0
 
-    rows = engine.db.conn.execute(
-        &quot;SELECT id FROM nodes WHERE tier = &#x27;archival&#x27;&quot;
-    ).fetchall()
     stamped, skipped = 0, 0
-    for row in rows:
-        node = engine.file_store.load(row[&quot;id&quot;])
-        if node is None or node.archived_at is not None:
-            continue  # already has it (or vanished) — leave untouched
-        node.archived_at = node.updated  # best proxy for the legacy demotion time
+    # Enumerate the SOURCE FILES on disk, not the derived index (council R3 H8): an archival
+    # file absent from the index would otherwise be missed forever once `done` is set.
+    for node in engine.file_store.list_all():
+        if node.tier != Tier.archival:
+            continue
+        irow = engine.db.conn.execute(
+            &quot;SELECT archived_at FROM nodes WHERE id = ?&quot;, (node.id,)
+        ).fetchone()
+        index_has = irow is not None and irow[&quot;archived_at&quot;] is not None
+        if node.archived_at is not None and index_has:
+            continue  # file + index already consistent
         try:
-            path = engine.file_store.save(node)   # atomic tmp + fsync + os.replace
-            engine.builder.index_single(path)     # mirror into the index
+            if node.archived_at is None:
+                node.archived_at = node.updated  # best proxy for the legacy demotion time
+                path = engine.file_store.save(node)   # atomic tmp + fsync + os.replace
+            else:
+                path = engine.file_store._find_file(node.id)  # file ok, index lagged
+            engine.builder.index_single(path)         # stamp/repair the index
             stamped += 1
         except Exception:
             skipped += 1
-            logger.warning(&quot;archived_at backfill skipped node %s&quot;, row[&quot;id&quot;])
+            logger.warning(&quot;archived_at backfill skipped node %s&quot;, node.id)
 
+    # Only mark done on a fully clean pass — a save-ok/index-fail node is re-checked next run
+    # (its file has archived_at but the index does not, so the loop re-indexes it).
     if skipped == 0:
         with engine.db.transaction() as conn:
             conn.execute(

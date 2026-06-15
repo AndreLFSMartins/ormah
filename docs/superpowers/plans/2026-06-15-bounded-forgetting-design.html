@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bounded Forgetting (#28) — Design</title>
-<!-- rich-doc-src-sha256:f01768634e1643d329e7cfc910e669d2d0e4174b174876cf0d336ce80b223371 -->
+<!-- rich-doc-src-sha256:6ce99ae26b626900c2a4b643d264abef2494368c1fdbf54a09a43831cfee52c0 -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
@@ -38,8 +38,7 @@ pre code{color:inherit;font-size:13px}
 .signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
 @media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
 </style></head>
-<body><nav class="toc"><div class="eyebrow">Ormah &middot; #28</div>
-<div class="doc-title">Bounded forgetting</div>
+<body><nav class="toc"><div class="eyebrow">Ormah &middot; #28</div><div class="doc-title">Bounded forgetting</div>
 <a href="#problem" class="lvl-2">Problem</a>
 <a href="#design-constraint" class="lvl-2">Design constraint</a>
 <a href="#decisions-locked-during-brainstorming" class="lvl-2">Decisions (locked during brainstorming)</a>
@@ -53,8 +52,7 @@ pre code{color:inherit;font-size:13px}
 <a href="#config-new-fields-in-src-ormah-config-py-ormah-env-prefix" class="lvl-2">Config (new fields in `src/ormah/config.py`, `ORMAH_` env prefix)</a>
 <a href="#operation" class="lvl-2">Operation</a>
 <a href="#testing-tdd" class="lvl-2">Testing (TDD)</a>
-<a href="#out-of-scope" class="lvl-2">Out of scope</a></nav>
-<main><div class="eyebrow">Design spec</div>
+<a href="#out-of-scope" class="lvl-2">Out of scope</a></nav><main><div class="eyebrow">Design spec</div>
 <h1 id="bounded-forgetting-28-design">Bounded Forgetting (#28) — Design</h1>
 <p><strong>Issue:</strong> #28 — <code>feat(background): bounded forgetting — delete dead-weight archival nodes</code> <strong>Branch:</strong> off <code>perf/auto-linker-incremental</code> (#26 not yet merged to main) <strong>Date:</strong> 2026-06-15</p>
 <h2 id="problem">Problem</h2>
@@ -106,7 +104,7 @@ pre code{color:inherit;font-size:13px}
 <ul><li><strong>Staleness signals (sustained dead weight):</strong> archived long enough (#2), not re-accessed</li></ul>
 <p>  (#2), <code>R</code> below the floor (#3). Phase A requires *not protected AND stale*.</p>
 <p><strong><code>archived_at</code> lifecycle:</strong> stamped on <strong>every</strong> transition into archival and <strong>cleared</strong> when the node leaves archival — so an <code>archival → working → archival</code> round-trip resets the clock instead of reusing a stale months-old timestamp.</p>
-<p><strong>Atomic delete-if-eligible:</strong> background jobs run concurrently, so eligibility is rechecked <strong>inside</strong> the <code>BEGIN IMMEDIATE</code> deletion transaction via <code>engine.delete_node_guarded(id, guard)</code>. <code>Database.transaction()</code> holds the cross-thread write lock for its whole duration, so a concurrent recall / promotion / <code>connect</code> / <code>submit_feedback</code> either commits before the guard reads (guard aborts) or blocks until the node is already removed. This closes the TOCTOU race without a global lock around <code>recall</code> — a global lock would reintroduce the #18/#19 contention that PR#19 fixed. The soft-delete is reversible for <code>deletion_retention_days</code>, so even a missed race is recoverable, not irreversible.</p>
+<p><strong>Atomic delete-if-eligible:</strong> background jobs run concurrently, so eligibility is rechecked <strong>inside</strong> the <code>BEGIN IMMEDIATE</code> deletion transaction via <code>engine.delete_node_guarded(id, guard)</code>. The guard is <strong>hybrid</strong>: it reads the volatile protective fields (<code>tier</code>, <code>last_accessed</code>, <code>archived_at</code>) from the <strong>source markdown file</strong>, because mutators (<code>update_node</code>, <code>_touch_access</code>) write the file *before* the index — a guard reading only the index could act on stale state and delete a node mid-promotion. <code>importance</code>/affinity/edges stay index-authoritative and are serialized by the transaction. The deletion <strong>moves the file first, then removes the index row</strong> inside the same transaction, so a crash leaves at worst a dangling index row (healed on rebuild), never a resurrected node. No global lock around <code>recall</code> — that would reintroduce the #18/#19 contention PR#19 fixed. The soft-delete is reversible for <code>deletion_retention_days</code>, so even a missed race is recoverable, not irreversible.</p>
 <h2 id="3-cap-backstop-forget-score">§3 Cap backstop <em>(forget-score)</em></h2>
 <p>When <code>archival_soft_cap &gt; 0</code> and exceeded, evict worst-first by a composite forget-score:</p>
 <pre><code class="lang-">score = (1 − R) · (1 − importance) · age_days · 1/(1 + degree) · no_positive_feedback</code></pre>
@@ -134,7 +132,6 @@ pre code{color:inherit;font-size:13px}
 <h2 id="out-of-scope">Out of <em>scope</em></h2>
 <ul><li>UI changes (the issue&#x27;s #22 active-graph-first is separate).</li><li>Restore-from-<code>deleted/</code> UX (the reversibility window exists; a restore command is not part</li></ul>
 <p>  of this slice).</p>
-<ul><li>#25 ANN / vector-search work (deferred per the perf roadmap).</li></ul>
-<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<ul><li>#25 ANN / vector-search work (deferred per the perf roadmap).</li></ul><div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
 <div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span><span class="role">Design spec &middot; #28 &middot; 2026-06-15</span></div>
 </main></body></html>

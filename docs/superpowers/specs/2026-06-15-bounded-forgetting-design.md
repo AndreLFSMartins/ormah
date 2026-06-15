@@ -122,12 +122,15 @@ instead of reusing a stale months-old timestamp.
 
 **Atomic delete-if-eligible:** background jobs run concurrently, so eligibility is rechecked
 **inside** the `BEGIN IMMEDIATE` deletion transaction via `engine.delete_node_guarded(id, guard)`.
-`Database.transaction()` holds the cross-thread write lock for its whole duration, so a
-concurrent recall / promotion / `connect` / `submit_feedback` either commits before the guard
-reads (guard aborts) or blocks until the node is already removed. This closes the TOCTOU race
-without a global lock around `recall` — a global lock would reintroduce the #18/#19 contention
-that PR#19 fixed. The soft-delete is reversible for `deletion_retention_days`, so even a missed
-race is recoverable, not irreversible.
+The guard is **hybrid**: it reads the volatile protective fields (`tier`, `last_accessed`,
+`archived_at`) from the **source markdown file**, because mutators (`update_node`,
+`_touch_access`) write the file *before* the index — a guard reading only the index could act on
+stale state and delete a node mid-promotion. `importance`/affinity/edges stay index-authoritative
+and are serialized by the transaction. The deletion **moves the file first, then removes the
+index row** inside the same transaction, so a crash leaves at worst a dangling index row (healed
+on rebuild), never a resurrected node. No global lock around `recall` — that would reintroduce
+the #18/#19 contention PR#19 fixed. The soft-delete is reversible for `deletion_retention_days`,
+so even a missed race is recoverable, not irreversible.
 
 ## §3 Cap backstop (forget-score)
 

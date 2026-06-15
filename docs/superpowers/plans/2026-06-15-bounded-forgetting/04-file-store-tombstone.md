@@ -74,16 +74,20 @@ Expected: FAIL (`deleted_at` not stamped; `list_deleted`/`purge` missing).
 
 - [ ] **Step 3: Implement in `file_store.py`**
 
-Add `import frontmatter` at the top (with the other imports).
+Add `import frontmatter` at the top (with the other imports). `os` and `tempfile` are already
+imported in `file_store.py`.
 
-Replace the existing `soft_delete` method body with:
+Replace the existing `soft_delete` method body with an **atomic** tombstone write that mirrors
+`save()` (council R3 H6: the old `path.rename` was atomic; an in-place `write_text`+`unlink` is
+not — a crash mid-write could truncate the tombstone):
 
 ```python
     def soft_delete(self, node_id: str) -> bool:
-        """Move a node file to the deleted/ directory, stamping deleted_at.
+        """Move a node file to the deleted/ directory, stamping deleted_at atomically.
 
         The deleted_at tombstone in the moved file's frontmatter is the purge
         clock (#28): self-contained, so it survives backup/restore and mtime resets.
+        Written via tmp + fsync + os.replace so a crash never leaves a partial tombstone.
         """
         path = self._find_file(node_id)
         if path is None:
@@ -93,9 +97,26 @@ Replace the existing `soft_delete` method body with:
 
         post = frontmatter.loads(path.read_text(encoding="utf-8"))
         post["deleted_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        text = frontmatter.dumps(post)
         dest = deleted_dir / path.name
-        dest.write_text(frontmatter.dumps(post), encoding="utf-8")
-        path.unlink()
+
+        fd, tmp = tempfile.mkstemp(dir=str(deleted_dir), suffix=".tmp", prefix=".ormah_")
+        closed = False
+        try:
+            os.write(fd, text.encode("utf-8"))
+            os.fsync(fd)
+            os.close(fd)
+            closed = True
+            os.replace(tmp, str(dest))   # atomic publish of the tombstone
+        except BaseException:
+            if not closed:
+                os.close(fd)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        path.unlink()                    # remove the original only after dest is durable
 
         self._id_cache.pop(node_id, None)
         return True

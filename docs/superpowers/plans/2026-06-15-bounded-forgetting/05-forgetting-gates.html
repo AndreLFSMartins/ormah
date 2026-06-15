@@ -2,7 +2,7 @@
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Task 05: Forgetting manager — Phase A gates → soft-delete</title>
-<!-- rich-doc-src-sha256:0032cfb0b543953b596251cd4efff7aff34a098e7e9b58ab698eca5bc4bd4de3 -->
+<!-- rich-doc-src-sha256:f1f8acd81c1e0e68c2fc28bd9491d89a26cf53d34cdbc20072745546b15f0f82 -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
@@ -80,14 +80,18 @@ def _enable(engine):
 
 
 def _make_eligible(engine, content=&quot;dead weight&quot;, days=200):
-    &quot;&quot;&quot;Create an archival node that passes every gate (not protected + stale).&quot;&quot;&quot;
+    &quot;&quot;&quot;Create an archival node eligible in BOTH file and index (the guard reads the file).&quot;&quot;&quot;
     node_id, _ = engine.remember(CreateNodeRequest(
         content=content, type=NodeType.fact, tier=Tier.archival, title=content))
-    old = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    engine.db.conn.execute(
-        &quot;UPDATE nodes SET tier=&#x27;archival&#x27;, importance=0.1, stability=1.0, &quot;
-        &quot;last_review=?, last_accessed=?, archived_at=? WHERE id=?&quot;,
-        (old, old, old, node_id))
+    old = datetime.now(timezone.utc) - timedelta(days=days)
+    node = engine.file_store.load(node_id)
+    node.importance = 0.1
+    node.stability = 1.0
+    node.last_review = old
+    node.last_accessed = old
+    node.archived_at = old
+    path = engine.file_store.save(node)        # source of truth
+    engine.builder.index_single(path)          # keep the index in sync
     engine.db.conn.commit()
     return node_id
 
@@ -169,7 +173,22 @@ def test_user_node_never_deleted(engine):
         (old, old, old, uid))
     engine.db.conn.commit()
     run_forgetting(engine)
-    assert _exists(engine, uid) is True</code></pre>
+    assert _exists(engine, uid) is True
+
+
+def test_guard_reads_file_over_stale_index(engine):
+    &quot;&quot;&quot;Cross-path race (council R3 C5): a promotion writes the FILE before the index.
+
+    The pre-filter (index) still sees archival+stale and selects the node, but the hybrid guard
+    reads the source file (tier=working) and aborts. Fails with an index-only guard.
+    &quot;&quot;&quot;
+    _enable(engine)
+    node_id = _make_eligible(engine)
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.working
+    engine.file_store.save(node)  # file promoted; index intentionally NOT updated
+    run_forgetting(engine)
+    assert _exists(engine, node_id) is True  # guard saw the fresh file → no deletion</code></pre>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 2: Run tests to verify they fail</strong></li></ul>
 <p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -v</code> Expected: FAIL (module does not exist).</p>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 3: Add <code>delete_node_guarded</code> to the engine (atomic delete-if-eligible)</strong></li></ul>
@@ -250,6 +269,12 @@ def test_guard_never_deletes_user_node(engine):
         with self.db.transaction() as conn:
             if not guard(conn):
                 return None  # state changed since selection — abort atomically
+            # Move the file FIRST (atomic), then remove from the index — both inside the txn
+            # (council R3 H7). If we crash after the move but before COMMIT, the index still
+            # references a now-missing file: load() returns None and the next full_rebuild drops
+            # the dangling row. The reverse order would resurrect the node on rebuild.
+            if not self.file_store.soft_delete(node_id):
+                return None  # file already gone — index untouched, nothing to do
             self.builder._remove_node(node_id)
             conn.execute(
                 &quot;DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?&quot;,
@@ -262,8 +287,6 @@ def test_guard_never_deletes_user_node(engine):
                  datetime.now(timezone.utc).isoformat()),
             )
 
-        # Index already committed → node won&#x27;t be re-selected; move the file last.
-        self.file_store.soft_delete(node_id)
         return f&quot;Deleted [{node_type}]: {title}\nID: {node_id}&quot;</code></pre>
 <p><code>json</code>, <code>datetime</code>, <code>timezone</code> are already imported in this module. Run the test again → PASS.</p>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 4: Implement the module</strong></li></ul>
@@ -313,17 +336,39 @@ def _run_gate_phase(engine, now: datetime) -&gt; int:
     return deleted
 
 
+def _hybrid_row(engine, node_id: str, conn):
+    &quot;&quot;&quot;A fresh gate row reading volatile fields from the SOURCE FILE, not the lagging index.
+
+    Council R3 C5: mutators (`update_node`, `_touch_access`) write the markdown file BEFORE the
+    index, so a guard reading only the index can see stale tier/last_accessed and delete a node
+    mid-promotion. The file is authoritative for tier / last_accessed / archived_at / FSRS fields.
+    `importance` stays index-authoritative (importance_scorer writes the index directly), and
+    affinity/edges are read via conn (serialized by BEGIN IMMEDIATE). Returns None if the file is
+    gone or no longer archival.
+    &quot;&quot;&quot;
+    node = engine.file_store.load(node_id)
+    if node is None or node.tier != Tier.archival:
+        return None
+    irow = conn.execute(&quot;SELECT importance FROM nodes WHERE id = ?&quot;, (node_id,)).fetchone()
+    importance = irow[&quot;importance&quot;] if irow and irow[&quot;importance&quot;] is not None else node.importance
+    return {
+        &quot;id&quot;: node.id,
+        &quot;importance&quot;: importance,
+        &quot;stability&quot;: node.stability,
+        &quot;last_review&quot;: node.last_review.isoformat() if node.last_review else None,
+        &quot;last_accessed&quot;: node.last_accessed.isoformat(),
+        &quot;archived_at&quot;: node.archived_at.isoformat() if node.archived_at else None,
+    }
+
+
 def _eligibility_guard(engine, node_id: str, now: datetime):
-    &quot;&quot;&quot;Build a guard(conn) that re-validates the gates inside the deletion transaction.&quot;&quot;&quot;
+    &quot;&quot;&quot;Build a guard(conn) that re-validates the gates from the source file inside the txn.&quot;&quot;&quot;
     s = engine.settings
 
     def guard(conn) -&gt; bool:
-        row = conn.execute(
-            f&quot;SELECT {_ROW_COLS} FROM nodes WHERE id = ? AND tier = &#x27;archival&#x27;&quot;, (node_id,)
-        ).fetchone()
+        row = _hybrid_row(engine, node_id, conn)
         if row is None:
-            return False
-        # _is_protected / _is_stale_eligible read engine.db.conn, which == conn inside the txn.
+            return False  # promoted / recalled-out / gone since selection
         return not _is_protected(engine, row, now) and _is_stale_eligible(s, row, now)
 
     return guard

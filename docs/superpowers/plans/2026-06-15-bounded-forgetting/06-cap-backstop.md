@@ -20,15 +20,19 @@ Append to `tests/test_background/test_forgetting_manager.py`:
 
 ```python
 def _make_archival_recent(engine, content, archived_days, importance=0.1):
-    """Archival node that is NOT gate-stale (recently accessed), with a chosen age."""
+    """Archival node NOT gate-stale (recent access), eligible in BOTH file and index."""
     node_id, _ = engine.remember(CreateNodeRequest(
         content=content, type=NodeType.fact, tier=Tier.archival, title=content))
-    recent = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
-    archived = (datetime.now(timezone.utc) - timedelta(days=archived_days)).isoformat()
-    engine.db.conn.execute(
-        "UPDATE nodes SET tier='archival', importance=?, stability=1.0, "
-        "last_review=?, last_accessed=?, archived_at=? WHERE id=?",
-        (importance, recent, recent, archived, node_id))
+    recent = datetime.now(timezone.utc) - timedelta(days=3)
+    archived = datetime.now(timezone.utc) - timedelta(days=archived_days)
+    node = engine.file_store.load(node_id)
+    node.importance = importance
+    node.stability = 1.0
+    node.last_review = recent
+    node.last_accessed = recent
+    node.archived_at = archived
+    path = engine.file_store.save(node)
+    engine.builder.index_single(path)
     engine.db.conn.commit()
     return node_id
 
@@ -175,9 +179,7 @@ def _run_cap_backstop(engine, now: datetime) -> int:
 
 def _cap_guard(engine, node_id: str, now: datetime):
     def guard(conn) -> bool:
-        row = conn.execute(
-            f"SELECT {_ROW_COLS} FROM nodes WHERE id = ? AND tier = 'archival'", (node_id,)
-        ).fetchone()
+        row = _hybrid_row(engine, node_id, conn)  # source-of-truth recheck (council R3 C5)
         return row is not None and not _is_protected(engine, row, now)
 
     return guard

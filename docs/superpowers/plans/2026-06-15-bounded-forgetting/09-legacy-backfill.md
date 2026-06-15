@@ -121,23 +121,32 @@ def _backfill_legacy_archived_at(engine) -> int:
     if done:
         return 0
 
-    rows = engine.db.conn.execute(
-        "SELECT id FROM nodes WHERE tier = 'archival'"
-    ).fetchall()
     stamped, skipped = 0, 0
-    for row in rows:
-        node = engine.file_store.load(row["id"])
-        if node is None or node.archived_at is not None:
-            continue  # already has it (or vanished) — leave untouched
-        node.archived_at = node.updated  # best proxy for the legacy demotion time
+    # Enumerate the SOURCE FILES on disk, not the derived index (council R3 H8): an archival
+    # file absent from the index would otherwise be missed forever once `done` is set.
+    for node in engine.file_store.list_all():
+        if node.tier != Tier.archival:
+            continue
+        irow = engine.db.conn.execute(
+            "SELECT archived_at FROM nodes WHERE id = ?", (node.id,)
+        ).fetchone()
+        index_has = irow is not None and irow["archived_at"] is not None
+        if node.archived_at is not None and index_has:
+            continue  # file + index already consistent
         try:
-            path = engine.file_store.save(node)   # atomic tmp + fsync + os.replace
-            engine.builder.index_single(path)     # mirror into the index
+            if node.archived_at is None:
+                node.archived_at = node.updated  # best proxy for the legacy demotion time
+                path = engine.file_store.save(node)   # atomic tmp + fsync + os.replace
+            else:
+                path = engine.file_store._find_file(node.id)  # file ok, index lagged
+            engine.builder.index_single(path)         # stamp/repair the index
             stamped += 1
         except Exception:
             skipped += 1
-            logger.warning("archived_at backfill skipped node %s", row["id"])
+            logger.warning("archived_at backfill skipped node %s", node.id)
 
+    # Only mark done on a fully clean pass — a save-ok/index-fail node is re-checked next run
+    # (its file has archived_at but the index does not, so the loop re-indexes it).
     if skipped == 0:
         with engine.db.transaction() as conn:
             conn.execute(
