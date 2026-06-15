@@ -251,6 +251,22 @@ def test_select_nodes_after_seq(engine):
     assert len(_select_nodes_after(engine.db.conn, 0, limit=1)) == 1
 
 
+def test_invalid_llm_output_records_error_not_none(engine):
+    """Malformed LLM JSON → recorded as result='error' (no edge), so the node resolves."""
+    id_a, id_b = _create_pair(engine)
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value="not valid json"):
+        from ormah.background.auto_linker import run_auto_linker
+        run_auto_linker(engine)
+    assert len(_edges_between(engine, id_a, id_b)) == 0  # no edge
+    pair = tuple(sorted([id_a, id_b]))
+    row = engine.db.conn.execute(
+        "SELECT result FROM auto_link_checked WHERE node_a=? AND node_b=?", pair
+    ).fetchone()
+    assert row is not None and row["result"] == "error"
+
+
 def test_checked_pairs_invalidated_on_update(engine):
     """Updating a node's content should clear its checked pairs so it gets re-evaluated."""
     from ormah.models.node import UpdateNodeRequest

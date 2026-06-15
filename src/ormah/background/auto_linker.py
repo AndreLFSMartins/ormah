@@ -134,17 +134,17 @@ def _llm_classify_link(settings, node_row, other_row) -> dict | None:
 
     raw = llm_generate(settings, prompt, json_mode=True)
     if raw is None:
-        return None
+        return None  # LLM UNAVAILABLE — transient; caller leaves the node unresolved
 
     try:
         result = json.loads(raw)
         if "relationship" not in result:
-            return None
+            return {"relationship": "error", "reason": "missing relationship field"}
         result["relationship"] = normalize_link_type(result["relationship"])
         return result
     except (json.JSONDecodeError, TypeError):
         logger.warning("LLM returned invalid JSON for link classification")
-        return None
+        return {"relationship": "error", "reason": "invalid LLM output"}
 
 
 def _node_dict(row, content_limit: int = 400) -> dict:
@@ -278,14 +278,14 @@ def _apply_edge(
             (*pair, edge_type, now),
         )
 
-        if edge_type != "none":
+        if edge_type not in ("none", "error"):
             conn.execute(
                 "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (node_a_id, node_b_id, edge_type, round(similarity, 3), now, reason),
             )
 
-    if edge_type != "none":
+    if edge_type not in ("none", "error"):
         try:
             mem_node = engine.file_store.load(node_a_id)
             if mem_node is not None:
