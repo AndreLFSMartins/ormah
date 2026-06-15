@@ -138,14 +138,22 @@ class FileStore:
                 out.append((node_id, meta.get("deleted_at"), path))
         return out
 
-    def purge(self, node_id: str) -> bool:
-        """Hard-delete a tombstone from deleted/. Returns True if removed."""
+    def purge(self, node_id: str, path: Path | None = None) -> bool:
+        """Hard-delete a tombstone from deleted/. Returns True if removed.
+
+        Pass ``path`` (from a prior ``list_deleted()``) to skip re-globbing the directory.
+        """
+        if path is not None:
+            if not path.exists():
+                return False
+            path.unlink()
+            return True
         deleted_dir = self.nodes_dir.parent / "deleted"
         if not deleted_dir.exists():
             return False
-        for node_id_found, _deleted_at, path in self.list_deleted():
+        for node_id_found, _deleted_at, found_path in self.list_deleted():
             if node_id_found == node_id:
-                path.unlink()
+                found_path.unlink()
                 return True
         return False
 

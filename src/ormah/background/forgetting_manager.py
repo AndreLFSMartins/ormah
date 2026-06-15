@@ -26,8 +26,8 @@ def run_forgetting(engine) -> None:
         _run_gate_phase(engine, now)
         _run_cap_backstop(engine, now)
         _run_purge(engine, now)
-    except Exception as e:
-        logger.warning("Forgetting manager failed: %s", e)
+    except Exception:
+        logger.exception("Forgetting manager failed")  # stack trace: this job deletes data
 
 
 def _run_gate_phase(engine, now: datetime) -> int:
@@ -224,7 +224,7 @@ def _run_purge(engine, now: datetime) -> int:
     s = engine.settings
     cutoff = now - timedelta(days=s.deletion_retention_days)
     purged = 0
-    for node_id, deleted_at, _path in engine.file_store.list_deleted():
+    for node_id, deleted_at, path in engine.file_store.list_deleted():
         if not deleted_at:
             continue  # no clock → keep (fail-safe)
         try:
@@ -235,7 +235,7 @@ def _run_purge(engine, now: datetime) -> int:
             ts = ts.replace(tzinfo=timezone.utc)
         if ts > cutoff:
             continue  # still inside the reversibility window
-        if engine.file_store.purge(node_id):
+        if engine.file_store.purge(node_id, path=path):  # reuse the known path (no re-glob)
             engine._write_audit_log(operation="purge", node_id=node_id)
             purged += 1
     if purged:
