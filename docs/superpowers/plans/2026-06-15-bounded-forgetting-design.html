@@ -1,8 +1,6 @@
 <!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bounded Forgetting (#28) — Design</title>
-<!-- rich-doc-src-sha256:6ce99ae26b626900c2a4b643d264abef2494368c1fdbf54a09a43831cfee52c0 -->
-<style>
+<title>Bounded Forgetting (#28) — Design</title><!-- rich-doc-src-sha256:81bab141a428a29bed1a048b545a69e257cbc7d21882f4091e6e2e89e30afbd4 --><style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
 *{box-sizing:border-box}html{scroll-behavior:smooth}
@@ -52,8 +50,8 @@ pre code{color:inherit;font-size:13px}
 <a href="#config-new-fields-in-src-ormah-config-py-ormah-env-prefix" class="lvl-2">Config (new fields in `src/ormah/config.py`, `ORMAH_` env prefix)</a>
 <a href="#operation" class="lvl-2">Operation</a>
 <a href="#testing-tdd" class="lvl-2">Testing (TDD)</a>
-<a href="#out-of-scope" class="lvl-2">Out of scope</a></nav><main><div class="eyebrow">Design spec</div>
-<h1 id="bounded-forgetting-28-design">Bounded Forgetting (#28) — Design</h1>
+<a href="#known-limitation-deletion-mutation-race-accepted-tracked-separately" class="lvl-2">Known limitation: deletion/mutation race (accepted, tracked separately)</a>
+<a href="#out-of-scope" class="lvl-2">Out of scope</a></nav><main><div class="eyebrow">Design spec</div><h1 id="bounded-forgetting-28-design">Bounded Forgetting (#28) — Design</h1>
 <p><strong>Issue:</strong> #28 — <code>feat(background): bounded forgetting — delete dead-weight archival nodes</code> <strong>Branch:</strong> off <code>perf/auto-linker-incremental</code> (#26 not yet merged to main) <strong>Date:</strong> 2026-06-15</p>
 <h2 id="problem">Problem</h2>
 <p>Decay is a one-way ratchet. <code>decay_manager</code> demotes stale <code>working</code> nodes to <code>archival</code> (<code>src/ormah/background/decay_manager.py</code>) but nothing ever removes them. <code>archival</code> only grows. On André&#x27;s real store (8.355 nodes, 80% archival) that graveyard:</p>
@@ -129,9 +127,13 @@ pre code{color:inherit;font-size:13px}
 <ul><li><strong><code>archived_at</code>:</strong> set on demotion in <code>decay_manager</code>; migration backfills existing</li></ul>
 <p>  archival rows from <code>updated</code>.</p>
 <ul><li><strong>Idempotence:</strong> a second run with no newly-eligible nodes deletes nothing.</li></ul>
+<h2 id="known-limitation-deletion-mutation-race-accepted-tracked-separately">Known limitation: deletion/mutation race (accepted, tracked <em>separately)</em></h2>
+<p>Four council rounds converged on this: the engine&#x27;s mutators (<code>update_node</code>, <code>_touch_access</code>) write the markdown <strong>file before</strong> acquiring the index transaction, and file operations are not covered by <code>Database.transaction</code>&#x27;s lock. So a vanishingly small window remains: between the guard&#x27;s source-file read and <code>soft_delete</code>&#x27;s move, a concurrent recall/promotion could re-save the file, and the node would be soft-deleted anyway. The hybrid guard + move-first ordering narrow this to microseconds but cannot close it at the forgetting layer.</p>
+<p><strong>Why it is acceptable to ship:</strong> the feature is opt-in and OFF by default; deletion is <strong>soft</strong> and reversible for <code>deletion_retention_days</code> (30); and the precondition (a node untouched for 90+ days being recalled in the exact microsecond of a daily job) makes the race astronomically improbable and fully recoverable.</p>
+<p><strong>Root fix (separate issue):</strong> reorder the elegibility-affecting mutators to acquire <code>db.transaction()</code> <strong>before</strong> <code>file_store.save()</code>, making the index/lock authoritative so the guard&#x27;s <code>BEGIN IMMEDIATE</code> serializes everything. This touches the recall hot path, so it is its own change with explicit sign-off — not gated inside #28 (a global recall lock is rejected: it reintroduces the #18/#19 contention PR#19 fixed).</p>
 <h2 id="out-of-scope">Out of <em>scope</em></h2>
 <ul><li>UI changes (the issue&#x27;s #22 active-graph-first is separate).</li><li>Restore-from-<code>deleted/</code> UX (the reversibility window exists; a restore command is not part</li></ul>
 <p>  of this slice).</p>
-<ul><li>#25 ANN / vector-search work (deferred per the perf roadmap).</li></ul><div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
-<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span><span class="role">Design spec &middot; #28 &middot; 2026-06-15</span></div>
-</main></body></html>
+<ul><li>#25 ANN / vector-search work (deferred per the perf roadmap).</li><li>The deletion/mutation race root fix (see Known limitation above) — separate engine issue.</li></ul>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span><span class="role">Design spec &middot; #28 &middot; 2026-06-15</span></div></main></body></html>

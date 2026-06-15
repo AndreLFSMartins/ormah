@@ -191,9 +191,30 @@ Unit tests (mock external boundaries, real SQLite index):
   archival rows from `updated`.
 - **Idempotence:** a second run with no newly-eligible nodes deletes nothing.
 
+## Known limitation: deletion/mutation race (accepted, tracked separately)
+
+Four council rounds converged on this: the engine's mutators (`update_node`, `_touch_access`)
+write the markdown **file before** acquiring the index transaction, and file operations are not
+covered by `Database.transaction`'s lock. So a vanishingly small window remains: between the
+guard's source-file read and `soft_delete`'s move, a concurrent recall/promotion could re-save
+the file, and the node would be soft-deleted anyway. The hybrid guard + move-first ordering
+narrow this to microseconds but cannot close it at the forgetting layer.
+
+**Why it is acceptable to ship:** the feature is opt-in and OFF by default; deletion is **soft**
+and reversible for `deletion_retention_days` (30); and the precondition (a node untouched for
+90+ days being recalled in the exact microsecond of a daily job) makes the race astronomically
+improbable and fully recoverable.
+
+**Root fix (separate issue):** reorder the elegibility-affecting mutators to acquire
+`db.transaction()` **before** `file_store.save()`, making the index/lock authoritative so the
+guard's `BEGIN IMMEDIATE` serializes everything. This touches the recall hot path, so it is its
+own change with explicit sign-off — not gated inside #28 (a global recall lock is rejected: it
+reintroduces the #18/#19 contention PR#19 fixed).
+
 ## Out of scope
 
 - UI changes (the issue's #22 active-graph-first is separate).
 - Restore-from-`deleted/` UX (the reversibility window exists; a restore command is not part
   of this slice).
 - #25 ANN / vector-search work (deferred per the perf roadmap).
+- The deletion/mutation race root fix (see Known limitation above) — separate engine issue.

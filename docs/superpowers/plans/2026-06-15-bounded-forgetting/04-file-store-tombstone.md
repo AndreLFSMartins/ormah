@@ -103,7 +103,10 @@ not — a crash mid-write could truncate the tombstone):
         fd, tmp = tempfile.mkstemp(dir=str(deleted_dir), suffix=".tmp", prefix=".ormah_")
         closed = False
         try:
-            os.write(fd, text.encode("utf-8"))
+            data = text.encode("utf-8")
+            written = 0
+            while written < len(data):     # write-all: os.write may short-write (council R4 H9)
+                written += os.write(fd, data[written:])
             os.fsync(fd)
             os.close(fd)
             closed = True

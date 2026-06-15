@@ -2,7 +2,7 @@
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bounded Forgetting (#28) Implementation Plan — Overview</title>
-<!-- rich-doc-src-sha256:3b31a1ade82677ed25a0b5890a127f4de1dd5b4234d4ead4e6f040f827d1201a -->
+<!-- rich-doc-src-sha256:291fbbdf5082b9a02e37db29d7c939236abf4a72678f794d204b64298f4c43bc -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
@@ -73,6 +73,7 @@ pre code{color:inherit;font-size:13px}
 <p>  deletion transaction (no global recall lock → no #18/#19 regression).</p>
 <ul><li><strong><code>archived_at</code> durable</strong> — stamped on every archival entry, cleared on exit; legacy files</li></ul>
 <p>  backfilled atomically once (Task 09), proven across <code>full_rebuild</code>.</p>
+<p><strong>Accepted known limitation (R4):</strong> a microscopic deletion/mutation race remains because the engine writes files before the index lock — see the spec&#x27;s &quot;Known limitation&quot; section. Accepted for ship (opt-in, OFF default, soft-delete reversible 30d); the root fix (mutators lock-before- save) is a separate engine issue, not gated inside #28.</p>
 <h2 id="definition-of-done">Definition of <em>done</em></h2>
 <ul><li>All new tests pass under <code>.venv/bin/python -m pytest tests/ -v</code>.</li><li><code>ruff check</code> clean on touched files.</li><li>With <code>deletion_enabled=False</code> (default), the job is a verified no-op.</li><li>Activation is env-only: <code>ORMAH_DELETION_ENABLED=true</code> in <code>~/.config/ormah/.env</code>.</li></ul>
 <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>

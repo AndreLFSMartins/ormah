@@ -2,7 +2,7 @@
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Task 04: file_store tombstone — `deleted_at`, `list_deleted`, `purge`</title>
-<!-- rich-doc-src-sha256:98b7d0ec7b1c0e79e26ffaacc13433fe890b4a63a7cdf04be4949f0bd6bad343 -->
+<!-- rich-doc-src-sha256:2ce9174d2ee4e55dc8a9617f4dcb14f1f07b150a13be072c4ef208f554e0979c -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
@@ -130,7 +130,10 @@ def test_purge_removes_tombstone(tmp_path):
         fd, tmp = tempfile.mkstemp(dir=str(deleted_dir), suffix=&quot;.tmp&quot;, prefix=&quot;.ormah_&quot;)
         closed = False
         try:
-            os.write(fd, text.encode(&quot;utf-8&quot;))
+            data = text.encode(&quot;utf-8&quot;)
+            written = 0
+            while written &lt; len(data):     # write-all: os.write may short-write (council R4 H9)
+                written += os.write(fd, data[written:])
             os.fsync(fd)
             os.close(fd)
             closed = True

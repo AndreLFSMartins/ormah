@@ -59,6 +59,11 @@
 - **`archived_at` durable** — stamped on every archival entry, cleared on exit; legacy files
   backfilled atomically once (Task 09), proven across `full_rebuild`.
 
+**Accepted known limitation (R4):** a microscopic deletion/mutation race remains because the
+engine writes files before the index lock — see the spec's "Known limitation" section. Accepted
+for ship (opt-in, OFF default, soft-delete reversible 30d); the root fix (mutators lock-before-
+save) is a separate engine issue, not gated inside #28.
+
 ## Definition of done
 
 - All new tests pass under `.venv/bin/python -m pytest tests/ -v`.
