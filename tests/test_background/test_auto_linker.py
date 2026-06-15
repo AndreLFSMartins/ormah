@@ -211,6 +211,28 @@ def test_max_nodes_per_run_default(engine):
     assert engine.settings.auto_link_max_nodes_per_run == 500
 
 
+def test_seq_bumped_on_rewrite(engine):
+    """Re-writing a node's content bumps its seq to the head (crit#2 mechanism)."""
+    from ormah.models.node import UpdateNodeRequest
+    id_a, id_b = _create_pair(engine)
+    seq_before = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    max_before = engine.db.conn.execute("SELECT MAX(seq) m FROM nodes").fetchone()["m"]
+    engine.update_node(id_a, UpdateNodeRequest(content="rewritten content"))
+    seq_after = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    assert seq_after > seq_before
+    assert seq_after > max_before  # landed at the head
+
+
+def test_metadata_update_does_not_bump_seq(engine):
+    """A direct metadata UPDATE (not via the builder) must not change seq."""
+    id_a, _ = _create_pair(engine)
+    before = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    with engine.db.transaction() as conn:
+        conn.execute("UPDATE nodes SET access_count = access_count + 1 WHERE id=?", (id_a,))
+    after = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    assert after == before
+
+
 def test_checked_pairs_invalidated_on_update(engine):
     """Updating a node's content should clear its checked pairs so it gets re-evaluated."""
     from ormah.models.node import UpdateNodeRequest

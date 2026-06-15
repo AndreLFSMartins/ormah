@@ -138,6 +138,19 @@ class IndexBuilder:
             ),
         )
 
+        # Durable monotonic change-sequence (council v2 crit#1): allocate the next seq from
+        # meta.node_seq_next — never decreases, independent of current rows, unlike MAX(seq)+1
+        # which is non-monotonic across INSERT OR REPLACE. Every content (re)write lands the node
+        # at the head, so reindex/import/restore re-enter the delta regardless of frontmatter
+        # timestamps. Metadata-only UPDATEs elsewhere do not pass through here.
+        row = conn.execute("SELECT value FROM meta WHERE key = 'node_seq_next'").fetchone()
+        next_seq = int(row[0]) if row else 1
+        conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (next_seq, node.id))
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
+            (str(next_seq + 1),),
+        )
+
         # Tags
         for tag in node.tags:
             conn.execute(
