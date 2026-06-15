@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bounded Forgetting (#28) — Design</title>
-<!-- rich-doc-src-sha256:f6538d93f9664269b21e2bca510ef0a8984247ccee8e992f8196ee06611cc4ea -->
+<!-- rich-doc-src-sha256:f01768634e1643d329e7cfc910e669d2d0e4174b174876cf0d336ce80b223371 -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
@@ -106,7 +106,7 @@ pre code{color:inherit;font-size:13px}
 <ul><li><strong>Staleness signals (sustained dead weight):</strong> archived long enough (#2), not re-accessed</li></ul>
 <p>  (#2), <code>R</code> below the floor (#3). Phase A requires *not protected AND stale*.</p>
 <p><strong><code>archived_at</code> lifecycle:</strong> stamped on <strong>every</strong> transition into archival and <strong>cleared</strong> when the node leaves archival — so an <code>archival → working → archival</code> round-trip resets the clock instead of reusing a stale months-old timestamp.</p>
-<p><strong>Revalidation:</strong> background jobs run concurrently, so eligibility is recomputed from a fresh row read <strong>immediately before</strong> each <code>delete_node</code> — a node recalled / promoted / connected / given feedback between selection and deletion is skipped.</p>
+<p><strong>Atomic delete-if-eligible:</strong> background jobs run concurrently, so eligibility is rechecked <strong>inside</strong> the <code>BEGIN IMMEDIATE</code> deletion transaction via <code>engine.delete_node_guarded(id, guard)</code>. <code>Database.transaction()</code> holds the cross-thread write lock for its whole duration, so a concurrent recall / promotion / <code>connect</code> / <code>submit_feedback</code> either commits before the guard reads (guard aborts) or blocks until the node is already removed. This closes the TOCTOU race without a global lock around <code>recall</code> — a global lock would reintroduce the #18/#19 contention that PR#19 fixed. The soft-delete is reversible for <code>deletion_retention_days</code>, so even a missed race is recoverable, not irreversible.</p>
 <h2 id="3-cap-backstop-forget-score">§3 Cap backstop <em>(forget-score)</em></h2>
 <p>When <code>archival_soft_cap &gt; 0</code> and exceeded, evict worst-first by a composite forget-score:</p>
 <pre><code class="lang-">score = (1 − R) · (1 − importance) · age_days · 1/(1 + degree) · no_positive_feedback</code></pre>

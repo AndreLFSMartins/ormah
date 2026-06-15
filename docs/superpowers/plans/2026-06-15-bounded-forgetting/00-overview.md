@@ -33,19 +33,31 @@
 | `src/ormah/store/file_store.py` | `soft_delete` stamps `deleted_at`; new `list_deleted()`, `purge()` | 04 |
 | `src/ormah/background/forgetting_manager.py` | Phase A: gates → soft-delete | 05 |
 | `src/ormah/background/forgetting_manager.py` | §3 cap backstop (forget-score eviction) | 06 |
+| `src/ormah/engine/memory_engine.py` | `delete_node_guarded` — atomic delete-if-eligible (closes TOCTOU) | 05 |
 | `src/ormah/background/forgetting_manager.py` | Phase B: hard-purge expired + audit | 07 |
 | `src/ormah/background/scheduler.py` | register `forgetting_manager` job | 08 |
+| `src/ormah/background/forgetting_manager.py` | lazy atomic legacy `archived_at` file backfill | 09 |
 
 ## Task order & dependencies
 
 1. **01 Config** — no deps.
-2. **02 archived_at plumbing** — no deps (schema/model).
-3. **03 Stamp on demotion** — needs 02.
+2. **02 archived_at plumbing** — no deps (schema/model; index-only migration backfill).
+3. **03 Stamp on demotion** — needs 02 (stamp on entry, clear on exit).
 4. **04 file_store tombstone** — no deps (can parallel 01–03).
-5. **05 Forgetting gates (Phase A)** — needs 01, 02, 03, 04.
+5. **05 Forgetting gates (Phase A) + `delete_node_guarded`** — needs 01, 02, 03, 04.
 6. **06 Cap backstop** — needs 05.
 7. **07 Phase B purge** — needs 04 (and 05's module).
 8. **08 Scheduler** — needs 05 (run_forgetting exists).
+9. **09 Legacy file backfill** — needs 02, 03, 05 (durable file stamp for legacy nodes).
+
+## Council revisions baked in (R1 + R2)
+
+- **Cap reuses the protection set** (`_evaluate_protection`) — never deletes a protected node;
+  accepts overflow instead. Staleness is Phase-A-only.
+- **TOCTOU closed atomically** — `delete_node_guarded` re-checks inside the `BEGIN IMMEDIATE`
+  deletion transaction (no global recall lock → no #18/#19 regression).
+- **`archived_at` durable** — stamped on every archival entry, cleared on exit; legacy files
+  backfilled atomically once (Task 09), proven across `full_rebuild`.
 
 ## Definition of done
 

@@ -15,15 +15,21 @@ is a no-op when `deletion_enabled=False`.
   reuses **the exact same `_is_protected`** — so the cap can never delete a protected node
   (council C1). `archived_at IS NULL` counts as protected, closing the `remember(tier=archival)`
   hole (council H3).
-- **Revalidate immediately before delete (council C2).** Eligibility is recomputed per-node from
-  a *fresh* row read right before `delete_node`, because background jobs run concurrently — a
-  node may be recalled / promoted / connected / get feedback between selection and deletion.
+- **Atomic delete-if-eligible (council C2 + R2 C3).** Per-node revalidation alone leaves a
+  TOCTOU gap (re-check and delete are separate ops). The fix uses a new
+  `engine.delete_node_guarded(node_id, guard)`: the guard re-checks eligibility **inside the
+  same `db.transaction()`** that removes the node. `Database.transaction()` is `BEGIN IMMEDIATE`
+  and holds a process lock for its whole duration, so every concurrent write
+  (`submit_feedback`, `connect`, `update_node` promotion) is serialized — it either commits
+  before the guard reads (guard aborts) or blocks until the node is already gone. No global lock
+  around `recall` (that would reintroduce the #18/#19 contention PR#19 fixed).
 - **Robust success check (council L1).** `delete_node` returns `str | None`; treat success only
   when the message starts with `"Deleted"`.
 
 **Files:**
+- Modify: `src/ormah/engine/memory_engine.py` (add `delete_node_guarded`)
 - Create: `src/ormah/background/forgetting_manager.py`
-- Test: `tests/test_background/test_forgetting_manager.py`
+- Test: `tests/test_background/test_forgetting_manager.py`, `tests/test_engine/test_delete_guarded.py`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -147,7 +153,112 @@ def test_user_node_never_deleted(engine):
 Run: `.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -v`
 Expected: FAIL (module does not exist).
 
-- [ ] **Step 3: Implement the module**
+- [ ] **Step 3: Add `delete_node_guarded` to the engine (atomic delete-if-eligible)**
+
+First write the guard test — create `tests/test_engine/test_delete_guarded.py`:
+
+```python
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from ormah.models.node import CreateNodeRequest, NodeType, Tier
+
+
+def _archival(engine):
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="g", type=NodeType.fact, tier=Tier.archival, title="g"))
+    return node_id
+
+
+def _exists(engine, node_id):
+    return engine.db.conn.execute(
+        "SELECT 1 FROM nodes WHERE id=?", (node_id,)).fetchone() is not None
+
+
+def test_guard_false_aborts_deletion(engine):
+    node_id = _archival(engine)
+    res = engine.delete_node_guarded(node_id, lambda conn: False)
+    assert res is None
+    assert _exists(engine, node_id) is True
+
+
+def test_guard_true_deletes(engine):
+    node_id = _archival(engine)
+    res = engine.delete_node_guarded(node_id, lambda conn: True)
+    assert res is not None and res.startswith("Deleted")
+    assert _exists(engine, node_id) is False
+
+
+def test_guard_observes_writes_in_same_transaction(engine):
+    """A +feedback row inserted inside the guard's txn is visible to the guard's recheck."""
+    node_id = _archival(engine)
+
+    def guard(conn):
+        conn.execute(
+            "INSERT INTO affinity (prompt_vec, node_id, signal, source, confirmed_at, session_id) "
+            "VALUES (?, ?, 1, 'explicit', ?, 's1')",
+            (b"\x00", node_id, datetime.now(timezone.utc).isoformat()))
+        row = conn.execute(
+            "SELECT 1 FROM affinity WHERE node_id=? AND signal>0 LIMIT 1", (node_id,)
+        ).fetchone()
+        return row is None  # protected (has feedback) → guard returns False → abort
+
+    res = engine.delete_node_guarded(node_id, guard)
+    assert res is None
+    assert _exists(engine, node_id) is True
+
+
+def test_guard_never_deletes_user_node(engine):
+    res = engine.delete_node_guarded(engine.user_node_id, lambda conn: True)
+    assert res is None
+```
+
+Run: `.venv/bin/python -m pytest tests/test_engine/test_delete_guarded.py -v` → FAIL (method missing).
+
+Add the method to `src/ormah/engine/memory_engine.py`, right after `delete_node`:
+
+```python
+    def delete_node_guarded(self, node_id: str, guard) -> str | None:
+        """Soft-delete a node only if ``guard(conn)`` still holds inside the write txn.
+
+        ``Database.transaction`` is BEGIN IMMEDIATE and holds the cross-thread write lock for
+        its whole duration, so the guard's recheck and the index removal are atomic against any
+        concurrent feedback/connect/promotion — closing the forgetting TOCTOU race (#28) without
+        serializing the recall hot path.
+        """
+        if node_id == self.user_node_id:
+            return None
+        full_node = self.file_store.load(node_id)
+        if full_node is None:
+            return None
+        title = full_node.title or full_node.content[:60]
+        snapshot = json.dumps(full_node.model_dump(mode="json"))
+        node_type = full_node.type.value
+
+        with self.db.transaction() as conn:
+            if not guard(conn):
+                return None  # state changed since selection — abort atomically
+            self.builder._remove_node(node_id)
+            conn.execute(
+                "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
+                (node_id, node_id),
+            )
+            conn.execute(
+                "INSERT INTO audit_log (operation, node_id, node_snapshot, detail, performed_at) "
+                "VALUES ('delete', ?, ?, ?, ?)",
+                (node_id, snapshot, json.dumps({"reason": "bounded_forgetting"}),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+
+        # Index already committed → node won't be re-selected; move the file last.
+        self.file_store.soft_delete(node_id)
+        return f"Deleted [{node_type}]: {title}\nID: {node_id}"
+```
+
+`json`, `datetime`, `timezone` are already imported in this module. Run the test again → PASS.
+
+- [ ] **Step 4: Implement the module**
 
 Create `src/ormah/background/forgetting_manager.py`:
 
@@ -190,17 +301,27 @@ def _run_gate_phase(engine, now: datetime) -> int:
     ]
     deleted = 0
     for node_id in candidates:
-        row = _fetch_row(engine, node_id)  # re-read fresh (council C2)
-        if row is None:
-            continue
-        if _is_protected(engine, row, now) or not _is_stale_eligible(s, row, now):
-            continue  # state changed since selection — skip
-        result = engine.delete_node(node_id)
-        if result and result.startswith("Deleted"):
+        if engine.delete_node_guarded(node_id, _eligibility_guard(engine, node_id, now)):
             deleted += 1
     if deleted:
         logger.info("Forgetting soft-deleted %d archival nodes", deleted)
     return deleted
+
+
+def _eligibility_guard(engine, node_id: str, now: datetime):
+    """Build a guard(conn) that re-validates the gates inside the deletion transaction."""
+    s = engine.settings
+
+    def guard(conn) -> bool:
+        row = conn.execute(
+            f"SELECT {_ROW_COLS} FROM nodes WHERE id = ? AND tier = 'archival'", (node_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        # _is_protected / _is_stale_eligible read engine.db.conn, which == conn inside the txn.
+        return not _is_protected(engine, row, now) and _is_stale_eligible(s, row, now)
+
+    return guard
 
 
 # --- shared gate predicates -------------------------------------------------
@@ -214,28 +335,32 @@ def _archival_rows(engine):
     ).fetchall()
 
 
-def _fetch_row(engine, node_id: str):
-    return engine.db.conn.execute(
-        f"SELECT {_ROW_COLS} FROM nodes WHERE id = ? AND tier = 'archival'", (node_id,)
-    ).fetchone()
+def _evaluate_protection(engine, row, now: datetime) -> tuple[bool, int]:
+    """§1 hard protections — single source of truth, computing connectivity at most once.
+
+    Returns ``(protected, degree)``. ``protected`` True means NEVER delete (Phase A and the cap
+    both honor it). ``degree`` is returned so the cap's forget-score never recomputes it (H5).
+    Cheap protections short-circuit before the edge query, so Phase A stays cheap for the common
+    high-importance / feedback cases.
+    """
+    s = engine.settings
+    if row["id"] == getattr(engine, "user_node_id", None):
+        return True, 0                                # gate #7: self node
+    if row["archived_at"] is None:
+        return True, 0                                # un-aged (e.g. remember(tier=archival))
+    importance = row["importance"] if row["importance"] is not None else 0.5
+    if importance >= s.decay_importance_threshold:
+        return True, 0                                # gate #4: high importance
+    if _has_positive_feedback(engine, row["id"]):
+        return True, 0                                # gate #5: ever positively useful
+    degree, max_weight = _connectivity(engine, row["id"])
+    if degree > s.deletion_max_degree or max_weight >= s.deletion_strong_edge_weight:
+        return True, degree                           # gate #6: hub / strong edge
+    return False, degree
 
 
 def _is_protected(engine, row, now: datetime) -> bool:
-    """§1 hard protections — a True here means NEVER delete (Phase A and the cap both honor it)."""
-    s = engine.settings
-    if row["id"] == getattr(engine, "user_node_id", None):
-        return True                                   # gate #7: self node
-    if row["archived_at"] is None:
-        return True                                   # un-aged (e.g. remember(tier=archival))
-    importance = row["importance"] if row["importance"] is not None else 0.5
-    if importance >= s.decay_importance_threshold:
-        return True                                   # gate #4: high importance
-    if _has_positive_feedback(engine, row["id"]):
-        return True                                   # gate #5: ever positively useful
-    degree, max_weight = _connectivity(engine, row["id"])
-    if degree > s.deletion_max_degree or max_weight >= s.deletion_strong_edge_weight:
-        return True                                   # gate #6: hub / strong edge
-    return False
+    return _evaluate_protection(engine, row, now)[0]
 
 
 def _is_stale_eligible(s, row, now: datetime) -> bool:
@@ -286,15 +411,15 @@ def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 5: Run tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -v`
-Expected: PASS (all tests, including the 7-gate conjunction matrix).
+Run: `.venv/bin/python -m pytest tests/test_engine/test_delete_guarded.py tests/test_background/test_forgetting_manager.py -v`
+Expected: PASS (guard tests + all forgetting tests, including the 7-gate conjunction matrix).
 
-- [ ] **Step 5: Lint + commit**
+- [ ] **Step 6: Lint + commit**
 
 ```bash
-.venv/bin/ruff check src/ormah/background/forgetting_manager.py tests/test_background/test_forgetting_manager.py
-git add src/ormah/background/forgetting_manager.py tests/test_background/test_forgetting_manager.py
-git commit -m "feat(background): forgetting manager gates + soft-delete (#28)"
+.venv/bin/ruff check src/ormah/engine/memory_engine.py src/ormah/background/forgetting_manager.py tests/test_background/test_forgetting_manager.py tests/test_engine/test_delete_guarded.py
+git add src/ormah/engine/memory_engine.py src/ormah/background/forgetting_manager.py tests/test_background/test_forgetting_manager.py tests/test_engine/test_delete_guarded.py
+git commit -m "feat(background): forgetting gates + atomic guarded soft-delete (#28)"
 ```

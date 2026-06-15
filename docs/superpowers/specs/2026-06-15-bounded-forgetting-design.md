@@ -120,9 +120,14 @@ and the §3 cap so they can never disagree:
 the node leaves archival — so an `archival → working → archival` round-trip resets the clock
 instead of reusing a stale months-old timestamp.
 
-**Revalidation:** background jobs run concurrently, so eligibility is recomputed from a fresh
-row read **immediately before** each `delete_node` — a node recalled / promoted / connected /
-given feedback between selection and deletion is skipped.
+**Atomic delete-if-eligible:** background jobs run concurrently, so eligibility is rechecked
+**inside** the `BEGIN IMMEDIATE` deletion transaction via `engine.delete_node_guarded(id, guard)`.
+`Database.transaction()` holds the cross-thread write lock for its whole duration, so a
+concurrent recall / promotion / `connect` / `submit_feedback` either commits before the guard
+reads (guard aborts) or blocks until the node is already removed. This closes the TOCTOU race
+without a global lock around `recall` — a global lock would reintroduce the #18/#19 contention
+that PR#19 fixed. The soft-delete is reversible for `deletion_retention_days`, so even a missed
+race is recoverable, not irreversible.
 
 ## §3 Cap backstop (forget-score)
 

@@ -91,6 +91,34 @@ def test_cap_disabled_by_default_zero(engine):
     ids = [_make_archival_recent(engine, f"z{i}", archived_days=300) for i in range(4)]
     run_forgetting(engine)
     assert _archival_count(engine) == 4  # cap off → no eviction
+
+
+def test_cap_protects_strong_edge_hub(engine):
+    _enable(engine)
+    engine.settings.archival_soft_cap = 1
+    a = _make_archival_recent(engine, "hub a", archived_days=400)
+    b = _make_archival_recent(engine, "hub b", archived_days=380)
+    filler = _make_archival_recent(engine, "filler", archived_days=20)
+    engine.connect(ConnectRequest(source_id=a, target_id=b, edge=EdgeType.related_to, weight=0.9))
+    run_forgetting(engine)
+    assert _exists(engine, a) is True and _exists(engine, b) is True  # hub protected in cap
+    assert _exists(engine, filler) is False
+
+
+def test_cap_never_evicts_user_node(engine):
+    _enable(engine)
+    engine.settings.archival_soft_cap = 0  # force overflow regardless of count below
+    uid = engine.user_node_id
+    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    engine.db.conn.execute(
+        "UPDATE nodes SET tier='archival', importance=0.1, stability=1.0, "
+        "last_review=?, last_accessed=?, archived_at=? WHERE id=?",
+        (old, old, old, uid))
+    engine.db.conn.commit()
+    engine.settings.archival_soft_cap = 1
+    _make_archival_recent(engine, "other", archived_days=30)
+    run_forgetting(engine)
+    assert _exists(engine, uid) is True  # self node never evicted by the cap
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -129,23 +157,30 @@ def _run_cap_backstop(engine, now: datetime) -> int:
 
     scored: list[tuple[float, str]] = []
     for row in rows:
-        if _is_protected(engine, row, now):
+        protected, degree = _evaluate_protection(engine, row, now)  # connectivity once (H5)
+        if protected:
             continue  # same hard protections as Phase A — accept overflow over deleting these
-        degree, _max_weight = _connectivity(engine, row["id"])
         scored.append((_forget_score(row, now, degree), row["id"]))
 
     scored.sort(reverse=True)  # highest forget-score (worst) first
     evicted = 0
     for _score, node_id in scored[:overflow]:
-        row = _fetch_row(engine, node_id)              # re-read fresh (council C2)
-        if row is None or _is_protected(engine, row, now):
-            continue
-        result = engine.delete_node(node_id)
-        if result and result.startswith("Deleted"):
+        # atomic delete-if-still-unprotected (council R2 C3) — staleness not required for the cap
+        if engine.delete_node_guarded(node_id, _cap_guard(engine, node_id, now)):
             evicted += 1
     if evicted:
         logger.info("Forgetting cap backstop evicted %d archival nodes", evicted)
     return evicted
+
+
+def _cap_guard(engine, node_id: str, now: datetime):
+    def guard(conn) -> bool:
+        row = conn.execute(
+            f"SELECT {_ROW_COLS} FROM nodes WHERE id = ? AND tier = 'archival'", (node_id,)
+        ).fetchone()
+        return row is not None and not _is_protected(engine, row, now)
+
+    return guard
 
 
 def _forget_score(row, now: datetime, degree: int) -> float:

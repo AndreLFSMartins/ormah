@@ -4,12 +4,14 @@
 index is *derived* from the markdown files and rebuilt on restore, so the value must live in
 the frontmatter (source of truth) and be mirrored into a `nodes.archived_at` column.
 
-> **Council R1 (Cursor + Codex):** the legacy backfill must write the **markdown files**, not
-> only the index. An index-only backfill is silently lost on the next `full_rebuild`/restore,
-> which re-parses the files (`archived_at=None`) and overwrites the column — leaving every
-> legacy archival node permanently outside gate-based forgetting. That defeats the feature on
-> the real store (≈6.7k legacy archival nodes). So the migration stamps both, and a test proves
-> survival across a full rebuild.
+> **Council R1 → R2:** an index-only backfill is lost on the next `full_rebuild`/restore (the
+> files are the source of truth). R1 fixed this by writing the files *inside the migration* —
+> but R2 (Codex critical + Cursor) showed that path is unsafe: non-atomic in-place writes can
+> corrupt source memories on crash/disk-full, and running heavy file I/O inside the SQLite
+> migration transaction reintroduces the #18 startup-contention class. **Resolution:** this task
+> keeps only the cheap **SQL index backfill** (helps until a rebuild). The durable, atomic
+> **file** backfill for legacy nodes moves to a lazy, one-time, guarded job — see Task 09. The
+> live demote→stamp→rebuild path is covered by the durability test below.
 
 **Files:**
 - Modify: `src/ormah/models/node.py` (add field)
@@ -150,39 +152,12 @@ Then, immediately after the `for col_name, ddl in enrichment_migrations:` loop, 
             if "archived_at" not in node_cols:
                 # Newly added: seed existing archival rows with their `updated` time, the
                 # best proxy for when they were demoted. Non-archival rows stay NULL.
+                # INDEX-ONLY: this helps until the next full_rebuild. The durable, atomic
+                # backfill of the SOURCE files is Task 09 (lazy, out of this transaction).
                 conn.execute(
                     "UPDATE nodes SET archived_at = updated "
                     "WHERE tier = 'archival' AND archived_at IS NULL"
                 )
-                # Also stamp the SOURCE files — the index is derived and a later full_rebuild
-                # would otherwise re-parse archived_at=None and wipe this backfill (council R1).
-                legacy = conn.execute(
-                    "SELECT file_path, updated FROM nodes WHERE tier = 'archival'"
-                ).fetchall()
-                _backfill_archived_at_files(legacy)
-```
-
-The helper writes the frontmatter only when absent (idempotent), so re-running never moves an
-already-stamped clock. Add it as a module-level function in `src/ormah/index/db.py`:
-
-```python
-def _backfill_archived_at_files(rows) -> None:
-    """One-time: stamp archived_at into legacy archival markdown files lacking it."""
-    import frontmatter
-    from pathlib import Path
-
-    for file_path, updated in rows:
-        try:
-            p = Path(file_path)
-            if not p.exists():
-                continue
-            post = frontmatter.loads(p.read_text(encoding="utf-8"))
-            if post.metadata.get("archived_at"):
-                continue  # already stamped — never overwrite
-            post["archived_at"] = updated
-            p.write_text(frontmatter.dumps(post), encoding="utf-8")
-        except Exception:
-            continue  # never let a malformed legacy file break startup
 ```
 
 - [ ] **Step 7: Index the column**
