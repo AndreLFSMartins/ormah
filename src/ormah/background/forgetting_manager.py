@@ -23,7 +23,7 @@ def run_forgetting(engine) -> None:
     try:
         now = datetime.now(timezone.utc)
         _run_gate_phase(engine, now)
-        # Task 06 inserts the §3 cap backstop here.
+        _run_cap_backstop(engine, now)
         # Task 07 inserts Phase B (hard-purge) here.
     except Exception as e:
         logger.warning("Forgetting manager failed: %s", e)
@@ -168,3 +168,51 @@ def _parse_dt(value: str) -> datetime:
 
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _run_cap_backstop(engine, now: datetime) -> int:
+    """Evict worst-first by forget-score down to archival_soft_cap, respecting protections."""
+    s = engine.settings
+    if s.archival_soft_cap <= 0:
+        return 0
+    rows = _archival_rows(engine)
+    overflow = len(rows) - s.archival_soft_cap
+    if overflow <= 0:
+        return 0
+
+    scored: list[tuple[float, str]] = []
+    for row in rows:
+        protected, degree = _evaluate_protection(engine, row, now)  # connectivity once (H5)
+        if protected:
+            continue  # same hard protections as Phase A — accept overflow over deleting these
+        scored.append((_forget_score(row, now, degree), row["id"]))
+
+    scored.sort(reverse=True)  # highest forget-score (worst) first
+    evicted = 0
+    for _score, node_id in scored[:overflow]:
+        # atomic delete-if-still-unprotected (council R2 C3) — staleness not required for the cap
+        if engine.delete_node_guarded(node_id, _cap_guard(engine, node_id, now)):
+            evicted += 1
+    if evicted:
+        logger.info("Forgetting cap backstop evicted %d archival nodes", evicted)
+    return evicted
+
+
+def _cap_guard(engine, node_id: str, now: datetime):
+    def guard(conn) -> bool:
+        row = _hybrid_row(engine, node_id, conn)  # source-of-truth recheck (council R3 C5)
+        return row is not None and not _is_protected(engine, row, now)
+
+    return guard
+
+
+def _forget_score(row, now: datetime, degree: int) -> float:
+    """Composite worst-first score: low R × low importance × age × low connectivity.
+
+    Candidates already exclude protected nodes, so positive feedback never reaches here.
+    """
+    r = _retrievability(row, now)
+    importance = row["importance"] if row["importance"] is not None else 0.5
+    # archived_at is guaranteed non-null (NULL ⇒ protected), so age is well defined.
+    age_days = max((now - _parse_dt(row["archived_at"])).total_seconds() / 86400, 0.0)
+    return (1.0 - r) * (1.0 - importance) * age_days * (1.0 / (1 + degree))
