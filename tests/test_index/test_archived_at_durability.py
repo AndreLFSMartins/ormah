@@ -1,12 +1,6 @@
-import pytest
-
 from ormah.models.node import CreateNodeRequest, NodeType, Tier, UpdateNodeRequest
 
 
-@pytest.mark.xfail(
-    reason="depends on Task 03: update_node does not yet stamp archived_at on demote",
-    strict=False,
-)
 def test_archived_at_survives_full_rebuild(engine):
     node_id, _ = engine.remember(CreateNodeRequest(
         content="durable", type=NodeType.fact, tier=Tier.working, title="durable"))

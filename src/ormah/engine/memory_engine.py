@@ -779,7 +779,12 @@ class MemoryEngine:
         if req.type is not None:
             node.type = req.type
         if req.tier is not None:
+            old_tier = node.tier
             node.tier = req.tier
+            if req.tier == Tier.archival and old_tier != Tier.archival:
+                node.archived_at = datetime.now(timezone.utc)  # entered the graveyard
+            elif req.tier != Tier.archival and old_tier == Tier.archival:
+                node.archived_at = None  # left archival → reset the graveyard clock
         if req.space is not None:
             node.space = req.space
         if req.tags is not None:
