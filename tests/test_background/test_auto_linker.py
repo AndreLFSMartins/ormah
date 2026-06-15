@@ -251,6 +251,50 @@ def test_select_nodes_after_seq(engine):
     assert len(_select_nodes_after(engine.db.conn, 0, limit=1)) == 1
 
 
+def test_run_advances_watermark(engine):
+    from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
+    _create_pair(engine)
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "none", "reason": "x"})):
+        run_auto_linker(engine)
+    last = _select_nodes_after(engine.db.conn, 0, limit=100)[-1]
+    assert _get_watermark(engine.db.conn) == last["seq"]
+
+
+def test_llm_none_does_not_advance_past_node(engine):
+    """crit#1: a transient None must not let the watermark pass the node."""
+    from ormah.background.auto_linker import run_auto_linker, _get_watermark
+    _create_pair(engine)
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=None):
+        run_auto_linker(engine)
+    # No node fully resolved → watermark stays at 0
+    assert _get_watermark(engine.db.conn) == 0
+    # Next run with the LLM healthy re-evaluates the pair
+    mock_llm = MagicMock(return_value=json.dumps({"relationship": "supports", "reason": "x"}))
+    with patch(_LLM_PATCH, mock_llm):
+        run_auto_linker(engine)
+    assert mock_llm.call_count >= 1
+
+
+def test_max_edges_does_not_skip_interrupted_node(engine):
+    """imp#4: max_edges mid-run must not advance the watermark past unprocessed nodes."""
+    from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
+    # three mutually-similar nodes
+    _create_pair(engine, title_a="A", content_a="shared topic alpha", title_b="B", content_b="shared topic alpha beta")
+    _create_pair(engine, title_a="C", content_a="shared topic alpha gamma", title_b="D", content_b="shared topic alpha delta")
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.auto_link_max_edges_per_run = 1
+    _reset_adapter()
+    rows = _select_nodes_after(engine.db.conn, 0, limit=100)
+    with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "supports", "reason": "x"})):
+        run_auto_linker(engine)
+    wm = _get_watermark(engine.db.conn)
+    assert wm < rows[-1]["seq"]  # did not reach the last node
+
+
 def test_invalid_llm_output_records_error_not_none(engine):
     """Malformed LLM JSON → recorded as result='error' (no edge), so the node resolves."""
     id_a, id_b = _create_pair(engine)

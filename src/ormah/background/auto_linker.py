@@ -301,91 +301,97 @@ def _apply_edge(
 
 
 def run_auto_linker(engine) -> None:
-    """Find similar nodes and create edges between them."""
+    """Incrementally link nodes with seq above the watermark; advance only past
+    fully-resolved nodes."""
     try:
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
 
         settings = engine.settings
-        encoder = get_encoder(settings)
-        vec_store = VectorStore(engine.db)
-
         if not settings.llm_enabled:
             logger.debug("Auto-linker skipped: LLM not enabled")
             return
 
+        encoder = get_encoder(settings)
+        vec_store = VectorStore(engine.db)
         conn = engine.db.conn
-        nodes = conn.execute("SELECT id, content, title, type, space FROM nodes").fetchall()
         threshold = settings.auto_link_similarity_threshold
         cross_space_penalty = settings.auto_link_cross_space_penalty
         max_edges = settings.auto_link_max_edges_per_run
+
+        watermark = _get_watermark(conn)
+        nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
+
         created = 0
+        last_complete: int | None = None
 
         for node in nodes:
             if created >= max_edges:
-                break
+                break  # batch budget spent; do not advance past this node
 
+            node_resolved = True
             text = f"{node['title'] or ''} {node['content']}".strip()
-            if not text:
-                continue
+            if text:
+                query_vec = encoder.encode(text)
+                similar = vec_store.search(query_vec, limit=6)
 
-            query_vec = encoder.encode(text)
-            similar = vec_store.search(query_vec, limit=6)
+                for match in similar:
+                    if created >= max_edges:
+                        node_resolved = False  # interrupted mid-node
+                        break
+                    if match["id"] == node["id"]:
+                        continue
 
-            for match in similar:
-                if match["id"] == node["id"]:
-                    continue
-
-                similarity = match["similarity"]
-
-                other_space = conn.execute(
-                    "SELECT space FROM nodes WHERE id = ?", (match["id"],)
-                ).fetchone()
-                if other_space is not None:
-                    src_space = node["space"] or ""
-                    tgt_space = other_space["space"] or ""
-                    if src_space != tgt_space:
+                    similarity = match["similarity"]
+                    other_space = conn.execute(
+                        "SELECT space FROM nodes WHERE id = ?", (match["id"],)
+                    ).fetchone()
+                    if other_space is not None and (node["space"] or "") != (other_space["space"] or ""):
                         similarity -= cross_space_penalty
+                    if similarity < threshold:
+                        continue
 
-                if similarity < threshold:
-                    continue
+                    pair = tuple(sorted([node["id"], match["id"]]))
+                    if conn.execute(
+                        "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+                    ).fetchone():
+                        continue
+                    if conn.execute(
+                        "SELECT 1 FROM edges WHERE (source_id = ? AND target_id = ?) "
+                        "OR (source_id = ? AND target_id = ?)",
+                        (node["id"], match["id"], match["id"], node["id"]),
+                    ).fetchone():
+                        continue
+                    other = conn.execute(
+                        "SELECT title, content, type, space FROM nodes WHERE id = ?",
+                        (match["id"],),
+                    ).fetchone()
+                    if other is None:
+                        continue
 
-                pair = tuple(sorted([node["id"], match["id"]]))
+                    llm_result = _llm_classify_link(settings, node, other)
+                    if llm_result is None:
+                        # LLM UNAVAILABLE (raw None) — transient. Leave node unresolved so the
+                        # watermark does not pass it. Not a poison: if the LLM is down, EVERY node
+                        # is unresolved, so the whole run waits — no single node blocks others.
+                        node_resolved = False
+                        continue
+                    relationship = llm_result["relationship"]  # may be 'error' (invalid output)
+                    _apply_edge(
+                        engine, node["id"], match["id"], relationship,
+                        llm_result.get("reason", ""), similarity,
+                    )
+                    # 'error' (poison content) is recorded in auto_link_checked by _apply_edge
+                    # and the node still counts as resolved → watermark advances (council v2 crit#2).
+                    if relationship not in ("none", "error"):
+                        created += 1
 
-                already_checked = conn.execute(
-                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?",
-                    pair,
-                ).fetchone()
-                if already_checked:
-                    continue
+            if not node_resolved:
+                break  # crit#1/imp#4: stop; watermark stays at the last fully-resolved node
+            last_complete = node["seq"]
 
-                existing = conn.execute(
-                    "SELECT 1 FROM edges WHERE "
-                    "(source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
-                    (node["id"], match["id"], match["id"], node["id"]),
-                ).fetchone()
-                if existing:
-                    continue
-
-                other = conn.execute(
-                    "SELECT title, content, type, space FROM nodes WHERE id = ?",
-                    (match["id"],),
-                ).fetchone()
-                if other is None:
-                    continue
-
-                llm_result = _llm_classify_link(settings, node, other)
-                if llm_result is None:
-                    # LLM unavailable for this pair — skip without recording
-                    continue
-
-                relationship = llm_result["relationship"]
-                reason = llm_result.get("reason", "")
-                _apply_edge(engine, node["id"], match["id"], relationship, reason, similarity)
-
-                if relationship != "none":
-                    created += 1
-
+        if last_complete is not None:
+            _set_watermark(engine, last_complete)
         if created:
             logger.info("Auto-linker created %d edges", created)
 
