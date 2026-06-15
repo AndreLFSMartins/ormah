@@ -254,7 +254,8 @@ def test_select_nodes_after_seq(engine):
 def test_run_advances_watermark(engine):
     from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
     _create_pair(engine)
-    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
     _reset_adapter()
     with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "none", "reason": "x"})):
         run_auto_linker(engine)
@@ -266,7 +267,8 @@ def test_llm_none_does_not_advance_past_node(engine):
     """crit#1: a transient None must not let the watermark pass the node."""
     from ormah.background.auto_linker import run_auto_linker, _get_watermark
     _create_pair(engine)
-    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
     _reset_adapter()
     with patch(_LLM_PATCH, return_value=None):
         run_auto_linker(engine)
@@ -285,7 +287,8 @@ def test_max_edges_does_not_skip_interrupted_node(engine):
     # three mutually-similar nodes
     _create_pair(engine, title_a="A", content_a="shared topic alpha", title_b="B", content_b="shared topic alpha beta")
     _create_pair(engine, title_a="C", content_a="shared topic alpha gamma", title_b="D", content_b="shared topic alpha delta")
-    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
     engine.settings.auto_link_max_edges_per_run = 1
     _reset_adapter()
     rows = _select_nodes_after(engine.db.conn, 0, limit=100)
@@ -317,7 +320,8 @@ def test_find_candidates_uses_window_without_advancing(engine):
 def test_invalid_llm_output_records_error_not_none(engine):
     """Malformed LLM JSON → recorded as result='error' (no edge), so the node resolves."""
     id_a, id_b = _create_pair(engine)
-    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
     _reset_adapter()
     with patch(_LLM_PATCH, return_value="not valid json"):
         from ormah.background.auto_linker import run_auto_linker
