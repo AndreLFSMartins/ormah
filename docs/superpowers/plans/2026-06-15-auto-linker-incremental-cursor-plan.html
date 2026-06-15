@@ -1,19 +1,24 @@
-<!doctype html>
-<html lang="en" data-mode="light">
+<!DOCTYPE html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Incremental auto-linker cursor — implementation plan</title>
-<!-- rich-doc-src-sha256:f00be12b2cf90fb2bfeae36cdd4634a7e16c4f633d1fdc00a581563593b806b2 -->
+<title>Incremental auto-linker cursor — Implementation Plan (v2)</title>
+<!-- rich-doc-src-sha256:2ed3bdacbd7b6b84940f2665cdef7f3829ecbeb905b850a6387dbd2e855702ad -->
 <style>
 /* rich-doc design system — Anthropic brand, document-oriented.
-   Inlined from assets/theme.css. */
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 
 :root{
+  /* Anthropic brand */
   --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
   --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
-  --accent:var(--orange);
+  --accent:var(--orange);            /* fixed primary accent */
   --font-head:"Poppins",Arial,sans-serif;
   --font-body:"Lora",Georgia,serif;
   --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
@@ -44,6 +49,7 @@ main{padding:56px 72px 140px;max-width:var(--maxw)}
 h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
   padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
 h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
 h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
   letter-spacing:-.005em}
 h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
@@ -74,6 +80,7 @@ th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
 th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
 tr:last-child td{border-bottom:none}
 td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+td code{font-size:13px}
 
 /* ---- figure / diagram ---- */
 figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
@@ -106,7 +113,7 @@ summary:hover{color:var(--accent)}
 .phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
 
 /* ---- metrics row: large numbers ---- */
-.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);flex-wrap:wrap}
 .metrics .metric{flex:0 1 auto}
 .metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
 .metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
@@ -132,342 +139,354 @@ summary:hover{color:var(--accent)}
 </style>
 </head>
 <body>
-
 <nav class="toc">
-  <div class="eyebrow">Implementation plan</div>
-  <div class="doc-title"><em>Incremental auto-linker cursor</em></div>
+  <div class="eyebrow">[ Plan · v2 ]</div>
+  <div class="doc-title">Incremental auto-linker cursor</div>
   <a href="#overview">Overview</a>
-  <a href="#architecture">How the cursor works</a>
-  <a href="#flow">Task dependency flow</a>
-  <a href="#files">File structure &amp; storage</a>
   <a href="#progress">Progress</a>
-  <a href="#task1" class="lvl-3">Task 1 · Config setting</a>
-  <a href="#task2" class="lvl-3">Task 2 · Watermark helpers</a>
-  <a href="#task3" class="lvl-3">Task 3 · Incremental select</a>
-  <a href="#task4" class="lvl-3">Task 4 · run_auto_linker</a>
-  <a href="#task5" class="lvl-3">Task 5 · _find_link_candidates</a>
-  <a href="#task6" class="lvl-3">Task 6 · Suite + lint</a>
-  <a href="#self-review">Self-review</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#sequence">Task sequence</a>
+  <a href="#files">File structure</a>
+  <a href="#tasks">Tasks</a>
+  <a href="#t1" class="lvl-3">1 · config setting</a>
+  <a href="#t2" class="lvl-3">2 · seq schema + migration</a>
+  <a href="#t3" class="lvl-3">3 · builder bumps seq</a>
+  <a href="#t4" class="lvl-3">4 · watermark helpers</a>
+  <a href="#t5" class="lvl-3">5 · select by seq</a>
+  <a href="#t6" class="lvl-3">6 · run_auto_linker + crit#1</a>
+  <a href="#t7" class="lvl-3">7 · _find_link_candidates</a>
+  <a href="#t8" class="lvl-3">8 · suite + lint</a>
+  <a href="#council">Council coverage</a>
+  <a href="#review">Self-review</a>
 </nav>
-
 <main>
 
-  <p class="eyebrow">Ormah · background · perf/auto-linker-incremental</p>
+  <h2 id="overview">The <em>overview</em> <a class="backlink" href="#overview">↑</a></h2>
 
-  <h2 id="overview">Incremental auto-linker <em>cursor</em></h2>
-
-  <p class="meta">Goal · Python 3.11 · SQLite (sqlite-vec) · pytest (asyncio_mode=auto) · base 0.11.0 · issue #26</p>
-
-  <p class="statement">Turn the per-run full scan into a bounded delta — and drain the historical backlog gradually instead of re-paying for it every run.</p>
-
-  <p>Make <code>run_auto_linker</code> (and the shared <code>_find_link_candidates</code> preview)
-  process only nodes newer than a persisted cursor. The per-run cost drops from
-  <strong>O(n²)</strong> — every node re-scanned against every other node, every run — to
-  <strong>O(batch·n)</strong>, where <code>batch</code> is a small bounded slice. Because an absent
-  watermark reads as the epoch, the existing backlog drains across successive runs rather than
-  blocking the first one.</p>
+  <p class="meta">Branch perf/auto-linker-incremental · base 0.11.0 · issue #26</p>
 
   <div class="metrics">
-    <div class="metric"><div class="big">6</div><div class="label">tasks</div></div>
-    <div class="metric"><div class="big">500</div><div class="label">batch / run (default)</div></div>
-    <div class="metric"><div class="big">O(batch·n)</div><div class="label">was O(n²)</div></div>
-    <div class="metric"><div class="big">3</div><div class="label">files touched</div></div>
+    <div class="metric"><div class="big">8</div><div class="label">tasks</div></div>
+    <div class="metric"><div class="big">500</div><div class="label">batch / run</div></div>
+    <div class="metric"><div class="big">O(n²)→O(batch·n)</div><div class="label">per-run cost</div></div>
+    <div class="metric"><div class="big">6</div><div class="label">files touched</div></div>
   </div>
 
-  <p>Source spec:
-  <code>docs/superpowers/specs/2026-06-15-auto-linker-incremental-cursor-design.md</code>.
-  For agentic workers: use <code>superpowers:subagent-driven-development</code> (recommended) or
-  <code>superpowers:executing-plans</code> to implement task-by-task.</p>
+  <p class="statement">Stop rescanning the whole graph every run — process only what changed since a persisted cursor, and drain the backlog oldest-first.</p>
 
-  <h2 id="architecture">How the <em>cursor</em> works</h2>
+  <p><code>run_auto_linker</code> (and the shared <a href="#t7"><code>_find_link_candidates</code></a> preview) should process only nodes newer than a persisted <strong>internal change-sequence</strong> cursor, turning the per-run O(n²) full scan into O(batch·n) — draining the historical backlog gradually, without missing nodes from reindex/import or transient LLM failures.</p>
 
-  <p>A <code>(updated, id)</code> <strong>watermark</strong> is stored in the existing
-  <code>meta</code> key-value table under key <code>auto_link_watermark</code>, value
-  <code>json.dumps([updated, node_id])</code>. It marks the last <em>fully-processed</em> node.</p>
+  <p>The mechanism is a monotonic <code>nodes.seq</code> integer (<a href="#t2">Task 2</a>), bumped at the single content-write site in the builder (<a href="#t3">Task 3</a>), plus an integer watermark in <code>meta</code> (<a href="#t4">Task 4</a>). The runner selects a bounded batch <code>WHERE seq &gt; watermark ORDER BY seq ASC</code> (<a href="#t5">Task 5</a>), runs the unchanged inner logic, and advances the watermark only to the last <strong>fully-resolved</strong> node (<a href="#t6">Task 6</a>). Absent watermark = 0, so the backlog drains oldest-first.</p>
 
-  <ul>
-    <li><strong>Selecting the delta.</strong> <code>run_auto_linker</code> reads the watermark, then
-    selects a bounded batch of nodes strictly after it, ordered <code>updated ASC, id ASC</code>.</li>
-    <li><strong>Advancing.</strong> After the unchanged inner match logic runs, the watermark moves to
-    the last fully-processed node. A partial run (hitting <code>max_edges</code>) does
-    <em>not</em> advance past the interrupted node — see <a href="#task4">Task&nbsp;4</a>.</li>
-    <li><strong>Preview never advances.</strong> <code>_find_link_candidates</code> reads the same
-    window but leaves the cursor untouched — see <a href="#task5">Task&nbsp;5</a>.</li>
-    <li><strong>Backlog drains from epoch.</strong> Absent watermark ⇒ <code>("", "")</code>, so the
-    historical backlog is consumed batch-by-batch across runs.</li>
-  </ul>
+  <p><strong>Tech stack:</strong> Python 3.11, SQLite, pytest (<code>asyncio_mode=auto</code>), existing <code>engine</code> fixture. <strong>Spec:</strong> <code>docs/superpowers/specs/2026-06-15-auto-linker-incremental-cursor-design.md</code> (v2).</p>
 
   <div class="callout">
-    <span class="label">Portable predicate</span>
-    The composite cursor avoids any SQLite row-value dependency:
-    <code>WHERE updated &gt; :u OR (updated = :u AND id &gt; :i)</code>. This is the tie-break that
-    keeps two nodes sharing a timestamp from being skipped or re-scanned. It is introduced in
-    <a href="#task3">Task&nbsp;3</a> and consumed by Tasks <a href="#task4">4</a> and
-    <a href="#task5">5</a>.</div>
+    <span class="label">Why v2</span>
+    v1 was rejected by council. This plan addresses <a href="#council">crit#1</a> (LLM <code>None</code> skip), crit#2 (domain-timestamp cursor → internal seq), imp#3 (bounded recall stated), imp#4 (max_edges test) and minor#5 (index). See <a href="#council">council coverage</a> for the per-criterion mapping.
+  </div>
 
-  <h2 id="flow">Task dependency <em>flow</em></h2>
-
-  <p>Tasks build a single helper chain: the config setting and the two helper layers
-  (<a href="#task2">watermark</a>, <a href="#task3">select</a>) are prerequisites that both
-  consumers — <a href="#task4">run_auto_linker</a> and <a href="#task5">_find_link_candidates</a> —
-  depend on. The suite-and-lint gate closes over both consumers.</p>
-
-  <figure id="flow-fig">
-<svg id="my-svg" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width: 593.629px; background-color: transparent;" viewBox="0 0 593.62890625 750" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#my-svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;fill:#141413;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#my-svg .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#my-svg .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#my-svg .error-icon{fill:#f1f4ec;}#my-svg .error-text{fill:#0e0b13;stroke:#0e0b13;}#my-svg .edge-thickness-normal{stroke-width:1px;}#my-svg .edge-thickness-thick{stroke-width:3.5px;}#my-svg .edge-pattern-solid{stroke-dasharray:0;}#my-svg .edge-thickness-invisible{stroke-width:0;fill:none;}#my-svg .edge-pattern-dashed{stroke-dasharray:3;}#my-svg .edge-pattern-dotted{stroke-dasharray:2;}#my-svg .marker{fill:#b0aea5;stroke:#b0aea5;}#my-svg .marker.cross{stroke:#b0aea5;}#my-svg svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;}#my-svg p{margin:0;}#my-svg .label{font-family:Arial,Helvetica,sans-serif;color:#141413;}#my-svg .cluster-label text{fill:#0e0b13;}#my-svg .cluster-label span{color:#0e0b13;}#my-svg .cluster-label span p{background-color:transparent;}#my-svg .label text,#my-svg span{fill:#141413;color:#141413;}#my-svg .node rect,#my-svg .node circle,#my-svg .node ellipse,#my-svg .node polygon,#my-svg .node path{fill:#fdf0eb;stroke:#d97757;stroke-width:1px;}#my-svg .rough-node .label text,#my-svg .node .label text,#my-svg .image-shape .label,#my-svg .icon-shape .label{text-anchor:middle;}#my-svg .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#my-svg .rough-node .label,#my-svg .node .label,#my-svg .image-shape .label,#my-svg .icon-shape .label{text-align:center;}#my-svg .node.clickable{cursor:pointer;}#my-svg .root .anchor path{fill:#b0aea5!important;stroke-width:0;stroke:#b0aea5;}#my-svg .arrowheadPath{fill:#05060a;}#my-svg .edgePath .path{stroke:#b0aea5;stroke-width:1px;}#my-svg .flowchart-link{stroke:#b0aea5;fill:none;}#my-svg .edgeLabel{background-color:#eef4fa;text-align:center;}#my-svg .edgeLabel p{background-color:#eef4fa;}#my-svg .edgeLabel rect{opacity:0.5;background-color:#eef4fa;fill:#eef4fa;}#my-svg .labelBkg{background-color:rgba(238, 244, 250, 0.5);}#my-svg .cluster rect{fill:#f1f4ec;stroke:hsl(82.5, 0%, 84.1176470588%);stroke-width:1px;}#my-svg .cluster text{fill:#0e0b13;}#my-svg .cluster span{color:#0e0b13;}#my-svg div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:Arial,Helvetica,sans-serif;font-size:12px;background:#f1f4ec;border:1px solid hsl(82.5, 0%, 84.1176470588%);border-radius:2px;pointer-events:none;z-index:100;}#my-svg .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#141413;}#my-svg rect.text{fill:none;stroke-width:0;}#my-svg .icon-shape,#my-svg .image-shape{background-color:#eef4fa;text-align:center;}#my-svg .icon-shape p,#my-svg .image-shape p{background-color:#eef4fa;padding:2px;}#my-svg .icon-shape .label rect,#my-svg .image-shape .label rect{opacity:0.5;background-color:#eef4fa;fill:#eef4fa;}#my-svg .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#my-svg .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#my-svg .node .neo-node{stroke:#d97757;}#my-svg [data-look="neo"].node rect,#my-svg [data-look="neo"].cluster rect,#my-svg [data-look="neo"].node polygon{stroke:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].node path{stroke:url(#my-svg-gradient);stroke-width:1px;}#my-svg [data-look="neo"].node .outer-path{filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].node .neo-line path{stroke:#d97757;filter:none;}#my-svg [data-look="neo"].node circle{stroke:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].node circle .state-start{fill:#000000;}#my-svg [data-look="neo"].icon-shape .icon{fill:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg [data-look="neo"].icon-shape .icon-neo path{stroke:url(#my-svg-gradient);filter:drop-shadow( 1px 2px 2px rgba(185,185,185,1));}#my-svg :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><g><marker id="my-svg_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointEnd-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="11.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto"><path d="M 0 0 L 11.5 7 L 0 14 z" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointStart-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="1" refY="7" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="14" orient="auto"><polygon points="0,7 11.5,14 11.5,0" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleEnd-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refY="5" refX="12.25" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleStart-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-2" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossEnd-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="17.7" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5;"/></marker><marker id="my-svg_flowchart-v2-crossStart-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="-3.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5; stroke-dasharray: 1, 0;"/></marker><g class="root"><g class="clusters"/><g class="edgePaths"><path d="M312.633,134L312.633,138.167C312.633,142.333,312.633,150.667,312.633,158.333C312.633,166,312.633,173,312.633,176.5L312.633,180" id="my-svg-L_T1_T2_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T1_T2_0" data-points="W3sieCI6MzEyLjYzMjgxMjUsInkiOjEzNH0seyJ4IjozMTIuNjMyODEyNSwieSI6MTU5fSx7IngiOjMxMi42MzI4MTI1LCJ5IjoxODR9XQ==" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M182.633,303.472L170.536,308.727C158.44,313.981,134.247,324.491,122.151,333.245C110.055,342,110.055,349,110.055,352.5L110.055,356" id="my-svg-L_T2_T3_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T2_T3_0" data-points="W3sieCI6MTgyLjYzMjgxMjUsInkiOjMwMy40NzIwNDAxMDc5ODMwNX0seyJ4IjoxMTAuMDU0Njg3NSwieSI6MzM1fSx7IngiOjExMC4wNTQ2ODc1LCJ5IjozNjB9XQ==" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M110.055,462L110.055,466.167C110.055,470.333,110.055,478.667,113.365,486.505C116.676,494.343,123.297,501.686,126.607,505.358L129.918,509.029" id="my-svg-L_T3_T4_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T3_T4_0" data-points="W3sieCI6MTEwLjA1NDY4NzUsInkiOjQ2Mn0seyJ4IjoxMTAuMDU0Njg3NSwieSI6NDg3fSx7IngiOjEzMi41OTY1NzY4OTE0NDczNywieSI6NTEyfV0=" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M312.633,310L312.633,314.167C312.633,318.333,312.633,326.667,312.633,343.5C312.633,360.333,312.633,385.667,312.633,411C312.633,436.333,312.633,461.667,305.863,478.171C299.094,494.676,285.555,502.351,278.786,506.189L272.017,510.027" id="my-svg-L_T2_T4_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T2_T4_0" data-points="W3sieCI6MzEyLjYzMjgxMjUsInkiOjMxMH0seyJ4IjozMTIuNjMyODEyNSwieSI6MzM1fSx7IngiOjMxMi42MzI4MTI1LCJ5Ijo0MTF9LHsieCI6MzEyLjYzMjgxMjUsInkiOjQ4N30seyJ4IjoyNjguNTM3MTYwNzczMDI2MywieSI6NTEyfV0=" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M212.109,445.847L232.197,452.706C252.284,459.565,292.458,473.282,319.315,483.979C346.171,494.676,359.71,502.351,366.479,506.189L373.249,510.027" id="my-svg-L_T3_T5_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T3_T5_0" data-points="W3sieCI6MjEyLjEwOTM3NSwieSI6NDQ1Ljg0Njg5MzY0Njg5MzY1fSx7IngiOjMzMi42MzI4MTI1LCJ5Ijo0ODd9LHsieCI6Mzc2LjcyODQ2NDIyNjk3MzcsInkiOjUxMn1d" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M430.078,310L437.846,314.167C445.613,318.333,461.148,326.667,468.916,343.5C476.684,360.333,476.684,385.667,476.684,411C476.684,436.333,476.684,461.667,476.222,477.839C475.761,494.011,474.838,501.023,474.377,504.528L473.916,508.034" id="my-svg-L_T2_T5_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T2_T5_0" data-points="W3sieCI6NDMwLjA3ODI1ODE2NzYxMzYsInkiOjMxMH0seyJ4Ijo0NzYuNjgzNTkzNzUsInkiOjMzNX0seyJ4Ijo0NzYuNjgzNTkzNzUsInkiOjQxMX0seyJ4Ijo0NzYuNjgzNTkzNzUsInkiOjQ4N30seyJ4Ijo0NzMuMzk0MTIwMDY1Nzg5NSwieSI6NTEyfV0=" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M178.582,614L178.582,618.167C178.582,622.333,178.582,630.667,188.421,639.205C198.261,647.743,217.939,656.486,227.779,660.857L237.618,665.229" id="my-svg-L_T4_T6_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T4_T6_0" data-points="W3sieCI6MTc4LjU4MjAzMTI1LCJ5Ijo2MTR9LHsieCI6MTc4LjU4MjAzMTI1LCJ5Ijo2Mzl9LHsieCI6MjQxLjI3MzQzNzUsInkiOjY2Ni44NTMwMjQ5MjA2ODIzfV0=" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M466.684,614L466.684,618.167C466.684,622.333,466.684,630.667,456.844,639.205C447.005,647.743,427.326,656.486,417.487,660.857L407.648,665.229" id="my-svg-L_T5_T6_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T5_T6_0" data-points="W3sieCI6NDY2LjY4MzU5Mzc1LCJ5Ijo2MTR9LHsieCI6NDY2LjY4MzU5Mzc1LCJ5Ijo2Mzl9LHsieCI6NDAzLjk5MjE4NzUsInkiOjY2Ni44NTMwMjQ5MjA2ODIzfV0=" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/></g><g class="edgeLabels"><g class="edgeLabel"><g class="label" data-id="L_T1_T2_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_T2_T3_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_T3_T4_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_T2_T4_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_T3_T5_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_T2_T5_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_T4_T6_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g><g class="edgeLabel"><g class="label" data-id="L_T5_T6_0" transform="translate(0, 0)"><foreignObject width="0" height="0"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default" id="my-svg-flowchart-T1-0" data-look="classic" transform="translate(312.6328125, 71)"><rect class="basic label-container" style="" x="-142.078125" y="-63" width="284.15625" height="126"/><g class="label" style="" transform="translate(-112.078125, -48)"><rect/><foreignObject width="224.15625" height="96"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Task 1<br />Config setting<br />auto_link_max_nodes_per_run = 500</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-T2-1" data-look="classic" transform="translate(312.6328125, 247)"><rect class="basic label-container" style="" x="-130" y="-63" width="260" height="126"/><g class="label" style="" transform="translate(-100, -48)"><rect/><foreignObject width="200" height="96"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Task 2<br />Watermark helpers<br />_get_watermark / _set_watermark</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-T3-2" data-look="classic" transform="translate(110.0546875, 411)"><rect class="basic label-container" style="" x="-102.0546875" y="-51" width="204.109375" height="102"/><g class="label" style="" transform="translate(-72.0546875, -36)"><rect/><foreignObject width="144.109375" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Task 3<br />Incremental select<br />_select_nodes_after</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-T4-3" data-look="classic" transform="translate(178.58203125, 563)"><rect class="basic label-container" style="" x="-119.15625" y="-51" width="238.3125" height="102"/><g class="label" style="" transform="translate(-89.15625, -36)"><rect/><foreignObject width="178.3125" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Task 4<br />run_auto_linker<br />drives + advances cursor</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-T5-4" data-look="classic" transform="translate(466.68359375, 563)"><rect class="basic label-container" style="" x="-118.9453125" y="-51" width="237.890625" height="102"/><g class="label" style="" transform="translate(-88.9453125, -36)"><rect/><foreignObject width="177.890625" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Task 5<br />_find_link_candidates<br />shares scan, no advance</p></span></div></foreignObject></g></g><g class="node default" id="my-svg-flowchart-T6-5" data-look="classic" transform="translate(322.6328125, 703)"><rect class="basic label-container" style="" x="-81.359375" y="-39" width="162.71875" height="78"/><g class="label" style="" transform="translate(-51.359375, -24)"><rect/><foreignObject width="102.71875" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Task 6<br />Full suite + lint</p></span></div></foreignObject></g></g></g></g></g><defs><filter id="my-svg-drop-shadow" height="130%" width="130%"><feDropShadow dx="4" dy="4" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><defs><filter id="my-svg-drop-shadow-small" height="150%" width="150%"><feDropShadow dx="2" dy="2" stdDeviation="0" flood-opacity="0.06" flood-color="#000000"/></filter></defs><linearGradient id="my-svg-gradient" gradientUnits="objectBoundingBox" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#d97757" stop-opacity="1"/><stop offset="100%" stop-color="hsl(210, 14.5454545455%, 85.6862745098%)" stop-opacity="1"/></linearGradient></svg>
-    <figcaption>Tasks 4 and 5 both depend on the watermark (Task 2) and the select (Task 3)</figcaption>
-  </figure>
-
-  <h2 id="files">File structure &amp; <em>storage</em></h2>
-
-  <table>
-    <thead><tr><th>Action</th><th>Path</th><th>What changes</th></tr></thead>
-    <tbody>
-      <tr><td>Modify</td><td><code>src/ormah/config.py</code></td><td>Add <code>auto_link_max_nodes_per_run</code> (near L121–123, beside other <code>auto_link_*</code> settings)</td></tr>
-      <tr><td>Modify</td><td><code>src/ormah/background/auto_linker.py</code></td><td>Watermark helpers, shared incremental node-select, rewrite <code>run_auto_linker</code> + <code>_find_link_candidates</code></td></tr>
-      <tr><td>Modify</td><td><code>tests/test_background/test_auto_linker.py</code></td><td>Add cursor tests; existing tests must stay green</td></tr>
-    </tbody>
-  </table>
-
-  <table>
-    <thead><tr><th>Watermark detail</th><th>Value</th></tr></thead>
-    <tbody>
-      <tr><td>Storage key</td><td><code>auto_link_watermark</code> in <code>meta</code></td></tr>
-      <tr><td>Stored value</td><td><code>json.dumps([updated, node_id])</code></td></tr>
-      <tr><td>Absent reads as</td><td><code>("", "")</code> (epoch)</td></tr>
-      <tr><td>SQLite predicate</td><td><code>WHERE updated &gt; :u OR (updated = :u AND id &gt; :i)</code> (portable, no row-value dependency)</td></tr>
-    </tbody>
-  </table>
-
-  <h2 id="progress">Progress</h2>
+  <h2 id="progress">Task <em>progress</em> <a class="backlink" href="#progress">↑</a></h2>
 
   <div class="progress">
     <div class="bar"><div class="fill" style="width:0%"></div></div>
-    <div class="label">0% — 0 of 28 steps complete</div>
+    <div class="label">0% — 0 of 39 steps complete</div>
   </div>
-
   <p>
-    <span class="schip todo">Task 1 · config</span>
-    <span class="schip todo">Task 2 · watermark</span>
-    <span class="schip todo">Task 3 · select</span>
-    <span class="schip todo">Task 4 · run_auto_linker</span>
-    <span class="schip todo">Task 5 · _find_link_candidates</span>
-    <span class="schip todo">Task 6 · suite + lint</span>
+    <span class="schip todo">1 · config</span>
+    <span class="schip todo">2 · schema</span>
+    <span class="schip todo">3 · builder</span>
+    <span class="schip todo">4 · watermark</span>
+    <span class="schip todo">5 · select</span>
+    <span class="schip todo">6 · runner</span>
+    <span class="schip todo">7 · preview</span>
+    <span class="schip todo">8 · suite</span>
   </p>
 
-  <!-- ====================== TASK 1 ====================== -->
-  <h3 id="task1">Task 1 · Config setting <code>auto_link_max_nodes_per_run</code><a class="backlink" href="#flow">↑ flow</a></h3>
-  <div class="phase p-o"><span class="pn">T1</span> The cursor batch size</div>
+  <h2 id="architecture">System <em>architecture</em> <a class="backlink" href="#architecture">↑</a></h2>
 
-  <p><strong>Files:</strong> modify <code>src/ormah/config.py</code> (near L121–123); test in
-  <code>tests/test_background/test_auto_linker.py</code>. The default of <strong>500</strong> is the
-  <code>batch</code> in O(batch·n); it is consumed by both <a href="#task4">Task&nbsp;4</a> and
-  <a href="#task5">Task&nbsp;5</a>.</p>
+  <p>Two pieces of durable state make the scan incremental: a monotonic <code>nodes.seq</code> per node and a single integer watermark in <code>meta.auto_link_watermark</code> (stored as text, absent ⇒ <code>0</code>).</p>
 
-  <details><summary>Steps &amp; code</summary>
+  <table>
+    <thead><tr><th>Element</th><th>Where</th><th>Invariant</th></tr></thead>
+    <tbody>
+      <tr><td><code>nodes.seq</code></td><td>Index DB column (<a href="#t2">Task 2</a>)</td><td>Monotonic; bumped only at the content-write site (<a href="#t3">Task 3</a>). Metadata-only updates never touch it.</td></tr>
+      <tr><td><code>meta.auto_link_watermark</code></td><td><code>meta</code> table (<a href="#t4">Task 4</a>)</td><td>The <code>seq</code> of the last <strong>fully-resolved</strong> node. Advances only past nodes with no unresolved candidate.</td></tr>
+      <tr><td>Batch window</td><td><code>_select_nodes_after</code> (<a href="#t5">Task 5</a>)</td><td><code>seq &gt; watermark ORDER BY seq ASC LIMIT n</code>; bounded by <code>auto_link_max_nodes_per_run</code>.</td></tr>
+    </tbody>
+  </table>
 
-  <p><strong>Step 1 — write the failing test</strong></p>
-<pre><code>def test_max_nodes_per_run_default(engine):
-    """The batch-size setting exists with a sane default."""
-    assert engine.settings.auto_link_max_nodes_per_run == 500</code></pre>
+  <p>The watermark is deliberately conservative: a transient LLM <code>None</code> (<a href="#council">crit#1</a>) or a mid-run <code>max_edges</code> cutoff (<a href="#council">imp#4</a>) leaves the node <em>unresolved</em>, and the watermark stays behind it so the next healthy run re-evaluates the same node. The <a href="#t7">preview path</a> reads the same window but never advances the cursor.</p>
 
-  <p><strong>Step 2 — run, expect FAIL:</strong>
-  <code>pytest tests/test_background/test_auto_linker.py::test_max_nodes_per_run_default -v</code> → AttributeError.</p>
+  <h2 id="sequence">Task <em>sequence</em> &amp; dependencies <a class="backlink" href="#sequence">↑</a></h2>
 
-  <p><strong>Step 3 — add the setting</strong> (beside the other <code>auto_link_*</code> fields):</p>
-<pre><code>    auto_link_max_nodes_per_run: int = 500  # cursor batch: nodes scanned per run</code></pre>
+  <p>The eight tasks form a dependency DAG, not a straight line. The data foundation (<a href="#t2">2</a> schema → <a href="#t3">3</a> builder) and the read primitives (<a href="#t4">4</a> watermark, <a href="#t5">5</a> select) converge on the two consumers — the <a href="#t6">runner (6)</a> and the <a href="#t7">preview (7)</a> — which both depend on <strong>4 and 5</strong>; 5 and 6 in turn depend on <strong>2 and 3</strong>. Everything closes with the <a href="#t8">suite (8)</a>.</p>
 
-  <p><strong>Step 4 — run, expect PASS.</strong></p>
+  <figure>
+    <svg id="my-svg" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width: 811.188px; background-color: transparent;" viewBox="0 0 811.1875 630" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#my-svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;fill:#141413;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#my-svg .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#my-svg .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#my-svg .error-icon{fill:#f1f4ec;}#my-svg .error-text{fill:#0e0b13;stroke:#0e0b13;}#my-svg .edge-thickness-normal{stroke-width:1px;}#my-svg .edge-thickness-thick{stroke-width:3.5px;}#my-svg .edge-pattern-solid{stroke-dasharray:0;}#my-svg .edge-thickness-invisible{stroke-width:0;fill:none;}#my-svg .edge-pattern-dashed{stroke-dasharray:3;}#my-svg .edge-pattern-dotted{stroke-dasharray:2;}#my-svg .marker{fill:#b0aea5;stroke:#b0aea5;}#my-svg .marker.cross{stroke:#b0aea5;}#my-svg svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;}#my-svg p{margin:0;}#my-svg .label{font-family:Arial,Helvetica,sans-serif;color:#141413;}#my-svg .cluster-label text{fill:#0e0b13;}#my-svg .cluster-label span{color:#0e0b13;}#my-svg .cluster-label span p{background-color:transparent;}#my-svg .label text,#my-svg span{fill:#141413;color:#141413;}#my-svg .node rect,#my-svg .node circle,#my-svg .node ellipse,#my-svg .node polygon,#my-svg .node path{fill:#fdf0eb;stroke:#d97757;stroke-width:1px;}#my-svg .rough-node .label text,#my-svg .node .label text,#my-svg .image-shape .label,#my-svg .icon-shape .label{text-anchor:middle;}#my-svg .node .katex path{fill:#000;stroke:#000;stroke-width:1px;}#my-svg .rough-node .label,#my-svg .node .label,#my-svg .image-shape .label,#my-svg .icon-shape .label{text-align:center;}#my-svg .node.clickable{cursor:pointer;}#my-svg .root .anchor path{fill:#b0aea5!important;stroke-width:0;stroke:#b0aea5;}#my-svg .arrowheadPath{fill:#05060a;}#my-svg .edgePath .path{stroke:#b0aea5;stroke-width:1px;}#my-svg .flowchart-link{stroke:#b0aea5;fill:none;}#my-svg .edgeLabel{background-color:#eef4fa;text-align:center;}#my-svg .edgeLabel p{background-color:#eef4fa;}#my-svg .edgeLabel rect{opacity:0.5;background-color:#eef4fa;fill:#eef4fa;}#my-svg .labelBkg{background-color:rgba(238, 244, 250, 0.5);}#my-svg .cluster rect{fill:#f1f4ec;stroke:hsl(82.5, 0%, 84.1176470588%);stroke-width:1px;}#my-svg .cluster text{fill:#0e0b13;}#my-svg .cluster span{color:#0e0b13;}#my-svg div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:Arial,Helvetica,sans-serif;font-size:12px;background:#f1f4ec;border:1px solid hsl(82.5, 0%, 84.1176470588%);border-radius:2px;pointer-events:none;z-index:100;}#my-svg .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#141413;}#my-svg rect.text{fill:none;stroke-width:0;}#my-svg .icon-shape,#my-svg .image-shape{background-color:#eef4fa;text-align:center;}#my-svg .icon-shape p,#my-svg .image-shape p{background-color:#eef4fa;padding:2px;}#my-svg .icon-shape .label rect,#my-svg .image-shape .label rect{opacity:0.5;background-color:#eef4fa;fill:#eef4fa;}#my-svg .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#my-svg .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#my-svg .node .neo-node{stroke:#d97757;}#my-svg :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}#my-svg .o&gt;*{fill:rgb(253, 244, 239)!important;stroke:rgb(217, 119, 87)!important;stroke-width:2px!important;color:rgb(20, 20, 19)!important;}#my-svg .o span{fill:rgb(253, 244, 239)!important;stroke:rgb(217, 119, 87)!important;stroke-width:2px!important;color:rgb(20, 20, 19)!important;}#my-svg .o tspan{fill:rgb(20, 20, 19)!important;}#my-svg .b&gt;*{fill:rgb(240, 245, 251)!important;stroke:rgb(106, 155, 204)!important;stroke-width:2px!important;color:rgb(20, 20, 19)!important;}#my-svg .b span{fill:rgb(240, 245, 251)!important;stroke:rgb(106, 155, 204)!important;stroke-width:2px!important;color:rgb(20, 20, 19)!important;}#my-svg .b tspan{fill:rgb(20, 20, 19)!important;}#my-svg .g&gt;*{fill:rgb(243, 245, 239)!important;stroke:rgb(120, 140, 93)!important;stroke-width:2px!important;color:rgb(20, 20, 19)!important;}#my-svg .g span{fill:rgb(243, 245, 239)!important;stroke:rgb(120, 140, 93)!important;stroke-width:2px!important;color:rgb(20, 20, 19)!important;}#my-svg .g tspan{fill:rgb(20, 20, 19)!important;}</style><g><marker id="my-svg_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="4.5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 5 L 10 10 L 10 0 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointEnd-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="11.5" refY="7" markerUnits="userSpaceOnUse" markerWidth="10.5" markerHeight="14" orient="auto"><path d="M 0 0 L 11.5 7 L 0 14 z" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-pointStart-margin" class="marker flowchart-v2" viewBox="0 0 11.5 14" refX="1" refY="7" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="14" orient="auto"><polygon points="0,7 11.5,14 11.5,0" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="11" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleStart" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-1" refY="5" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleEnd-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refY="5" refX="12.25" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-circleStart-margin" class="marker flowchart-v2" viewBox="0 0 10 10" refX="-2" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><circle cx="5" cy="5" r="5" class="arrowMarkerPath" style="stroke-width: 0; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossEnd" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="12" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossStart" class="marker cross flowchart-v2" viewBox="0 0 11 11" refX="-1" refY="5.2" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="11" orient="auto"><path d="M 1,1 l 9,9 M 10,1 l -9,9" class="arrowMarkerPath" style="stroke-width: 2; stroke-dasharray: 1, 0;"/></marker><marker id="my-svg_flowchart-v2-crossEnd-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="17.7" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5;"/></marker><marker id="my-svg_flowchart-v2-crossStart-margin" class="marker cross flowchart-v2" viewBox="0 0 15 15" refX="-3.5" refY="7.5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto"><path d="M 1,1 L 14,14 M 1,14 L 14,1" class="arrowMarkerPath" style="stroke-width: 2.5; stroke-dasharray: 1, 0;"/></marker><g class="root"><g class="clusters"/><g class="edgePaths"><path d="M137.18,366L137.18,370.167C137.18,374.333,137.18,382.667,147.894,390.77C158.608,398.873,180.036,406.747,190.75,410.684L201.464,414.62" id="my-svg-L_T1_T6_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T1_T6_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M327.775,110L323.373,114.167C318.97,118.333,310.165,126.667,305.762,134.333C301.359,142,301.359,149,301.359,152.5L301.359,156" id="my-svg-L_T2_T3_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T2_T3_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M510.802,110L521.353,114.167C531.903,118.333,553.004,126.667,563.555,141.5C574.105,156.333,574.105,177.667,574.105,199C574.105,220.333,574.105,241.667,580.827,256.17C587.549,270.672,600.992,278.345,607.713,282.181L614.435,286.017" id="my-svg-L_T2_T5_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T2_T5_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M426.969,219.358L471.848,226.632C516.727,233.905,606.484,248.453,650.815,259.234C695.146,270.016,694.05,277.032,693.502,280.54L692.953,284.048" id="my-svg-L_T3_T5_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T3_T5_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M301.359,238L301.359,242.167C301.359,246.333,301.359,254.667,301.359,269.5C301.359,284.333,301.359,305.667,301.359,327C301.359,348.333,301.359,369.667,301.907,383.841C302.456,398.016,303.552,405.032,304.1,408.54L304.648,412.048" id="my-svg-L_T3_T6_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T3_T6_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M398.403,366L394.796,370.167C391.189,374.333,383.976,382.667,376.587,390.534C369.199,398.401,361.636,405.802,357.854,409.502L354.073,413.202" id="my-svg-L_T4_T6_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T4_T6_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M515.672,366L524.594,370.167C533.516,374.333,551.359,382.667,567.957,390.7C584.554,398.733,599.905,406.467,607.58,410.334L615.255,414.2" id="my-svg-L_T4_T7_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T4_T7_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M581.161,366L569.934,370.167C558.707,374.333,536.254,382.667,510.894,391.301C485.534,399.936,457.268,408.872,443.135,413.34L429.001,417.809" id="my-svg-L_T5_T6_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T5_T6_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M698.43,366L699.732,370.167C701.034,374.333,703.638,382.667,704.392,390.341C705.146,398.016,704.05,405.032,703.502,408.54L702.953,412.048" id="my-svg-L_T5_T7_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T5_T7_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M311.359,494L311.359,498.167C311.359,502.333,311.359,510.667,328.021,520.678C344.683,530.69,378.007,542.38,394.669,548.225L411.331,554.07" id="my-svg-L_T6_T8_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T6_T8_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M696.242,494L696.242,498.167C696.242,502.333,696.242,510.667,676.253,521.153C656.265,531.638,616.287,544.277,596.299,550.596L576.31,556.915" id="my-svg-L_T7_T8_0" class="edge-thickness-normal edge-pattern-solid edge-thickness-normal edge-pattern-solid flowchart-link" style=";" data-edge="true" data-et="edge" data-id="L_T7_T8_0" data-look="classic" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/></g><g class="edgeLabels"/><g class="nodes"><g class="node default o" id="my-svg-flowchart-T1-0" data-look="classic" transform="translate(137.1796875, 327)"><rect class="basic label-container" style="fill:#fdf4ef !important;stroke:#d97757 !important;stroke-width:2px !important" x="-129.1796875" y="-39" width="258.359375" height="78"/><g class="label" style="color:#141413 !important" transform="translate(-99.1796875, -24)"><rect/><foreignObject width="198.359375" height="48"><div style="color: rgb(20, 20, 19) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#141413 !important" class="nodeLabel"><p>Task 1<br />config: max_nodes_per_run</p></span></div></foreignObject></g></g><g class="node default b" id="my-svg-flowchart-T2-1" data-look="classic" transform="translate(381.6640625, 59)"><rect class="basic label-container" style="fill:#f0f5fb !important;stroke:#6a9bcc !important;stroke-width:2px !important" x="-130" y="-51" width="260" height="102"/><g class="label" style="color:#141413 !important" transform="translate(-100, -36)"><rect/><foreignObject width="200" height="72"><div style="color: rgb(20, 20, 19) !important; display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#141413 !important" class="nodeLabel"><p>Task 2<br />schema + migration: nodes.seq</p></span></div></foreignObject></g></g><g class="node default g" id="my-svg-flowchart-T3-2" data-look="classic" transform="translate(301.359375, 199)"><rect class="basic label-container" style="fill:#f3f5ef !important;stroke:#788c5d !important;stroke-width:2px !important" x="-125.609375" y="-39" width="251.21875" height="78"/><g class="label" style="color:#141413 !important" transform="translate(-95.609375, -24)"><rect/><foreignObject width="191.21875" height="48"><div style="color: rgb(20, 20, 19) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#141413 !important" class="nodeLabel"><p>Task 3<br />builder bumps seq on write</p></span></div></foreignObject></g></g><g class="node default o" id="my-svg-flowchart-T4-3" data-look="classic" transform="translate(432.1640625, 327)"><rect class="basic label-container" style="fill:#fdf4ef !important;stroke:#d97757 !important;stroke-width:2px !important" x="-95.8046875" y="-39" width="191.609375" height="78"/><g class="label" style="color:#141413 !important" transform="translate(-65.8046875, -24)"><rect/><foreignObject width="131.609375" height="48"><div style="color: rgb(20, 20, 19) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#141413 !important" class="nodeLabel"><p>Task 4<br />watermark helpers</p></span></div></foreignObject></g></g><g class="node default b" id="my-svg-flowchart-T5-4" data-look="classic" transform="translate(686.2421875, 327)"><rect class="basic label-container" style="fill:#f0f5fb !important;stroke:#6a9bcc !important;stroke-width:2px !important" x="-108.2734375" y="-39" width="216.546875" height="78"/><g class="label" style="color:#141413 !important" transform="translate(-78.2734375, -24)"><rect/><foreignObject width="156.546875" height="48"><div style="color: rgb(20, 20, 19) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#141413 !important" class="nodeLabel"><p>Task 5<br />select nodes after seq</p></span></div></foreignObject></g></g><g class="node default g" id="my-svg-flowchart-T6-5" data-look="classic" transform="translate(311.359375, 455)"><rect class="basic label-container" style="fill:#f3f5ef !important;stroke:#788c5d !important;stroke-width:2px !important" x="-113.828125" y="-39" width="227.65625" height="78"/><g class="label" style="color:#141413 !important" transform="translate(-83.828125, -24)"><rect/><foreignObject width="167.65625" height="48"><div style="color: rgb(20, 20, 19) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#141413 !important" class="nodeLabel"><p>Task 6<br />run_auto_linker + crit#1</p></span></div></foreignObject></g></g><g class="node default o" id="my-svg-flowchart-T7-6" data-look="classic" transform="translate(696.2421875, 455)"><rect class="basic label-container" style="fill:#fdf4ef !important;stroke:#d97757 !important;stroke-width:2px !important" x="-106.9453125" y="-39" width="213.890625" height="78"/><g class="label" style="color:#141413 !important" transform="translate(-76.9453125, -24)"><rect/><foreignObject width="153.890625" height="48"><div style="color: rgb(20, 20, 19) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#141413 !important" class="nodeLabel"><p>Task 7<br />_find_link_candidates</p></span></div></foreignObject></g></g><g class="node default b" id="my-svg-flowchart-T8-7" data-look="classic" transform="translate(493.80078125, 583)"><rect class="basic label-container" style="fill:#f0f5fb !important;stroke:#6a9bcc !important;stroke-width:2px !important" x="-78.6953125" y="-39" width="157.390625" height="78"/><g class="label" style="color:#141413 !important" transform="translate(-48.6953125, -24)"><rect/><foreignObject width="97.390625" height="48"><div style="color: rgb(20, 20, 19) !important; display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;" xmlns="http://www.w3.org/1999/xhtml"><span style="color:#141413 !important" class="nodeLabel"><p>Task 8<br />full suite + lint</p></span></div></foreignObject></g></g></g></g></g></svg>
+    <figcaption>Task DAG — orange/blue/green cycle by index · 6 &amp; 7 depend on 4 &amp; 5 · 5 &amp; 6 depend on 2 &amp; 3</figcaption>
+  </figure>
 
-  <p><strong>Step 5 — commit</strong></p>
-<pre><code>git add src/ormah/config.py tests/test_background/test_auto_linker.py
-git commit -m "feat(config): add auto_link_max_nodes_per_run cursor batch setting (#26)"</code></pre>
+  <h2 id="files">File <em>structure</em> <a class="backlink" href="#files">↑</a></h2>
+
+  <p>Six source/test areas change. The watermark lives at <code>meta.auto_link_watermark</code> = integer <code>seq</code> (text), absent ⇒ <code>0</code>.</p>
+
+  <table>
+    <thead><tr><th>File</th><th>Change</th><th>Task</th></tr></thead>
+    <tbody>
+      <tr><td><code>src/ormah/config.py</code></td><td>Setting <code>auto_link_max_nodes_per_run</code></td><td><a href="#t1">1</a></td></tr>
+      <tr><td><code>src/ormah/index/schema.sql</code></td><td><code>seq</code> column + index for fresh DBs</td><td><a href="#t2">2</a></td></tr>
+      <tr><td><code>src/ormah/index/db.py</code></td><td><code>_migrate()</code> adds <code>seq</code> + index + backfill for existing DBs</td><td><a href="#t2">2</a></td></tr>
+      <tr><td><code>src/ormah/index/builder.py</code></td><td>Bump <code>seq</code> after the content write</td><td><a href="#t3">3</a></td></tr>
+      <tr><td><code>src/ormah/background/auto_linker.py</code></td><td>Watermark helpers, incremental select, rewrite <code>run_auto_linker</code> (with crit#1) and <code>_find_link_candidates</code></td><td><a href="#t4">4</a>·<a href="#t5">5</a>·<a href="#t6">6</a>·<a href="#t7">7</a></td></tr>
+      <tr><td><code>tests/test_background/…</code> + <code>tests/test_index/</code></td><td>Tests</td><td>all</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="tasks">The <em>tasks</em> <a class="backlink" href="#tasks">↑</a></h2>
+
+  <p>Each task is TDD: failing test → run red → implement → run green → commit. Every step is a checkbox in the source; none are checked yet (see <a href="#progress">progress</a>).</p>
+
+  <!-- TASK 1 -->
+  <h3 id="t1">Task 1 <a class="backlink" href="#tasks">↑</a></h3>
+  <div class="phase p-o"><span class="pn">Task 1</span> config setting</div>
+  <p class="meta">Modify <code>src/ormah/config.py</code> · Test <code>tests/test_background/test_auto_linker.py</code></p>
+  <p>A single setting, <code>auto_link_max_nodes_per_run</code> (default <code>500</code>), bounds the batch window read by <a href="#t5">Task 5</a> and consumed by both <a href="#t6">Task 6</a> and <a href="#t7">Task 7</a>.</p>
+  <details>
+    <summary>Steps &amp; code</summary>
+<pre><code># Step 1 — failing test
+def test_max_nodes_per_run_default(engine):
+    assert engine.settings.auto_link_max_nodes_per_run == 500
+
+# Step 2 — run → FAIL (AttributeError)
+# Step 3 — add in config.py beside other auto_link_*:
+    auto_link_max_nodes_per_run: int = 500  # cursor batch: nodes scanned per run
+
+# Step 4 — re-run → PASS
+# Step 5 — commit
+git commit -am "feat(config): add auto_link_max_nodes_per_run (#26)"</code></pre>
   </details>
 
-  <!-- ====================== TASK 2 ====================== -->
-  <h3 id="task2">Task 2 · Watermark helpers<a class="backlink" href="#flow">↑ flow</a></h3>
-  <div class="phase p-b"><span class="pn">T2</span> Persist and read the cursor</div>
+  <!-- TASK 2 -->
+  <h3 id="t2">Task 2 <a class="backlink" href="#tasks">↑</a></h3>
+  <div class="phase p-b"><span class="pn">Task 2</span> nodes.seq schema + migration + backfill</div>
+  <p class="meta">Modify <code>src/ormah/index/schema.sql</code> · <code>src/ormah/index/db.py</code> (<code>_migrate</code>, ~L102-116) · Test <code>tests/test_index/test_migration_seq.py</code> (create)</p>
+  <p>Adds the monotonic <code>seq</code> column (fresh DBs via <code>schema.sql</code>, existing DBs via <code>_migrate</code>) plus <code>idx_nodes_seq</code> (<a href="#council">minor#5</a>). The backfill orders existing rows by <code>created ASC</code> so the historical backlog drains oldest-first — the same ordering the <a href="#architecture">watermark</a> relies on. This is the foundation for <a href="#t3">Task 3</a> (builder bump) and <a href="#t5">Task 5</a> (select).</p>
+  <details>
+    <summary>Steps &amp; code</summary>
+<pre><code># Step 1 — failing test
+def test_seq_column_backfilled_by_created(engine):
+    """Existing nodes get a monotonic seq ordered by created ASC."""
+    from tests.test_background.test_auto_linker import _create_pair
+    id_a, id_b = _create_pair(engine)
+    rows = engine.db.conn.execute(
+        "SELECT id, seq FROM nodes WHERE id IN (?, ?) ORDER BY seq", (id_a, id_b)
+    ).fetchall()
+    seqs = [r["seq"] for r in rows]
+    assert all(s &gt; 0 for s in seqs)
+    assert seqs[0] != seqs[1]  # unique, monotonic
 
-  <p><strong>Files:</strong> modify <code>src/ormah/background/auto_linker.py</code> (helpers near top,
-  after imports); test in <code>test_auto_linker.py</code>. <code>_get_watermark</code> returns
-  <code>(str, str)</code> — the exact shape consumed by <a href="#task3">Task&nbsp;3</a>'s
-  <code>_select_nodes_after</code> and by both <a href="#task4">Task&nbsp;4</a> and
-  <a href="#task5">Task&nbsp;5</a>.</p>
+# Step 2 — run → FAIL (no seq column)
 
-  <details><summary>Steps &amp; code</summary>
+# Step 3 — schema.sql: add to nodes table (after file_hash)
+    seq INTEGER NOT NULL DEFAULT 0
+# and after the existing idx_nodes_* indexes:
+CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq);
 
-  <p><strong>Step 1 — write the failing test</strong></p>
-<pre><code>def test_watermark_roundtrip(engine):
-    """Absent watermark reads as epoch; set then get round-trips."""
+# db.py _migrate(), after the enrichment_migrations loop:
+            if "seq" not in node_cols:
+                conn.execute("ALTER TABLE nodes ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq)")
+                # Backfill existing rows: oldest (created ASC) gets the lowest seq,
+                # so the historical backlog drains oldest-first.
+                rows = conn.execute(
+                    "SELECT id FROM nodes ORDER BY created ASC, rowid ASC"
+                ).fetchall()
+                for i, row in enumerate(rows, start=1):
+                    conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (i, row[0]))
+
+# Step 4 — re-run → PASS
+# Step 5 — commit
+git commit -am "feat(index): add monotonic nodes.seq column + backfill (#26)"</code></pre>
+  </details>
+
+  <!-- TASK 3 -->
+  <h3 id="t3">Task 3 <a class="backlink" href="#tasks">↑</a></h3>
+  <div class="phase p-g"><span class="pn">Task 3</span> builder bumps seq on content write</div>
+  <p class="meta">Modify <code>src/ormah/index/builder.py</code> (<code>_index_file_nodes_only</code>, after <code>INSERT OR REPLACE</code> ~L110-139) · Test <code>tests/test_background/test_auto_linker.py</code></p>
+  <p>Builds on the <a href="#t2">Task 2</a> column. The bump lives at the <em>single</em> content-write site, so every re-write lands the node at the head — and reindex/import/restore re-enter the delta regardless of frontmatter timestamps (this is the <a href="#council">crit#2</a> mechanism). Metadata-only UPDATEs elsewhere never pass through here. Consumed downstream by <a href="#t5">Task 5</a> and <a href="#t6">Task 6</a>.</p>
+  <details>
+    <summary>Steps &amp; code</summary>
+<pre><code># Step 1 — failing tests
+def test_seq_bumped_on_rewrite(engine):
+    """Re-writing a node's content bumps its seq to the head (crit#2 mechanism)."""
+    from ormah.models.node import UpdateNodeRequest
+    id_a, id_b = _create_pair(engine)
+    seq_before = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    max_before = engine.db.conn.execute("SELECT MAX(seq) m FROM nodes").fetchone()["m"]
+    engine.update_node(id_a, UpdateNodeRequest(content="rewritten content"))
+    seq_after = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    assert seq_after &gt; seq_before
+    assert seq_after &gt; max_before  # landed at the head
+
+def test_metadata_update_does_not_bump_seq(engine):
+    """A direct metadata UPDATE (not via the builder) must not change seq."""
+    id_a, _ = _create_pair(engine)
+    before = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    with engine.db.transaction() as conn:
+        conn.execute("UPDATE nodes SET access_count = access_count + 1 WHERE id=?", (id_a,))
+    after = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    assert after == before
+
+# Step 2 — run → FAIL (seq unchanged after rewrite)
+
+# Step 3 — builder.py, immediately after the INSERT OR REPLACE conn.execute(...) block
+#          (before the Tags loop):
+        # Monotonic change-sequence: every content (re)write lands the node at the head,
+        # so reindex/import/restore re-enter the auto-linker delta regardless of frontmatter
+        # timestamps. Metadata-only UPDATEs elsewhere do not pass through here.
+        conn.execute(
+            "UPDATE nodes SET seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM nodes) WHERE id = ?",
+            (node.id,),
+        )
+
+# Step 4 — run → PASS (both tests)
+# Step 5 — commit
+git commit -am "feat(index): bump nodes.seq on content write in builder (#26)"</code></pre>
+  </details>
+
+  <!-- TASK 4 -->
+  <h3 id="t4">Task 4 <a class="backlink" href="#tasks">↑</a></h3>
+  <div class="phase p-o"><span class="pn">Task 4</span> watermark helpers (integer seq)</div>
+  <p class="meta">Modify <code>src/ormah/background/auto_linker.py</code> (top, after imports) · Test <code>tests/test_background/test_auto_linker.py</code></p>
+  <p><code>_get_watermark(conn) -&gt; int</code> (absent ⇒ <code>0</code>) and <code>_set_watermark(engine, seq)</code> persist the cursor in <code>meta</code>. Both <a href="#t6">Task 6</a> (advances it) and <a href="#t7">Task 7</a> (reads but never advances) depend on these helpers.</p>
+  <details>
+    <summary>Steps &amp; code</summary>
+<pre><code># Step 1 — failing test
+def test_watermark_roundtrip(engine):
     from ormah.background.auto_linker import _get_watermark, _set_watermark
+    assert _get_watermark(engine.db.conn) == 0
+    _set_watermark(engine, 42)
+    assert _get_watermark(engine.db.conn) == 42
 
-    assert _get_watermark(engine.db.conn) == ("", "")
+# Step 2 — run → FAIL (ImportError)
 
-    _set_watermark(engine, "2026-06-15T00:00:00+00:00", "node-xyz")
-    assert _get_watermark(engine.db.conn) == ("2026-06-15T00:00:00+00:00", "node-xyz")</code></pre>
+# Step 3 — implement (import json already present):
+_WATERMARK_KEY = "auto_link_watermark"
 
-  <p><strong>Step 2 — run, expect FAIL:</strong> ImportError.</p>
-
-  <p><strong>Step 3 — implement the helpers</strong> (<code>import json</code> already present):</p>
-<pre><code>_WATERMARK_KEY = "auto_link_watermark"
-
-
-def _get_watermark(conn) -&gt; tuple[str, str]:
-    """Return (updated, id) of the last fully-processed node, or ('', '') if unset."""
-    row = conn.execute(
-        "SELECT value FROM meta WHERE key = ?", (_WATERMARK_KEY,)
-    ).fetchone()
+def _get_watermark(conn) -&gt; int:
+    """Return the seq of the last fully-processed node, or 0 if unset."""
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (_WATERMARK_KEY,)).fetchone()
     if row is None:
-        return ("", "")
+        return 0
     try:
-        updated, node_id = json.loads(row["value"])
-        return (updated, node_id)
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return ("", "")
+        return int(row["value"])
+    except (ValueError, TypeError):
+        return 0
 
-
-def _set_watermark(engine, updated: str, node_id: str) -&gt; None:
+def _set_watermark(engine, seq: int) -&gt; None:
     with engine.db.transaction() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-            (_WATERMARK_KEY, json.dumps([updated, node_id])),
-        )</code></pre>
+            (_WATERMARK_KEY, str(seq)),
+        )
 
-  <p><strong>Step 4 — run, expect PASS.</strong></p>
-
-  <p><strong>Step 5 — commit</strong></p>
-<pre><code>git add src/ormah/background/auto_linker.py tests/test_background/test_auto_linker.py
-git commit -m "feat(background): add auto_link watermark get/set helpers (#26)"</code></pre>
+# Step 4 — run → PASS
+# Step 5 — commit
+git commit -am "feat(background): integer seq watermark helpers (#26)"</code></pre>
   </details>
 
-  <!-- ====================== TASK 3 ====================== -->
-  <h3 id="task3">Task 3 · Incremental node select<a class="backlink" href="#flow">↑ flow</a></h3>
-  <div class="phase p-g"><span class="pn">T3</span> The bounded delta query</div>
-
-  <p><strong>Files:</strong> modify <code>auto_linker.py</code>; test in <code>test_auto_linker.py</code>.
-  This is the shared scan that both consumers call: it reads the
-  <a href="#task2">Task&nbsp;2</a> watermark window and returns nodes strictly greater than it,
-  ascending and bounded. Reused unchanged by <a href="#task4">Task&nbsp;4</a> and
-  <a href="#task5">Task&nbsp;5</a>.</p>
-
-  <details><summary>Steps &amp; code</summary>
-
-  <p><strong>Step 1 — write the failing test</strong></p>
-<pre><code>def test_select_nodes_after_window(engine):
-    """Only nodes after the (updated,id) watermark are returned, ordered, bounded."""
+  <!-- TASK 5 -->
+  <h3 id="t5">Task 5 <a class="backlink" href="#tasks">↑</a></h3>
+  <div class="phase p-b"><span class="pn">Task 5</span> incremental node select by seq</div>
+  <p class="meta">Modify <code>src/ormah/background/auto_linker.py</code> · Test <code>tests/test_background/test_auto_linker.py</code></p>
+  <p><code>_select_nodes_after(conn, watermark, limit)</code> returns nodes with <code>seq &gt; watermark ORDER BY seq ASC LIMIT n</code> — the shared batch primitive. Depends on the <a href="#t2">Task 2</a> column / <a href="#t3">Task 3</a> bump; consumed identically by <a href="#t6">Task 6</a> and <a href="#t7">Task 7</a>.</p>
+  <details>
+    <summary>Steps &amp; code</summary>
+<pre><code># Step 1 — failing test
+def test_select_nodes_after_seq(engine):
     from ormah.background.auto_linker import _select_nodes_after
-
-    id_a, id_b = _create_pair(engine)  # two nodes, real timestamps
-
-    # Watermark before both ⇒ both returned, ordered by (updated, id)
-    rows = _select_nodes_after(engine.db.conn, "", "", limit=10)
-    ids = [r["id"] for r in rows]
-    assert id_a in ids and id_b in ids
-
-    # Watermark at the last row ⇒ nothing after it
+    id_a, id_b = _create_pair(engine)
+    rows = _select_nodes_after(engine.db.conn, 0, limit=10)
+    assert {id_a, id_b} &lt;= {r["id"] for r in rows}
     last = rows[-1]
-    rows2 = _select_nodes_after(engine.db.conn, last["updated"], last["id"], limit=10)
+    rows2 = _select_nodes_after(engine.db.conn, last["seq"], limit=10)
     assert all(r["id"] != last["id"] for r in rows2)
+    assert len(_select_nodes_after(engine.db.conn, 0, limit=1)) == 1
 
-    # limit is honoured
-    assert len(_select_nodes_after(engine.db.conn, "", "", limit=1)) == 1</code></pre>
+# Step 2 — run → FAIL (ImportError)
 
-  <p><strong>Step 2 — run, expect FAIL:</strong> ImportError.</p>
-
-  <p><strong>Step 3 — implement the select</strong></p>
-<pre><code>def _select_nodes_after(conn, wm_updated: str, wm_id: str, limit: int) -&gt; list:
-    """Nodes with (updated, id) strictly greater than the watermark, ascending, bounded."""
+# Step 3 — implement
+def _select_nodes_after(conn, watermark: int, limit: int) -&gt; list:
+    """Nodes with seq strictly greater than the watermark, ascending, bounded."""
     return conn.execute(
-        "SELECT id, content, title, type, space, updated FROM nodes "
-        "WHERE updated &gt; ? OR (updated = ? AND id &gt; ?) "
-        "ORDER BY updated ASC, id ASC LIMIT ?",
-        (wm_updated, wm_updated, wm_id, limit),
-    ).fetchall()</code></pre>
+        "SELECT id, content, title, type, space, seq FROM nodes "
+        "WHERE seq &gt; ? ORDER BY seq ASC LIMIT ?",
+        (watermark, limit),
+    ).fetchall()
 
-  <p><strong>Step 4 — run, expect PASS.</strong></p>
-
-  <p><strong>Step 5 — commit</strong></p>
-<pre><code>git add src/ormah/background/auto_linker.py tests/test_background/test_auto_linker.py
-git commit -m "feat(background): incremental (updated,id) node select for auto-linker (#26)"</code></pre>
+# Step 4 — run → PASS
+# Step 5 — commit
+git commit -am "feat(background): incremental seq node select (#26)"</code></pre>
   </details>
 
-  <!-- ====================== TASK 4 ====================== -->
-  <h3 id="task4">Task 4 · <code>run_auto_linker</code> drives the cursor<a class="backlink" href="#flow">↑ flow</a></h3>
-  <div class="phase p-o"><span class="pn">T4</span> Select, process, advance</div>
-
-  <p><strong>Files:</strong> modify <code>run_auto_linker</code> (~L273–364); test in
-  <code>test_auto_linker.py</code>. Reads the <a href="#task2">Task&nbsp;2</a> watermark, selects the
-  batch via <a href="#task3">Task&nbsp;3</a>, runs the unchanged inner match logic, then advances the
-  watermark to the last <em>fully-processed</em> node.</p>
-
+  <!-- TASK 6 -->
+  <h3 id="t6">Task 6 <a class="backlink" href="#tasks">↑</a></h3>
+  <div class="phase p-g"><span class="pn">Task 6</span> run_auto_linker drives the cursor (with crit#1)</div>
+  <p class="meta">Modify <code>src/ormah/background/auto_linker.py</code> (<code>run_auto_linker</code>) · Test <code>tests/test_background/test_auto_linker.py</code></p>
+  <p>The keystone. Reads the <a href="#t4">watermark (Task 4)</a>, selects the <a href="#t5">batch (Task 5)</a> bounded by the <a href="#t1">setting (Task 1)</a>, runs the unchanged inner classify/apply logic, and advances the watermark <strong>only</strong> to the last fully-resolved node. The <code>node_resolved</code> flag is the core safety property:</p>
+  <div class="callout">
+    <span class="label">crit#1 — transient LLM None</span>
+    A <code>None</code> classification leaves the node unresolved (<code>node_resolved = False</code>) and the loop breaks; the watermark stays at the last fully-resolved node, so the next healthy run re-evaluates the pair. Verified by <code>test_llm_none_does_not_advance_past_node</code>.
+  </div>
   <div class="callout warn">
-    <span class="label">Partial runs must not skip work</span>
-    When the run hits <code>max_edges</code> mid-node, <code>stopped_early</code> breaks the loop and
-    <code>last_complete</code> is <em>not</em> updated past the interrupted node — so the watermark
-    never advances over work that did not finish. The covering test is
-    <code>test_backlog_drains_across_runs</code>.</div>
-
-  <details><summary>Failing tests (Step 1)</summary>
+    <span class="label">imp#4 — max_edges mid-run</span>
+    Hitting the <code>max_edges</code> budget mid-node also marks the node unresolved and breaks, so the watermark cannot jump past unprocessed nodes. Verified by <code>test_max_edges_does_not_skip_interrupted_node</code>.
+  </div>
+  <details>
+    <summary>Tests</summary>
 <pre><code>def test_run_advances_watermark(engine):
-    """After a run, the watermark equals the last processed node's (updated, id)."""
     from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
-
     _create_pair(engine)
-    engine.settings.llm_provider = "ollama"
-    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
     _reset_adapter()
-
     with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "none", "reason": "x"})):
         run_auto_linker(engine)
+    last = _select_nodes_after(engine.db.conn, 0, limit=100)[-1]
+    assert _get_watermark(engine.db.conn) == last["seq"]
 
-    all_rows = _select_nodes_after(engine.db.conn, "", "", limit=100)
-    last = all_rows[-1]
-    assert _get_watermark(engine.db.conn) == (last["updated"], last["id"])
-
-
-def test_empty_delta_is_noop(engine):
-    """A second run with the watermark at the head selects nothing and never calls the LLM."""
-    from ormah.background.auto_linker import run_auto_linker
-
+def test_llm_none_does_not_advance_past_node(engine):
+    """crit#1: a transient None must not let the watermark pass the node."""
+    from ormah.background.auto_linker import run_auto_linker, _get_watermark
     _create_pair(engine)
-    engine.settings.llm_provider = "ollama"
-    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
     _reset_adapter()
-
-    with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "none", "reason": "x"})):
+    with patch(_LLM_PATCH, return_value=None):
         run_auto_linker(engine)
-
-    mock_llm = MagicMock(return_value=json.dumps({"relationship": "none", "reason": "x"}))
+    assert _get_watermark(engine.db.conn) == 0   # no node fully resolved
+    mock_llm = MagicMock(return_value=json.dumps({"relationship": "supports", "reason": "x"}))
     with patch(_LLM_PATCH, mock_llm):
         run_auto_linker(engine)
-    assert mock_llm.call_count == 0
+    assert mock_llm.call_count &gt;= 1
 
-
-def test_backlog_drains_across_runs(engine):
-    """With batch=1, two nodes take two runs to fully process."""
+def test_max_edges_does_not_skip_interrupted_node(engine):
+    """imp#4: max_edges mid-run must not advance the watermark past unprocessed nodes."""
     from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
-
-    _create_pair(engine)
-    engine.settings.llm_provider = "ollama"
-    engine.settings.auto_link_similarity_threshold = 0.0
-    engine.settings.auto_link_max_nodes_per_run = 1
+    _create_pair(engine, title_a="A", content_a="shared topic alpha", title_b="B", content_b="shared topic alpha beta")
+    _create_pair(engine, title_a="C", content_a="shared topic alpha gamma", title_b="D", content_b="shared topic alpha delta")
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.auto_link_max_edges_per_run = 1
     _reset_adapter()
-
-    rows = _select_nodes_after(engine.db.conn, "", "", limit=100)
-    with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "none", "reason": "x"})):
+    rows = _select_nodes_after(engine.db.conn, 0, limit=100)
+    with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "supports", "reason": "x"})):
         run_auto_linker(engine)
-        assert _get_watermark(engine.db.conn) == (rows[0]["updated"], rows[0]["id"])
-        run_auto_linker(engine)
-        assert _get_watermark(engine.db.conn) == (rows[1]["updated"], rows[1]["id"])</code></pre>
+    wm = _get_watermark(engine.db.conn)
+    assert wm &lt; rows[-1]["seq"]   # did not reach the last node</code></pre>
   </details>
-
-  <p><strong>Step 2 — run, expect FAIL:</strong> watermark not advanced / LLM still called.</p>
-
-  <details><summary>Step 3 — rewrite <code>run_auto_linker</code></summary>
-  <p>Replace the node fetch + loop. The inner match logic (encode → search → cross-space penalty →
-  threshold → <code>auto_link_checked</code> → existing-edge → <code>_llm_classify_link</code> →
-  <code>_apply_edge</code>) is unchanged.</p>
+  <details>
+    <summary>Implementation — rewritten run_auto_linker</summary>
 <pre><code>def run_auto_linker(engine) -&gt; None:
-    """Incrementally link nodes newer than the watermark; advance the watermark."""
+    """Incrementally link nodes with seq above the watermark; advance only past
+    fully-resolved nodes."""
     try:
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
@@ -484,20 +503,17 @@ def test_backlog_drains_across_runs(engine):
         cross_space_penalty = settings.auto_link_cross_space_penalty
         max_edges = settings.auto_link_max_edges_per_run
 
-        wm_updated, wm_id = _get_watermark(conn)
-        nodes = _select_nodes_after(
-            conn, wm_updated, wm_id, settings.auto_link_max_nodes_per_run
-        )
+        watermark = _get_watermark(conn)
+        nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
 
         created = 0
-        last_complete: tuple[str, str] | None = None
-        stopped_early = False
+        last_complete: int | None = None
 
         for node in nodes:
             if created &gt;= max_edges:
-                stopped_early = True
-                break
+                break  # batch budget spent; do not advance past this node
 
+            node_resolved = True
             text = f"{node['title'] or ''} {node['content']}".strip()
             if text:
                 query_vec = encoder.encode(text)
@@ -505,7 +521,7 @@ def test_backlog_drains_across_runs(engine):
 
                 for match in similar:
                     if created &gt;= max_edges:
-                        stopped_early = True
+                        node_resolved = False  # interrupted mid-node
                         break
                     if match["id"] == node["id"]:
                         continue
@@ -514,9 +530,8 @@ def test_backlog_drains_across_runs(engine):
                     other_space = conn.execute(
                         "SELECT space FROM nodes WHERE id = ?", (match["id"],)
                     ).fetchone()
-                    if other_space is not None:
-                        if (node["space"] or "") != (other_space["space"] or ""):
-                            similarity -= cross_space_penalty
+                    if other_space is not None and (node["space"] or "") != (other_space["space"] or ""):
+                        similarity -= cross_space_penalty
                     if similarity &lt; threshold:
                         continue
 
@@ -540,136 +555,106 @@ def test_backlog_drains_across_runs(engine):
 
                     llm_result = _llm_classify_link(settings, node, other)
                     if llm_result is None:
+                        node_resolved = False  # crit#1: leave unresolved, do not pass this node
                         continue
-                    relationship = llm_result["relationship"]
                     _apply_edge(
-                        engine, node["id"], match["id"], relationship,
+                        engine, node["id"], match["id"], llm_result["relationship"],
                         llm_result.get("reason", ""), similarity,
                     )
-                    if relationship != "none":
+                    if llm_result["relationship"] != "none":
                         created += 1
 
-            if stopped_early:
-                break
-            last_complete = (node["updated"], node["id"])
+            if not node_resolved:
+                break  # crit#1/imp#4: stop; watermark stays at the last fully-resolved node
+            last_complete = node["seq"]
 
         if last_complete is not None:
-            _set_watermark(engine, last_complete[0], last_complete[1])
+            _set_watermark(engine, last_complete)
         if created:
             logger.info("Auto-linker created %d edges", created)
 
     except Exception as e:
         logger.warning("Auto-linker failed: %s", e)</code></pre>
   </details>
+  <p class="meta">Step 4: full file → PASS, including existing <code>test_llm_*</code> / <code>test_checked_pairs_*</code>. Step 5: <code>git commit -am "feat(background): drive auto_linker by seq cursor, retry on LLM failure (#26)"</code></p>
 
-  <p><strong>Step 4 — run the full file, expect PASS:</strong>
-  <code>pytest tests/test_background/test_auto_linker.py -v</code>. New tests pass AND existing
-  <code>test_llm_*</code> / <code>test_checked_pairs_*</code> tests stay green.</p>
-
-  <p><strong>Step 5 — commit</strong></p>
-<pre><code>git add src/ormah/background/auto_linker.py tests/test_background/test_auto_linker.py
-git commit -m "feat(background): drive auto_linker by incremental watermark cursor (#26)"</code></pre>
-
-  <!-- ====================== TASK 5 ====================== -->
-  <h3 id="task5">Task 5 · <code>_find_link_candidates</code> shares the scan<a class="backlink" href="#flow">↑ flow</a></h3>
-  <div class="phase p-b"><span class="pn">T5</span> Same window, never advance</div>
-
-  <p><strong>Files:</strong> modify <code>_find_link_candidates</code> (~L131–220); test in
-  <code>test_auto_linker.py</code>. Replaces the <code>ORDER BY RANDOM()</code> full scan with the
-  shared <a href="#task3">Task&nbsp;3</a> select and reads the <a href="#task2">Task&nbsp;2</a>
-  watermark — but, unlike <a href="#task4">Task&nbsp;4</a>, it must <strong>not</strong> advance the
-  cursor. Inner filtering and the returned <code>{"node_a", "node_b", "similarity"}</code> shape are
-  unchanged.</p>
-
-  <details><summary>Steps &amp; code</summary>
-
-  <p><strong>Step 1 — write the failing test</strong></p>
-<pre><code>def test_find_candidates_uses_window_without_advancing(engine):
-    """Preview reads the watermark window but never advances the watermark."""
+  <!-- TASK 7 -->
+  <h3 id="t7">Task 7 <a class="backlink" href="#tasks">↑</a></h3>
+  <div class="phase p-o"><span class="pn">Task 7</span> _find_link_candidates shares the incremental scan</div>
+  <p class="meta">Modify <code>src/ormah/background/auto_linker.py</code> (<code>_find_link_candidates</code>) · Test <code>tests/test_background/test_auto_linker.py</code></p>
+  <p>The preview path swaps its <code>ORDER BY RANDOM()</code> fetch for the same <a href="#t5">window (Task 5)</a> read at the current <a href="#t4">watermark (Task 4)</a> — but <strong>never advances</strong> the cursor, so previewing cannot starve the <a href="#t6">runner (Task 6)</a>. The candidate-collection loop bounded by <code>limit</code> is unchanged.</p>
+  <details>
+    <summary>Steps &amp; code</summary>
+<pre><code># Step 1 — failing test
+def test_find_candidates_uses_window_without_advancing(engine):
     from ormah.background.auto_linker import _find_link_candidates, _get_watermark
-
     _create_pair(engine)
     engine.settings.auto_link_similarity_threshold = 0.0
-
     before = _get_watermark(engine.db.conn)
     cands = _find_link_candidates(engine, limit=8)
-    assert isinstance(cands, list)
     assert all("node_a" in c and "node_b" in c and "similarity" in c for c in cands)
-    # Preview must not move the cursor
-    assert _get_watermark(engine.db.conn) == before</code></pre>
+    assert _get_watermark(engine.db.conn) == before  # preview never advances the cursor
 
-  <p><strong>Step 2 — run, expect FAIL:</strong> watermark advanced or shape mismatch.</p>
+# Step 2 — run → FAIL
 
-  <p><strong>Step 3 — rewrite the node fetch.</strong> Replace the old
-  <code>nodes = conn.execute("SELECT ... ORDER BY RANDOM()").fetchall()</code> line with the shared
-  select; the rest of the body (the <code>for node in nodes:</code> loop bounded by <code>limit</code>)
-  stays as-is.</p>
-<pre><code>        conn = engine.db.conn
-        wm_updated, wm_id = _get_watermark(conn)
-        nodes = _select_nodes_after(
-            conn, wm_updated, wm_id, settings.auto_link_max_nodes_per_run
-        )</code></pre>
+# Step 3 — replace the node fetch (remove ORDER BY RANDOM(); loop unchanged):
+        conn = engine.db.conn
+        watermark = _get_watermark(conn)
+        nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
 
-  <p><strong>Step 4 — run, expect PASS:</strong>
-  <code>pytest tests/test_background/test_auto_linker.py -v</code>. Existing
-  <code>TestFindLinkCandidates</code> / <code>test_run_maintenance</code> tests stay green.</p>
-
-  <p><strong>Step 5 — commit</strong></p>
-<pre><code>git add src/ormah/background/auto_linker.py tests/test_background/test_auto_linker.py
-git commit -m "feat(background): share incremental scan in _find_link_candidates (#26)"</code></pre>
+# Step 4 — run → PASS; existing TestFindLinkCandidates / test_run_maintenance stay green
+# Step 5 — commit
+git commit -am "feat(background): share seq scan in _find_link_candidates (#26)"</code></pre>
   </details>
 
-  <!-- ====================== TASK 6 ====================== -->
-  <h3 id="task6">Task 6 · Full suite + lint<a class="backlink" href="#flow">↑ flow</a></h3>
-  <div class="phase p-g"><span class="pn">T6</span> Close the gate over both consumers</div>
+  <!-- TASK 8 -->
+  <h3 id="t8">Task 8 <a class="backlink" href="#tasks">↑</a></h3>
+  <div class="phase p-b"><span class="pn">Task 8</span> full suite + lint</div>
+  <p class="meta">No source change — closes out <a href="#t6">Task 6</a> and <a href="#t7">Task 7</a></p>
+  <details>
+    <summary>Steps</summary>
+<pre><code># Step 1
+pytest tests/test_background/ tests/test_index/ -v   # all green
+# Step 2
+ruff check src/ tests/                                # clean
+# Step 3 (optional smoke, real store)
+# restart .venv/bin/ormah server; after a maintenance run, confirm
+# meta.auto_link_watermark advanced and equals a real seq:
+sqlite3 ~/.local/share/ormah/memory/index.db \
+  "SELECT (SELECT value FROM meta WHERE key='auto_link_watermark') AS wm, \
+          (SELECT MAX(seq) FROM nodes) AS maxseq"</code></pre>
+  </details>
 
-  <p>The verification gate over <a href="#task4">Task&nbsp;4</a> and <a href="#task5">Task&nbsp;5</a>.</p>
+  <h2 id="council">Council <em>coverage</em> <a class="backlink" href="#council">↑</a></h2>
 
-  <ul>
-    <li><strong>Step 1:</strong> <code>pytest tests/test_background/ -v</code> → all green.</li>
-    <li><strong>Step 2:</strong> <code>ruff check src/ tests/</code> → clean.</li>
-    <li><strong>Step 3 (optional, real store):</strong> restart <code>.venv/bin/ormah server</code>,
-    confirm a maintenance run advances <code>meta.auto_link_watermark</code>:
-<pre><code>sqlite3 ~/.local/share/ormah/memory/index.db \
-  "SELECT value FROM meta WHERE key='auto_link_watermark'"</code></pre></li>
-  </ul>
-
-  <!-- ====================== SELF-REVIEW ====================== -->
-  <h2 id="self-review">Self-<em>review</em></h2>
-
-  <p class="meta">Spec coverage — every spec requirement maps to a task</p>
+  <p>v1 was rejected; v2 maps every criterion to a concrete task and test.</p>
 
   <table>
-    <thead><tr><th>Spec requirement</th><th>Covered by</th><th>Evidence</th></tr></thead>
+    <thead><tr><th>Criterion</th><th>Resolution</th><th>Test</th></tr></thead>
     <tbody>
-      <tr><td>Watermark in <code>meta</code></td><td><a href="#task2">T2</a></td><td><span class="yes">✓</span></td></tr>
-      <tr><td>Incremental select / O(batch·n)</td><td><a href="#task3">T3</a>, <a href="#task4">T4</a></td><td><span class="yes">✓</span></td></tr>
-      <tr><td>Backlog drains from epoch</td><td><a href="#task4">T4</a></td><td><code>test_backlog_drains_across_runs</code></td></tr>
-      <tr><td><code>_find_link_candidates</code> shared scan, no advance</td><td><a href="#task5">T5</a></td><td><span class="yes">✓</span></td></tr>
-      <tr><td>New setting default 500</td><td><a href="#task1">T1</a></td><td><span class="yes">✓</span></td></tr>
-      <tr><td>Composite <code>(updated,id)</code> cursor + ties</td><td><a href="#task3">T3</a></td><td>predicate</td></tr>
-      <tr><td>Correctness / idempotency via <code>auto_link_checked</code></td><td><a href="#task4">T4</a>, <a href="#task5">T5</a></td><td>existing tests kept green</td></tr>
-      <tr><td>Partial run / <code>max_edges</code> does not advance past interrupted node</td><td><a href="#task4">T4</a></td><td><code>stopped_early</code> / <code>last_complete</code></td></tr>
+      <tr><td><span class="yes">crit#1</span> — LLM None</td><td><a href="#t6">Task 6</a> <code>node_resolved</code></td><td><code>test_llm_none_does_not_advance_past_node</code></td></tr>
+      <tr><td><span class="yes">crit#2</span> — domain-timestamp → internal seq</td><td><a href="#t2">Tasks 2</a>/<a href="#t3">3</a></td><td><code>test_seq_bumped_on_rewrite</code></td></tr>
+      <tr><td>imp#3 — bounded recall</td><td>spec "Correctness" updated</td><td>—</td></tr>
+      <tr><td>imp#4 — max_edges test</td><td><a href="#t6">Task 6</a></td><td><code>test_max_edges_does_not_skip_interrupted_node</code></td></tr>
+      <tr><td>minor#5 — index</td><td><a href="#t2">Task 2</a> <code>idx_nodes_seq</code></td><td>—</td></tr>
     </tbody>
   </table>
 
-  <div class="callout">
-    <span class="label">Type consistency</span>
-    <code>_get_watermark</code> returns <code>(str, str)</code>, consumed by
-    <code>_select_nodes_after(conn, wm_updated, wm_id, limit)</code> in both
-    <a href="#task4">T4</a> and <a href="#task5">T5</a>; <code>_set_watermark(engine, updated, node_id)</code>;
-    the <code>auto_link_max_nodes_per_run</code> name is consistent across T1/T4/T5.
-    Placeholder scan: none — every code step shows full code.</div>
+  <h2 id="review">Self-<em>review</em> <a class="backlink" href="#review">↑</a></h2>
 
-  <p><strong>Out of scope (unchanged):</strong> LLM edge-quality (~90% supports), ANN
-  (<a href="https://github.com/r-spade/ormah/issues/25">#25</a>), embedding reuse.</p>
+  <p><span class="chip on">no placeholders</span><span class="chip">type-consistent</span><span class="chip">scope-bounded</span></p>
+
+  <ul>
+    <li><strong>Placeholder scan:</strong> none — every code step shows full code.</li>
+    <li><strong>Type consistency:</strong> <code>_get_watermark(conn) -&gt; int</code>, <code>_set_watermark(engine, seq: int)</code>, <code>_select_nodes_after(conn, watermark: int, limit)</code> used identically in <a href="#t6">Tasks 6</a> and <a href="#t7">7</a>; <code>auto_link_max_nodes_per_run</code> consistent; <code>seq</code> column consistent across <a href="#t2">Tasks 2</a>/<a href="#t3">3</a>/<a href="#t5">5</a>/<a href="#t6">6</a>.</li>
+    <li><strong>Out of scope (unchanged):</strong> LLM edge-quality, ANN (#25), revisiting bounded recall, embedding reuse.</li>
+  </ul>
 
   <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
   <div class="signature">
-    <div class="name">Ormah · background · auto-linker</div>
-    <div class="role">Implementation plan companion · perf/auto-linker-incremental · issue #26</div>
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
   </div>
-
 </main>
 </body>
 </html>

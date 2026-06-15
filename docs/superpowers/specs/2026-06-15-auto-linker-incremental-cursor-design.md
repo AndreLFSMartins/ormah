@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-15
 **Branch:** `perf/auto-linker-incremental` (off 0.11.0)
-**Status:** approved design, pending implementation plan
+**Status:** revised after council review (v2) — pending re-review
 **Issue:** upstream #26 — `auto_linker` is O(n²): full-table scan × brute-force vector search × LLM-per-candidate every run.
 
 ## Problem
@@ -19,71 +19,95 @@ encode+search — so the scan cost is unbounded in `n` regardless. On the real s
 (8.355 nodes) most of each run is spent re-encoding and re-searching nodes that yield
 nothing (4.776 nodes — 57% — have never produced an evaluated pair).
 
-## Approach (chosen: A — watermark in `meta`)
+## Approach (revised: internal change-sequence cursor)
+
+> **Council change (crit. #2):** an earlier draft used a `(updated, id)` watermark over the
+> domain timestamp. But `created`/`updated` come from the markdown frontmatter
+> (`builder.py:128`), so historical imports, restores, and index rebuilds insert rows with
+> timestamps **behind** the watermark — permanently invisible to the scan. Replaced with an
+> internal monotonic change-sequence that is bumped wherever node *content* is (re)written.
 
 A single mechanism serves both **backfill** (drain the historical backlog) and **incremental**
 (only new/changed nodes), differing only in the watermark's initial value.
 
 ### State & config
-- **`meta.auto_link_watermark`** — ISO timestamp of the `updated` field of the last
-  fully-processed node. Absent ⇒ treated as epoch (`""`) ⇒ backlog drains from the oldest
-  node. (`meta` is the existing key-value table that already holds `last_maintenance_run`.)
-- **New setting `auto_link_max_nodes_per_run: int = 500`** — bounds the scan (the outer
-  loop). `auto_link_max_edges_per_run` (500) stays as a secondary write guard.
-- No new table, no new dependency, no change to the `nodes` schema.
+- **New column `nodes.seq INTEGER NOT NULL DEFAULT 0`** + index `idx_nodes_seq`. A monotonic
+  change-sequence, **not** a domain timestamp.
+- **`seq` is bumped at the single content-write site** `Builder._index_file_nodes_only`
+  (`src/ormah/index/builder.py:103`), through which `remember`, the file-watcher, **and
+  reindex/import** all pass. After the `INSERT OR REPLACE INTO nodes`, set
+  `seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM nodes)` for that node. So every (re)write of
+  content — including reindex of an old markdown file — lands the node at the head of the
+  sequence. Metadata-only `UPDATE nodes SET ...` (access_count, importance, tier) deliberately
+  do **not** bump `seq` (they don't change the embedding, so they must not trigger re-linking).
+- **`meta.auto_link_watermark`** — the integer `seq` of the last fully-processed node, stored
+  as text. Absent ⇒ `0` ⇒ backlog drains from the lowest seq. (`meta` already holds
+  `last_maintenance_run`.)
+- **New setting `auto_link_max_nodes_per_run: int = 500`** — bounds the scan (outer loop).
+  `auto_link_max_edges_per_run` (500) stays as a secondary write guard.
+- **Migration** in `Database._migrate()` (idempotent `ALTER TABLE`, same pattern as
+  `edges.reason` at `db.py:100`): add the column + index, then backfill existing rows
+  `seq = row_number ordered by created ASC` (oldest = lowest seq, so the backlog drains oldest-first).
 
 ### `run_auto_linker`
-Replace `SELECT id, content, title, type, space FROM nodes` (all rows) with:
+Replace `SELECT ... FROM nodes` (all rows) with:
 
 ```sql
--- watermark is the composite (updated, id) of the last processed node;
--- shown here as a single column for readability (see "Timestamp ties").
-SELECT id, content, title, type, space, updated
-FROM nodes
-WHERE (updated, id) > (:wm_updated, :wm_id)
-ORDER BY updated ASC, id ASC LIMIT :max_nodes_per_run
+SELECT id, content, title, type, space, seq FROM nodes
+WHERE seq > :watermark ORDER BY seq ASC LIMIT :max_nodes_per_run
 ```
 
-The inner logic is unchanged: encode → `vec_store.search` → threshold/cross-space penalty →
-`auto_link_checked`/existing-edge skip → `_llm_classify_link` → `_apply_edge`. After the loop,
-write `auto_link_watermark = updated of the last fully-processed node` to `meta` (inside a
-transaction). Per-run cost: **O(batch · n)** instead of O(n²).
+The inner match logic (encode → `vec_store.search` → cross-space penalty → threshold →
+`auto_link_checked`/existing-edge skip → `_llm_classify_link` → `_apply_edge`) is unchanged.
+The watermark advances to the `seq` of the last **fully-resolved** node (see Correctness).
+Per-run cost: **O(batch · n)** instead of O(n²).
 
-### `_find_link_candidates` (decision (a): in scope)
-Extract the candidate scan into a shared incremental generator used by both callers. It
-**reads** the same watermark but does **not** advance it (it is a side-effect-free preview),
-and replaces `ORDER BY RANDOM()` with the same deterministic `updated ASC` window. This
-removes the duplication the issue calls out and fixes both O(n²) sites with one technique.
+### `_find_link_candidates`
+Shares the same incremental select (`seq > watermark ORDER BY seq ASC`), **reads** the
+watermark but never advances it (it is a side-effect-free preview). Replaces `ORDER BY RANDOM()`.
 
 ## Correctness
 
-- **No links lost:** every possible pair is discovered when the *newer* node of the pair is
-  processed — `vec_store.search` is symmetric and `auto_link_checked` deduplicates. The older
-  side need not be re-scanned.
-- **Updates re-enter Δ:** node update bumps `updated` *and* deletes the node's
-  `auto_link_checked` rows (`memory_engine.py` :806/:850/:1201/:1206), so it naturally
-  re-appears above the watermark.
-- **Partial run / crash / `max_edges` hit mid-node:** watermark only advances to the last
-  *complete* node; reprocessing is idempotent (checked pairs are skipped; no duplicate edges).
-- **Timestamp ties:** cursor is the composite `(updated, id)` so equal `updated` values are
-  neither skipped nor repeated.
+- **New & changed nodes both re-enter Δ (crit. #2 fixed):** every content write bumps `seq`
+  past the watermark via the single builder site, so reindex/import/restore are covered by
+  construction — independent of markdown timestamps. Node update also deletes the node's
+  `auto_link_checked` rows (`memory_engine.py` :806/:850/:1201/:1206), so its pairs are
+  re-evaluated.
+- **Transient LLM failure is not skipped (crit. #1 fixed):** a node becomes `last_complete`
+  (and lets the watermark advance) **only if every match above threshold was resolved** — i.e.
+  recorded in `auto_link_checked` or already an edge. If `_llm_classify_link` returns `None`
+  for any above-threshold match, the node is left incomplete and the watermark does not pass
+  it, so the next run retries.
+- **Bounded recall, stated honestly (importante #3):** `vec_store.search(limit=6)` returns only
+  the top-6 neighbours, and top-k membership is **not** symmetric — a pair where neither node
+  is in the other's top-6 is never evaluated. This is a pre-existing limit of the full scan
+  too; the cursor additionally removes the re-scan "second chance". Accepted as bounded recall
+  (not lossless); revisiting strategies are out of scope for this perf fix.
+- **Partial run / crash / `max_edges` hit mid-node:** the watermark only advances to the last
+  fully-resolved node; reprocessing is idempotent (checked pairs skipped; no duplicate edges).
+- **No ties:** `seq` is unique and monotonic, so the cursor is a single integer (no composite
+  comparison needed).
 
 ## Testing (TDD — tests first)
 
-1. Run processes only `updated > watermark`, never the full table; respects the batch limit.
-2. Watermark advances to the last processed node's `updated`; never past unprocessed nodes.
-3. Backlog drains across multiple runs; once Δ is empty a run is cheap (no encode/search).
-4. Updated node re-enters Δ; an old↔new pair is created when the new node is processed.
-5. Absent watermark ⇒ epoch; empty store ⇒ no-op.
-6. `_find_link_candidates` returns only candidates in the watermark window, deterministically,
-   without advancing the watermark.
-7. Existing `auto_link_checked` tests stay green (no re-check, invalidation on update).
+1. `seq` is bumped on content write (insert and re-write via the builder) and is monotonic.
+2. Metadata-only updates (e.g. access_count) do **not** bump `seq`.
+3. Run processes only `seq > watermark`, never the full table; respects the batch limit.
+4. Watermark advances to the last fully-resolved node's `seq`; never past unprocessed nodes.
+5. **LLM `None` (crit. #1):** run 1 returns `None` for the pair → watermark does not pass the
+   node → run 2 re-evaluates it.
+6. **`max_edges` mid-node (importante #4):** ≥3 linkable nodes, `max_nodes`/`max_edges=1`, LLM
+   always creates an edge → after run 1 the watermark sits on the 1st node; run 2 processes the 2nd.
+7. **Reindex/import (crit. #2):** re-indexing an old markdown file bumps its `seq` so it
+   re-enters Δ even though its `updated` timestamp is behind the watermark.
+8. Backlog drains across multiple runs; once Δ is empty a run is cheap.
+9. Absent watermark ⇒ 0; empty store ⇒ no-op.
+10. `_find_link_candidates` returns only the seq-window, without advancing the watermark.
+11. Existing `auto_link_checked` tests stay green (no re-check, invalidation on update).
 
 ## Out of scope
 
-- The edge-quality concern (local gemma3:4b classifies ~90% of pairs as `supports`, ~16.7k
-  edges) — a separate issue, not this perf fix.
-- Reusing stored embeddings instead of re-encoding each Δ node — possible later optimization;
-  with a bounded batch the re-encode is no longer the bottleneck.
-- ANN for the vector search itself (upstream #25) — separate; benefit compounds once added.
-- Tier-based prioritization of the drain order — addable later via `ORDER BY` within approach A.
+- LLM edge-quality (local gemma3:4b classifies ~90% of pairs as `supports`, ~16.7k edges).
+- ANN for the vector search itself (upstream #25) — benefit compounds once added.
+- Revisiting the bounded-recall limit (symmetric candidate generation) — separate concern.
+- Reusing stored embeddings instead of re-encoding each Δ node — possible later optimization.

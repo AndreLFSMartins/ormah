@@ -1,250 +1,292 @@
-# Incremental auto-linker cursor — Implementation Plan
+# Incremental auto-linker cursor — Implementation Plan (v2, post-council)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `run_auto_linker` (and the shared `_find_link_candidates` preview) process only nodes newer than a persisted cursor, turning the per-run O(n²) full scan into O(batch·n), while draining the historical backlog gradually.
+**Goal:** Make `run_auto_linker` (and the shared `_find_link_candidates` preview) process only nodes newer than a persisted **internal change-sequence** cursor, turning the per-run O(n²) full scan into O(batch·n), draining the historical backlog gradually, without missing nodes from reindex/import or transient LLM failures.
 
-**Architecture:** A `(updated, id)` watermark stored in the existing `meta` key-value table. `run_auto_linker` selects a bounded batch of nodes after the watermark (`updated ASC, id ASC`), runs the unchanged inner logic, then advances the watermark to the last fully-processed node. `_find_link_candidates` reads the same watermark window but never advances it. Absent watermark = epoch, so the backlog drains across runs.
+**Architecture:** A monotonic `nodes.seq` integer, bumped at the single content-write site (`Builder._index_file_nodes_only`), and an integer watermark in `meta`. `run_auto_linker` selects a bounded batch `WHERE seq > watermark ORDER BY seq ASC`, runs the unchanged inner logic, and advances the watermark only to the last **fully-resolved** node. `_find_link_candidates` reads the same window without advancing. Absent watermark = 0, so the backlog drains oldest-first.
 
-**Tech Stack:** Python 3.11, SQLite (sqlite-vec), pytest (`asyncio_mode=auto`), existing `engine` fixture.
+**Tech Stack:** Python 3.11, SQLite, pytest (`asyncio_mode=auto`), existing `engine` fixture.
 
-**Spec:** `docs/superpowers/specs/2026-06-15-auto-linker-incremental-cursor-design.md`
-
+**Spec:** `docs/superpowers/specs/2026-06-15-auto-linker-incremental-cursor-design.md` (v2)
 **Branch:** `perf/auto-linker-incremental` (base 0.11.0)
+**Council:** v1 rejected — this plan addresses crit#1 (LLM None skip), crit#2 (domain-timestamp cursor → internal seq), imp#3 (bounded recall stated), imp#4 (max_edges test), minor#5 (index).
 
 ## File structure
 
-- Modify `src/ormah/config.py` — add setting `auto_link_max_nodes_per_run`.
-- Modify `src/ormah/background/auto_linker.py` — add watermark helpers, a shared incremental node-select, rewrite `run_auto_linker` and `_find_link_candidates`.
-- Modify `tests/test_background/test_auto_linker.py` — add cursor tests; existing tests must stay green.
+- Modify `src/ormah/config.py` — setting `auto_link_max_nodes_per_run`.
+- Modify `src/ormah/index/schema.sql` — `seq` column + index for fresh DBs.
+- Modify `src/ormah/index/db.py` — `_migrate()` adds `seq` + index + backfill for existing DBs.
+- Modify `src/ormah/index/builder.py` — bump `seq` after the content write.
+- Modify `src/ormah/background/auto_linker.py` — watermark helpers, incremental select, rewrite `run_auto_linker` (with crit#1) and `_find_link_candidates`.
+- Modify `tests/test_background/test_auto_linker.py` + `tests/test_index/` — tests.
 
-Watermark storage: key `auto_link_watermark` in `meta`, value `json.dumps([updated, node_id])`. Absent ⇒ `("", "")`. SQLite predicate (portable, no row-value dependency): `WHERE updated > :u OR (updated = :u AND id > :i)`.
+Watermark: `meta.auto_link_watermark` = integer `seq` (text), absent ⇒ `0`.
 
 ---
 
-### Task 1: Config setting `auto_link_max_nodes_per_run`
+### Task 1: Config setting
 
-**Files:**
-- Modify: `src/ormah/config.py` (near line 121-123, beside other `auto_link_*` settings)
-- Test: `tests/test_background/test_auto_linker.py`
+**Files:** Modify `src/ormah/config.py` (beside `auto_link_*`); Test `tests/test_background/test_auto_linker.py`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Failing test**
 
 ```python
 def test_max_nodes_per_run_default(engine):
-    """The batch-size setting exists with a sane default."""
     assert engine.settings.auto_link_max_nodes_per_run == 500
 ```
 
-- [ ] **Step 2: Run, expect FAIL** — `pytest tests/test_background/test_auto_linker.py::test_max_nodes_per_run_default -v` → AttributeError.
-
-- [ ] **Step 3: Add the setting**
-
-In `src/ormah/config.py`, beside the other `auto_link_*` fields:
+- [ ] **Step 2:** `pytest tests/test_background/test_auto_linker.py::test_max_nodes_per_run_default -v` → FAIL (AttributeError).
+- [ ] **Step 3: Add setting** in `config.py` beside other `auto_link_*`:
 
 ```python
     auto_link_max_nodes_per_run: int = 500  # cursor batch: nodes scanned per run
 ```
 
-- [ ] **Step 4: Run, expect PASS.**
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/ormah/config.py tests/test_background/test_auto_linker.py
-git commit -m "feat(config): add auto_link_max_nodes_per_run cursor batch setting (#26)"
-```
+- [ ] **Step 4:** Re-run → PASS.
+- [ ] **Step 5: Commit** `git commit -am "feat(config): add auto_link_max_nodes_per_run (#26)"`
 
 ---
 
-### Task 2: Watermark helpers
+### Task 2: `nodes.seq` schema + migration + backfill
 
-**Files:**
-- Modify: `src/ormah/background/auto_linker.py` (add helpers near top, after imports)
-- Test: `tests/test_background/test_auto_linker.py`
+**Files:** Modify `src/ormah/index/schema.sql`; Modify `src/ormah/index/db.py` (`_migrate`, ~L102-116); Test `tests/test_index/test_migration_seq.py` (create).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Failing test**
+
+```python
+def test_seq_column_backfilled_by_created(engine):
+    """Existing nodes get a monotonic seq ordered by created ASC."""
+    # _create_pair inserts two nodes via the builder
+    from tests.test_background.test_auto_linker import _create_pair
+    id_a, id_b = _create_pair(engine)
+    rows = engine.db.conn.execute(
+        "SELECT id, seq FROM nodes WHERE id IN (?, ?) ORDER BY seq", (id_a, id_b)
+    ).fetchall()
+    seqs = [r["seq"] for r in rows]
+    assert all(s > 0 for s in seqs)
+    assert seqs[0] != seqs[1]  # unique, monotonic
+```
+
+- [ ] **Step 2:** `pytest tests/test_index/test_migration_seq.py -v` → FAIL (no `seq` column).
+- [ ] **Step 3: Schema + migration.** In `schema.sql`, add to the `nodes` table definition (after `file_hash`):
+
+```sql
+    seq INTEGER NOT NULL DEFAULT 0
+```
+
+and after the existing `idx_nodes_*` indexes:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq);
+```
+
+In `db.py` `_migrate()`, after the `enrichment_migrations` loop:
+
+```python
+            if "seq" not in node_cols:
+                conn.execute("ALTER TABLE nodes ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq)")
+                # Backfill existing rows: oldest (created ASC) gets the lowest seq,
+                # so the historical backlog drains oldest-first.
+                rows = conn.execute(
+                    "SELECT id FROM nodes ORDER BY created ASC, rowid ASC"
+                ).fetchall()
+                for i, row in enumerate(rows, start=1):
+                    conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (i, row[0]))
+```
+
+- [ ] **Step 4:** Re-run → PASS.
+- [ ] **Step 5: Commit** `git commit -am "feat(index): add monotonic nodes.seq column + backfill (#26)"`
+
+---
+
+### Task 3: Builder bumps `seq` on content write
+
+**Files:** Modify `src/ormah/index/builder.py` (`_index_file_nodes_only`, after the `INSERT OR REPLACE` at ~L110-139); Test `tests/test_background/test_auto_linker.py`.
+
+- [ ] **Step 1: Failing tests**
+
+```python
+def test_seq_bumped_on_rewrite(engine):
+    """Re-writing a node's content bumps its seq to the head (crit#2 mechanism)."""
+    from ormah.models.node import UpdateNodeRequest
+    id_a, id_b = _create_pair(engine)
+    seq_before = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    max_before = engine.db.conn.execute("SELECT MAX(seq) m FROM nodes").fetchone()["m"]
+    engine.update_node(id_a, UpdateNodeRequest(content="rewritten content"))
+    seq_after = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    assert seq_after > seq_before
+    assert seq_after > max_before  # landed at the head
+
+
+def test_metadata_update_does_not_bump_seq(engine):
+    """A direct metadata UPDATE (not via the builder) must not change seq."""
+    id_a, _ = _create_pair(engine)
+    before = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    with engine.db.transaction() as conn:
+        conn.execute("UPDATE nodes SET access_count = access_count + 1 WHERE id=?", (id_a,))
+    after = engine.db.conn.execute("SELECT seq FROM nodes WHERE id=?", (id_a,)).fetchone()["seq"]
+    assert after == before
+```
+
+- [ ] **Step 2:** Run → FAIL (`test_seq_bumped_on_rewrite`: seq unchanged after rewrite).
+- [ ] **Step 3: Bump seq** in `builder.py`, immediately after the `INSERT OR REPLACE INTO nodes (...)` `conn.execute(...)` block (before the Tags loop):
+
+```python
+        # Monotonic change-sequence: every content (re)write lands the node at the head,
+        # so reindex/import/restore re-enter the auto-linker delta regardless of frontmatter
+        # timestamps. Metadata-only UPDATEs elsewhere do not pass through here.
+        conn.execute(
+            "UPDATE nodes SET seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM nodes) WHERE id = ?",
+            (node.id,),
+        )
+```
+
+- [ ] **Step 4:** Run → PASS (both tests).
+- [ ] **Step 5: Commit** `git commit -am "feat(index): bump nodes.seq on content write in builder (#26)"`
+
+---
+
+### Task 4: Watermark helpers (integer seq)
+
+**Files:** Modify `src/ormah/background/auto_linker.py` (top, after imports); Test `tests/test_background/test_auto_linker.py`.
+
+- [ ] **Step 1: Failing test**
 
 ```python
 def test_watermark_roundtrip(engine):
-    """Absent watermark reads as epoch; set then get round-trips."""
     from ormah.background.auto_linker import _get_watermark, _set_watermark
-
-    assert _get_watermark(engine.db.conn) == ("", "")
-
-    _set_watermark(engine, "2026-06-15T00:00:00+00:00", "node-xyz")
-    assert _get_watermark(engine.db.conn) == ("2026-06-15T00:00:00+00:00", "node-xyz")
+    assert _get_watermark(engine.db.conn) == 0
+    _set_watermark(engine, 42)
+    assert _get_watermark(engine.db.conn) == 42
 ```
 
-- [ ] **Step 2: Run, expect FAIL** — ImportError.
-
-- [ ] **Step 3: Implement the helpers**
-
-In `src/ormah/background/auto_linker.py` (add `import json` is already present):
+- [ ] **Step 2:** Run → FAIL (ImportError).
+- [ ] **Step 3: Implement** in `auto_linker.py` (`import json` already present):
 
 ```python
 _WATERMARK_KEY = "auto_link_watermark"
 
 
-def _get_watermark(conn) -> tuple[str, str]:
-    """Return (updated, id) of the last fully-processed node, or ('', '') if unset."""
-    row = conn.execute(
-        "SELECT value FROM meta WHERE key = ?", (_WATERMARK_KEY,)
-    ).fetchone()
+def _get_watermark(conn) -> int:
+    """Return the seq of the last fully-processed node, or 0 if unset."""
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (_WATERMARK_KEY,)).fetchone()
     if row is None:
-        return ("", "")
+        return 0
     try:
-        updated, node_id = json.loads(row["value"])
-        return (updated, node_id)
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return ("", "")
+        return int(row["value"])
+    except (ValueError, TypeError):
+        return 0
 
 
-def _set_watermark(engine, updated: str, node_id: str) -> None:
+def _set_watermark(engine, seq: int) -> None:
     with engine.db.transaction() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-            (_WATERMARK_KEY, json.dumps([updated, node_id])),
+            (_WATERMARK_KEY, str(seq)),
         )
 ```
 
-- [ ] **Step 4: Run, expect PASS.**
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/ormah/background/auto_linker.py tests/test_background/test_auto_linker.py
-git commit -m "feat(background): add auto_link watermark get/set helpers (#26)"
-```
+- [ ] **Step 4:** Run → PASS.
+- [ ] **Step 5: Commit** `git commit -am "feat(background): integer seq watermark helpers (#26)"`
 
 ---
 
-### Task 3: Incremental node select
+### Task 5: Incremental node select by seq
 
-**Files:**
-- Modify: `src/ormah/background/auto_linker.py`
-- Test: `tests/test_background/test_auto_linker.py`
+**Files:** Modify `src/ormah/background/auto_linker.py`; Test `tests/test_background/test_auto_linker.py`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Failing test**
 
 ```python
-def test_select_nodes_after_window(engine):
-    """Only nodes after the (updated,id) watermark are returned, ordered, bounded."""
+def test_select_nodes_after_seq(engine):
     from ormah.background.auto_linker import _select_nodes_after
-
-    id_a, id_b = _create_pair(engine)  # two nodes, real timestamps
-
-    # Watermark before both ⇒ both returned, ordered by (updated, id)
-    rows = _select_nodes_after(engine.db.conn, "", "", limit=10)
-    ids = [r["id"] for r in rows]
-    assert id_a in ids and id_b in ids
-
-    # Watermark at the last row ⇒ nothing after it
+    id_a, id_b = _create_pair(engine)
+    rows = _select_nodes_after(engine.db.conn, 0, limit=10)
+    assert {id_a, id_b} <= {r["id"] for r in rows}
     last = rows[-1]
-    rows2 = _select_nodes_after(engine.db.conn, last["updated"], last["id"], limit=10)
+    rows2 = _select_nodes_after(engine.db.conn, last["seq"], limit=10)
     assert all(r["id"] != last["id"] for r in rows2)
-
-    # limit is honoured
-    assert len(_select_nodes_after(engine.db.conn, "", "", limit=1)) == 1
+    assert len(_select_nodes_after(engine.db.conn, 0, limit=1)) == 1
 ```
 
-- [ ] **Step 2: Run, expect FAIL** — ImportError.
-
-- [ ] **Step 3: Implement the select**
+- [ ] **Step 2:** Run → FAIL (ImportError).
+- [ ] **Step 3: Implement**
 
 ```python
-def _select_nodes_after(conn, wm_updated: str, wm_id: str, limit: int) -> list:
-    """Nodes with (updated, id) strictly greater than the watermark, ascending, bounded."""
+def _select_nodes_after(conn, watermark: int, limit: int) -> list:
+    """Nodes with seq strictly greater than the watermark, ascending, bounded."""
     return conn.execute(
-        "SELECT id, content, title, type, space, updated FROM nodes "
-        "WHERE updated > ? OR (updated = ? AND id > ?) "
-        "ORDER BY updated ASC, id ASC LIMIT ?",
-        (wm_updated, wm_updated, wm_id, limit),
+        "SELECT id, content, title, type, space, seq FROM nodes "
+        "WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+        (watermark, limit),
     ).fetchall()
 ```
 
-- [ ] **Step 4: Run, expect PASS.**
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/ormah/background/auto_linker.py tests/test_background/test_auto_linker.py
-git commit -m "feat(background): incremental (updated,id) node select for auto-linker (#26)"
-```
+- [ ] **Step 4:** Run → PASS.
+- [ ] **Step 5: Commit** `git commit -am "feat(background): incremental seq node select (#26)"`
 
 ---
 
-### Task 4: `run_auto_linker` drives the cursor
+### Task 6: `run_auto_linker` drives the cursor (with crit#1)
 
-**Files:**
-- Modify: `src/ormah/background/auto_linker.py` (`run_auto_linker`, ~L273-364)
-- Test: `tests/test_background/test_auto_linker.py`
+**Files:** Modify `src/ormah/background/auto_linker.py` (`run_auto_linker`); Test `tests/test_background/test_auto_linker.py`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Failing tests**
 
 ```python
 def test_run_advances_watermark(engine):
-    """After a run, the watermark equals the last processed node's (updated, id)."""
     from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
-
     _create_pair(engine)
-    engine.settings.llm_provider = "ollama"
-    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
     _reset_adapter()
-
     with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "none", "reason": "x"})):
         run_auto_linker(engine)
-
-    all_rows = _select_nodes_after(engine.db.conn, "", "", limit=100)
-    last = all_rows[-1]
-    assert _get_watermark(engine.db.conn) == (last["updated"], last["id"])
+    last = _select_nodes_after(engine.db.conn, 0, limit=100)[-1]
+    assert _get_watermark(engine.db.conn) == last["seq"]
 
 
-def test_empty_delta_is_noop(engine):
-    """A second run with the watermark at the head selects nothing and never calls the LLM."""
-    from ormah.background.auto_linker import run_auto_linker
-
+def test_llm_none_does_not_advance_past_node(engine):
+    """crit#1: a transient None must not let the watermark pass the node."""
+    from ormah.background.auto_linker import run_auto_linker, _get_watermark
     _create_pair(engine)
-    engine.settings.llm_provider = "ollama"
-    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
     _reset_adapter()
-
-    with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "none", "reason": "x"})):
+    with patch(_LLM_PATCH, return_value=None):
         run_auto_linker(engine)
-
-    mock_llm = MagicMock(return_value=json.dumps({"relationship": "none", "reason": "x"}))
+    # No node fully resolved → watermark stays at 0
+    assert _get_watermark(engine.db.conn) == 0
+    # Next run with the LLM healthy re-evaluates the pair
+    mock_llm = MagicMock(return_value=json.dumps({"relationship": "supports", "reason": "x"}))
     with patch(_LLM_PATCH, mock_llm):
         run_auto_linker(engine)
-    assert mock_llm.call_count == 0
+    assert mock_llm.call_count >= 1
 
 
-def test_backlog_drains_across_runs(engine):
-    """With batch=1, two nodes take two runs to fully process."""
+def test_max_edges_does_not_skip_interrupted_node(engine):
+    """imp#4: max_edges mid-run must not advance the watermark past unprocessed nodes."""
     from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
-
-    _create_pair(engine)
-    engine.settings.llm_provider = "ollama"
-    engine.settings.auto_link_similarity_threshold = 0.0
-    engine.settings.auto_link_max_nodes_per_run = 1
+    # three mutually-similar nodes
+    _create_pair(engine, title_a="A", content_a="shared topic alpha", title_b="B", content_b="shared topic alpha beta")
+    _create_pair(engine, title_a="C", content_a="shared topic alpha gamma", title_b="D", content_b="shared topic alpha delta")
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.auto_link_max_edges_per_run = 1
     _reset_adapter()
-
-    rows = _select_nodes_after(engine.db.conn, "", "", limit=100)
-    with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "none", "reason": "x"})):
+    rows = _select_nodes_after(engine.db.conn, 0, limit=100)
+    with patch(_LLM_PATCH, return_value=json.dumps({"relationship": "supports", "reason": "x"})):
         run_auto_linker(engine)
-        assert _get_watermark(engine.db.conn) == (rows[0]["updated"], rows[0]["id"])
-        run_auto_linker(engine)
-        assert _get_watermark(engine.db.conn) == (rows[1]["updated"], rows[1]["id"])
+    wm = _get_watermark(engine.db.conn)
+    assert wm < rows[-1]["seq"]  # did not reach the last node
 ```
 
-- [ ] **Step 2: Run, expect FAIL** — watermark not advanced / LLM still called.
-
+- [ ] **Step 2:** Run → FAIL.
 - [ ] **Step 3: Rewrite `run_auto_linker`**
-
-Replace the node fetch + loop. Read the watermark, select the batch, track the last *complete* node, advance the watermark at the end. The inner match logic (encode → search → cross-space penalty → threshold → `auto_link_checked` → existing-edge → `_llm_classify_link` → `_apply_edge`) is unchanged.
 
 ```python
 def run_auto_linker(engine) -> None:
-    """Incrementally link nodes newer than the watermark; advance the watermark."""
+    """Incrementally link nodes with seq above the watermark; advance only past
+    fully-resolved nodes."""
     try:
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
@@ -261,20 +303,17 @@ def run_auto_linker(engine) -> None:
         cross_space_penalty = settings.auto_link_cross_space_penalty
         max_edges = settings.auto_link_max_edges_per_run
 
-        wm_updated, wm_id = _get_watermark(conn)
-        nodes = _select_nodes_after(
-            conn, wm_updated, wm_id, settings.auto_link_max_nodes_per_run
-        )
+        watermark = _get_watermark(conn)
+        nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
 
         created = 0
-        last_complete: tuple[str, str] | None = None
-        stopped_early = False
+        last_complete: int | None = None
 
         for node in nodes:
             if created >= max_edges:
-                stopped_early = True
-                break
+                break  # batch budget spent; do not advance past this node
 
+            node_resolved = True
             text = f"{node['title'] or ''} {node['content']}".strip()
             if text:
                 query_vec = encoder.encode(text)
@@ -282,7 +321,7 @@ def run_auto_linker(engine) -> None:
 
                 for match in similar:
                     if created >= max_edges:
-                        stopped_early = True
+                        node_resolved = False  # interrupted mid-node
                         break
                     if match["id"] == node["id"]:
                         continue
@@ -291,9 +330,8 @@ def run_auto_linker(engine) -> None:
                     other_space = conn.execute(
                         "SELECT space FROM nodes WHERE id = ?", (match["id"],)
                     ).fetchone()
-                    if other_space is not None:
-                        if (node["space"] or "") != (other_space["space"] or ""):
-                            similarity -= cross_space_penalty
+                    if other_space is not None and (node["space"] or "") != (other_space["space"] or ""):
+                        similarity -= cross_space_penalty
                     if similarity < threshold:
                         continue
 
@@ -317,21 +355,21 @@ def run_auto_linker(engine) -> None:
 
                     llm_result = _llm_classify_link(settings, node, other)
                     if llm_result is None:
+                        node_resolved = False  # crit#1: leave unresolved, do not pass this node
                         continue
-                    relationship = llm_result["relationship"]
                     _apply_edge(
-                        engine, node["id"], match["id"], relationship,
+                        engine, node["id"], match["id"], llm_result["relationship"],
                         llm_result.get("reason", ""), similarity,
                     )
-                    if relationship != "none":
+                    if llm_result["relationship"] != "none":
                         created += 1
 
-            if stopped_early:
-                break
-            last_complete = (node["updated"], node["id"])
+            if not node_resolved:
+                break  # crit#1/imp#4: stop; watermark stays at the last fully-resolved node
+            last_complete = node["seq"]
 
         if last_complete is not None:
-            _set_watermark(engine, last_complete[0], last_complete[1])
+            _set_watermark(engine, last_complete)
         if created:
             logger.info("Auto-linker created %d edges", created)
 
@@ -339,79 +377,54 @@ def run_auto_linker(engine) -> None:
         logger.warning("Auto-linker failed: %s", e)
 ```
 
-- [ ] **Step 4: Run the full file, expect PASS** — `pytest tests/test_background/test_auto_linker.py -v`. All new tests pass AND the existing `test_llm_*` / `test_checked_pairs_*` tests stay green.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/ormah/background/auto_linker.py tests/test_background/test_auto_linker.py
-git commit -m "feat(background): drive auto_linker by incremental watermark cursor (#26)"
-```
+- [ ] **Step 4:** Run the full file → PASS, including existing `test_llm_*` / `test_checked_pairs_*`.
+- [ ] **Step 5: Commit** `git commit -am "feat(background): drive auto_linker by seq cursor, retry on LLM failure (#26)"`
 
 ---
 
-### Task 5: `_find_link_candidates` shares the incremental scan
+### Task 7: `_find_link_candidates` shares the incremental scan
 
-**Files:**
-- Modify: `src/ormah/background/auto_linker.py` (`_find_link_candidates`, ~L131-220)
-- Test: `tests/test_background/test_auto_linker.py`
+**Files:** Modify `src/ormah/background/auto_linker.py` (`_find_link_candidates`); Test `tests/test_background/test_auto_linker.py`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Failing test**
 
 ```python
 def test_find_candidates_uses_window_without_advancing(engine):
-    """Preview reads the watermark window but never advances the watermark."""
     from ormah.background.auto_linker import _find_link_candidates, _get_watermark
-
     _create_pair(engine)
     engine.settings.auto_link_similarity_threshold = 0.0
-
     before = _get_watermark(engine.db.conn)
     cands = _find_link_candidates(engine, limit=8)
-    assert isinstance(cands, list)
     assert all("node_a" in c and "node_b" in c and "similarity" in c for c in cands)
-    # Preview must not move the cursor
-    assert _get_watermark(engine.db.conn) == before
+    assert _get_watermark(engine.db.conn) == before  # preview never advances the cursor
 ```
 
-- [ ] **Step 2: Run, expect FAIL** — watermark advanced or shape mismatch.
-
-- [ ] **Step 3: Rewrite the node fetch in `_find_link_candidates`**
-
-Replace `ORDER BY RANDOM()` full scan with the shared incremental select; read the watermark, do **not** advance it. Inner filtering (similarity/threshold/cross-space, `seen_pairs`, `auto_link_checked`, existing edge) and the returned `{"node_a", "node_b", "similarity"}` shape are unchanged.
+- [ ] **Step 2:** Run → FAIL.
+- [ ] **Step 3: Replace the node fetch** in `_find_link_candidates` (remove the `ORDER BY RANDOM()` line; the candidate-collection loop bounded by `limit` is unchanged):
 
 ```python
         conn = engine.db.conn
-        wm_updated, wm_id = _get_watermark(conn)
-        nodes = _select_nodes_after(
-            conn, wm_updated, wm_id, settings.auto_link_max_nodes_per_run
-        )
+        watermark = _get_watermark(conn)
+        nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
 ```
 
-(Remove the old `nodes = conn.execute("SELECT ... ORDER BY RANDOM()").fetchall()` line; the rest of the function body — the `for node in nodes:` candidate-collection loop bounded by `limit` — stays as-is.)
-
-- [ ] **Step 4: Run, expect PASS** — `pytest tests/test_background/test_auto_linker.py -v`. Existing `TestFindLinkCandidates` / `test_run_maintenance` tests stay green.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/ormah/background/auto_linker.py tests/test_background/test_auto_linker.py
-git commit -m "feat(background): share incremental scan in _find_link_candidates (#26)"
-```
+- [ ] **Step 4:** Run → PASS; existing `TestFindLinkCandidates` / `test_run_maintenance` stay green.
+- [ ] **Step 5: Commit** `git commit -am "feat(background): share seq scan in _find_link_candidates (#26)"`
 
 ---
 
-### Task 6: Full suite + lint
+### Task 8: Full suite + lint
 
-- [ ] **Step 1:** `pytest tests/test_background/ -v` → all green.
+- [ ] **Step 1:** `pytest tests/test_background/ tests/test_index/ -v` → all green.
 - [ ] **Step 2:** `ruff check src/ tests/` → clean.
-- [ ] **Step 3:** Manual smoke against the dev server (optional, real store): restart `.venv/bin/ormah server`, confirm a maintenance run advances `meta.auto_link_watermark` (`sqlite3 ~/.local/share/ormah/memory/index.db "SELECT value FROM meta WHERE key='auto_link_watermark'"`).
+- [ ] **Step 3 (optional smoke, real store):** restart `.venv/bin/ormah server`; after a maintenance run, confirm `meta.auto_link_watermark` advanced and equals a real `seq`:
+  `sqlite3 ~/.local/share/ormah/memory/index.db "SELECT (SELECT value FROM meta WHERE key='auto_link_watermark') AS wm, (SELECT MAX(seq) FROM nodes) AS maxseq"`
 
 ---
 
 ## Self-review
 
-- **Spec coverage:** watermark in `meta` (T2) ✓; incremental select / O(batch·n) (T3,T4) ✓; backlog drains from epoch (T4 `test_backlog_drains_across_runs`) ✓; `_find_link_candidates` shared scan, no advance (T5) ✓; new setting default 500 (T1) ✓; composite `(updated,id)` cursor + ties (T3 predicate) ✓; correctness/idempotency via existing `auto_link_checked` (existing tests kept green, T4/T5) ✓; partial-run/`max_edges` does not advance past the interrupted node (T4 `stopped_early`/`last_complete`) ✓.
+- **Council coverage:** crit#1 (LLM None) → Task 6 `node_resolved`/`test_llm_none_does_not_advance_past_node` ✓; crit#2 (domain-timestamp → internal seq) → Tasks 2/3 + `test_seq_bumped_on_rewrite` ✓; imp#3 (bounded recall) → spec "Correctness" updated ✓; imp#4 (max_edges test) → `test_max_edges_does_not_skip_interrupted_node` ✓; minor#5 (index) → `idx_nodes_seq` in Task 2 ✓.
 - **Placeholder scan:** none — every code step shows full code.
-- **Type consistency:** `_get_watermark` returns `(str, str)` used by `_select_nodes_after(conn, wm_updated, wm_id, limit)` in both T4 and T5; `_set_watermark(engine, updated, node_id)`; `auto_link_max_nodes_per_run` name consistent across T1/T4/T5.
-- **Out of scope (unchanged):** LLM edge-quality (~90% supports), ANN (#25), embedding reuse.
+- **Type consistency:** `_get_watermark(conn) -> int`, `_set_watermark(engine, seq: int)`, `_select_nodes_after(conn, watermark: int, limit)` used identically in Tasks 6 and 7; `auto_link_max_nodes_per_run` consistent; `seq` column consistent across Tasks 2/3/5/6.
+- **Out of scope (unchanged):** LLM edge-quality, ANN (#25), revisiting bounded recall, embedding reuse.
