@@ -22,6 +22,7 @@ def run_forgetting(engine) -> None:
         return  # opt-in; the graveyard is untouched until explicitly armed
     try:
         now = datetime.now(timezone.utc)
+        _backfill_legacy_archived_at(engine)
         _run_gate_phase(engine, now)
         _run_cap_backstop(engine, now)
         _run_purge(engine, now)
@@ -240,3 +241,52 @@ def _run_purge(engine, now: datetime) -> int:
     if purged:
         logger.info("Forgetting hard-purged %d expired tombstones", purged)
     return purged
+
+
+_BACKFILL_META_KEY = "archived_at_legacy_backfill_done"
+
+
+def _backfill_legacy_archived_at(engine) -> int:
+    """One-time: stamp archived_at into legacy archival files lacking it (atomic via file_store).
+
+    Runs once (guarded by a meta flag), outside any migration transaction. Uses the atomic
+    file_store.save so a write failure can never truncate a source memory; the done-flag is set
+    only on a fully clean pass, so transient failures retry next run.
+    """
+    done = engine.db.conn.execute(
+        "SELECT 1 FROM meta WHERE key = ?", (_BACKFILL_META_KEY,)
+    ).fetchone()
+    if done:
+        return 0
+
+    stamped, skipped = 0, 0
+    # Enumerate the SOURCE FILES on disk, not the derived index (council R3 H8): an archival
+    # file absent from the index would otherwise be missed forever once `done` is set. We only
+    # touch files whose own archived_at is None (true legacy markers) — a file that already
+    # carries archived_at is authoritative and must not be re-indexed here, or we would clobber
+    # a deliberately index-lagged archived_at=NULL (the mid-promotion state _hybrid_row defends).
+    for node in engine.file_store.list_all():
+        if node.tier != Tier.archival or node.archived_at is not None:
+            continue
+        try:
+            node.archived_at = node.updated  # best proxy for the legacy demotion time
+            path = engine.file_store.save(node)   # atomic tmp + fsync + os.replace
+            engine.builder.index_single(path)     # stamp the index
+            stamped += 1
+        except Exception:
+            skipped += 1
+            logger.warning("archived_at backfill skipped node %s", node.id)
+
+    # Only mark done on a fully clean pass — a save-ok/index-fail node is re-checked next run
+    # (its file has archived_at but the index does not, so the loop re-indexes it).
+    if skipped == 0:
+        with engine.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')",
+                (_BACKFILL_META_KEY,),
+            )
+    if stamped or skipped:
+        logger.info(
+            "Forgetting legacy backfill: stamped %d, skipped %d", stamped, skipped
+        )
+    return stamped
