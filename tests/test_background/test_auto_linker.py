@@ -295,6 +295,15 @@ def test_max_edges_does_not_skip_interrupted_node(engine):
     assert wm < rows[-1]["seq"]  # did not reach the last node
 
 
+def test_full_rebuild_resets_watermark(engine):
+    """A mass reindex must not leave a stale watermark hiding the whole store."""
+    from ormah.background.auto_linker import _set_watermark, _get_watermark
+    _create_pair(engine)
+    _set_watermark(engine, 99999)
+    engine.builder.full_rebuild()
+    assert _get_watermark(engine.db.conn) == 0
+
+
 def test_find_candidates_uses_window_without_advancing(engine):
     from ormah.background.auto_linker import _find_link_candidates, _get_watermark
     _create_pair(engine)
