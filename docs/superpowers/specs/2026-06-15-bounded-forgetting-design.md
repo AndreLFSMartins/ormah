@@ -70,7 +70,11 @@ Add `nodes.archived_at TEXT` (nullable):
 - Set when a node is demoted to `archival` — in the `decay_manager` demotion path (and any
   other path that writes `tier = archival`).
 - Migration in `Database._migrate` adds the column and backfills existing `archival` rows
-  with their current `updated` value (best available proxy for legacy data).
+  with their current `updated` value (best available proxy for legacy data). The backfill
+  writes the **source markdown files**, not only the index: the index is derived, so an
+  index-only backfill is wiped by the next `full_rebuild`/restore (which re-parses
+  `archived_at=None`), permanently excluding legacy archival nodes from forgetting. A test
+  asserts the value survives a full rebuild.
 
 ## file_store changes
 
@@ -102,6 +106,24 @@ Over `tier == archival` candidates; cheap predicates in SQL, FSRS `R` computed i
 Each gate alone produces false positives; the conjunction only catches genuine dead weight:
 archival, unimportant, unused, never useful, weakly connected, old.
 
+The gates split into two kinds, sharing one `_is_protected(node)` predicate reused by Phase A
+and the §3 cap so they can never disagree:
+
+- **Protections (hard "never delete"):** self node, `archived_at IS NULL`, high importance
+  (#4), positive feedback (#5), hub/strong-edge or degree > max (#6). `archived_at IS NULL`
+  covers nodes created directly as `archival` via `remember(tier=archival)` — un-aged, so
+  protected.
+- **Staleness signals (sustained dead weight):** archived long enough (#2), not re-accessed
+  (#2), `R` below the floor (#3). Phase A requires *not protected AND stale*.
+
+**`archived_at` lifecycle:** stamped on **every** transition into archival and **cleared** when
+the node leaves archival — so an `archival → working → archival` round-trip resets the clock
+instead of reusing a stale months-old timestamp.
+
+**Revalidation:** background jobs run concurrently, so eligibility is recomputed from a fresh
+row read **immediately before** each `delete_node` — a node recalled / promoted / connected /
+given feedback between selection and deletion is skipped.
+
 ## §3 Cap backstop (forget-score)
 
 When `archival_soft_cap > 0` and exceeded, evict worst-first by a composite forget-score:
@@ -110,11 +132,13 @@ When `archival_soft_cap > 0` and exceeded, evict worst-first by a composite forg
 score = (1 − R) · (1 − importance) · age_days · 1/(1 + degree) · no_positive_feedback
 ```
 
-where `age_days = now − archived_at` and `no_positive_feedback ∈ {0, 1}` (a node with
-positive feedback scores 0 and is never evicted). Sort descending, evict down to the cap,
-skipping every node protected under §1.
-If only protected nodes remain, the store stays above the cap — better to exceed the cap
-than delete a valuable memory.
+where `age_days = now − archived_at`. The cap evaluates candidates through the **same
+`_is_protected` predicate** as Phase A, so protected nodes (self, null-`archived_at`, high
+importance, positive feedback, hub) are never evicted — the forget-score only orders the
+*unprotected* remainder. The cap deliberately ignores the staleness signals (it may evict a
+node younger than the graveyard window — that is the backstop's purpose). Sort descending,
+evict down to the cap. If only protected nodes remain, the store stays above the cap — better
+to exceed the cap than delete a valuable memory.
 
 ## Config (new fields in `src/ormah/config.py`, `ORMAH_` env prefix)
 

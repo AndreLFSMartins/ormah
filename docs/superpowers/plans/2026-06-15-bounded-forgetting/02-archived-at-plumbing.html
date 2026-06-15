@@ -2,7 +2,7 @@
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Task 02: `archived_at` plumbing</title>
-<!-- rich-doc-src-sha256:6cadd1049de9f2f9008c57ec755face999ec4e2be2bd62a27abcf42155eaf1ea -->
+<!-- rich-doc-src-sha256:15966e43305dc7962cfc368a9a248a48df3a517e845d5e1543747d3e76ddfc30 -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
@@ -48,6 +48,7 @@ pre code{color:inherit;font-size:13px}
 <div class="eyebrow">Implementation plan</div>
 <h1 id="task-02-archived-at-plumbing">Task 02: <code>archived_at</code> plumbing</h1>
 <p><code>archived_at</code> is a node timestamp: when a node entered the <code>archival</code> tier. The SQLite index is *derived* from the markdown files and rebuilt on restore, so the value must live in the frontmatter (source of truth) and be mirrored into a <code>nodes.archived_at</code> column.</p>
+<div class="callout"><strong>Council R1 (Cursor + Codex):</strong> the legacy backfill must write the <strong>markdown files</strong>, not only the index. An index-only backfill is silently lost on the next <code>full_rebuild</code>/restore, which re-parses the files (<code>archived_at=None</code>) and overwrites the column — leaving every legacy archival node permanently outside gate-based forgetting. That defeats the feature on the real store (≈6.7k legacy archival nodes). So the migration stamps both, and a test proves survival across a full rebuild.</div>
 <p><strong>Files:</strong></p>
 <ul><li>Modify: <code>src/ormah/models/node.py</code> (add field)</li><li>Modify: <code>src/ormah/store/markdown.py</code> (serialize/parse)</li><li>Modify: <code>src/ormah/index/schema.sql</code> (column for fresh DBs)</li><li>Modify: <code>src/ormah/index/db.py</code> (migration for legacy DBs)</li><li>Modify: <code>src/ormah/index/builder.py</code> (index the column)</li><li>Test: <code>tests/test_store/test_markdown.py</code>, <code>tests/test_index/test_migrations.py</code></li></ul>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 1: Write the failing tests</strong></li></ul>
@@ -94,8 +95,26 @@ def test_migrate_adds_archived_at_and_backfills(tmp_path):
     row = db.conn.execute(&quot;SELECT archived_at FROM nodes WHERE id=&#x27;n1&#x27;&quot;).fetchone()
     assert row[&quot;archived_at&quot;] == &quot;2026-02-01T00:00:00Z&quot;  # backfilled from updated
     db.close()</code></pre>
+<p>Also create <code>tests/test_index/test_archived_at_durability.py</code> (proves the value survives a full rebuild from files — the council&#x27;s core durability invariant):</p>
+<pre><code class="lang-python">from ormah.models.node import CreateNodeRequest, NodeType, Tier, UpdateNodeRequest
+
+
+def test_archived_at_survives_full_rebuild(engine):
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content=&quot;durable&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;durable&quot;))
+    engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+    stamped = engine.file_store.load(node_id).archived_at
+    assert stamped is not None
+
+    engine.builder.full_rebuild()  # re-parse all files into a fresh index
+
+    row = engine.db.conn.execute(
+        &quot;SELECT archived_at FROM nodes WHERE id = ?&quot;, (node_id,)
+    ).fetchone()
+    assert row[&quot;archived_at&quot;] is not None  # not wiped by the rebuild</code></pre>
+<p>(This test depends on Task 03&#x27;s stamping; if running Task 02 in isolation, mark it <code>xfail</code> until Task 03 lands, then remove the marker.)</p>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 2: Run tests to verify they fail</strong></li></ul>
-<p>Run: <code>.venv/bin/python -m pytest tests/test_store/test_markdown.py tests/test_index/test_migrations.py -v</code> Expected: FAIL (<code>archived_at</code> not a field / column).</p>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_store/test_markdown.py tests/test_index/test_migrations.py tests/test_index/test_archived_at_durability.py -v</code> Expected: FAIL (<code>archived_at</code> not a field / column).</p>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 3: Add the model field</strong></li></ul>
 <p>In <code>src/ormah/models/node.py</code>, inside <code>MemoryNode</code>, add right after the <code>last_review</code> line:</p>
 <pre><code class="lang-python">    archived_at: datetime | None = None  # when the node entered the archival tier (#28)</code></pre>
@@ -119,7 +138,31 @@ def test_migrate_adds_archived_at_and_backfills(tmp_path):
                 conn.execute(
                     &quot;UPDATE nodes SET archived_at = updated &quot;
                     &quot;WHERE tier = &#x27;archival&#x27; AND archived_at IS NULL&quot;
-                )</code></pre>
+                )
+                # Also stamp the SOURCE files — the index is derived and a later full_rebuild
+                # would otherwise re-parse archived_at=None and wipe this backfill (council R1).
+                legacy = conn.execute(
+                    &quot;SELECT file_path, updated FROM nodes WHERE tier = &#x27;archival&#x27;&quot;
+                ).fetchall()
+                _backfill_archived_at_files(legacy)</code></pre>
+<p>The helper writes the frontmatter only when absent (idempotent), so re-running never moves an already-stamped clock. Add it as a module-level function in <code>src/ormah/index/db.py</code>:</p>
+<pre><code class="lang-python">def _backfill_archived_at_files(rows) -&gt; None:
+    &quot;&quot;&quot;One-time: stamp archived_at into legacy archival markdown files lacking it.&quot;&quot;&quot;
+    import frontmatter
+    from pathlib import Path
+
+    for file_path, updated in rows:
+        try:
+            p = Path(file_path)
+            if not p.exists():
+                continue
+            post = frontmatter.loads(p.read_text(encoding=&quot;utf-8&quot;))
+            if post.metadata.get(&quot;archived_at&quot;):
+                continue  # already stamped — never overwrite
+            post[&quot;archived_at&quot;] = updated
+            p.write_text(frontmatter.dumps(post), encoding=&quot;utf-8&quot;)
+        except Exception:
+            continue  # never let a malformed legacy file break startup</code></pre>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 7: Index the column</strong></li></ul>
 <p>In <code>src/ormah/index/builder.py</code> <code>_index_file_nodes_only</code>, update the INSERT:</p>
 <p>Column list — change <code>... last_review, file_path, file_hash)</code> to <code>... last_review, archived_at, file_path, file_hash)</code> and add one <code>?</code> to the VALUES tuple.</p>
@@ -131,8 +174,8 @@ def test_migrate_adds_archived_at_and_backfills(tmp_path):
 <p>Run: <code>.venv/bin/python -m pytest tests/test_index tests/test_store -v</code> Expected: PASS (no regressions from the new column).</p>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 10: Lint + commit</strong></li></ul>
 <pre><code class="lang-bash">.venv/bin/ruff check src/ormah/models/node.py src/ormah/store/markdown.py src/ormah/index/db.py src/ormah/index/builder.py
-git add src/ormah/models/node.py src/ormah/store/markdown.py src/ormah/index/schema.sql src/ormah/index/db.py src/ormah/index/builder.py tests/test_store/test_markdown.py tests/test_index/test_migrations.py
-git commit -m &quot;feat(index): add archived_at timestamp to nodes (#28)&quot;</code></pre>
+git add src/ormah/models/node.py src/ormah/store/markdown.py src/ormah/index/schema.sql src/ormah/index/db.py src/ormah/index/builder.py tests/test_store/test_markdown.py tests/test_index/test_migrations.py tests/test_index/test_archived_at_durability.py
+git commit -m &quot;feat(index): add durable archived_at timestamp to nodes (#28)&quot;</code></pre>
 <div class="callout"><strong>Note for executor:</strong> if <code>ALTER TABLE ... DROP COLUMN</code> is unsupported on the installed SQLite, replace Step 1&#x27;s <code>DROP COLUMN</code> setup by creating the DB, then asserting the column exists after <code>init_schema()</code> (fresh DBs get it from schema.sql) and testing backfill by inserting an archival row with NULL <code>archived_at</code> and calling the backfill UPDATE directly.</div>
 <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
 <div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span>

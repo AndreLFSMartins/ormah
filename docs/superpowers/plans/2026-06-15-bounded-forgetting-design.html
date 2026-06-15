@@ -1,256 +1,140 @@
 <!DOCTYPE html>
-<html lang="pt-BR" data-mode="light">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bounded Forgetting (#28) — Design</title>
-<!-- rich-doc-src-sha256:45af674def4525c3e4e203eb36a9bed91a43658b4f5423b9c697c4265653977f -->
+<!-- rich-doc-src-sha256:f6538d93f9664269b21e2bca510ef0a8984247ccee8e992f8196ee06611cc4ea -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
-:root{
-  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
-  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
-  --accent:var(--orange);
-  --font-head:"Poppins",Arial,sans-serif;
-  --font-body:"Lora",Georgia,serif;
-  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
-  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
-}
-[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
-*{box-sizing:border-box} html{scroll-behavior:smooth}
-body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
-  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
-nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
-  border-right:1px solid var(--hairline);padding:46px 30px}
-nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
-  color:var(--accent);margin-bottom:14px}
-nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
-  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
-nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
-  padding:5px 0;border:none}
-nav.toc a:hover{color:var(--ink)}
-nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.12 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}nav.toc a.lvl-3{padding-left:16px;font-size:13px}
 main{padding:56px 72px 140px;max-width:var(--maxw)}
 .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
 .meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
-h1{font:400 italic 46px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
-h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
-  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
-h2:first-of-type{margin-top:0}
-h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
-h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
-p,li{color:var(--ink)} strong{font-weight:700}
-a{color:var(--accent);text-underline-offset:2px}
-.statement{font:400 italic 26px/1.25 var(--font-body);letter-spacing:-.01em;color:var(--ink);
-  margin:26px 0;max-width:24em;text-wrap:pretty}
-.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
-  background:transparent;padding:14px 20px;margin:20px 0}
-.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
-  color:var(--accent);display:block;margin-bottom:8px}
-.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
-  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
-.chip.on{color:var(--accent);border-color:var(--accent)}
+h1{font:400 italic 44px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
+h2{font:600 28px/1.12 var(--font-head);letter-spacing:-.015em;margin:52px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:8px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 19px/1.2 var(--font-head);margin:30px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent);text-underline-offset:2px}
+ul,ol{padding-left:22px}li{margin:5px 0}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:12px 20px;margin:20px 0}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 6px 0}
 table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
-th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline);vertical-align:top}
 th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
 tr:last-child td{border-bottom:none}
-td code{font-size:13px}
-figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
-figure svg{max-width:100%;height:auto}
-figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
-  text-transform:uppercase;letter-spacing:.04em}
-code{font:14px var(--font-mono);color:var(--accent)}
-pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
-pre code{color:inherit}
-.spectrum{display:flex;height:4px;margin:40px 0 22px}
-.spectrum span{flex:1}
-.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
-.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
-  border-left:2px solid var(--accent);padding-left:16px}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);background:#fdfcf9;padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink);margin:16px 0}
+pre code{color:inherit;font-size:13px}
+.spectrum{display:flex;height:4px;margin:48px 0 22px}.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
 .signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
-.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
-.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
-  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
-.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
-.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
-.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);flex-wrap:wrap}
-.metrics .metric{flex:0 1 auto}
-.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
-.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
-@media(max-width:880px){
-  body{grid-template-columns:1fr}
-  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
-  main{padding:32px 24px 90px}
-}
-</style>
-</head>
-<body>
-<nav class="toc">
-  <div class="eyebrow">Ormah · #28</div>
-  <div class="doc-title">Bounded forgetting</div>
-  <a href="#problem">O problema</a>
-  <a href="#constraint">A restrição</a>
-  <a href="#decisions">Decisões travadas</a>
-  <a href="#flow">Fluxo do job</a>
-  <a href="#gates" class="lvl-3">§1 Gates</a>
-  <a href="#score" class="lvl-3">§3 Forget-score</a>
-  <a href="#schema">Schema &amp; file_store</a>
-  <a href="#config">Config</a>
-  <a href="#operation">Operação</a>
-  <a href="#testing">Testes</a>
-  <a href="#scope">Fora de escopo</a>
-</nav>
-<main>
-  <div class="eyebrow">Design spec</div>
-  <h1>Bounded forgetting</h1>
-  <div class="meta">Issue #28 · branch feat/bounded-forgetting · 2026-06-15</div>
-
-  <div class="metrics">
-    <div class="metric"><div class="big">2</div><div class="label">fases por run</div></div>
-    <div class="metric"><div class="big">7</div><div class="label">gates conjuntos</div></div>
-    <div class="metric"><div class="big">8</div><div class="label">knobs de config</div></div>
-    <div class="metric"><div class="big">OFF</div><div class="label">default (opt-in)</div></div>
-    <div class="metric"><div class="big">1</div><div class="label">coluna nova</div></div>
-  </div>
-
-  <h2 id="problem">O <em>problema</em></h2>
-  <p>Decay é uma catraca de mão única. O <code>decay_manager</code> rebaixa nós <code>working</code>
-  estagnados para <code>archival</code>, mas nada nunca os remove — <code>archival</code> só cresce.
-  No store real do André (8.355 nós, 80% archival) esse cemitério:</p>
-  <ul>
-    <li>conta no total de nós (a UI do grafo já sofre);</li>
-    <li>é varrido por todo job de background (auto-linker é O(n²) sobre <em>todos</em> os nós);</li>
-    <li>ainda aparece no recall como ruído (só rebaixado via <code>tier_boost_archival = -0.1</code>).</li>
-  </ul>
-  <p class="statement">Decay reduz prioridade — não custo nem ruído. Deleção é a única alavanca que encolhe o store.</p>
-  <p>Encolher <code>n</code> também é multiplicador grátis para o <a href="#flow">#26</a> (auto-linker) e o #25 (vector search).</p>
-
-  <h2 id="constraint">A <em>restrição</em></h2>
-  <div class="callout">
-    <span class="label">Princípio de confiança</span>
-    Deleção nunca depende de um único sinal. Atua só na cauda <code>archival</code>, exige a
-    <strong>conjunção</strong> de vários sinais independentes, e mantém uma <strong>janela de
-    reversibilidade</strong> antes de qualquer byte sair do disco. Cada decisão é explicável por nó.
-  </div>
-  <p>Um falso negativo — deletar algo que depois importava — é irrecuperável. Por isso o desenho
-  inteiro é fail-closed: <a href="#decisions">OFF por padrão</a>, gates conjuntos, e soft-delete antes de purge.</p>
-
-  <h2 id="decisions">Decisões <em>travadas</em></h2>
-  <table>
-    <thead><tr><th>Decisão</th><th>Escolha</th><th>Porquê</th></tr></thead>
-    <tbody>
-      <tr><td>Escopo</td><td>Issue completo: §1 gates + §2 soft→purge + §3 cap</td><td>André optou pelo ciclo de vida completo numa entrega.</td></tr>
-      <tr><td>Estado default</td><td>Opt-in, <strong>OFF</strong> (<code>deletion_enabled=False</code>)</td><td>Ação irreversível num sistema de confiança → default fail-closed; o usuário arma explicitamente.</td></tr>
-      <tr><td>Superfície de ativação</td><td><strong>Env / <code>.env</code>, sem UI</strong></td><td>A UI web está lenta demais para abrir no node count do André. Tudo é pydantic-settings (prefixo <code>ORMAH_</code>).</td></tr>
-      <tr><td>Cronômetro do purge</td><td><code>deleted_at</code> no <strong>frontmatter</strong></td><td>Auto-contido: sobrevive a backup/restore e a resets de mtime/TCC-copy nesta máquina.</td></tr>
-      <tr><td>Sinal "archived ≥ N dias"</td><td>Coluna <strong><code>nodes.archived_at</code></strong></td><td>Única forma robusta de expressar idade no graveyard sem acoplar a writes não-relacionados.</td></tr>
-    </tbody>
-  </table>
-
-  <h2 id="flow">Fluxo do <em>job</em></h2>
-  <p>Um novo módulo <code>src/ormah/background/forgetting_manager.py</code> → <code>run_forgetting(engine)</code>,
-  registrado no <code>scheduler.py</code> com intervalo próprio. Cada run tem duas fases, ambas guardadas
-  pelo master switch — quando <code>deletion_enabled=False</code> o job retorna na hora (no-op).</p>
-
-  <div class="phase p-o"><span class="pn">Fase A</span> Gates → soft-delete (+ cap backstop)</div>
-  <div class="phase p-b"><span class="pn">Fase B</span> Hard-purge da janela de retenção</div>
-
-  <figure>
-    <svg id="my-svg" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width: 563.52px; background-color: transparent;" viewBox="0 0 563.51953125 1773" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#my-svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;fill:#141413;}#my-svg .error-icon{fill:#f1f4ec;}#my-svg .error-text{fill:#0e0b13;stroke:#0e0b13;}#my-svg .edge-thickness-normal{stroke-width:1px;}#my-svg .edge-thickness-thick{stroke-width:3.5px;}#my-svg .edge-pattern-solid{stroke-dasharray:0;}#my-svg .edge-thickness-invisible{stroke-width:0;fill:none;}#my-svg .edge-pattern-dashed{stroke-dasharray:3;}#my-svg .edge-pattern-dotted{stroke-dasharray:2;}#my-svg .marker{fill:#b0aea5;stroke:#b0aea5;}#my-svg .marker.cross{stroke:#b0aea5;}#my-svg svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;}#my-svg p{margin:0;}#my-svg .label{font-family:Arial,Helvetica,sans-serif;color:#141413;}#my-svg .cluster-label text{fill:#0e0b13;}#my-svg .cluster-label span{color:#0e0b13;}#my-svg .cluster-label span p{background-color:transparent;}#my-svg .label text,#my-svg span{fill:#141413;color:#141413;}#my-svg .node rect,#my-svg .node circle,#my-svg .node ellipse,#my-svg .node polygon,#my-svg .node path{fill:#fdf0eb;stroke:#d97757;stroke-width:1px;}#my-svg .rough-node .label text,#my-svg .node .label text{text-anchor:middle;}#my-svg .node .label,#my-svg .image-shape .label,#my-svg .icon-shape .label{text-align:center;}#my-svg .arrowheadPath{fill:#05060a;}#my-svg .edgePath .path{stroke:#b0aea5;stroke-width:1px;}#my-svg .flowchart-link{stroke:#b0aea5;fill:none;}#my-svg .edgeLabel{background-color:#faf9f5;text-align:center;}#my-svg .edgeLabel p{background-color:#faf9f5;}#my-svg .edgeLabel rect{opacity:0.5;background-color:#faf9f5;fill:#faf9f5;}#my-svg .labelBkg{background-color:rgba(250, 249, 245, 0.5);}#my-svg .node.clickable{cursor:pointer;}#my-svg .flowchartTitleText{text-anchor:middle;font-size:18px;fill:#141413;}</style><g><marker id="my-svg_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker></g><g class="root"><g class="edgePaths"><path d="M192.923,47.5L178.88,53.583C164.837,59.667,136.75,71.833,122.707,85.417C108.664,99,108.664,114,108.664,121.5L108.664,129" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M281.21,47.5L295.086,53.583C308.963,59.667,336.716,71.833,350.592,83.417C364.469,95,364.469,106,364.469,111.5L364.469,117" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M364.469,199L364.469,203.167C364.469,207.333,364.469,215.667,364.469,223.333C364.469,231,364.469,238,364.469,241.5L364.469,245" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M299.989,534.521L290.122,551.434C280.255,568.347,260.52,602.174,250.653,624.587C240.785,647,240.785,658,240.785,663.5L240.785,669" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M428.948,534.521L438.815,551.434C448.683,568.347,468.418,602.174,478.285,628.587C488.152,655,488.152,674,488.152,683.5L488.152,693" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M240.785,775L240.785,779.167C240.785,783.333,240.785,791.667,240.785,799.333C240.785,807,240.785,814,240.785,817.5L240.785,821" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M282.599,1012.842L290.122,1025.978C297.644,1039.114,312.689,1065.385,320.212,1084.021C327.734,1102.656,327.734,1113.656,327.734,1119.156L327.734,1124.656" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M198.971,1012.842L191.449,1025.978C183.926,1039.114,168.881,1065.385,161.358,1093.187C153.836,1120.99,153.836,1150.323,153.836,1177.656C153.836,1204.99,153.836,1230.323,160.231,1246.814C166.626,1263.305,179.416,1270.954,185.811,1274.779L192.206,1278.603" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M327.734,1230.656L327.734,1234.823C327.734,1238.99,327.734,1247.323,321.339,1255.314C314.945,1263.305,302.155,1270.954,295.76,1274.779L289.365,1278.603" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M240.785,1334.656L240.785,1338.823C240.785,1342.99,240.785,1351.323,240.785,1358.99C240.785,1366.656,240.785,1373.656,240.785,1377.156L240.785,1380.656" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M189.681,1561.896L177.782,1576.58C165.884,1591.264,142.086,1620.632,130.188,1640.816C118.289,1661,118.289,1672,118.289,1677.5L118.289,1683" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M291.889,1561.896L303.788,1576.58C315.687,1591.264,339.484,1620.632,351.383,1642.816C363.281,1665,363.281,1680,363.281,1687.5L363.281,1695" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/></g><g class="edgeLabels"><g class="edgeLabel" transform="translate(108.6640625, 84)"><g class="label" transform="translate(-16.8984375, -12)"><foreignObject width="33.796875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>false</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(364.46875, 84)"><g class="label" transform="translate(-13.7890625, -12)"><foreignObject width="27.578125" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>true</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(240.78515625, 636)"><g class="label" transform="translate(-27.125, -12)"><foreignObject width="54.25" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>all pass</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(488.15234375, 636)"><g class="label" transform="translate(-25.3515625, -12)"><foreignObject width="50.703125" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>any fail</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(327.734375, 1091.65625)"><g class="label" transform="translate(-12.453125, -12)"><foreignObject width="24.90625" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>yes</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(153.8359375, 1179.65625)"><g class="label" transform="translate(-8.8984375, -12)"><foreignObject width="17.796875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>no</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(118.2890625, 1650)"><g class="label" transform="translate(-12.453125, -12)"><foreignObject width="24.90625" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>yes</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(363.28125, 1650)"><g class="label" transform="translate(-8.8984375, -12)"><foreignObject width="17.796875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>no</p></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default" transform="translate(236.56640625, 27.5)"><polygon points="9.75,0 155.546875,0 165.296875,-19.5 155.546875,-39 9.75,-39 0,-19.5" class="label-container" transform="translate(-82.6484375,19.5)"/><g class="label" transform="translate(-65.3984375, -12)"><foreignObject width="130.796875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>deletion_enabled?</p></span></div></foreignObject></g></g><g class="node default" transform="translate(108.6640625, 160)"><rect class="basic label-container" x="-75.8046875" y="-27" width="151.609375" height="54"/><g class="label" transform="translate(-45.8046875, -12)"><foreignObject width="91.609375" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>no-op: return</p></span></div></foreignObject></g></g><g class="node default" transform="translate(364.46875, 160)"><rect class="basic label-container" x="-130" y="-39" width="260" height="78"/><g class="label" transform="translate(-100, -24)"><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Phase A: scan archival candidates</p></span></div></foreignObject></g></g><g class="node default" transform="translate(364.46875, 424)"><polygon points="175,0 350,-175 175,-350 0,-175" class="label-container" transform="translate(-174.5, 175)"/><g class="label" transform="translate(-100, -60)"><foreignObject width="200" height="120"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>§1 conjunction gates<br/>archived 90d · R&lt;0.05 · imp&lt;0.5<br/>no +feedback · degree≤2 · not self</p></span></div></foreignObject></g></g><g class="node default" transform="translate(240.78515625, 724)"><rect class="basic label-container" x="-130" y="-51" width="260" height="102"/><g class="label" transform="translate(-100, -36)"><foreignObject width="200" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>engine.delete_node()<br/>index − · audit · soft_delete → deleted/</p></span></div></foreignObject></g></g><g class="node default" transform="translate(488.15234375, 724)"><rect class="basic label-container" x="-67.3671875" y="-27" width="134.734375" height="54"/><g class="label" transform="translate(-37.3671875, -12)"><foreignObject width="74.734375" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>keep node</p></span></div></foreignObject></g></g><g class="node default" transform="translate(240.78515625, 939.828125)"><polygon points="114.828125,0 229.65625,-114.828125 114.828125,-229.65625 0,-114.828125" class="label-container" transform="translate(-114.328125, 114.828125)"/><g class="label" transform="translate(-75.828125, -24)"><foreignObject width="151.65625" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>archival_soft_cap &gt; 0<br/>and still exceeded?</p></span></div></foreignObject></g></g><g class="node default" transform="translate(327.734375, 1179.65625)"><rect class="basic label-container" x="-130" y="-51" width="260" height="102"/><g class="label" transform="translate(-100, -36)"><foreignObject width="200" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>evict worst-first by forget-score<br/>respecting all §1 protections</p></span></div></foreignObject></g></g><g class="node default" transform="translate(240.78515625, 1307.65625)"><rect class="basic label-container" x="-105.15625" y="-27" width="210.3125" height="54"/><g class="label" transform="translate(-75.15625, -12)"><foreignObject width="150.3125" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Phase B: list deleted/</p></span></div></foreignObject></g></g><g class="node default" transform="translate(240.78515625, 1498.828125)"><polygon points="114.171875,0 228.34375,-114.171875 114.171875,-228.34375 0,-114.171875" class="label-container" transform="translate(-113.671875, 114.171875)"/><g class="label" transform="translate(-75.171875, -24)"><foreignObject width="150.34375" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>deleted_at older than<br/>retention_days (30)?</p></span></div></foreignObject></g></g><g class="node default" transform="translate(118.2890625, 1726)"><rect class="basic label-container" x="-110.2890625" y="-39" width="220.578125" height="78"/><g class="label" transform="translate(-80.2890625, -24)"><foreignObject width="160.578125" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>file_store.purge()<br/>audit: operation=purge</p></span></div></foreignObject></g></g><g class="node default" transform="translate(363.28125, 1726)"><rect class="basic label-container" x="-84.703125" y="-27" width="169.40625" height="54"/><g class="label" transform="translate(-54.703125, -12)"><foreignObject width="109.40625" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>keep in window</p></span></div></foreignObject></g></g></g></g></svg>
-    <figcaption>Run do forgetting_manager — Fase A (gates → soft-delete → cap) e Fase B (purge), sob o master switch</figcaption>
-  </figure>
-
-  <p>Reusar <code>engine.delete_node</code> no soft-delete mantém um caminho único de deleção
-  (índice + audit + cleanup de auto-link já tratados), então o job novo fica pequeno.</p>
-
-  <h3 id="gates">§1 — Gates de elegibilidade (deleta só quando TODOS valem)</h3>
-  <p>Sobre candidatos <code>tier == archival</code>; predicados baratos em SQL, FSRS <code>R</code>
-  calculado em Python (mesma fórmula do <code>decay_manager</code>: <code>R = exp(-days_since / stability)</code>).</p>
-  <table>
-    <thead><tr><th>#</th><th>Gate</th><th>Condição</th></tr></thead>
-    <tbody>
-      <tr><td>1</td><td>Só o graveyard</td><td><code>tier == archival</code> — nunca <code>working</code>/<code>core</code></td></tr>
-      <tr><td>2</td><td>Staleness sustentada</td><td><code>archived_at</code> e <code>last_accessed</code> ≤ <code>now − min_archival_days</code></td></tr>
-      <tr><td>3</td><td>Retrievability no chão</td><td><code>R &lt; deletion_retrievability_floor</code> (mais fundo que o threshold de decay)</td></tr>
-      <tr><td>4</td><td>Baixa importância</td><td><code>importance &lt; decay_importance_threshold</code> (reusa 0.5)</td></tr>
-      <tr><td>5</td><td>Nunca útil</td><td><code>NOT EXISTS(affinity WHERE node_id=? AND signal&gt;0)</code> — qualquer +feedback ⇒ protegido</td></tr>
-      <tr><td>6</td><td>Baixa conectividade</td><td><code>degree ≤ deletion_max_degree</code> e nenhuma edge com <code>weight ≥ strong_edge_weight</code></td></tr>
-      <tr><td>7</td><td>Não-protegido</td><td>Não é o self/user node (não há "pin" no schema hoje)</td></tr>
-    </tbody>
-  </table>
-  <p>Cada gate sozinho gera falsos positivos; a conjunção só pega peso-morto genuíno: archival,
-  sem importância, sem uso, nunca útil, fracamente conectado, antigo.</p>
-
-  <h3 id="score">§3 — Forget-score (cap backstop)</h3>
-  <p>Quando <code>archival_soft_cap &gt; 0</code> e excedido, evicta worst-first por um score composto:</p>
-  <pre><code>score = (1 − R) · (1 − importance) · age_days · 1/(1 + degree) · no_positive_feedback
-
-age_days = now − archived_at
-no_positive_feedback ∈ {0, 1}   # nó com +feedback pontua 0 → nunca evicta</code></pre>
-  <p>Ordena descendente, evicta até o cap, pulando todo nó protegido sob <a href="#gates">§1</a>.
-  Se sobrarem só protegidos, o store fica acima do cap — melhor exceder que deletar algo valioso.</p>
-
-  <h2 id="schema">Schema &amp; <em>file_store</em></h2>
-  <h3>Migração (uma)</h3>
-  <p>Adiciona <code>nodes.archived_at TEXT</code> (nullable): setada quando um nó é rebaixado para
-  <code>archival</code> (no caminho do <code>decay_manager</code>). A migração em <code>Database._migrate</code>
-  backfilla os <code>archival</code> existentes com o <code>updated</code> atual.</p>
-  <h3>Mudanças no file_store</h3>
-  <ul>
-    <li><code>soft_delete(node_id)</code> — estampa <code>deleted_at: &lt;iso&gt;</code> no frontmatter ao mover para <code>deleted/</code>. Centralizado lá, então a deleção manual também ganha janela de reversibilidade.</li>
-    <li><code>list_deleted()</code> — novo: enumera os arquivos em <code>deleted/</code>.</li>
-    <li><code>purge(node_id)</code> — novo: hard-remove um arquivo de <code>deleted/</code>.</li>
-  </ul>
-
-  <h2 id="config">Config <em>(env)</em></h2>
-  <p>Novos campos em <code>src/ormah/config.py</code>, prefixo <code>ORMAH_</code>. Reusa
-  <code>decay_importance_threshold</code> (0.5) no gate #4.</p>
-  <table>
-    <thead><tr><th>Campo</th><th>Default</th><th>Env var</th></tr></thead>
-    <tbody>
-      <tr><td><code>deletion_enabled</code></td><td><code>False</code></td><td><code>ORMAH_DELETION_ENABLED</code></td></tr>
-      <tr><td><code>forgetting_interval_hours</code></td><td><code>24</code></td><td><code>ORMAH_FORGETTING_INTERVAL_HOURS</code></td></tr>
-      <tr><td><code>deletion_min_archival_days</code></td><td><code>90</code></td><td><code>ORMAH_DELETION_MIN_ARCHIVAL_DAYS</code></td></tr>
-      <tr><td><code>deletion_retrievability_floor</code></td><td><code>0.05</code></td><td><code>ORMAH_DELETION_RETRIEVABILITY_FLOOR</code></td></tr>
-      <tr><td><code>deletion_max_degree</code></td><td><code>2</code></td><td><code>ORMAH_DELETION_MAX_DEGREE</code></td></tr>
-      <tr><td><code>deletion_strong_edge_weight</code></td><td><code>0.7</code></td><td><code>ORMAH_DELETION_STRONG_EDGE_WEIGHT</code></td></tr>
-      <tr><td><code>deletion_retention_days</code></td><td><code>30</code></td><td><code>ORMAH_DELETION_RETENTION_DAYS</code></td></tr>
-      <tr><td><code>archival_soft_cap</code></td><td><code>0</code> (off)</td><td><code>ORMAH_ARCHIVAL_SOFT_CAP</code></td></tr>
-    </tbody>
-  </table>
-
-  <h2 id="operation">Operação</h2>
-  <div class="callout">
-    <span class="label">Ativar sem UI</span>
-    Adicione <code>ORMAH_DELETION_ENABLED=true</code> (e overrides de tuning) em
-    <code>~/.config/ormah/.env</code>, depois reinicie o server. A UI web lenta nunca está no caminho crítico.
-  </div>
-
-  <h2 id="testing">Testes <em>(TDD)</em></h2>
-  <ul>
-    <li><strong>Por gate, positivo + negativo:</strong> stale-o-bastante vs recente (<code>archived_at</code>, <code>last_accessed</code>), <code>R</code> abaixo vs acima do floor, importância, +affinity presente (protege) vs ausente, degree/strong-edge, self node pulado.</li>
-    <li><strong>Conjunção:</strong> nó falhando exatamente um gate não deleta; passando todos é soft-deletado.</li>
-    <li><strong>Master switch:</strong> <code>deletion_enabled=False</code> ⇒ zero deleções, mesmo com elegíveis.</li>
-    <li><strong>soft_delete estampa <code>deleted_at</code></strong> no frontmatter; arquivo cai em <code>deleted/</code>.</li>
-    <li><strong>Purge (Fase B):</strong> arquivos além de <code>retention_days</code> removidos; dentro da janela sobrevivem; audit registra <code>operation='purge'</code>.</li>
-    <li><strong>Cap backstop:</strong> eviction worst-first até o cap; protegidos/+feedback/hub nunca evictam.</li>
-    <li><strong>archived_at:</strong> setado na demoção; migração backfilla dos <code>updated</code>.</li>
-    <li><strong>Idempotência:</strong> segundo run sem novos elegíveis não deleta nada.</li>
-  </ul>
-
-  <h2 id="scope">Fora de <em>escopo</em></h2>
-  <p>
-    <span class="chip">UI / #22 active-graph-first</span>
-    <span class="chip">restore-from-deleted UX</span>
-    <span class="chip">#25 ANN / vector-search</span>
-  </p>
-  <p>A janela de reversibilidade existe; um comando de restore não faz parte desta fatia.</p>
-
-  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
-  <div class="signature">
-    <span class="name">Ormah · Bounded forgetting</span>
-    <span class="role">Design spec · #28 · 2026-06-15</span>
-  </div>
-</main>
-</body>
-</html>
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+</style></head>
+<body><nav class="toc"><div class="eyebrow">Ormah &middot; #28</div>
+<div class="doc-title">Bounded forgetting</div>
+<a href="#problem" class="lvl-2">Problem</a>
+<a href="#design-constraint" class="lvl-2">Design constraint</a>
+<a href="#decisions-locked-during-brainstorming" class="lvl-2">Decisions (locked during brainstorming)</a>
+<a href="#architecture-one-new-background-job" class="lvl-2">Architecture: one new background job</a>
+<a href="#phase-a-gates-soft-delete-cap-backstop" class="lvl-3">Phase A — gates → soft-delete (+ cap backstop)</a>
+<a href="#phase-b-hard-purge" class="lvl-3">Phase B — hard-purge</a>
+<a href="#schema-change-one-migration" class="lvl-2">Schema change (one migration)</a>
+<a href="#file-store-changes" class="lvl-2">file_store changes</a>
+<a href="#1-eligibility-gates-delete-only-when-all-hold" class="lvl-2">§1 Eligibility gates (delete only when ALL hold)</a>
+<a href="#3-cap-backstop-forget-score" class="lvl-2">§3 Cap backstop (forget-score)</a>
+<a href="#config-new-fields-in-src-ormah-config-py-ormah-env-prefix" class="lvl-2">Config (new fields in `src/ormah/config.py`, `ORMAH_` env prefix)</a>
+<a href="#operation" class="lvl-2">Operation</a>
+<a href="#testing-tdd" class="lvl-2">Testing (TDD)</a>
+<a href="#out-of-scope" class="lvl-2">Out of scope</a></nav>
+<main><div class="eyebrow">Design spec</div>
+<h1 id="bounded-forgetting-28-design">Bounded Forgetting (#28) — Design</h1>
+<p><strong>Issue:</strong> #28 — <code>feat(background): bounded forgetting — delete dead-weight archival nodes</code> <strong>Branch:</strong> off <code>perf/auto-linker-incremental</code> (#26 not yet merged to main) <strong>Date:</strong> 2026-06-15</p>
+<h2 id="problem">Problem</h2>
+<p>Decay is a one-way ratchet. <code>decay_manager</code> demotes stale <code>working</code> nodes to <code>archival</code> (<code>src/ormah/background/decay_manager.py</code>) but nothing ever removes them. <code>archival</code> only grows. On André&#x27;s real store (8.355 nodes, 80% archival) that graveyard:</p>
+<ul><li>counts toward total node count (graph UI struggles),</li><li>is scanned by every background job (auto-linker is O(n²) over *all* nodes),</li><li>still surfaces in recall as noise (only down-ranked via <code>tier_boost_archival = -0.1</code>).</li></ul>
+<p>Decay reduces *priority*, not *cost* or *noise*. <strong>Deletion is the only lever that shrinks the store.</strong> Shrinking <code>n</code> is also a free multiplier for #26 (auto-linker) and #25 (vector search).</p>
+<h2 id="design-constraint">Design <em>constraint</em></h2>
+<p>Deletion is irreversible and memory lives on trust. A false negative — deleting something that later mattered — is unrecoverable. Therefore:</p>
+<div class="callout">Deletion never depends on a single signal. It acts only on the <code>archival</code> tail, requires the conjunction of several independent signals, and keeps a reversibility window before anything leaves disk. Every decision is explainable per node.</div>
+<h2 id="decisions-locked-during-brainstorming">Decisions (locked during <em>brainstorming)</em></h2>
+<table><thead><tr><th>Decision</th><th>Choice</th><th>Rationale</th></tr></thead><tbody><tr><td>Scope</td><td>Full issue: §1 gates + §2 soft→hard-purge + §3 cap backstop</td><td>André opted for the complete lifecycle in one delivery.</td></tr><tr><td>Default state</td><td>Opt-in, <strong>OFF</strong> (<code>deletion_enabled = False</code>)</td><td>Irreversible action in a trust-critical system → fail-closed default; user arms it explicitly.</td></tr><tr><td>Enablement surface</td><td><strong>Env / <code>.env</code> only, no UI toggle</strong></td><td>The web UI is too slow to open at André&#x27;s node count. All config is pydantic-settings (<code>ORMAH_</code> prefix), read from <code>~/.config/ormah/.env</code> and <code>./.env</code>.</td></tr><tr><td>Purge timing</td><td><code>deleted_at</code> stamped in the moved file&#x27;s <strong>frontmatter</strong></td><td>Self-contained: survives backup/restore and mtime/TCC-copy resets on this machine.</td></tr><tr><td>&quot;archived ≥ N days&quot; signal</td><td>Dedicated <strong><code>nodes.archived_at</code></strong> column</td><td>Only robust way to express graveyard age without coupling to unrelated <code>update_node</code> writes.</td></tr></tbody></table>
+<h2 id="architecture-one-new-background-job">Architecture: one new background <em>job</em></h2>
+<p>New module <code>src/ormah/background/forgetting_manager.py</code> → <code>run_forgetting(engine)</code>, registered in <code>src/ormah/background/scheduler.py</code> with its own interval. Each run has two phases, both guarded by the master switch <code>deletion_enabled</code> (when <code>False</code>, the job returns immediately — a no-op):</p>
+<h3 id="phase-a-gates-soft-delete-cap-backstop">Phase A — gates → soft-delete (+ cap backstop)</h3>
+<ol><li>Select <code>archival</code> candidates (SQL prefilter on cheap columns).</li><li>Apply the conjunction gates (§1). For each eligible node, call <code>engine.delete_node(id)</code>,</li></ol>
+<p>   which already does: index removal, <code>audit_log</code> (<code>operation=&#x27;delete&#x27;</code>), <code>auto_link_checked</code>    cleanup, and <code>file_store.soft_delete</code> (move to <code>deleted/</code>).</p>
+<ol><li>If <code>archival_soft_cap &gt; 0</code> and the surviving archival count still exceeds it, evict</li></ol>
+<p>   worst-first by forget-score (§3) down to the cap, <strong>respecting every protection in §1</strong>.</p>
+<h3 id="phase-b-hard-purge">Phase B — hard-purge</h3>
+<ol><li><code>file_store.list_deleted()</code> → iterate files in <code>deleted/</code>.</li><li>Parse <code>deleted_at</code> from each file&#x27;s frontmatter.</li><li>For files older than <code>deletion_retention_days</code>, <code>file_store.purge(node_id)</code> (remove from</li></ol>
+<p>   disk) and write <code>audit_log</code> (<code>operation=&#x27;purge&#x27;</code>).</p>
+<p>Reusing <code>engine.delete_node</code> for soft-delete keeps a single deletion path (index + audit + auto-link cleanup all handled), so the new job stays small.</p>
+<h2 id="schema-change-one-migration">Schema change (one <em>migration)</em></h2>
+<p>Add <code>nodes.archived_at TEXT</code> (nullable):</p>
+<ul><li>Set when a node is demoted to <code>archival</code> — in the <code>decay_manager</code> demotion path (and any</li></ul>
+<p>  other path that writes <code>tier = archival</code>).</p>
+<ul><li>Migration in <code>Database._migrate</code> adds the column and backfills existing <code>archival</code> rows</li></ul>
+<p>  with their current <code>updated</code> value (best available proxy for legacy data). The backfill   writes the <strong>source markdown files</strong>, not only the index: the index is derived, so an   index-only backfill is wiped by the next <code>full_rebuild</code>/restore (which re-parses   <code>archived_at=None</code>), permanently excluding legacy archival nodes from forgetting. A test   asserts the value survives a full rebuild.</p>
+<h2 id="file-store-changes">file_store <em>changes</em></h2>
+<ul><li><code>soft_delete(node_id)</code> — before/while moving to <code>deleted/</code>, stamp <code>deleted_at: &lt;iso&gt;</code> into</li></ul>
+<p>  the file&#x27;s frontmatter. Centralized here, so manual <code>delete_node</code> also gets a timed   reversibility window.</p>
+<ul><li><code>list_deleted()</code> — new: enumerate files currently in <code>deleted/</code>.</li><li><code>purge(node_id)</code> — new: hard-remove a file from <code>deleted/</code>.</li></ul>
+<h2 id="1-eligibility-gates-delete-only-when-all-hold">§1 Eligibility gates (delete only when ALL <em>hold)</em></h2>
+<p>Over <code>tier == archival</code> candidates; cheap predicates in SQL, FSRS <code>R</code> computed in Python (same formula as <code>decay_manager</code>: <code>R = exp(-days_since_anchor / stability)</code>).</p>
+<ol><li><code>tier == archival</code> — never <code>working</code>/<code>core</code>.</li><li><code>archived_at &lt;= now − deletion_min_archival_days</code> <strong>AND</strong></li></ol>
+<p>   <code>last_accessed &lt;= now − deletion_min_archival_days</code> — sustained staleness, not a point    reading.</p>
+<ol><li><code>R &lt; deletion_retrievability_floor</code> — retrievability below a hard floor (deeper than the</li></ol>
+<p>   decay demotion threshold).</p>
+<ol><li><code>importance &lt; decay_importance_threshold</code> — high importance never deletes.</li><li><code>NOT EXISTS (SELECT 1 FROM affinity WHERE node_id = ? AND signal &gt; 0)</code> — never positively</li></ol>
+<p>   useful (any <code>submit_feedback(+1)</code> or positive affinity ⇒ protected forever). Ties into #21.</p>
+<ol><li><code>degree &lt;= deletion_max_degree</code> <strong>AND</strong> no edge with <code>weight &gt;= deletion_strong_edge_weight</code></li></ol>
+<p>   — leaves are safe; never delete a bridge/hub.</p>
+<ol><li>Not the user/self node. (No &quot;pin&quot; concept exists in the schema today; protection is the</li></ol>
+<p>   self node. If a pin feature is added later, it must be respected here.)</p>
+<p>Each gate alone produces false positives; the conjunction only catches genuine dead weight: archival, unimportant, unused, never useful, weakly connected, old.</p>
+<p>The gates split into two kinds, sharing one <code>_is_protected(node)</code> predicate reused by Phase A and the §3 cap so they can never disagree:</p>
+<ul><li><strong>Protections (hard &quot;never delete&quot;):</strong> self node, <code>archived_at IS NULL</code>, high importance</li></ul>
+<p>  (#4), positive feedback (#5), hub/strong-edge or degree &gt; max (#6). <code>archived_at IS NULL</code>   covers nodes created directly as <code>archival</code> via <code>remember(tier=archival)</code> — un-aged, so   protected.</p>
+<ul><li><strong>Staleness signals (sustained dead weight):</strong> archived long enough (#2), not re-accessed</li></ul>
+<p>  (#2), <code>R</code> below the floor (#3). Phase A requires *not protected AND stale*.</p>
+<p><strong><code>archived_at</code> lifecycle:</strong> stamped on <strong>every</strong> transition into archival and <strong>cleared</strong> when the node leaves archival — so an <code>archival → working → archival</code> round-trip resets the clock instead of reusing a stale months-old timestamp.</p>
+<p><strong>Revalidation:</strong> background jobs run concurrently, so eligibility is recomputed from a fresh row read <strong>immediately before</strong> each <code>delete_node</code> — a node recalled / promoted / connected / given feedback between selection and deletion is skipped.</p>
+<h2 id="3-cap-backstop-forget-score">§3 Cap backstop <em>(forget-score)</em></h2>
+<p>When <code>archival_soft_cap &gt; 0</code> and exceeded, evict worst-first by a composite forget-score:</p>
+<pre><code class="lang-">score = (1 − R) · (1 − importance) · age_days · 1/(1 + degree) · no_positive_feedback</code></pre>
+<p>where <code>age_days = now − archived_at</code>. The cap evaluates candidates through the <strong>same <code>_is_protected</code> predicate</strong> as Phase A, so protected nodes (self, null-<code>archived_at</code>, high importance, positive feedback, hub) are never evicted — the forget-score only orders the *unprotected* remainder. The cap deliberately ignores the staleness signals (it may evict a node younger than the graveyard window — that is the backstop&#x27;s purpose). Sort descending, evict down to the cap. If only protected nodes remain, the store stays above the cap — better to exceed the cap than delete a valuable memory.</p>
+<h2 id="config-new-fields-in-src-ormah-config-py-ormah-env-prefix">Config (new fields in <code>src/ormah/config.py</code>, <code>ORMAH_</code> env <em>prefix)</em></h2>
+<table><thead><tr><th>Field</th><th>Default</th><th>Env var</th></tr></thead><tbody><tr><td><code>deletion_enabled</code></td><td><code>False</code></td><td><code>ORMAH_DELETION_ENABLED</code></td></tr><tr><td><code>forgetting_interval_hours</code></td><td><code>24</code></td><td><code>ORMAH_FORGETTING_INTERVAL_HOURS</code></td></tr><tr><td><code>deletion_min_archival_days</code></td><td><code>90</code></td><td><code>ORMAH_DELETION_MIN_ARCHIVAL_DAYS</code></td></tr><tr><td><code>deletion_retrievability_floor</code></td><td><code>0.05</code></td><td><code>ORMAH_DELETION_RETRIEVABILITY_FLOOR</code></td></tr><tr><td><code>deletion_max_degree</code></td><td><code>2</code></td><td><code>ORMAH_DELETION_MAX_DEGREE</code></td></tr><tr><td><code>deletion_strong_edge_weight</code></td><td><code>0.7</code></td><td><code>ORMAH_DELETION_STRONG_EDGE_WEIGHT</code></td></tr><tr><td><code>deletion_retention_days</code></td><td><code>30</code></td><td><code>ORMAH_DELETION_RETENTION_DAYS</code></td></tr><tr><td><code>archival_soft_cap</code></td><td><code>0</code> (off)</td><td><code>ORMAH_ARCHIVAL_SOFT_CAP</code></td></tr></tbody></table>
+<p>Reuses existing <code>decay_importance_threshold</code> (0.5) for gate #4. Validators mirror the existing decay/threshold validators (positive intervals, <code>0..1</code> floors).</p>
+<h2 id="operation">Operation</h2>
+<p>Enablement and tuning are env-driven, no UI involvement. To activate on André&#x27;s machine: add <code>ORMAH_DELETION_ENABLED=true</code> (and any tuning overrides) to <code>~/.config/ormah/.env</code>, then restart the server. The slow web UI is never on the critical path.</p>
+<h2 id="testing-tdd">Testing <em>(TDD)</em></h2>
+<p>Unit tests (mock external boundaries, real SQLite index):</p>
+<ul><li><strong>Per gate, positive + negative:</strong> stale-enough vs too-recent (<code>archived_at</code>,</li></ul>
+<p>  <code>last_accessed</code>), <code>R</code> below vs above floor, importance below vs above threshold, positive   affinity present (protected) vs absent, degree/strong-edge below vs above limits, self node   skipped.</p>
+<ul><li><strong>Conjunction:</strong> a node failing exactly one gate is not deleted; a node passing all is</li></ul>
+<p>  soft-deleted.</p>
+<ul><li><strong>Master switch:</strong> <code>deletion_enabled = False</code> ⇒ zero deletions (no-op), even with eligible</li></ul>
+<p>  nodes.</p>
+<ul><li><strong><code>soft_delete</code> stamps <code>deleted_at</code></strong> in frontmatter; file lands in <code>deleted/</code>.</li><li><strong>Phase B purge:</strong> files past <code>deletion_retention_days</code> are removed; files inside the window</li></ul>
+<p>  survive; <code>audit_log</code> records <code>operation=&#x27;purge&#x27;</code>.</p>
+<ul><li><strong>Cap backstop:</strong> with <code>archival_soft_cap</code> set, worst-first eviction down to the cap;</li></ul>
+<p>  protected/feedback-positive/hub nodes never evicted even if it leaves the count above cap.</p>
+<ul><li><strong><code>archived_at</code>:</strong> set on demotion in <code>decay_manager</code>; migration backfills existing</li></ul>
+<p>  archival rows from <code>updated</code>.</p>
+<ul><li><strong>Idempotence:</strong> a second run with no newly-eligible nodes deletes nothing.</li></ul>
+<h2 id="out-of-scope">Out of <em>scope</em></h2>
+<ul><li>UI changes (the issue&#x27;s #22 active-graph-first is separate).</li><li>Restore-from-<code>deleted/</code> UX (the reversibility window exists; a restore command is not part</li></ul>
+<p>  of this slice).</p>
+<ul><li>#25 ANN / vector-search work (deferred per the perf roadmap).</li></ul>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span><span class="role">Design spec &middot; #28 &middot; 2026-06-15</span></div>
+</main></body></html>

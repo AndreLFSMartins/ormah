@@ -2,7 +2,7 @@
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Task 05: Forgetting manager — Phase A gates → soft-delete</title>
-<!-- rich-doc-src-sha256:817a4e6edb3d6aa14a4cb9d88659af926a57391d73f2f828306da429e8d2c58f -->
+<!-- rich-doc-src-sha256:62ee7719c53034411a246ab54a976c027538d9cf2c6fc80219be7683af6214c6 -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
@@ -42,13 +42,20 @@ pre code{color:inherit;font-size:13px}
 <body>
 <nav class="toc"><div class="eyebrow">Ormah &middot; #28</div>
 <div class="doc-title">Bounded forgetting</div>
-
+<a href="#council-r1-design-decisions-baked-in" class="lvl-2">Council R1 design decisions baked in</a>
 </nav>
 <main>
 <div class="eyebrow">Implementation plan</div>
 <h1 id="task-05-forgetting-manager-phase-a-gates-soft-delete">Task 05: Forgetting manager — Phase A gates → soft-delete</h1>
 <p><strong>Depends on:</strong> Tasks 01, 02, 03, 04.</p>
-<p>Create the new job module. Phase A selects <code>archival</code> candidates, applies the §1 conjunction gates, and soft-deletes the eligible ones via <code>engine.delete_node</code> (which already removes from index, audits, and moves to <code>deleted/</code>). The whole job is a no-op when <code>deletion_enabled=False</code>.</p>
+<p>Create the new job module. Phase A selects <code>archival</code> candidates, applies the §1 gates split into two predicates, and soft-deletes the eligible ones via <code>engine.delete_node</code>. The whole job is a no-op when <code>deletion_enabled=False</code>.</p>
+<h2 id="council-r1-design-decisions-baked-in">Council R1 design decisions baked <em>in</em></h2>
+<ul><li><strong>Single source of protection (<code>_is_protected</code>).</strong> The §1 gates split into <strong>protections</strong></li></ul>
+<p>  (hard &quot;never delete&quot;: self node, <code>archived_at IS NULL</code>, importance ≥ threshold, positive   feedback, hub/strong-edge, degree &gt; max) and <strong>staleness signals</strong> (<code>archived_at</code> old,   <code>last_accessed</code> old, <code>R &lt; floor</code>). Phase A requires *not protected AND stale*. Task 06&#x27;s cap   reuses <strong>the exact same <code>_is_protected</code></strong> — so the cap can never delete a protected node   (council C1). <code>archived_at IS NULL</code> counts as protected, closing the <code>remember(tier=archival)</code>   hole (council H3).</p>
+<ul><li><strong>Revalidate immediately before delete (council C2).</strong> Eligibility is recomputed per-node from</li></ul>
+<p>  a *fresh* row read right before <code>delete_node</code>, because background jobs run concurrently — a   node may be recalled / promoted / connected / get feedback between selection and deletion.</p>
+<ul><li><strong>Robust success check (council L1).</strong> <code>delete_node</code> returns <code>str | None</code>; treat success only</li></ul>
+<p>  when the message starts with <code>&quot;Deleted&quot;</code>.</p>
 <p><strong>Files:</strong></p>
 <ul><li>Create: <code>src/ormah/background/forgetting_manager.py</code></li><li>Test: <code>tests/test_background/test_forgetting_manager.py</code></li></ul>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 1: Write the failing tests</strong></li></ul>
@@ -56,6 +63,8 @@ pre code{color:inherit;font-size:13px}
 <pre><code class="lang-python">from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from ormah.background.forgetting_manager import run_forgetting
 from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, NodeType, Tier
@@ -66,8 +75,12 @@ def _exists(engine, node_id) -&gt; bool:
     return row is not None
 
 
+def _enable(engine):
+    engine.settings.deletion_enabled = True
+
+
 def _make_eligible(engine, content=&quot;dead weight&quot;, days=200):
-    &quot;&quot;&quot;Create an archival node that passes every gate.&quot;&quot;&quot;
+    &quot;&quot;&quot;Create an archival node that passes every gate (not protected + stale).&quot;&quot;&quot;
     node_id, _ = engine.remember(CreateNodeRequest(
         content=content, type=NodeType.fact, tier=Tier.archival, title=content))
     old = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -79,14 +92,9 @@ def _make_eligible(engine, content=&quot;dead weight&quot;, days=200):
     return node_id
 
 
-def _enable(engine):
-    engine.settings.deletion_enabled = True
-
-
 def test_master_switch_off_is_noop(engine):
     node_id = _make_eligible(engine)
-    # default deletion_enabled is False
-    run_forgetting(engine)
+    run_forgetting(engine)  # deletion_enabled defaults to False
     assert _exists(engine, node_id) is True
 
 
@@ -97,65 +105,61 @@ def test_fully_eligible_node_is_soft_deleted(engine):
     assert _exists(engine, node_id) is False
 
 
-def test_recent_archival_is_kept(engine):
-    &quot;&quot;&quot;Fails gate #2 (sustained staleness).&quot;&quot;&quot;
-    _enable(engine)
-    node_id = _make_eligible(engine, days=5)  # archived/accessed only 5 days ago
-    run_forgetting(engine)
-    assert _exists(engine, node_id) is True
-
-
-def test_high_importance_is_kept(engine):
-    &quot;&quot;&quot;Fails gate #4.&quot;&quot;&quot;
+def test_idempotent_second_run_deletes_nothing(engine):
     _enable(engine)
     node_id = _make_eligible(engine)
-    engine.db.conn.execute(&quot;UPDATE nodes SET importance=0.9 WHERE id=?&quot;, (node_id,))
-    engine.db.conn.commit()
     run_forgetting(engine)
-    assert _exists(engine, node_id) is True
+    run_forgetting(engine)
+    assert _exists(engine, node_id) is False
 
 
-def test_positive_feedback_protects(engine):
-    &quot;&quot;&quot;Fails gate #5.&quot;&quot;&quot;
+# --- conjunction matrix: passing all gates deletes; breaking exactly one keeps (council M1) ---
+
+def _break(engine, node_id, gate):
+    now = datetime.now(timezone.utc)
+    recent = now.isoformat()
+    if gate == &quot;tier&quot;:
+        engine.db.conn.execute(&quot;UPDATE nodes SET tier=&#x27;working&#x27; WHERE id=?&quot;, (node_id,))
+    elif gate == &quot;archived_recent&quot;:
+        engine.db.conn.execute(&quot;UPDATE nodes SET archived_at=? WHERE id=?&quot;, (recent, node_id))
+    elif gate == &quot;accessed_recent&quot;:
+        engine.db.conn.execute(&quot;UPDATE nodes SET last_accessed=? WHERE id=?&quot;, (recent, node_id))
+    elif gate == &quot;retrievable&quot;:   # high stability ⇒ R well above floor
+        engine.db.conn.execute(&quot;UPDATE nodes SET stability=100000.0 WHERE id=?&quot;, (node_id,))
+    elif gate == &quot;importance&quot;:
+        engine.db.conn.execute(&quot;UPDATE nodes SET importance=0.9 WHERE id=?&quot;, (node_id,))
+    elif gate == &quot;archived_null&quot;:
+        engine.db.conn.execute(&quot;UPDATE nodes SET archived_at=NULL WHERE id=?&quot;, (node_id,))
+    elif gate == &quot;feedback&quot;:
+        engine.db.conn.execute(
+            &quot;INSERT INTO affinity (prompt_vec, node_id, signal, source, confirmed_at, session_id) &quot;
+            &quot;VALUES (?, ?, 1, &#x27;explicit&#x27;, ?, &#x27;s1&#x27;)&quot;, (b&quot;\x00&quot;, node_id, recent))
+    engine.db.conn.commit()
+
+
+@pytest.mark.parametrize(&quot;gate&quot;, [
+    &quot;tier&quot;, &quot;archived_recent&quot;, &quot;accessed_recent&quot;, &quot;retrievable&quot;,
+    &quot;importance&quot;, &quot;archived_null&quot;, &quot;feedback&quot;,
+])
+def test_breaking_one_gate_keeps_node(engine, gate):
     _enable(engine)
     node_id = _make_eligible(engine)
-    engine.db.conn.execute(
-        &quot;INSERT INTO affinity (prompt_vec, node_id, signal, source, confirmed_at, session_id) &quot;
-        &quot;VALUES (?, ?, 1, &#x27;explicit&#x27;, ?, &#x27;s1&#x27;)&quot;,
-        (b&quot;\x00&quot;, node_id, datetime.now(timezone.utc).isoformat()))
-    engine.db.conn.commit()
+    _break(engine, node_id, gate)
     run_forgetting(engine)
-    assert _exists(engine, node_id) is True
+    assert _exists(engine, node_id) is True, f&quot;gate={gate} should have protected the node&quot;
 
 
-def test_strong_edge_protects_hub(engine):
-    &quot;&quot;&quot;Fails gate #6 (strong edge).&quot;&quot;&quot;
+def test_strong_edge_protects_both_nodes(engine):
     _enable(engine)
     a = _make_eligible(engine, content=&quot;hub a&quot;)
     b = _make_eligible(engine, content=&quot;hub b&quot;)
     engine.connect(ConnectRequest(source_id=a, target_id=b, edge=EdgeType.related_to, weight=0.9))
     run_forgetting(engine)
-    assert _exists(engine, a) is True
-    assert _exists(engine, b) is True
-
-
-def test_working_tier_never_touched(engine):
-    &quot;&quot;&quot;Fails gate #1.&quot;&quot;&quot;
-    _enable(engine)
-    node_id, _ = engine.remember(CreateNodeRequest(
-        content=&quot;active&quot;, type=NodeType.fact, tier=Tier.working, title=&quot;active&quot;))
-    old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
-    engine.db.conn.execute(
-        &quot;UPDATE nodes SET importance=0.1, stability=1.0, last_review=?, last_accessed=? WHERE id=?&quot;,
-        (old, old, node_id))
-    engine.db.conn.commit()
-    run_forgetting(engine)
-    assert _exists(engine, node_id) is True
+    assert _exists(engine, a) is True and _exists(engine, b) is True
 
 
 def test_user_node_never_deleted(engine):
     _enable(engine)
-    # the self node is created at startup; force it to look eligible
     uid = engine.user_node_id
     assert uid is not None
     old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
@@ -165,15 +169,7 @@ def test_user_node_never_deleted(engine):
         (old, old, old, uid))
     engine.db.conn.commit()
     run_forgetting(engine)
-    assert _exists(engine, uid) is True
-
-
-def test_idempotent_second_run_deletes_nothing(engine):
-    _enable(engine)
-    node_id = _make_eligible(engine)
-    run_forgetting(engine)
-    run_forgetting(engine)  # nothing new eligible
-    assert _exists(engine, node_id) is False</code></pre>
+    assert _exists(engine, uid) is True</code></pre>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 2: Run tests to verify they fail</strong></li></ul>
 <p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -v</code> Expected: FAIL (module does not exist).</p>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 3: Implement the module</strong></li></ul>
@@ -196,60 +192,84 @@ logger = logging.getLogger(__name__)
 
 def run_forgetting(engine) -&gt; None:
     &quot;&quot;&quot;Soft-delete dead-weight archival nodes, then purge expired tombstones.&quot;&quot;&quot;
-    settings = engine.settings
-    if not settings.deletion_enabled:
-        return  # opt-in; the graveyard is left untouched until explicitly armed
+    if not engine.settings.deletion_enabled:
+        return  # opt-in; the graveyard is untouched until explicitly armed
     try:
         now = datetime.now(timezone.utc)
-
-        eligible = _eligible_for_deletion(engine, now)
-        deleted = 0
-        for node_id in eligible:
-            if engine.delete_node(node_id):
-                deleted += 1
-        if deleted:
-            logger.info(&quot;Forgetting soft-deleted %d archival nodes&quot;, deleted)
-
+        _run_gate_phase(engine, now)
         # Task 06 inserts the §3 cap backstop here.
         # Task 07 inserts Phase B (hard-purge) here.
-
     except Exception as e:
         logger.warning(&quot;Forgetting manager failed: %s&quot;, e)
 
 
-def _eligible_for_deletion(engine, now: datetime) -&gt; list[str]:
-    &quot;&quot;&quot;Return archival node ids that satisfy ALL §1 gates.&quot;&quot;&quot;
+def _run_gate_phase(engine, now: datetime) -&gt; int:
+    &quot;&quot;&quot;Phase A: soft-delete archival nodes that are not protected AND are stale.&quot;&quot;&quot;
     s = engine.settings
-    cutoff = (now - timedelta(days=s.deletion_min_archival_days)).isoformat()
+    candidates = [
+        row[&quot;id&quot;] for row in _archival_rows(engine)
+        if not _is_protected(engine, row, now) and _is_stale_eligible(s, row, now)
+    ]
+    deleted = 0
+    for node_id in candidates:
+        row = _fetch_row(engine, node_id)  # re-read fresh (council C2)
+        if row is None:
+            continue
+        if _is_protected(engine, row, now) or not _is_stale_eligible(s, row, now):
+            continue  # state changed since selection — skip
+        result = engine.delete_node(node_id)
+        if result and result.startswith(&quot;Deleted&quot;):
+            deleted += 1
+    if deleted:
+        logger.info(&quot;Forgetting soft-deleted %d archival nodes&quot;, deleted)
+    return deleted
 
-    # Cheap predicates in SQL: archival tail, low importance, sustained staleness.
-    rows = engine.db.conn.execute(
-        &quot;&quot;&quot;
-        SELECT id, importance, stability, last_review, last_accessed, archived_at
-        FROM nodes
-        WHERE tier = &#x27;archival&#x27;
-          AND COALESCE(importance, 0.5) &lt; ?
-          AND archived_at IS NOT NULL
-          AND archived_at &lt;= ?
-          AND last_accessed &lt;= ?
-        &quot;&quot;&quot;,
-        (s.decay_importance_threshold, cutoff, cutoff),
+
+# --- shared gate predicates -------------------------------------------------
+
+_ROW_COLS = &quot;id, importance, stability, last_review, last_accessed, archived_at&quot;
+
+
+def _archival_rows(engine):
+    return engine.db.conn.execute(
+        f&quot;SELECT {_ROW_COLS} FROM nodes WHERE tier = &#x27;archival&#x27;&quot;
     ).fetchall()
 
-    user_id = getattr(engine, &quot;user_node_id&quot;, None)
-    eligible: list[str] = []
-    for row in rows:
-        if row[&quot;id&quot;] == user_id:
-            continue  # gate #7: never the self node
-        if _retrievability(row, now) &gt;= s.deletion_retrievability_floor:
-            continue  # gate #3
-        if _has_positive_feedback(engine, row[&quot;id&quot;]):
-            continue  # gate #5
-        degree, max_weight = _connectivity(engine, row[&quot;id&quot;])
-        if degree &gt; s.deletion_max_degree or max_weight &gt;= s.deletion_strong_edge_weight:
-            continue  # gate #6
-        eligible.append(row[&quot;id&quot;])
-    return eligible
+
+def _fetch_row(engine, node_id: str):
+    return engine.db.conn.execute(
+        f&quot;SELECT {_ROW_COLS} FROM nodes WHERE id = ? AND tier = &#x27;archival&#x27;&quot;, (node_id,)
+    ).fetchone()
+
+
+def _is_protected(engine, row, now: datetime) -&gt; bool:
+    &quot;&quot;&quot;§1 hard protections — a True here means NEVER delete (Phase A and the cap both honor it).&quot;&quot;&quot;
+    s = engine.settings
+    if row[&quot;id&quot;] == getattr(engine, &quot;user_node_id&quot;, None):
+        return True                                   # gate #7: self node
+    if row[&quot;archived_at&quot;] is None:
+        return True                                   # un-aged (e.g. remember(tier=archival))
+    importance = row[&quot;importance&quot;] if row[&quot;importance&quot;] is not None else 0.5
+    if importance &gt;= s.decay_importance_threshold:
+        return True                                   # gate #4: high importance
+    if _has_positive_feedback(engine, row[&quot;id&quot;]):
+        return True                                   # gate #5: ever positively useful
+    degree, max_weight = _connectivity(engine, row[&quot;id&quot;])
+    if degree &gt; s.deletion_max_degree or max_weight &gt;= s.deletion_strong_edge_weight:
+        return True                                   # gate #6: hub / strong edge
+    return False
+
+
+def _is_stale_eligible(s, row, now: datetime) -&gt; bool:
+    &quot;&quot;&quot;§1 staleness signals — sustained dead weight. NOT protections (the cap skips these).&quot;&quot;&quot;
+    cutoff = now - timedelta(days=s.deletion_min_archival_days)
+    if _parse_dt(row[&quot;archived_at&quot;]) &gt; cutoff:
+        return False                                  # gate #2: in graveyard long enough
+    if _parse_dt(row[&quot;last_accessed&quot;]) &gt; cutoff:
+        return False                                  # gate #2: not re-accessed
+    if _retrievability(row, now) &gt;= s.deletion_retrievability_floor:
+        return False                                  # gate #3: R below the floor
+    return True
 
 
 def _retrievability(row, now: datetime) -&gt; float:
@@ -259,13 +279,12 @@ def _retrievability(row, now: datetime) -&gt; float:
     try:
         anchor = datetime.fromisoformat(anchor_str)
     except (ValueError, TypeError):
-        return 1.0  # cannot compute → treat as fully retrievable (protect)
-    days_since = max((now - anchor).total_seconds() / 86400, 0.001)
+        return 1.0
+    days_since = max((now - _aware(anchor)).total_seconds() / 86400, 0.001)
     return math.exp(-days_since / stability)
 
 
 def _has_positive_feedback(engine, node_id: str) -&gt; bool:
-    &quot;&quot;&quot;Gate #5: any submit_feedback(+1) / positive affinity protects forever.&quot;&quot;&quot;
     row = engine.db.conn.execute(
         &quot;SELECT 1 FROM affinity WHERE node_id = ? AND signal &gt; 0 LIMIT 1&quot;, (node_id,)
     ).fetchone()
@@ -273,15 +292,22 @@ def _has_positive_feedback(engine, node_id: str) -&gt; bool:
 
 
 def _connectivity(engine, node_id: str) -&gt; tuple[int, float]:
-    &quot;&quot;&quot;Return (degree, max_edge_weight) over all edges touching the node.&quot;&quot;&quot;
     row = engine.db.conn.execute(
         &quot;SELECT COUNT(*) AS degree, COALESCE(MAX(weight), 0) AS max_w &quot;
         &quot;FROM edges WHERE source_id = ? OR target_id = ?&quot;,
         (node_id, node_id),
     ).fetchone()
-    return row[&quot;degree&quot;], row[&quot;max_w&quot;]</code></pre>
+    return row[&quot;degree&quot;], row[&quot;max_w&quot;]
+
+
+def _parse_dt(value: str) -&gt; datetime:
+    return _aware(datetime.fromisoformat(value))
+
+
+def _aware(dt: datetime) -&gt; datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)</code></pre>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 4: Run tests to verify they pass</strong></li></ul>
-<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -v</code> Expected: PASS (9 tests).</p>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -v</code> Expected: PASS (all tests, including the 7-gate conjunction matrix).</p>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 5: Lint + commit</strong></li></ul>
 <pre><code class="lang-bash">.venv/bin/ruff check src/ormah/background/forgetting_manager.py tests/test_background/test_forgetting_manager.py
 git add src/ormah/background/forgetting_manager.py tests/test_background/test_forgetting_manager.py

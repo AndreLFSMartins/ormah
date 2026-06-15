@@ -2,7 +2,7 @@
 <html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Task 06: §3 cap backstop (forget-score eviction)</title>
-<!-- rich-doc-src-sha256:046373b7ae3cb806c5d152e1977766a1c4681def68a482045aaa8823b8a4b297 -->
+<!-- rich-doc-src-sha256:f9c5f63c19a6da44f23effdf5dd950ecc322d46d3754ab5ef61fc45a35dfcbe8 -->
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--maxw:1140px}
@@ -48,71 +48,85 @@ pre code{color:inherit;font-size:13px}
 <div class="eyebrow">Implementation plan</div>
 <h1 id="task-06-3-cap-backstop-forget-score-eviction">Task 06: §3 cap backstop (forget-score eviction)</h1>
 <p><strong>Depends on:</strong> Task 05.</p>
-<p>After Phase A, if <code>archival_soft_cap &gt; 0</code> and the archival count still exceeds it, evict the worst nodes by a composite forget-score, worst-first, down to the cap — while respecting every protection (self node, positive feedback, hub). The cap is independent of the gate staleness window: it can evict a node that is *inside* the gates, which is the whole point of a backstop.</p>
+<p>After Phase A, if <code>archival_soft_cap &gt; 0</code> and the archival count still exceeds it, evict the worst nodes by a composite forget-score, worst-first, down to the cap — <strong>respecting the exact same <code>_is_protected</code> set as Phase A</strong> (council C1). The cap deliberately ignores the *staleness* signals (it may evict a node younger than the graveyard window — that is the point of a backstop), but it never touches a <strong>protected</strong> node: self, <code>archived_at IS NULL</code>, high importance, positive feedback, hub/strong-edge, degree &gt; max. If the cap cannot reach the target without violating a protection, it <strong>accepts the overflow</strong> (spec §3).</p>
 <p><strong>Files:</strong></p>
 <ul><li>Modify: <code>src/ormah/background/forgetting_manager.py</code></li><li>Test: <code>tests/test_background/test_forgetting_manager.py</code> (append)</li></ul>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 1: Write the failing tests</strong></li></ul>
 <p>Append to <code>tests/test_background/test_forgetting_manager.py</code>:</p>
-<pre><code class="lang-python">def _make_archival_recent(engine, content, archived_days):
-    &quot;&quot;&quot;Archival node that is NOT gate-eligible (recently accessed), with a chosen age.&quot;&quot;&quot;
+<pre><code class="lang-python">def _make_archival_recent(engine, content, archived_days, importance=0.1):
+    &quot;&quot;&quot;Archival node that is NOT gate-stale (recently accessed), with a chosen age.&quot;&quot;&quot;
     node_id, _ = engine.remember(CreateNodeRequest(
         content=content, type=NodeType.fact, tier=Tier.archival, title=content))
     recent = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
     archived = (datetime.now(timezone.utc) - timedelta(days=archived_days)).isoformat()
     engine.db.conn.execute(
-        &quot;UPDATE nodes SET tier=&#x27;archival&#x27;, importance=0.1, stability=1.0, &quot;
+        &quot;UPDATE nodes SET tier=&#x27;archival&#x27;, importance=?, stability=1.0, &quot;
         &quot;last_review=?, last_accessed=?, archived_at=? WHERE id=?&quot;,
-        (recent, recent, archived, node_id))
+        (importance, recent, recent, archived, node_id))
     engine.db.conn.commit()
     return node_id
 
 
-def test_cap_backstop_evicts_worst_down_to_cap(engine):
+def _archival_count(engine):
+    return engine.db.conn.execute(
+        &quot;SELECT COUNT(*) AS c FROM nodes WHERE tier=&#x27;archival&#x27;&quot;).fetchone()[&quot;c&quot;]
+
+
+def test_cap_evicts_worst_down_to_cap(engine):
     _enable(engine)
     engine.settings.archival_soft_cap = 2
     ids = [_make_archival_recent(engine, f&quot;n{i}&quot;, archived_days=age)
            for i, age in enumerate([300, 250, 200, 150, 50])]
-    # none are gate-eligible (accessed 3 days ago) → Phase A deletes nothing
-    run_forgetting(engine)
-    remaining = engine.db.conn.execute(
-        &quot;SELECT COUNT(*) AS c FROM nodes WHERE tier=&#x27;archival&#x27;&quot;).fetchone()[&quot;c&quot;]
-    assert remaining == 2
-    # the two youngest (least forgettable) survive
-    assert _exists(engine, ids[4]) is True   # 50d
-    assert _exists(engine, ids[3]) is True   # 150d
-    # the oldest were evicted
-    assert _exists(engine, ids[0]) is False  # 300d
+    run_forgetting(engine)  # none are gate-stale → Phase A deletes nothing
+    assert _archival_count(engine) == 2
+    assert _exists(engine, ids[4]) is True   # youngest (least forgettable) survives
+    assert _exists(engine, ids[3]) is True
+    assert _exists(engine, ids[0]) is False  # oldest evicted
 
 
-def test_cap_backstop_never_evicts_protected(engine):
+def test_cap_never_evicts_protected_high_importance(engine):
     _enable(engine)
     engine.settings.archival_soft_cap = 1
-    old = _make_archival_recent(engine, &quot;old protected&quot;, archived_days=400)
+    old_imp = _make_archival_recent(engine, &quot;old important&quot;, archived_days=400, importance=0.9)
     mid = _make_archival_recent(engine, &quot;mid&quot;, archived_days=200)
     young = _make_archival_recent(engine, &quot;young&quot;, archived_days=20)
-    # protect the worst-scored (oldest) with positive feedback
+    run_forgetting(engine)
+    assert _exists(engine, old_imp) is True   # protected by importance despite worst age
+    assert _exists(engine, young) is True
+    assert _exists(engine, mid) is False      # evicted to approach the cap
+
+
+def test_cap_accepts_overflow_when_only_protected_remain(engine):
+    _enable(engine)
+    engine.settings.archival_soft_cap = 1
+    a = _make_archival_recent(engine, &quot;fa&quot;, archived_days=300, importance=0.9)
+    b = _make_archival_recent(engine, &quot;fb&quot;, archived_days=250, importance=0.9)
+    run_forgetting(engine)
+    assert _archival_count(engine) == 2  # both protected → cap exceeded, nothing deleted
+
+
+def test_cap_protects_feedback_node(engine):
+    _enable(engine)
+    engine.settings.archival_soft_cap = 1
+    fb = _make_archival_recent(engine, &quot;fb node&quot;, archived_days=400)
+    other = _make_archival_recent(engine, &quot;other&quot;, archived_days=30)
     engine.db.conn.execute(
         &quot;INSERT INTO affinity (prompt_vec, node_id, signal, source, confirmed_at, session_id) &quot;
         &quot;VALUES (?, ?, 1, &#x27;explicit&#x27;, ?, &#x27;s1&#x27;)&quot;,
-        (b&quot;\x00&quot;, old, datetime.now(timezone.utc).isoformat()))
+        (b&quot;\x00&quot;, fb, datetime.now(timezone.utc).isoformat()))
     engine.db.conn.commit()
     run_forgetting(engine)
-    # protected node survives even though it scores worst; cap may stay above target
-    assert _exists(engine, old) is True
-    assert _exists(engine, young) is True   # youngest survives
-    assert _exists(engine, mid) is False    # evicted to approach the cap
+    assert _exists(engine, fb) is True       # feedback protects even the worst-scored
+    assert _exists(engine, other) is False
 
 
 def test_cap_disabled_by_default_zero(engine):
     _enable(engine)
-    # archival_soft_cap defaults to 0
     ids = [_make_archival_recent(engine, f&quot;z{i}&quot;, archived_days=300) for i in range(4)]
     run_forgetting(engine)
-    remaining = engine.db.conn.execute(
-        &quot;SELECT COUNT(*) AS c FROM nodes WHERE tier=&#x27;archival&#x27;&quot;).fetchone()[&quot;c&quot;]
-    assert remaining == 4  # cap off → no eviction</code></pre>
+    assert _archival_count(engine) == 4  # cap off → no eviction</code></pre>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 2: Run tests to verify they fail</strong></li></ul>
-<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -k cap -v</code> Expected: FAIL (cap not implemented; <code>test_cap_disabled_by_default_zero</code> may pass already).</p>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -k cap -v</code> Expected: FAIL (cap not wired; <code>test_cap_disabled_by_default_zero</code> already passes).</p>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 3: Wire the cap into <code>run_forgetting</code></strong></li></ul>
 <p>In <code>src/ormah/background/forgetting_manager.py</code>, replace the line:</p>
 <pre><code class="lang-python">        # Task 06 inserts the §3 cap backstop here.</code></pre>
@@ -125,30 +139,26 @@ def test_cap_disabled_by_default_zero(engine):
     s = engine.settings
     if s.archival_soft_cap &lt;= 0:
         return 0
-    rows = engine.db.conn.execute(
-        &quot;SELECT id, importance, stability, last_review, last_accessed, archived_at &quot;
-        &quot;FROM nodes WHERE tier = &#x27;archival&#x27;&quot;
-    ).fetchall()
+    rows = _archival_rows(engine)
     overflow = len(rows) - s.archival_soft_cap
     if overflow &lt;= 0:
         return 0
 
-    user_id = getattr(engine, &quot;user_node_id&quot;, None)
     scored: list[tuple[float, str]] = []
     for row in rows:
-        if row[&quot;id&quot;] == user_id:
-            continue  # never the self node
-        if _has_positive_feedback(engine, row[&quot;id&quot;]):
-            continue  # proven-useful ⇒ protected forever
-        degree, max_weight = _connectivity(engine, row[&quot;id&quot;])
-        if max_weight &gt;= s.deletion_strong_edge_weight:
-            continue  # never evict a hub
+        if _is_protected(engine, row, now):
+            continue  # same hard protections as Phase A — accept overflow over deleting these
+        degree, _max_weight = _connectivity(engine, row[&quot;id&quot;])
         scored.append((_forget_score(row, now, degree), row[&quot;id&quot;]))
 
     scored.sort(reverse=True)  # highest forget-score (worst) first
     evicted = 0
     for _score, node_id in scored[:overflow]:
-        if engine.delete_node(node_id):
+        row = _fetch_row(engine, node_id)              # re-read fresh (council C2)
+        if row is None or _is_protected(engine, row, now):
+            continue
+        result = engine.delete_node(node_id)
+        if result and result.startswith(&quot;Deleted&quot;):
             evicted += 1
     if evicted:
         logger.info(&quot;Forgetting cap backstop evicted %d archival nodes&quot;, evicted)
@@ -158,22 +168,19 @@ def test_cap_disabled_by_default_zero(engine):
 def _forget_score(row, now: datetime, degree: int) -&gt; float:
     &quot;&quot;&quot;Composite worst-first score: low R × low importance × age × low connectivity.
 
-    Candidates already exclude positive feedback, so the no_positive_feedback factor is 1.
+    Candidates already exclude protected nodes, so positive feedback never reaches here.
     &quot;&quot;&quot;
     r = _retrievability(row, now)
     importance = row[&quot;importance&quot;] if row[&quot;importance&quot;] is not None else 0.5
-    anchor_str = row[&quot;archived_at&quot;] or row[&quot;last_accessed&quot;]
-    try:
-        age_days = max((now - datetime.fromisoformat(anchor_str)).total_seconds() / 86400, 0.0)
-    except (ValueError, TypeError):
-        age_days = 0.0
+    # archived_at is guaranteed non-null (NULL ⇒ protected), so age is well defined.
+    age_days = max((now - _parse_dt(row[&quot;archived_at&quot;])).total_seconds() / 86400, 0.0)
     return (1.0 - r) * (1.0 - importance) * age_days * (1.0 / (1 + degree))</code></pre>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 5: Run tests to verify they pass</strong></li></ul>
 <p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_forgetting_manager.py -v</code> Expected: PASS (all tests, including the Task 05 set).</p>
 <ul><li><span style="color:var(--accent)">&#9744;</span> <strong>Step 6: Lint + commit</strong></li></ul>
 <pre><code class="lang-bash">.venv/bin/ruff check src/ormah/background/forgetting_manager.py tests/test_background/test_forgetting_manager.py
 git add src/ormah/background/forgetting_manager.py tests/test_background/test_forgetting_manager.py
-git commit -m &quot;feat(background): cap backstop forget-score eviction (#28)&quot;</code></pre>
+git commit -m &quot;feat(background): cap backstop forget-score eviction respecting protections (#28)&quot;</code></pre>
 <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
 <div class="signature"><span class="name">Ormah &middot; Bounded forgetting</span>
 <span class="role">Plan &middot; #28 &middot; 2026-06-15</span></div>
