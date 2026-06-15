@@ -207,6 +207,10 @@ def test_checked_pairs_recorded_for_none(engine):
     assert row["result"] == "none"
 
 
+def test_max_nodes_per_run_default(engine):
+    assert engine.settings.auto_link_max_nodes_per_run == 500
+
+
 def test_checked_pairs_invalidated_on_update(engine):
     """Updating a node's content should clear its checked pairs so it gets re-evaluated."""
     from ormah.models.node import UpdateNodeRequest
