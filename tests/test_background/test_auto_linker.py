@@ -295,6 +295,16 @@ def test_max_edges_does_not_skip_interrupted_node(engine):
     assert wm < rows[-1]["seq"]  # did not reach the last node
 
 
+def test_find_candidates_uses_window_without_advancing(engine):
+    from ormah.background.auto_linker import _find_link_candidates, _get_watermark
+    _create_pair(engine)
+    engine.settings.auto_link_similarity_threshold = 0.0
+    before = _get_watermark(engine.db.conn)
+    cands = _find_link_candidates(engine, limit=8)
+    assert all("node_a" in c and "node_b" in c and "similarity" in c for c in cands)
+    assert _get_watermark(engine.db.conn) == before  # preview never advances the cursor
+
+
 def test_invalid_llm_output_records_error_not_none(engine):
     """Malformed LLM JSON → recorded as result='error' (no edge), so the node resolves."""
     id_a, id_b = _create_pair(engine)

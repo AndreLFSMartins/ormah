@@ -176,7 +176,8 @@ def _find_link_candidates(engine, limit: int = 8) -> list[dict]:
         vec_store = VectorStore(engine.db)
 
         conn = engine.db.conn
-        nodes = conn.execute("SELECT id, content, title, type, space FROM nodes ORDER BY RANDOM()").fetchall()
+        watermark = _get_watermark(conn)
+        nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
         threshold = settings.auto_link_similarity_threshold
         cross_space_penalty = settings.auto_link_cross_space_penalty
 
