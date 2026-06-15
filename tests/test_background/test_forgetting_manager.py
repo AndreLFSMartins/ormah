@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import frontmatter
 import pytest
 
 from ormah.background.forgetting_manager import run_forgetting
@@ -238,3 +239,58 @@ def test_cap_never_evicts_user_node(engine):
     _make_archival_recent(engine, "other", archived_days=30)
     run_forgetting(engine)
     assert _exists(engine, uid) is True  # self node never evicted by the cap
+
+
+def _backdate_tombstone(engine, node_id, days):
+    when = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+    for nid, _da, path in engine.file_store.list_deleted():
+        if nid == node_id:
+            post = frontmatter.loads(path.read_text(encoding="utf-8"))
+            post["deleted_at"] = when
+            path.write_text(frontmatter.dumps(post), encoding="utf-8")
+            return
+    raise AssertionError(f"tombstone for {node_id} not found")
+
+
+def _tombstone_ids(engine):
+    return {nid for nid, _da, _p in engine.file_store.list_deleted()}
+
+
+def test_expired_tombstone_is_purged_and_audited(engine):
+    _enable(engine)
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="bye", type=NodeType.fact, tier=Tier.working, title="bye"))
+    engine.delete_node(node_id)              # soft-delete → deleted/
+    _backdate_tombstone(engine, node_id, days=60)  # retention is 30
+
+    run_forgetting(engine)
+
+    assert node_id not in _tombstone_ids(engine)
+    audited = engine.db.conn.execute(
+        "SELECT 1 FROM audit_log WHERE operation='purge' AND node_id=?", (node_id,)
+    ).fetchone()
+    assert audited is not None
+
+
+def test_tombstone_within_window_is_kept(engine):
+    _enable(engine)
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="recent", type=NodeType.fact, tier=Tier.working, title="recent"))
+    engine.delete_node(node_id)
+    _backdate_tombstone(engine, node_id, days=5)  # inside the 30-day window
+
+    run_forgetting(engine)
+
+    assert node_id in _tombstone_ids(engine)
+
+
+def test_purge_skipped_when_disabled(engine):
+    # master switch OFF: even an old tombstone is not purged
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="keep", type=NodeType.fact, tier=Tier.working, title="keep"))
+    engine.delete_node(node_id)
+    _backdate_tombstone(engine, node_id, days=60)
+
+    run_forgetting(engine)  # deletion_enabled defaults to False
+
+    assert node_id in _tombstone_ids(engine)

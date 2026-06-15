@@ -24,7 +24,7 @@ def run_forgetting(engine) -> None:
         now = datetime.now(timezone.utc)
         _run_gate_phase(engine, now)
         _run_cap_backstop(engine, now)
-        # Task 07 inserts Phase B (hard-purge) here.
+        _run_purge(engine, now)
     except Exception as e:
         logger.warning("Forgetting manager failed: %s", e)
 
@@ -216,3 +216,27 @@ def _forget_score(row, now: datetime, degree: int) -> float:
     # archived_at is guaranteed non-null (NULL ⇒ protected), so age is well defined.
     age_days = max((now - _parse_dt(row["archived_at"])).total_seconds() / 86400, 0.0)
     return (1.0 - r) * (1.0 - importance) * age_days * (1.0 / (1 + degree))
+
+
+def _run_purge(engine, now: datetime) -> int:
+    """Hard-purge tombstones whose deleted_at is past the retention window."""
+    s = engine.settings
+    cutoff = now - timedelta(days=s.deletion_retention_days)
+    purged = 0
+    for node_id, deleted_at, _path in engine.file_store.list_deleted():
+        if not deleted_at:
+            continue  # no clock → keep (fail-safe)
+        try:
+            ts = datetime.fromisoformat(deleted_at)
+        except (ValueError, TypeError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts > cutoff:
+            continue  # still inside the reversibility window
+        if engine.file_store.purge(node_id):
+            engine._write_audit_log(operation="purge", node_id=node_id)
+            purged += 1
+    if purged:
+        logger.info("Forgetting hard-purged %d expired tombstones", purged)
+    return purged
