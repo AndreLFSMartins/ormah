@@ -33,13 +33,20 @@ A single mechanism serves both **backfill** (drain the historical backlog) and *
 ### State & config
 - **New column `nodes.seq INTEGER NOT NULL DEFAULT 0`** + index `idx_nodes_seq`. A monotonic
   change-sequence, **not** a domain timestamp.
-- **`seq` is bumped at the single content-write site** `Builder._index_file_nodes_only`
-  (`src/ormah/index/builder.py:103`), through which `remember`, the file-watcher, **and
-  reindex/import** all pass. After the `INSERT OR REPLACE INTO nodes`, set
-  `seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM nodes)` for that node. So every (re)write of
-  content — including reindex of an old markdown file — lands the node at the head of the
-  sequence. Metadata-only `UPDATE nodes SET ...` (access_count, importance, tier) deliberately
+- **`seq` is allocated from a durable monotonic counter** `meta.node_seq_next` (never
+  decreases, independent of the current rows) at the single content-write site
+  `Builder._index_file_nodes_only` (`src/ormah/index/builder.py:103`), through which `remember`,
+  the file-watcher, **and reindex/import** all pass. After the `INSERT OR REPLACE INTO nodes`,
+  read+bump the counter and set the node's `seq` to it. So every (re)write of content — including
+  reindex of an old markdown file — lands the node at the **head** of the sequence, always above
+  any watermark. Metadata-only `UPDATE nodes SET ...` (access_count, importance, tier) deliberately
   do **not** bump `seq` (they don't change the embedding, so they must not trigger re-linking).
+  > **Council v2 (crit #1):** an earlier draft used `MAX(seq)+1`, which is not monotonic across
+  > `INSERT OR REPLACE` (the deleted row's seq is recomputed) — a durable counter fixes this.
+- **`full_rebuild()` resets the watermark to 0** (`builder.py:23` — the single point all rebuild
+  paths funnel through: startup FTS migration, `rebuild_index`/`POST /rebuild`, restore). Defensive:
+  the durable counter already keeps rebuilt nodes above the watermark, but the reset also covers a
+  wiped-meta rebuild. (Council v2.)
 - **`meta.auto_link_watermark`** — the integer `seq` of the last fully-processed node, stored
   as text. Absent ⇒ `0` ⇒ backlog drains from the lowest seq. (`meta` already holds
   `last_maintenance_run`.)
@@ -73,11 +80,16 @@ watermark but never advances it (it is a side-effect-free preview). Replaces `OR
   construction — independent of markdown timestamps. Node update also deletes the node's
   `auto_link_checked` rows (`memory_engine.py` :806/:850/:1201/:1206), so its pairs are
   re-evaluated.
-- **Transient LLM failure is not skipped (crit. #1 fixed):** a node becomes `last_complete`
-  (and lets the watermark advance) **only if every match above threshold was resolved** — i.e.
-  recorded in `auto_link_checked` or already an edge. If `_llm_classify_link` returns `None`
-  for any above-threshold match, the node is left incomplete and the watermark does not pass
-  it, so the next run retries.
+- **Transient LLM failure retries; poison node never deadlocks (crit. #1 v1 + crit. #2 v2):**
+  `_llm_classify_link` distinguishes two cases. **LLM unavailable** (`raw is None`) → returns
+  `None` → the node is left unresolved and the watermark does not pass it (next run retries). This
+  is the transient case (Ollama down) and does not deadlock: when the LLM is down, *every* node
+  is unresolved, so the whole run simply waits — no single node blocks others. **Invalid/unexpected
+  LLM output** (malformed JSON or missing `relationship`) → returns `{"relationship": "error"}` →
+  `_apply_edge` records `result='error'` in `auto_link_checked` (no edge) and the node is treated
+  as resolved, so the watermark advances. A content-specific "poison" pair therefore never blocks
+  later nodes. (An `error` pair is re-tried only if the node's content changes — which bumps `seq`
+  and clears its `auto_link_checked` rows.)
 - **Bounded recall, stated honestly (importante #3):** `vec_store.search(limit=6)` returns only
   the top-6 neighbours, and top-k membership is **not** symmetric — a pair where neither node
   is in the other's top-6 is never evaluated. This is a pre-existing limit of the full scan

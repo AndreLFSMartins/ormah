@@ -94,6 +94,12 @@ In `db.py` `_migrate()`, after the `enrichment_migrations` loop:
                 ).fetchall()
                 for i, row in enumerate(rows, start=1):
                     conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (i, row[0]))
+                # Initialize the durable monotonic counter past the backfilled max,
+                # so future writes always allocate seq above any current watermark.
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
+                    (str(len(rows) + 1),),
+                )
 ```
 
 - [ ] **Step 4:** Re-run → PASS.
@@ -134,12 +140,17 @@ def test_metadata_update_does_not_bump_seq(engine):
 - [ ] **Step 3: Bump seq** in `builder.py`, immediately after the `INSERT OR REPLACE INTO nodes (...)` `conn.execute(...)` block (before the Tags loop):
 
 ```python
-        # Monotonic change-sequence: every content (re)write lands the node at the head,
-        # so reindex/import/restore re-enter the auto-linker delta regardless of frontmatter
+        # Durable monotonic change-sequence (council v2 crit#1): allocate the next seq from
+        # meta.node_seq_next — never decreases, independent of current rows, unlike MAX(seq)+1
+        # which is non-monotonic across INSERT OR REPLACE. Every content (re)write lands the node
+        # at the head, so reindex/import/restore re-enter the delta regardless of frontmatter
         # timestamps. Metadata-only UPDATEs elsewhere do not pass through here.
+        row = conn.execute("SELECT value FROM meta WHERE key = 'node_seq_next'").fetchone()
+        next_seq = int(row[0]) if row else 1
+        conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (next_seq, node.id))
         conn.execute(
-            "UPDATE nodes SET seq = (SELECT COALESCE(MAX(seq), 0) + 1 FROM nodes) WHERE id = ?",
-            (node.id,),
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
+            (str(next_seq + 1),),
         )
 ```
 
@@ -226,6 +237,61 @@ def _select_nodes_after(conn, watermark: int, limit: int) -> list:
 
 - [ ] **Step 4:** Run → PASS.
 - [ ] **Step 5: Commit** `git commit -am "feat(background): incremental seq node select (#26)"`
+
+---
+
+### Task 5b: `error` classification for invalid LLM output (poison-node guard, council v2 crit#2)
+
+**Files:** Modify `src/ormah/background/auto_linker.py` (`_llm_classify_link` ~L105-117, `_apply_edge` ~L251); Test `tests/test_background/test_auto_linker.py`.
+
+- [ ] **Step 1: Failing test**
+
+```python
+def test_invalid_llm_output_records_error_not_none(engine):
+    """Malformed LLM JSON → recorded as result='error' (no edge), so the node resolves."""
+    id_a, id_b = _create_pair(engine)
+    engine.settings.llm_provider = "ollama"; engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value="not valid json"):
+        from ormah.background.auto_linker import run_auto_linker
+        run_auto_linker(engine)
+    assert len(_edges_between(engine, id_a, id_b)) == 0  # no edge
+    pair = tuple(sorted([id_a, id_b]))
+    row = engine.db.conn.execute(
+        "SELECT result FROM auto_link_checked WHERE node_a=? AND node_b=?", pair
+    ).fetchone()
+    assert row is not None and row["result"] == "error"
+```
+
+- [ ] **Step 2:** Run → FAIL (invalid JSON currently returns None → no record).
+- [ ] **Step 3a:** In `_llm_classify_link`, return an `error` classification (not `None`) for invalid/unexpected output; keep `None` only for an unavailable LLM:
+
+```python
+    raw = llm_generate(settings, prompt, json_mode=True)
+    if raw is None:
+        return None  # LLM UNAVAILABLE — transient; caller leaves the node unresolved
+
+    try:
+        result = json.loads(raw)
+        if "relationship" not in result:
+            return {"relationship": "error", "reason": "missing relationship field"}
+        result["relationship"] = normalize_link_type(result["relationship"])
+        return result
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("LLM returned invalid JSON for link classification")
+        return {"relationship": "error", "reason": "invalid LLM output"}
+```
+
+- [ ] **Step 3b:** In `_apply_edge`, treat `error` like `none` — record the checked pair but create no edge. Change both guards from `if edge_type != "none":` to:
+
+```python
+        if edge_type not in ("none", "error"):
+```
+
+(both the `edges` INSERT block and the markdown-connection block).
+
+- [ ] **Step 4:** Run → PASS.
+- [ ] **Step 5: Commit** `git commit -am "feat(background): classify invalid LLM output as error, not None (#26)"`
 
 ---
 
@@ -355,13 +421,19 @@ def run_auto_linker(engine) -> None:
 
                     llm_result = _llm_classify_link(settings, node, other)
                     if llm_result is None:
-                        node_resolved = False  # crit#1: leave unresolved, do not pass this node
+                        # LLM UNAVAILABLE (raw None) — transient. Leave node unresolved so the
+                        # watermark does not pass it. Not a poison: if the LLM is down, EVERY node
+                        # is unresolved, so the whole run waits — no single node blocks others.
+                        node_resolved = False
                         continue
+                    relationship = llm_result["relationship"]  # may be 'error' (invalid output)
                     _apply_edge(
-                        engine, node["id"], match["id"], llm_result["relationship"],
+                        engine, node["id"], match["id"], relationship,
                         llm_result.get("reason", ""), similarity,
                     )
-                    if llm_result["relationship"] != "none":
+                    # 'error' (poison content) is recorded in auto_link_checked by _apply_edge
+                    # and the node still counts as resolved → watermark advances (council v2 crit#2).
+                    if relationship not in ("none", "error"):
                         created += 1
 
             if not node_resolved:
@@ -410,6 +482,36 @@ def test_find_candidates_uses_window_without_advancing(engine):
 
 - [ ] **Step 4:** Run → PASS; existing `TestFindLinkCandidates` / `test_run_maintenance` stay green.
 - [ ] **Step 5: Commit** `git commit -am "feat(background): share seq scan in _find_link_candidates (#26)"`
+
+---
+
+### Task 7b: `full_rebuild` resets the watermark (council v2 crit#1)
+
+**Files:** Modify `src/ormah/index/builder.py` (`full_rebuild`, ~L23-31); Test `tests/test_background/test_auto_linker.py`.
+
+- [ ] **Step 1: Failing test**
+
+```python
+def test_full_rebuild_resets_watermark(engine):
+    """A mass reindex must not leave a stale watermark hiding the whole store."""
+    from ormah.background.auto_linker import _set_watermark, _get_watermark
+    _create_pair(engine)
+    _set_watermark(engine, 99999)
+    engine.builder.full_rebuild()
+    assert _get_watermark(engine.db.conn) == 0
+```
+
+- [ ] **Step 2:** Run → FAIL (watermark stays 99999).
+- [ ] **Step 3:** In `Builder.full_rebuild`, after it has deleted/reindexed the nodes (so the reset is not clobbered), clear the watermark — the single point all rebuild paths funnel through (startup FTS migration, `rebuild_index`/`POST /rebuild`, restore):
+
+```python
+        # Mass reindex re-allocates seq from the durable counter; clear the watermark so the
+        # rebuilt store is reprocessed even if the counter was also reset (wiped meta).
+        self.db.conn.execute("DELETE FROM meta WHERE key = 'auto_link_watermark'")
+```
+
+- [ ] **Step 4:** Run → PASS.
+- [ ] **Step 5: Commit** `git commit -am "feat(index): reset auto_link watermark on full_rebuild (#26)"`
 
 ---
 
