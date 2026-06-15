@@ -205,7 +205,7 @@ and reversible for `deletion_retention_days` (30); and the precondition (a node 
 90+ days being recalled in the exact microsecond of a daily job) makes the race astronomically
 improbable and fully recoverable.
 
-**Root fix (separate issue):** reorder the elegibility-affecting mutators to acquire
+**Root fix (separate issue — #29):** reorder the elegibility-affecting mutators to acquire
 `db.transaction()` **before** `file_store.save()`, making the index/lock authoritative so the
 guard's `BEGIN IMMEDIATE` serializes everything. This touches the recall hot path, so it is its
 own change with explicit sign-off — not gated inside #28 (a global recall lock is rejected: it
