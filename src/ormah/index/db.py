@@ -115,6 +115,23 @@ class Database:
                 if col_name not in node_cols:
                     conn.execute(ddl)
 
+            if "seq" not in node_cols:
+                conn.execute("ALTER TABLE nodes ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq)")
+                # Backfill existing rows: oldest (created ASC) gets the lowest seq,
+                # so the historical backlog drains oldest-first.
+                rows = conn.execute(
+                    "SELECT id FROM nodes ORDER BY created ASC, rowid ASC"
+                ).fetchall()
+                for i, row in enumerate(rows, start=1):
+                    conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (i, row[0]))
+                # Initialize the durable monotonic counter past the backfilled max,
+                # so future writes always allocate seq above any current watermark.
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
+                    (str(len(rows) + 1),),
+                )
+
             # Create new feedback/logging tables if missing
             existing_tables = {
                 row[0]
