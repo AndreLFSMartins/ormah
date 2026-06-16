@@ -119,24 +119,11 @@ class MemoryEngine:
                     "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_needs_rebuild', '0')"
                 )
 
-        # Re-embed nodes if the vector store is missing entries or schema version changed
-        vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
-        stored_version_row = self.db.conn.execute(
-            "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
-        ).fetchone()
-        stored_version = int(stored_version_row["value"]) if stored_version_row else 0
-        needs_reindex = (count > 0 and vec_count < count) or stored_version < _EMBEDDING_SCHEMA_VERSION
-
-        if needs_reindex:
-            reason = "schema version change" if stored_version < _EMBEDDING_SCHEMA_VERSION else "missing entries"
-            logger.info("Re-indexing embeddings (%s): vec=%d, nodes=%d, schema v%d→v%d",
-                        reason, vec_count, count, stored_version, _EMBEDDING_SCHEMA_VERSION)
-            self._reindex_all_embeddings()
-            with self.db.transaction() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('embedding_schema_version', ?)",
-                    (str(_EMBEDDING_SCHEMA_VERSION),),
-                )
+        # Embedding recovery (delta + schema bump) is no longer done synchronously
+        # here -- it would block the port bind on a full O(n) re-embed. It now lives
+        # in backfill_embeddings(), driven by the embedding_backfill background job
+        # (and a scheduler-independent fallback). The encoder is still warmed below
+        # via _warmup_embedder(). (#32)
 
         # One-time FSRS data migration: seed stability from access patterns
         self._migrate_fsrs()
