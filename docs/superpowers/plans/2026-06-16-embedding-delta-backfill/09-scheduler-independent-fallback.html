@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- rich-doc-src-sha256:6ebda84fb36214203dc00f2bc8ac150cb59cec0f14b34208222870380f17d9db -->
+<!-- rich-doc-src-sha256:c35fc39a06164d27c84f564f144e860da863452f6ee0b73c36f0f38fc983e313 -->
 <html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 09 — Scheduler-independent fallback (#32)</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
@@ -18,103 +18,188 @@ h1{font:400 italic 42px/1.08 var(--font-body);margin:12px 0 8px}
 h2{font:600 26px/1.12 var(--font-head);letter-spacing:-.015em;margin:48px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
 h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
 h3{font:600 17px/1.3 var(--font-head);margin:28px 0 8px;scroll-margin-top:24px}
-.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:27em}
+.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:30em}
 p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent)}
 code{font:13.5px var(--font-mono);color:var(--accent)}
 pre{border:1px solid var(--hairline);padding:15px;overflow-x:auto;font:12.5px/1.6 var(--font-mono);color:var(--ink)}pre code{color:inherit}
 table{border-collapse:collapse;width:100%;margin:18px 0;font-size:15px;border:1px solid var(--hairline)}
 th,td{text-align:left;padding:10px 15px;border-bottom:1px solid var(--hairline)}
 th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
-tr:last-child td{border-bottom:none}
+tr:last-child td{border-bottom:none}td code{color:var(--ink)}
 .step{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone);border:1px solid var(--hairline);border-radius:20px;padding:4px 10px;margin-right:8px}
 .callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:13px 18px;margin:18px 0}
 .callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:7px}
+figure{margin:24px 0;padding:20px;border:1px solid var(--hairline);text-align:center}figure svg{max-width:100%;height:auto}
+figcaption{margin-top:10px;font:400 12px/1.4 var(--font-head);color:var(--stone);text-transform:uppercase;letter-spacing:.04em}
 .spectrum{display:flex;height:4px;margin:38px 0 20px}.spectrum span{flex:1}.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
 .signature{border-left:2px solid var(--accent);padding-left:15px;color:var(--stone)}.signature .name{font:400 italic 17px/1 var(--font-body);color:var(--ink)}.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
 @media(max-width:860px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:30px 22px 80px}}
 </style></head><body>
-<nav class="toc"><div class="eyebrow">#32 · Task 09</div><div class="doc-title">Scheduler fallback</div>
-<a href="#why">Why</a><a href="#files">Files</a><a href="#s1">1 · Failing tests</a><a href="#s3">3 · Helper</a><a href="#s4">4 · Wire in lifespan</a><a href="#s5">5 · Verify</a></nav>
+<nav class="toc"><div class="eyebrow">#32 · Task 09</div><div class="doc-title">Backfill fallback</div>
+<a href="#what">What &amp; why</a><a href="#flow">Retry loop</a><a href="#files">Files</a><a href="#s1">1 · Failing tests</a><a href="#s3">3 · Constants + helper</a><a href="#s4">4 · Wire lifespan</a><a href="#s5">5 · Verify</a></nav>
 <main>
-<div class="eyebrow">Implementation plan · Task 09 · council I1</div>
-<h1>Scheduler-independent <em>fallback</em></h1>
-<div class="meta">Daemon-thread one-shot · needs Task 06</div>
-<p class="statement">If the scheduler fails to start, recovery still happens — off a daemon thread, never blocking the bind.</p>
+<div class="eyebrow">Implementation plan · Task 09</div>
+<h1>Backfill <em>fallback</em></h1>
+<div class="meta">retries with backoff · needs Task 06</div>
+<p class="statement">When the scheduler never starts, a daemon thread retries reconciliation with backoff until the gap closes — not a single one-shot.</p>
 
-<h2 id="why">The <em>change</em></h2>
-<p>Council <strong>I1</strong>: the server treats <code>start_scheduler</code> as optional (<code>lifespan</code> catches its failure and keeps serving). With the synchronous startup re-embed gone (Task 05), a scheduler that fails to start would leave missing vectors unhealed indefinitely. When the scheduler did <strong>not</strong> start, kick one reconciliation off a daemon thread. The happy path is unchanged — the scheduler's post-bind <code>next_run_time</code> (Task 07) still drives the first run and the recurring cadence.</p>
+<h2 id="what">What &amp; <em>why</em></h2>
+<p>Council <strong>I1</strong>: the server treats <code>start_scheduler</code> as optional (<code>lifespan</code> catches its failure and keeps serving). With the synchronous startup re-embed gone (<a href="05-startup-remove-block.html">Task 05</a>), a scheduler that fails to start would leave missing vectors unhealed indefinitely. Add a narrow fallback: when the scheduler did <strong>not</strong> start, kick reconciliation off a daemon thread (off the bind path, so it never blocks) that <strong>retries with exponential backoff until the gap closes or the attempt budget is exhausted</strong> — not a single one-shot. <code>run_embedding_backfill</code> raises while the store is incomplete, so a transient encoder outage at startup doesn't leave vectors unhealed until the next restart. The happy path is unchanged — the scheduler's post-bind <code>next_run_time</code> (<a href="07-scheduler-register.html">Task 07</a>) still drives the first run and the recurring cadence.</p>
+
+<h2 id="flow">The retry <em>loop</em></h2>
+<figure>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 200" font-family="Arial,sans-serif" font-size="13">
+<rect x="20" y="80" width="150" height="44" fill="none" stroke="#141413"/>
+<text x="95" y="100" text-anchor="middle">attempt n/5</text>
+<text x="95" y="116" text-anchor="middle">run_embedding_backfill</text>
+<line x1="170" y1="102" x2="230" y2="102" stroke="#141413"/>
+<polygon points="230,80 360,80 330,124 260,124" fill="none" stroke="#141413"/>
+<text x="295" y="106" text-anchor="middle">raised?</text>
+<line x1="360" y1="102" x2="430" y2="102" stroke="#788c5d"/><text x="385" y="92" fill="#788c5d">no</text>
+<rect x="430" y="80" width="120" height="44" fill="none" stroke="#788c5d"/>
+<text x="490" y="106" text-anchor="middle" fill="#788c5d">return (healed)</text>
+<line x1="295" y1="124" x2="295" y2="165" stroke="#d97757"/><text x="305" y="150" fill="#d97757">yes</text>
+<rect x="200" y="165" width="200" height="30" fill="none" stroke="#d97757"/>
+<text x="300" y="185" text-anchor="middle" fill="#d97757">sleep min(30·2^n, 600) → retry</text>
+<line x1="600" y1="80" x2="600" y2="170" stroke="#b0aea5" stroke-dasharray="3"/>
+<text x="640" y="128" text-anchor="middle" fill="#b0aea5">n==5: give up</text>
+</svg>
+<figcaption>Bounded exponential backoff: 30s base, 600s cap, 5 attempts, then stops without raising on the main thread</figcaption>
+</figure>
 
 <h2 id="files">Files <em>touched</em></h2>
 <table><thead><tr><th>Action</th><th>Path</th></tr></thead><tbody>
-<tr><td>Modify</td><td><code>src/ormah/main.py</code> (add <code>_start_backfill_fallback</code>; call in <code>lifespan</code> ~L68-71)</td></tr>
+<tr><td>Modify</td><td><code>src/ormah/main.py</code> (add constants + <code>_start_backfill_fallback</code>; call it in <code>lifespan</code> when the scheduler is absent)</td></tr>
 <tr><td>Test</td><td><code>tests/test_main_backfill_fallback.py</code></td></tr></tbody></table>
 
 <h2 id="s1"><span class="step">Step 1</span><em>Failing</em> tests</h2>
-<pre><code>"""Scheduler-independent embedding backfill fallback (#32, council I1)."""
+<pre><code>"""Scheduler-independent embedding backfill fallback (#32, council I1).
+
+The fallback retries with backoff until the gap closes (run_embedding_backfill
+raises while it is incomplete) or the attempt budget is exhausted -- not a single
+one-shot -- so a transient encoder outage at startup doesn't leave vectors
+unhealed until the next restart.
+"""
 from __future__ import annotations
 
-import time
+import time as _time
 
 from ormah import main
 
+real_sleep = _time.sleep
 
-def test_start_backfill_fallback_runs_job_off_thread(monkeypatch):
+
+def _wait_for(predicate, timeout=2.0):
+    waited = 0.0
+    while not predicate() and waited &lt; timeout:
+        real_sleep(0.02)
+        waited += 0.02
+
+
+def test_fallback_runs_backfill_off_thread(monkeypatch):
     calls = []
     monkeypatch.setattr(
         "ormah.background.embedding_backfill.run_embedding_backfill",
         lambda engine: calls.append(engine),
     )
     sentinel = object()
-    main._start_backfill_fallback(sentinel)
-    for _ in range(100):
-        if calls:
-            break
-        time.sleep(0.01)
+    main._start_backfill_fallback(sentinel)  # returns immediately (off-thread)
+    _wait_for(lambda: len(calls) &gt;= 1)
     assert calls == [sentinel]
 
 
-def test_start_backfill_fallback_swallows_errors(monkeypatch):
+def test_fallback_retries_until_success(monkeypatch):
+    calls = []
+
+    def _flaky(engine):
+        calls.append(engine)
+        if len(calls) &lt; 2:
+            raise RuntimeError("still incomplete")
+
+    monkeypatch.setattr(
+        "ormah.background.embedding_backfill.run_embedding_backfill", _flaky)
+    monkeypatch.setattr("time.sleep", lambda s: real_sleep(0.001))
+
+    main._start_backfill_fallback(object())
+    _wait_for(lambda: len(calls) &gt;= 2)
+    real_sleep(0.05)  # give a spurious 3rd attempt a chance to (not) happen
+    assert len(calls) == 2  # retried once, then stopped on success
+
+
+def test_fallback_gives_up_after_budget_without_raising(monkeypatch):
+    calls = []
+
     def _boom(engine):
-        raise RuntimeError("backfill blew up in fallback")
+        calls.append(engine)
+        raise RuntimeError("permanently incomplete")
+
     monkeypatch.setattr(
         "ormah.background.embedding_backfill.run_embedding_backfill", _boom)
-    main._start_backfill_fallback(object())  # must not raise
-    time.sleep(0.05)</code></pre>
+    monkeypatch.setattr("time.sleep", lambda s: real_sleep(0.001))
+
+    main._start_backfill_fallback(object())  # must not raise on the main thread
+    _wait_for(lambda: len(calls) &gt;= main._BACKFILL_FALLBACK_MAX_ATTEMPTS)
+    real_sleep(0.05)
+    assert len(calls) == main._BACKFILL_FALLBACK_MAX_ATTEMPTS  # bounded, then gives up</code></pre>
 
 <h3 id="s2">Step 2 · Run to verify it fails</h3>
-<p>Run: <code>.venv/bin/python -m pytest tests/test_main_backfill_fallback.py -v</code> → FAIL (no <code>_start_backfill_fallback</code>).</p>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_main_backfill_fallback.py -v</code> → FAIL (<code>AttributeError: module 'ormah.main' has no attribute '_start_backfill_fallback'</code>).</p>
 
-<h2 id="s3"><span class="step">Step 3</span>The fallback <em>helper</em></h2>
-<pre><code>def _start_backfill_fallback(engine) -> None:
-    """Run one embedding reconciliation off a daemon thread when the scheduler is
+<h2 id="s3"><span class="step">Step 3</span>Constants + fallback <em>helper</em></h2>
+<pre><code># Embedding-backfill fallback: how many times the daemon thread retries the
+# reconciliation (with exponential backoff) before giving up. The recurring job /
+# sleep-cycle remains the long-term net; this only covers a scheduler that failed
+# to start plus a transient encoder outage at boot.
+_BACKFILL_FALLBACK_MAX_ATTEMPTS = 5
+_BACKFILL_FALLBACK_BASE_BACKOFF = 30.0  # seconds
+_BACKFILL_FALLBACK_MAX_BACKOFF = 600.0  # seconds
+
+
+def _start_backfill_fallback(engine) -&gt; None:
+    """Run embedding reconciliation off a daemon thread when the scheduler is
     unavailable, so missing vectors are still healed without it (#32, council I1).
-    Off the bind path -- never blocks startup."""
+    Off the bind path -- never blocks startup. Retries with exponential backoff
+    until the gap closes (``run_embedding_backfill`` raises while incomplete) or
+    the attempt budget is exhausted, instead of a single one-shot."""
     import threading
+    import time
 
     def _run():
         from ormah.background.embedding_backfill import run_embedding_backfill
-        try:
-            run_embedding_backfill(engine)
-        except Exception as e:
-            logger.warning("Embedding backfill fallback failed: %s", e)
+
+        for attempt in range(_BACKFILL_FALLBACK_MAX_ATTEMPTS):
+            try:
+                run_embedding_backfill(engine)
+                return  # gap closed (the job raises while it is still incomplete)
+            except Exception as e:
+                logger.warning(
+                    "Embedding backfill fallback attempt %d/%d failed: %s",
+                    attempt + 1, _BACKFILL_FALLBACK_MAX_ATTEMPTS, e,
+                )
+                if attempt + 1 &lt; _BACKFILL_FALLBACK_MAX_ATTEMPTS:
+                    time.sleep(min(
+                        _BACKFILL_FALLBACK_BASE_BACKOFF * (2 ** attempt),
+                        _BACKFILL_FALLBACK_MAX_BACKOFF,
+                    ))
 
     threading.Thread(
         target=_run, name="embedding-backfill-fallback", daemon=True
     ).start()</code></pre>
 
-<h2 id="s4"><span class="step">Step 4</span>Wire into <em>lifespan</em></h2>
-<p>After the scheduler <code>try/except</code> block (~L68-71):</p>
-<pre><code>    # If the scheduler did not start, the recurring embedding_backfill job won't run.
-    # Heal missing vectors once off a daemon thread so recovery doesn't depend on it (#32).
+<h2 id="s4"><span class="step">Step 4</span>Wire it in <em>lifespan</em></h2>
+<p>In <code>lifespan</code>, after the scheduler block (and alongside the <code>maintenance_manager</code> fallback), add:</p>
+<pre><code>    # If the scheduler did not start, its recurring embedding_backfill job won't
+    # run. Heal missing vectors off a daemon thread so recovery doesn't depend on
+    # the scheduler (#32, council I1). Off the bind path -- never blocks startup.
     if not hasattr(app.state, "scheduler"):
         _start_backfill_fallback(engine)</code></pre>
 
 <h2 id="s5"><span class="step">Step 5</span><em>Verify</em> + commit</h2>
-<pre><code>.venv/bin/python -m pytest tests/test_main_backfill_fallback.py -v
-.venv/bin/ruff check src/ormah/main.py tests/test_main_backfill_fallback.py
+<p>Run: <code>.venv/bin/python -m pytest tests/test_main_backfill_fallback.py -v</code> → PASS (3 tests — off-thread, retries-until-success, gives-up-after-budget).</p>
+<pre><code>.venv/bin/ruff check src/ormah/main.py tests/test_main_backfill_fallback.py
 git add src/ormah/main.py tests/test_main_backfill_fallback.py
-git commit -m "feat(server): scheduler-independent embedding backfill fallback (#32)"</code></pre>
+git commit -m "feat(server): scheduler-independent backfill fallback retries with backoff (#32)"</code></pre>
 
 <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
-<div class="signature"><span class="name">Ormah #32 · Task 09</span><span class="role">Scheduler-independent fallback</span></div>
+<div class="signature"><span class="name">Ormah #32 · Task 09</span><span class="role">Backfill fallback — retry with backoff</span></div>
 </main></body></html>

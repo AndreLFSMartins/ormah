@@ -9,7 +9,7 @@ add an E2E test: artificial gap → registered job heals it → gap returns to 0
 - Modify: `src/ormah/engine/memory_engine.py` (`stats()` ~L1117-1126)
 - Test: `tests/test_engine/test_embedding_observability.py`
 
-Depends on Task 03 (`_missing_embeddable_count`, `_get_meta_json`), Task 06
+Depends on Task 03 (`_missing_embeddable_count`), Task 06
 (`run_embedding_backfill`), Task 07 (job registered).
 
 - [ ] **Step 1: Write the failing tests**
@@ -17,7 +17,8 @@ Depends on Task 03 (`_missing_embeddable_count`, `_get_meta_json`), Task 06
 Create `tests/test_engine/test_embedding_observability.py`:
 
 ```python
-"""Embedding observability in stats() + E2E recovery (#32, council I3)."""
+"""stats() must expose the embedding gap + schema version, and recovery must
+prove out end-to-end via the registered job (#32, council I3)."""
 from __future__ import annotations
 
 from ormah.engine.memory_engine import _EMBEDDING_SCHEMA_VERSION
@@ -26,11 +27,8 @@ from ormah.models.node import CreateNodeRequest
 
 def _set_schema_current(engine):
     with engine.db.transaction() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES "
-            "('embedding_schema_version', ?)",
-            (str(_EMBEDDING_SCHEMA_VERSION),),
-        )
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES "
+                     "('embedding_schema_version', ?)", (str(_EMBEDDING_SCHEMA_VERSION),))
 
 
 def test_stats_exposes_embedding_gap_and_version(engine):
@@ -38,9 +36,7 @@ def test_stats_exposes_embedding_gap_and_version(engine):
     _set_schema_current(engine)
     with engine.db.transaction() as conn:
         conn.execute("DELETE FROM node_vectors WHERE id = ?", (nid,))
-
     s = engine.stats()
-
     assert s["embedding_gap"] >= 1
     assert s["embedding_schema_version"] == _EMBEDDING_SCHEMA_VERSION
     assert "vec_count" in s
@@ -49,21 +45,17 @@ def test_stats_exposes_embedding_gap_and_version(engine):
 def test_e2e_gap_recovers_via_registered_job(engine):
     from ormah.background.scheduler import start_scheduler
     from ormah.background.embedding_backfill import run_embedding_backfill
-
     nid, _ = engine.remember(CreateNodeRequest(title="recover", content="me"))
     _set_schema_current(engine)
     with engine.db.transaction() as conn:
         conn.execute("DELETE FROM node_vectors WHERE id = ?", (nid,))
     assert engine.stats()["embedding_gap"] >= 1
-
-    # The scheduler registers the job; run the same callable it would fire.
-    scheduler, _tracker = start_scheduler(engine)
+    scheduler, _t = start_scheduler(engine)
     try:
         assert scheduler.get_job("embedding_backfill") is not None
         run_embedding_backfill(engine)
     finally:
         scheduler.shutdown(wait=False)
-
     assert engine.stats()["embedding_gap"] == 0
 ```
 
@@ -82,10 +74,7 @@ In `src/ormah/engine/memory_engine.py`, replace `stats()` (~L1117-1126) with:
         tier_counts = self.graph.count_by_tier()
         total = sum(tier_counts.values())
         edge_count = self.db.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
-        vec_count = self.db.conn.execute(
-            "SELECT count(*) FROM node_vectors"
-        ).fetchone()[0]
-        quarantine = set(self._get_meta_json("embedding_quarantine", []))
+        vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
         ver_row = self.db.conn.execute(
             "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
         ).fetchone()
@@ -94,7 +83,9 @@ In `src/ormah/engine/memory_engine.py`, replace `stats()` (~L1117-1126) with:
             "by_tier": tier_counts,
             "total_edges": edge_count,
             "vec_count": vec_count,
-            "embedding_gap": self._missing_embeddable_count(quarantine),
+            # Embeddable nodes still missing a vector -- the honest embedding gap.
+            # Stays > 0 for any node that cannot be embedded (visible, never masked).
+            "embedding_gap": self._missing_embeddable_count(),
             "embedding_schema_version": int(ver_row["value"]) if ver_row else 0,
         }
 ```

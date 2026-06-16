@@ -1,6 +1,6 @@
 <!DOCTYPE html>
-<!-- rich-doc-src-sha256:87c11b2d6c576a1f1b56dd8fac69543b5551146bec9071530eeb4e9c1625a576 -->
-<html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 03 — backfill_embeddings + quarantine (#32)</title>
+<!-- rich-doc-src-sha256:5e340a35f19ca98496f67ae5e738186cdeade0ecc93ae03ec8e92d7412d151ff -->
+<html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 03 — backfill_embeddings (#32)</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
 :root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace}
@@ -18,61 +18,162 @@ h1{font:400 italic 42px/1.08 var(--font-body);margin:12px 0 8px}
 h2{font:600 26px/1.12 var(--font-head);letter-spacing:-.015em;margin:48px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
 h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
 h3{font:600 17px/1.3 var(--font-head);margin:28px 0 8px;scroll-margin-top:24px}
-.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:28em}
+.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:30em}
 p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent)}
 code{font:13.5px var(--font-mono);color:var(--accent)}
 pre{border:1px solid var(--hairline);padding:15px;overflow-x:auto;font:12.5px/1.6 var(--font-mono);color:var(--ink)}pre code{color:inherit}
 table{border-collapse:collapse;width:100%;margin:18px 0;font-size:15px;border:1px solid var(--hairline)}
 th,td{text-align:left;padding:10px 15px;border-bottom:1px solid var(--hairline)}
 th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
-tr:last-child td{border-bottom:none}
-.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}.chip.on{color:var(--accent);border-color:var(--accent)}
+tr:last-child td{border-bottom:none}td code{color:var(--ink)}
 .step{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone);border:1px solid var(--hairline);border-radius:20px;padding:4px 10px;margin-right:8px}
 .callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:13px 18px;margin:18px 0}
 .callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:7px}
+figure{margin:24px 0;padding:20px;border:1px solid var(--hairline);text-align:center}figure svg{max-width:100%;height:auto}
+figcaption{margin-top:10px;font:400 12px/1.4 var(--font-head);color:var(--stone);text-transform:uppercase;letter-spacing:.04em}
 .spectrum{display:flex;height:4px;margin:38px 0 20px}.spectrum span{flex:1}.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
 .signature{border-left:2px solid var(--accent);padding-left:15px;color:var(--stone)}.signature .name{font:400 italic 17px/1 var(--font-body);color:var(--ink)}.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
 @media(max-width:860px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:30px 22px 80px}}
 </style></head><body>
-<nav class="toc"><div class="eyebrow">#32 · Task 03</div><div class="doc-title">backfill + quarantine</div>
-<a href="#concepts">Concepts</a><a href="#files">Files</a><a href="#s1">1 · Failing tests</a><a href="#s3">3 · Helpers</a><a href="#s4">4 · backfill_embeddings</a><a href="#s5">5 · Verify</a></nav>
+<nav class="toc"><div class="eyebrow">#32 · Task 03</div><div class="doc-title">backfill_embeddings()</div>
+<a href="#what">What &amp; why</a><a href="#concepts">Concepts</a><a href="#flow">Two modes</a><a href="#files">Files</a><a href="#s1">1 · Failing tests</a><a href="#s3">3 · Helpers</a><a href="#s4">4 · backfill_embeddings</a><a href="#s5">5 · Verify</a></nav>
 <main>
-<div class="eyebrow">Implementation plan · Task 03 · council C1/I2</div>
-<h1>backfill + <em>quarantine</em></h1>
-<div class="meta">Delta + schema-bump · needs Tasks 01, 02</div>
-<p class="statement">A single poison node cannot force an O(n) re-embed every tick; the version advances only when the store is verified complete.</p>
+<div class="eyebrow">Implementation plan · Task 03</div>
+<h1>The <em>reconciler</em></h1>
+<div class="meta">delta + schema-bump · no quarantine · needs 01, 02</div>
+<p class="statement">Re-embed once on a schema bump, delete the stale vector of any failure, advance the version unconditionally — then let delta retry the honest gap forever.</p>
 
-<h2 id="concepts">The <em>concepts</em></h2>
-<table><thead><tr><th>Concept</th><th>Definition</th></tr></thead><tbody>
-<tr><td><code>meta['embedding_quarantine']</code></td><td>JSON list of ids that failed <code>&gt;= embedding_schema_max_attempts</code> times; excluded from delta + completeness target.</td></tr>
-<tr><td><code>meta['embedding_fail_counts']</code></td><td>JSON dict <code>{id: consecutive_fail_count}</code>; a success clears the entry.</td></tr>
-<tr><td><strong>embeddable</strong></td><td><code>COALESCE(NULLIF(TRIM(content),''), NULLIF(TRIM(title),'')) IS NOT NULL</code> and not quarantined.</td></tr>
-<tr><td><strong>missing</strong></td><td>embeddable nodes with no <code>node_vectors_rowids</code> row (<code>LEFT JOIN ... WHERE v.id IS NULL</code>).</td></tr>
-</tbody></table>
+<h2 id="what">What &amp; <em>why</em></h2>
+<p>Implements the council-revised recovery (<strong>R2: quarantine dropped</strong>): two modes (delta / schema-bump) with <strong>no quarantine</strong> and <strong>no fail-count meta</strong>. A schema bump re-embeds all embeddable nodes once, deletes the stale vector of any node that fails to encode (so it becomes genuinely missing), and advances the version <strong>unconditionally</strong> after the pass. Delta mode embeds only the nodes missing from the vector store (anti-join, O(gap)). A permanently-failing ("poison") node stays visible in <code>missing</code> and is retried every tick — never dropped, never masked.</p>
+
+<h2 id="concepts">Core <em>concepts</em></h2>
+<ul>
+<li><strong>embeddable</strong> node (SQL proxy for non-empty <code>_embedding_text</code>): <code>COALESCE(NULLIF(TRIM(content), ''), NULLIF(TRIM(title), '')) IS NOT NULL</code>. There is <strong>no</strong> quarantine — every embeddable node is always a candidate.</li>
+<li><strong>missing</strong> = embeddable nodes with no row in <code>node_vectors_rowids</code> (<code>LEFT JOIN ... WHERE v.id IS NULL</code>). <code>_missing_embeddable_count()</code> takes <strong>no arguments</strong>; it is the honest gap.</li>
+<li><strong>schema bump</strong> (<code>stored_version &lt; _EMBEDDING_SCHEMA_VERSION</code>): re-embed all embeddable nodes once; for each failure, <code>DELETE FROM node_vectors WHERE id = ?</code>; advance the version unconditionally.</li>
+<li><strong>delta</strong> (<code>stored_version == _EMBEDDING_SCHEMA_VERSION</code>): embed only the missing embeddable nodes, O(gap).</li>
+</ul>
+
+<h2 id="flow">Two <em>modes</em></h2>
+<figure>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 260" font-family="Arial,sans-serif" font-size="13">
+<rect x="30" y="20" width="220" height="56" fill="none" stroke="#d97757"/>
+<text x="140" y="44" text-anchor="middle" fill="#d97757">SCHEMA bump</text>
+<text x="140" y="64" text-anchor="middle">re-embed all embeddable</text>
+<line x1="250" y1="48" x2="300" y2="48" stroke="#141413"/>
+<rect x="300" y="20" width="170" height="56" fill="none" stroke="#141413"/>
+<text x="385" y="44" text-anchor="middle">encode fails?</text>
+<text x="385" y="64" text-anchor="middle">delete stale vec</text>
+<line x1="470" y1="48" x2="520" y2="48" stroke="#788c5d"/>
+<rect x="520" y="20" width="150" height="56" fill="none" stroke="#788c5d"/>
+<text x="595" y="44" text-anchor="middle" fill="#788c5d">advance version</text>
+<text x="595" y="64" text-anchor="middle">(unconditional)</text>
+<rect x="30" y="160" width="220" height="56" fill="none" stroke="#6a9bcc"/>
+<text x="140" y="184" text-anchor="middle" fill="#6a9bcc">DELTA (every tick)</text>
+<text x="140" y="204" text-anchor="middle">embed missing only · O(gap)</text>
+<line x1="250" y1="188" x2="300" y2="188" stroke="#141413"/>
+<rect x="300" y="160" width="370" height="56" fill="none" stroke="#141413"/>
+<text x="485" y="184" text-anchor="middle">poison node stays in `missing`</text>
+<text x="485" y="204" text-anchor="middle">retried one row at a time — never masked</text>
+</svg>
+<figcaption>Schema runs once at a version bump; delta is the steady-state reconciler</figcaption>
+</figure>
 
 <h2 id="files">Files <em>touched</em></h2>
 <table><thead><tr><th>Action</th><th>Path</th></tr></thead><tbody>
-<tr><td>Modify</td><td><code>src/ormah/engine/memory_engine.py</code> (helpers + <code>backfill_embeddings</code>)</td></tr>
+<tr><td>Modify</td><td><code>src/ormah/engine/memory_engine.py</code> (add helpers + <code>backfill_embeddings</code> near <code>_embed_node_rows</code>)</td></tr>
 <tr><td>Test</td><td><code>tests/test_engine/test_backfill_embeddings.py</code></td></tr></tbody></table>
 
 <h2 id="s1"><span class="step">Step 1</span><em>Failing</em> tests</h2>
-<p>4 tests: delta-closes-gap, delta-noop-when-full, schema-bump-reembeds-and-bumps, and the council C1 bound:</p>
-<pre><code>def test_schema_bump_quarantines_poison_node_without_looping(engine, monkeypatch):
-    """C1: a node that always fails to encode is quarantined within the retry
-    budget; the version then advances and subsequent runs do NOT re-embed all N."""
-    engine.settings.embedding_schema_max_attempts = 2
+<pre><code>"""Tests for MemoryEngine.backfill_embeddings (delta + schema-bump, no quarantine, #32).
+
+Design (council R2): schema-bump re-embeds all embeddable nodes once, deletes the
+stale vector of any node that fails to encode (so it becomes genuinely missing),
+and advances the version unconditionally after the pass. Delta mode embeds only
+nodes missing from the vector store. A permanently-failing node stays visible in
+``missing`` and is retried every tick -- never dropped, never masked.
+"""
+from __future__ import annotations
+
+import numpy as np
+
+from ormah.models.node import CreateNodeRequest
+from ormah.engine.memory_engine import _EMBEDDING_SCHEMA_VERSION
+
+
+def _set_schema_version(engine, version: int) -> None:
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES "
+            "('embedding_schema_version', ?)",
+            (str(version),),
+        )
+
+
+def _stored_version(engine) -> int:
+    return int(engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key='embedding_schema_version'"
+    ).fetchone()["value"])
+
+
+def test_backfill_delta_closes_the_gap(engine):
+    ids = []
+    for i in range(3):
+        nid, _ = engine.remember(CreateNodeRequest(title=f"N{i}", content=f"content {i}"))
+        ids.append(nid)
+    _set_schema_version(engine, _EMBEDDING_SCHEMA_VERSION)  # already current -&gt; delta mode
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors WHERE id = ?", (ids[0],))
+
+    result = engine.backfill_embeddings()
+
+    assert result["mode"] == "delta"
+    assert result["missing"] == 0
+    assert engine.db.conn.execute(
+        "SELECT count(*) FROM node_vectors_rowids WHERE id = ?", (ids[0],)
+    ).fetchone()[0] == 1
+
+
+def test_backfill_delta_is_noop_when_full(engine):
+    engine.remember(CreateNodeRequest(title="Solo", content="content"))
+    _set_schema_version(engine, _EMBEDDING_SCHEMA_VERSION)
+    engine.backfill_embeddings()  # settle any startup-created node
+
+    result = engine.backfill_embeddings()
+
+    assert result["mode"] == "delta"
+    assert result["embedded"] == 0
+
+
+def test_backfill_schema_bump_reembeds_all_and_bumps_version(engine):
+    engine.remember(CreateNodeRequest(title="A", content="alpha"))
+    engine.remember(CreateNodeRequest(title="B", content="beta"))
+    _set_schema_version(engine, 1)
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors")
+
+    result = engine.backfill_embeddings()
+
+    assert result["mode"] == "schema"
+    assert result["missing"] == 0
+    assert _stored_version(engine) == _EMBEDDING_SCHEMA_VERSION
+
+
+def test_schema_bump_poison_node_stays_visible_and_advances_version(engine, monkeypatch):
+    """A node that always fails to encode stays genuinely missing (its stale vector
+    is deleted) and visible in `missing`; the version still advances after the pass,
+    and the next delta run retries it without re-embedding the whole store."""
     engine.remember(CreateNodeRequest(title="poison", content="POISON payload"))
     engine.remember(CreateNodeRequest(title="ok1", content="fine one"))
     engine.remember(CreateNodeRequest(title="ok2", content="fine two"))
     _set_schema_version(engine, 1)
-    with engine.db.transaction() as conn:
-        conn.execute("DELETE FROM node_vectors")
 
     dim = engine.settings.embedding_dim
 
     class _SelectiveEncoder:
         def __init__(self):
             self.encode_calls = 0
+
         def encode(self, text):
             self.encode_calls += 1
             if "POISON" in text:
@@ -82,102 +183,125 @@ tr:last-child td{border-bottom:none}
     enc = _SelectiveEncoder()
     monkeypatch.setattr("ormah.embeddings.encoder.get_encoder", lambda settings: enc)
 
-    r1 = engine.backfill_embeddings()                  # poison fails (count 1) -> version stays 1
-    r2 = engine.backfill_embeddings()                  # fails again (count 2) -> quarantined -> version bumps
-    assert r2["quarantined"] == 1
-    assert int(engine.db.conn.execute(
-        "SELECT value FROM meta WHERE key='embedding_schema_version'").fetchone()["value"]) == _EMBEDDING_SCHEMA_VERSION
+    # Schema bump: poison fails -&gt; its stale vector is deleted -&gt; genuinely missing.
+    r1 = engine.backfill_embeddings()
+    assert r1["mode"] == "schema"
+    assert r1["failed"] == 1
+    assert r1["missing"] == 1
+    assert _stored_version(engine) == _EMBEDDING_SCHEMA_VERSION  # advances unconditionally
+    assert engine.db.conn.execute(
+        "SELECT count(*) FROM node_vectors_rowids WHERE id = "
+        "(SELECT id FROM nodes WHERE title='poison')"
+    ).fetchone()[0] == 0
 
-    calls_before = enc.encode_calls
-    r3 = engine.backfill_embeddings()                  # delta; quarantined poison excluded
-    assert r3["mode"] == "delta" and r3["embedded"] == 0
-    assert enc.encode_calls == calls_before            # did NOT re-embed all N again</code></pre>
-<p>(Full file also has <code>test_backfill_delta_closes_the_gap</code>, <code>test_backfill_delta_is_noop_when_full</code>, <code>test_backfill_schema_bump_reembeds_all_and_bumps_version</code> — see the task md.)</p>
+    # Delta run: retries ONLY the missing poison node (O(gap)), still fails.
+    calls_after_schema = enc.encode_calls
+    r2 = engine.backfill_embeddings()
+    assert r2["mode"] == "delta"
+    assert r2["embedded"] == 0
+    assert r2["failed"] == 1
+    assert r2["missing"] == 1
+    assert enc.encode_calls == calls_after_schema + 1  # one retry, not a full re-embed</code></pre>
 
-<h2 id="s3"><span class="step">Step 3</span>Quarantine + query <em>helpers</em></h2>
-<pre><code>    _EMBEDDABLE_SQL = (
+<h3 id="s2">Step 2 · Run to verify it fails</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_engine/test_backfill_embeddings.py -v</code> → FAIL (<code>AttributeError: ... 'backfill_embeddings'</code>).</p>
+
+<h2 id="s3"><span class="step">Step 3</span><code>_EMBEDDABLE_SQL</code> + <em>missing count</em></h2>
+<p>In <code>src/ormah/engine/memory_engine.py</code>, add these near <code>_embed_node_rows</code> (Task 02):</p>
+<pre><code>    # SQL proxy for "_embedding_text(title, content) is non-empty": a node is
+    # embeddable when it has non-whitespace content OR title.
+    _EMBEDDABLE_SQL = (
         "COALESCE(NULLIF(TRIM(content), ''), NULLIF(TRIM(title), '')) IS NOT NULL"
     )
 
-    def _get_meta_json(self, key: str, default):
-        row = self.db.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-        if not row:
-            return default
-        try:
-            return json.loads(row["value"])
-        except (ValueError, TypeError):
-            return default
-
-    def _set_meta_json(self, key: str, value) -> None:
-        with self.db.transaction() as conn:
-            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                         (key, json.dumps(value)))
-
-    def _missing_embeddable_count(self, quarantine: set[str]) -> int:
-        rows = self.db.conn.execute(
-            f"SELECT n.id FROM nodes n "
+    def _missing_embeddable_count(self) -&gt; int:
+        """Embeddable nodes with no row in the vector store (the honest gap)."""
+        return self.db.conn.execute(
+            f"SELECT count(*) FROM nodes n "
             f"LEFT JOIN node_vectors_rowids v ON n.id = v.id "
             f"WHERE v.id IS NULL AND {self._EMBEDDABLE_SQL}"
-        ).fetchall()
-        return sum(1 for r in rows if r["id"] not in quarantine)</code></pre>
+        ).fetchone()[0]</code></pre>
 
-<h2 id="s4"><span class="step">Step 4</span><em>backfill_embeddings()</em></h2>
-<pre><code>    def backfill_embeddings(self) -> dict:
-        max_attempts = self.settings.embedding_schema_max_attempts
-        quarantine = set(self._get_meta_json("embedding_quarantine", []))
-        fail_counts = self._get_meta_json("embedding_fail_counts", {})
+<h2 id="s4"><span class="step">Step 4</span>Implement <em>backfill_embeddings</em></h2>
+<pre><code>    def backfill_embeddings(self) -&gt; dict:
+        """Reconcile the vector store. Idempotent; safe to run repeatedly.
 
+        Two modes:
+        - **schema bump** (stored version &lt; current): every existing vector was
+          built under an old scheme, so re-embed all embeddable nodes in a single
+          pass. For each node that fails to encode, delete its stale vector so it
+          becomes genuinely missing (caught by future delta runs). Advance the
+          version unconditionally after the pass -- the store has been fully
+          reprocessed; nodes that could not be embedded are now honestly missing.
+        - **delta** (stored version == current): embed only embeddable nodes
+          missing from the vector store (anti-join), O(gap).
+
+        A permanently-failing node simply stays in ``missing`` and is retried each
+        tick -- never dropped, never masked. Returns a summary dict where
+        ``missing`` is the honest embedding gap after the run.
+        """
         count = self.db.conn.execute("SELECT count(*) FROM nodes").fetchone()[0]
         ver_row = self.db.conn.execute(
-            "SELECT value FROM meta WHERE key = 'embedding_schema_version'").fetchone()
+            "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
+        ).fetchone()
         stored_version = int(ver_row["value"]) if ver_row else 0
-
-        q_list = list(quarantine)
-        placeholders = ",".join("?" * len(q_list)) if q_list else None
-        not_quarantined = f"AND n.id NOT IN ({placeholders})" if placeholders else ""
-        params = tuple(q_list)
 
         if stored_version &lt; _EMBEDDING_SCHEMA_VERSION:
             mode = "schema"
             rows = self.db.conn.execute(
-                f"SELECT n.id, n.title, n.content FROM nodes n "
-                f"WHERE {self._EMBEDDABLE_SQL} {not_quarantined}", params).fetchall()
+                f"SELECT id, title, content FROM nodes WHERE {self._EMBEDDABLE_SQL}"
+            ).fetchall()
+            logger.info(
+                "Embedding backfill (schema v%d-&gt;v%d): re-embedding %d nodes",
+                stored_version, _EMBEDDING_SCHEMA_VERSION, len(rows),
+            )
         else:
             mode = "delta"
             rows = self.db.conn.execute(
                 f"SELECT n.id, n.title, n.content FROM nodes n "
                 f"LEFT JOIN node_vectors_rowids v ON n.id = v.id "
-                f"WHERE v.id IS NULL AND {self._EMBEDDABLE_SQL} {not_quarantined}", params).fetchall()
+                f"WHERE v.id IS NULL AND {self._EMBEDDABLE_SQL}"
+            ).fetchall()
+            if rows:
+                logger.info("Embedding backfill (delta): embedding %d missing nodes", len(rows))
 
         embedded_ids, failed_ids = self._embed_node_rows(rows)
 
-        for nid in embedded_ids:
-            fail_counts.pop(nid, None)
-        for nid in failed_ids:
-            fail_counts[nid] = fail_counts.get(nid, 0) + 1
-            if fail_counts[nid] >= max_attempts:
-                quarantine.add(nid); fail_counts.pop(nid, None)
-        self._set_meta_json("embedding_quarantine", sorted(quarantine))
-        self._set_meta_json("embedding_fail_counts", fail_counts)
-
-        missing = self._missing_embeddable_count(quarantine)
-        if mode == "schema" and missing == 0:
+        # Schema mode: drop the stale vector of any node that failed to re-embed
+        # under the new scheme, so it is genuinely missing (and retried by delta)
+        # rather than silently kept with an outdated embedding.
+        if mode == "schema" and failed_ids:
             with self.db.transaction() as conn:
-                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES "
-                             "('embedding_schema_version', ?)", (str(_EMBEDDING_SCHEMA_VERSION),))
+                for nid in failed_ids:
+                    conn.execute("DELETE FROM node_vectors WHERE id = ?", (nid,))
 
+        # Advance the schema version unconditionally after a full schema pass.
+        if mode == "schema":
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                    "('embedding_schema_version', ?)",
+                    (str(_EMBEDDING_SCHEMA_VERSION),),
+                )
+
+        missing = self._missing_embeddable_count()
         vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
-        return {"mode": mode, "embedded": len(embedded_ids), "failed": len(failed_ids),
-                "missing": missing, "quarantined": len(quarantine),
-                "vec_count": vec_count, "node_count": count}</code></pre>
-<div class="callout"><span class="label">Bound</span>The schema migration costs O(N × budget) one-time (a poison node is quarantined within <code>embedding_schema_max_attempts</code> passes), then delta forever — never an unbounded loop.</div>
+        return {
+            "mode": mode,
+            "embedded": len(embedded_ids),
+            "failed": len(failed_ids),
+            "missing": missing,
+            "vec_count": vec_count,
+            "node_count": count,
+        }</code></pre>
+<div class="callout"><span class="label">Return dict</span>Keys: <code>mode</code>, <code>embedded</code>, <code>failed</code>, <code>missing</code>, <code>vec_count</code>, <code>node_count</code>. There is <strong>no</strong> <code>quarantined</code> key — consumed by <a href="06-background-job.html">Task 06</a> and <a href="10-observability-and-e2e.html">Task 10</a>.</div>
 
 <h2 id="s5"><span class="step">Step 5</span><em>Verify</em> + commit</h2>
-<pre><code>.venv/bin/python -m pytest tests/test_engine/test_backfill_embeddings.py -v
-.venv/bin/ruff check src/ormah/engine/memory_engine.py tests/test_engine/test_backfill_embeddings.py
+<p>Run: <code>.venv/bin/python -m pytest tests/test_engine/test_backfill_embeddings.py -v</code> → PASS (4 tests, incl. the poison-node-stays-visible bound).</p>
+<pre><code>.venv/bin/ruff check src/ormah/engine/memory_engine.py tests/test_engine/test_backfill_embeddings.py
 git add src/ormah/engine/memory_engine.py tests/test_engine/test_backfill_embeddings.py
-git commit -m "feat(engine): backfill_embeddings with quarantine + verified completeness (#32)"</code></pre>
+git commit -m "feat(engine): backfill_embeddings delta + schema-bump, delete-stale, advance-after-pass (#32)"</code></pre>
 
 <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
-<div class="signature"><span class="name">Ormah #32 · Task 03</span><span class="role">backfill + quarantine</span></div>
+<div class="signature"><span class="name">Ormah #32 · Task 03</span><span class="role">backfill_embeddings — no quarantine</span></div>
 </main></body></html>

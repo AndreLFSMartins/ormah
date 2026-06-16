@@ -2,8 +2,9 @@
 
 Pure refactor: pull the build-embeddings → chunked-upsert → verify loop into a reusable
 `_embed_node_rows(nodes) -> (embedded_ids, failed_ids)` method that operates on an explicit row
-list and reports **which** ids succeeded/failed (Task 03's quarantine needs the ids, not just
-counts). `_reindex_all_embeddings()` becomes a thin wrapper, so the public reindex path is
+list and reports **which** ids succeeded/failed (Task 03's reconciliation needs the ids — it
+deletes the stale vector of any node that fails to re-embed — not just counts).
+`_reindex_all_embeddings()` becomes a thin wrapper, so the public reindex path is
 unchanged. The `vec_count` discrepancy warning from the original is preserved.
 
 **Files:**

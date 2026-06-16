@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- rich-doc-src-sha256:695c7343ba07fd1f31f3a891a39aa46fd2c0447ff8128f5562d9e83d92cfe8f6 -->
+<!-- rich-doc-src-sha256:64ad6f51f04e983592dccba870265210cf03e89266b7904e3c0186d5066bb0d4 -->
 <html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 02 — Extract _embed_node_rows (#32)</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
@@ -39,7 +39,7 @@ tr:last-child td{border-bottom:none}
 <div class="eyebrow">Implementation plan · Task 02</div>
 <h1>Extract <em>_embed_node_rows</em></h1>
 <div class="meta">Pure refactor · no dependencies</div>
-<p class="statement">One reusable embedding core that reports which ids succeeded and failed — the quarantine needs the ids.</p>
+<p class="statement">One reusable embedding core that reports which ids succeeded and failed — the reconciliation needs the ids.</p>
 
 <h2 id="why">The <em>refactor</em></h2>
 <p>Pull the build-embeddings → chunked-upsert → verify loop out of <code>_reindex_all_embeddings</code> into <code>_embed_node_rows(nodes) -&gt; (embedded_ids, failed_ids)</code>. <code>_reindex_all_embeddings()</code> becomes a thin wrapper, so the public reindex path is unchanged. The <code>vec_count</code> discrepancy warning is preserved.</p>

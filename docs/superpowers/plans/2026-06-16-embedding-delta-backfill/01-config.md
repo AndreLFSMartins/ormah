@@ -33,13 +33,12 @@ def test_embedding_index_max_retries_rejects_negative():
         Settings(embedding_index_max_retries=-1)
 
 
-def test_embedding_schema_max_attempts_default_and_floor():
+def test_embedding_index_retry_backoff_rejects_negative():
     import pytest
     from pydantic import ValidationError
     from ormah.config import Settings
-    assert Settings().embedding_schema_max_attempts == 3
     with pytest.raises(ValidationError):
-        Settings(embedding_schema_max_attempts=0)
+        Settings(embedding_index_retry_backoff_seconds=-0.1)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -53,11 +52,12 @@ In `src/ormah/config.py`, after the `auto_cluster_interval_minutes` line (~L58) 
 "Background intervals" block add:
 
 ```python
-    # Embedding backfill / vector-store reconciliation (#32)
+    # Embedding backfill / vector-store reconciliation (#32).
+    # Set the interval to a very large value (e.g. 999999) to disable the
+    # in-process recurring job and let the 02:00 sleep-cycle (run-all) drive it.
     embedding_backfill_interval_minutes: int = 60
     embedding_index_max_retries: int = 2
     embedding_index_retry_backoff_seconds: float = 0.5
-    embedding_schema_max_attempts: int = 3  # quarantine a node after this many failed schema-bump embeds
 ```
 
 - [ ] **Step 4: Add validators**
@@ -80,7 +80,7 @@ field_validator list (~L280-285) so it reads:
         return v
 ```
 
-Then add a new validator below it:
+Then add two new validators below it:
 
 ```python
     @field_validator("embedding_index_max_retries")
@@ -96,19 +96,12 @@ Then add a new validator below it:
         if v < 0:
             raise ValueError(f"embedding_index_retry_backoff_seconds must be >= 0, got {v}")
         return v
-
-    @field_validator("embedding_schema_max_attempts")
-    @classmethod
-    def _embedding_schema_max_attempts_positive(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"embedding_schema_max_attempts must be >= 1, got {v}")
-        return v
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_config.py -v -k embedding_backfill or embedding_index`
-Expected: PASS (3 tests).
+Expected: PASS (4 tests).
 
 - [ ] **Step 6: Lint + commit**
 
