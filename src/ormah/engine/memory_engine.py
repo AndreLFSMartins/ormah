@@ -8,6 +8,7 @@ import logging
 import math
 import re
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2210,17 +2211,32 @@ class MemoryEngine:
                 return None
 
     def _index_embedding(self, node: MemoryNode) -> None:
-        try:
-            from ormah.embeddings.vector_store import VectorStore
-            from ormah.embeddings.encoder import get_encoder
+        from ormah.embeddings.vector_store import VectorStore
+        from ormah.embeddings.encoder import get_encoder
 
-            encoder = get_encoder(self.settings)
-            vec_store = VectorStore(self.db)
-            text = _embedding_text(node.title, node.content, self.settings.embedding_max_content_chars)
-            embedding = encoder.encode(text)
-            vec_store.upsert(node.id, embedding)
-        except Exception as e:
-            logger.warning("Failed to index embedding for node %s: %s", node.id[:8], e)
+        text = _embedding_text(
+            node.title, node.content, self.settings.embedding_max_content_chars
+        )
+        if not text:
+            return
+
+        max_retries = self.settings.embedding_index_max_retries
+        backoff = self.settings.embedding_index_retry_backoff_seconds
+        for attempt in range(max_retries + 1):
+            try:
+                encoder = get_encoder(self.settings)
+                vec_store = VectorStore(self.db)
+                embedding = encoder.encode(text)
+                vec_store.upsert(node.id, embedding)
+                return
+            except Exception as e:
+                if attempt < max_retries:
+                    time.sleep(backoff * (2 ** attempt))
+                    continue
+                logger.warning(
+                    "Failed to index embedding for node %s after %d attempts: %s",
+                    node.id[:8], max_retries + 1, e,
+                )
 
     def _auto_link_node(self, node: MemoryNode) -> list[tuple[str, str, float]]:
         """Find similar existing nodes and create edges. Returns [(id, title, similarity)]."""
