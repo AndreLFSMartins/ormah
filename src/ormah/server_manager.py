@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -59,7 +60,11 @@ PLIST_TEMPLATE = """\
     <key>PATH</key><string>{bin_dir}:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>30</integer>
 </dict>
 </plist>
 """
@@ -86,6 +91,18 @@ def is_server_running() -> bool:
             return r.status_code == 200
     except Exception:
         return False
+
+
+def is_port_in_use(host: str, port: int) -> bool:
+    """Return True if something is already accepting connections on host:port.
+
+    Used as a pre-flight before binding: if another process (typically an
+    already-running ormah server) owns the port, the launcher exits cleanly
+    instead of letting uvicorn crash on bind and KeepAlive respawn it in a loop.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) == 0
 
 
 def install_launchd_agent(ormah_bin: str, wrapper_path: str | None = None) -> None:
