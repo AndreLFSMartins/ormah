@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -155,6 +155,24 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         id="restore_verification",
         name="Cloud restore verification",
         misfire_grace_time=_MISFIRE_GRACE,
+    )
+
+    from ormah.background.embedding_backfill import run_embedding_backfill
+
+    # Reconcile the vector store (delta + schema bump). A post-bind first run
+    # (~10s after start) guarantees recovery right after the port binds even when
+    # the operator sets the interval to a very large value (999999) to rely on the
+    # 02:00 sleep-cycle instead. max_instances=1: a slow run on a large gap must
+    # never overlap the next tick.
+    scheduler.add_job(
+        tracked(tracker, "embedding_backfill", run_embedding_backfill, engine),
+        "interval",
+        minutes=s.embedding_backfill_interval_minutes,
+        id="embedding_backfill",
+        name="Embedding backfill",
+        misfire_grace_time=_MISFIRE_GRACE,
+        max_instances=1,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10),
     )
 
     scheduler.start()
