@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- rich-doc-src-sha256:24a1bb71123665902f13203d37e5a09325e33fe70b47a41e6a05e29eb973903c -->
+<!-- rich-doc-src-sha256:e0a6f9652d5d6d5383379433b4fdaee5046848e4f42c7c6a210382f33e35afa5 -->
 <html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 06 — embedding_backfill job (#32)</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
@@ -18,40 +18,39 @@ h1{font:400 italic 42px/1.08 var(--font-body);margin:12px 0 8px}
 h2{font:600 26px/1.12 var(--font-head);letter-spacing:-.015em;margin:48px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
 h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
 h3{font:600 17px/1.3 var(--font-head);margin:28px 0 8px;scroll-margin-top:24px}
-.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:26em}
+.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:27em}
 p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent)}
 code{font:13.5px var(--font-mono);color:var(--accent)}
-pre{border:1px solid var(--hairline);padding:15px;overflow-x:auto;font:12.5px/1.6 var(--font-mono);color:var(--ink)}
-pre code{color:inherit}
+pre{border:1px solid var(--hairline);padding:15px;overflow-x:auto;font:12.5px/1.6 var(--font-mono);color:var(--ink)}pre code{color:inherit}
 table{border-collapse:collapse;width:100%;margin:18px 0;font-size:15px;border:1px solid var(--hairline)}
 th,td{text-align:left;padding:10px 15px;border-bottom:1px solid var(--hairline)}
 th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
 tr:last-child td{border-bottom:none}
 .step{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone);border:1px solid var(--hairline);border-radius:20px;padding:4px 10px;margin-right:8px}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:13px 18px;margin:18px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:7px}
 .spectrum{display:flex;height:4px;margin:38px 0 20px}.spectrum span{flex:1}.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
 .signature{border-left:2px solid var(--accent);padding-left:15px;color:var(--stone)}.signature .name{font:400 italic 17px/1 var(--font-body);color:var(--ink)}.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
 @media(max-width:860px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:30px 22px 80px}}
 </style></head><body>
 <nav class="toc"><div class="eyebrow">#32 · Task 06</div><div class="doc-title">embedding_backfill job</div>
-<a href="#why">Why</a><a href="#files">Files</a><a href="#s1">1 · Failing test</a><a href="#s3">3 · Module</a><a href="#s4">4 · Verify</a><a href="#s5">5 · Commit</a></nav>
+<a href="#why">Why</a><a href="#files">Files</a><a href="#s1">1 · Failing tests</a><a href="#s3">3 · Module</a><a href="#s4">4 · Verify</a></nav>
 <main>
-<div class="eyebrow">Implementation plan · Task 06</div>
+<div class="eyebrow">Implementation plan · Task 06 · council I4</div>
 <h1>The <em>job</em> module</h1>
-<div class="meta">Thin scheduler wrapper · needs Task 03</div>
-<p class="statement">Call backfill_embeddings, log real work, swallow errors — a background job never crashes the scheduler.</p>
+<div class="meta">Scheduler wrapper · raises on incomplete · needs Task 03</div>
+<p class="statement">An incomplete backfill must show as a job failure in health — not a false "ok" hiding missing vectors.</p>
 
 <h2 id="why">The <em>wrapper</em></h2>
-<p>Follows the <code>run_decay(engine)</code> / <code>run_auto_linker(engine)</code> pattern: call <code>engine.backfill_embeddings()</code>, log non-empty work, swallow exceptions.</p>
+<p>Follows the <code>run_decay(engine)</code> pattern, with one council-I4 twist: when the run ends with <code>missing &gt; 0</code> (embeddable, non-quarantined nodes still lack vectors), it <strong>raises</strong> so <code>tracked()</code> records a failure and <code>/admin/health</code> reflects the degradation. A fully-quarantined / fully-embedded store (<code>missing == 0</code>) is a success even if some nodes failed transiently this tick.</p>
 
 <h2 id="files">Files <em>touched</em></h2>
 <table><thead><tr><th>Action</th><th>Path</th></tr></thead><tbody>
 <tr><td>Create</td><td><code>src/ormah/background/embedding_backfill.py</code></td></tr>
 <tr><td>Test</td><td><code>tests/test_background/test_embedding_backfill.py</code></td></tr></tbody></table>
 
-<h2 id="s1"><span class="step">Step 1</span><em>Failing</em> test</h2>
-<pre><code>"""Tests for the embedding_backfill background job (#32)."""
-from __future__ import annotations
-
+<h2 id="s1"><span class="step">Step 1</span><em>Failing</em> tests</h2>
+<pre><code>import pytest
 from ormah.background.embedding_backfill import run_embedding_backfill
 from ormah.models.node import CreateNodeRequest
 
@@ -60,35 +59,31 @@ def test_run_embedding_backfill_closes_gap(engine):
     nid, _ = engine.remember(CreateNodeRequest(title="Job", content="content"))
     with engine.db.transaction() as conn:
         conn.execute("DELETE FROM node_vectors WHERE id = ?", (nid,))
-
-    run_embedding_backfill(engine)  # returns None, like the other jobs
-
+    run_embedding_backfill(engine)
     assert engine.db.conn.execute(
         "SELECT count(*) FROM node_vectors_rowids WHERE id = ?", (nid,)
     ).fetchone()[0] == 1
 
 
-def test_run_embedding_backfill_swallows_errors(engine, monkeypatch):
-    def _boom():
-        raise RuntimeError("backfill exploded")
+def test_run_embedding_backfill_raises_when_incomplete(engine, monkeypatch):
+    monkeypatch.setattr(engine, "backfill_embeddings",
+        lambda: {"mode": "delta", "embedded": 0, "failed": 1, "missing": 1,
+                 "quarantined": 0, "vec_count": 0, "node_count": 1})
+    with pytest.raises(RuntimeError, match="incomplete"):
+        run_embedding_backfill(engine)
 
-    monkeypatch.setattr(engine, "backfill_embeddings", _boom)
 
-    # must not raise -- background jobs are fail-safe
-    run_embedding_backfill(engine)</code></pre>
+def test_run_embedding_backfill_ok_when_complete(engine, monkeypatch):
+    monkeypatch.setattr(engine, "backfill_embeddings",
+        lambda: {"mode": "delta", "embedded": 0, "failed": 0, "missing": 0,
+                 "quarantined": 0, "vec_count": 1, "node_count": 1})
+    run_embedding_backfill(engine)  # must NOT raise</code></pre>
 
 <h3 id="s2">Step 2 · Run to verify it fails</h3>
-<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_embedding_backfill.py -v</code><br>
-Expected: FAIL — <code>ModuleNotFoundError: No module named 'ormah.background.embedding_backfill'</code>.</p>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_embedding_backfill.py -v</code> → FAIL (module missing).</p>
 
 <h2 id="s3"><span class="step">Step 3</span>Create the <em>module</em></h2>
-<p>Create <code>src/ormah/background/embedding_backfill.py</code>:</p>
-<pre><code>"""Vector-store reconciliation job: backfill missing embeddings (#32).
-
-Runs `engine.backfill_embeddings()` -- delta-only when the schema version matches,
-a full re-embed on a schema bump. Registered in the scheduler with a post-bind
-`next_run_time` and included in the sleep-cycle `run-all` pass.
-"""
+<pre><code>"""Vector-store reconciliation job: backfill missing embeddings (#32)."""
 
 from __future__ import annotations
 
@@ -98,25 +93,26 @@ logger = logging.getLogger(__name__)
 
 
 def run_embedding_backfill(engine) -> None:
-    """Embed any nodes missing a vector (or re-embed all on a schema bump)."""
-    try:
-        result = engine.backfill_embeddings()
-        if result.get("embedded"):
-            logger.info(
-                "Embedding backfill (%s): embedded=%d failed=%d vec=%d/%d",
-                result["mode"], result["embedded"], result.get("failed", 0),
-                result["vec_count"], result["node_count"],
-            )
-    except Exception as e:
-        logger.warning("Embedding backfill failed: %s", e)</code></pre>
+    """Reconcile the vector store. Raises if the store is left incomplete."""
+    result = engine.backfill_embeddings()
+    if result.get("embedded") or result.get("missing"):
+        logger.info(
+            "Embedding backfill (%s): embedded=%d failed=%d missing=%d quarantined=%d vec=%d/%d",
+            result["mode"], result["embedded"], result["failed"], result["missing"],
+            result["quarantined"], result["vec_count"], result["node_count"],
+        )
+    if result.get("missing", 0) > 0:
+        raise RuntimeError(
+            f"Embedding backfill incomplete: {result['missing']} embeddable nodes "
+            f"still missing vectors (failed={result['failed']})"
+        )</code></pre>
+<div class="callout"><span class="label">Health signal</span>Unlike the other jobs, this one does <strong>not</strong> swallow the incomplete state — <code>tracked()</code> (job_tracker.py:81-83) catches the raise and records a job failure, the intended health signal.</div>
 
-<h2 id="s4"><span class="step">Step 4</span><em>Verify</em></h2>
-<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_embedding_backfill.py -v</code> → PASS (2 tests).</p>
-
-<h2 id="s5"><span class="step">Step 5</span>Lint + <em>commit</em></h2>
-<pre><code>.venv/bin/ruff check src/ormah/background/embedding_backfill.py tests/test_background/test_embedding_backfill.py
+<h2 id="s4"><span class="step">Step 4</span><em>Verify</em> + commit</h2>
+<pre><code>.venv/bin/python -m pytest tests/test_background/test_embedding_backfill.py -v
+.venv/bin/ruff check src/ormah/background/embedding_backfill.py tests/test_background/test_embedding_backfill.py
 git add src/ormah/background/embedding_backfill.py tests/test_background/test_embedding_backfill.py
-git commit -m "feat(background): add embedding_backfill reconciliation job (#32)"</code></pre>
+git commit -m "feat(background): embedding_backfill job, non-ok on incomplete store (#32)"</code></pre>
 
 <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
 <div class="signature"><span class="name">Ormah #32 · Task 06</span><span class="role">embedding_backfill job</span></div>

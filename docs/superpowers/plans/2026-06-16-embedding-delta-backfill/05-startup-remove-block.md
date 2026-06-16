@@ -2,8 +2,9 @@
 
 `startup()` currently blocks the uvicorn port bind on a full re-embed whenever any vector is
 missing. Delete that block — recovery (delta + schema bump) now lives in `backfill_embeddings`
-(Task 03), driven by the background job (Task 06/07). After this, `startup()` never touches the
-encoder, so the port binds immediately.
+(Task 03), driven by the background job (Task 06/07). After this, `startup()` no longer
+**embeds** nodes — it still calls `_warmup_embedder()` (which warms the encoder; intentional
+and unchanged), but the synchronous full re-embed that blocked the bind is gone.
 
 **Files:**
 - Modify: `src/ormah/engine/memory_engine.py` (`startup()` ~L121-138)
@@ -30,7 +31,7 @@ def test_startup_does_not_call_reindex(tmp_memory_dir, monkeypatch):
     )
     monkeypatch.setattr(
         MemoryEngine, "_embed_node_rows",
-        lambda self, nodes: (called.__setitem__("embed_rows", True), (0, 0))[1],
+        lambda self, nodes: (called.__setitem__("embed_rows", True), ([], []))[1],
     )
 
     eng = MemoryEngine(Settings(memory_dir=tmp_memory_dir))

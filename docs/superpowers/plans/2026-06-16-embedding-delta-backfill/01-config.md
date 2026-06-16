@@ -31,6 +31,15 @@ def test_embedding_index_max_retries_rejects_negative():
     from ormah.config import Settings
     with pytest.raises(ValidationError):
         Settings(embedding_index_max_retries=-1)
+
+
+def test_embedding_schema_max_attempts_default_and_floor():
+    import pytest
+    from pydantic import ValidationError
+    from ormah.config import Settings
+    assert Settings().embedding_schema_max_attempts == 3
+    with pytest.raises(ValidationError):
+        Settings(embedding_schema_max_attempts=0)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -48,6 +57,7 @@ In `src/ormah/config.py`, after the `auto_cluster_interval_minutes` line (~L58) 
     embedding_backfill_interval_minutes: int = 60
     embedding_index_max_retries: int = 2
     embedding_index_retry_backoff_seconds: float = 0.5
+    embedding_schema_max_attempts: int = 3  # quarantine a node after this many failed schema-bump embeds
 ```
 
 - [ ] **Step 4: Add validators**
@@ -85,6 +95,13 @@ Then add a new validator below it:
     def _embedding_index_backoff_nonneg(cls, v: float) -> float:
         if v < 0:
             raise ValueError(f"embedding_index_retry_backoff_seconds must be >= 0, got {v}")
+        return v
+
+    @field_validator("embedding_schema_max_attempts")
+    @classmethod
+    def _embedding_schema_max_attempts_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"embedding_schema_max_attempts must be >= 1, got {v}")
         return v
 ```
 

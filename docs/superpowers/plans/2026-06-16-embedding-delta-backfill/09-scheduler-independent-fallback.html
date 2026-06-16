@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<!-- rich-doc-src-sha256:6ebda84fb36214203dc00f2bc8ac150cb59cec0f14b34208222870380f17d9db -->
+<html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 09 — Scheduler-independent fallback (#32)</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/1.55 var(--font-body);display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 28px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.1 var(--font-body);margin:0 0 24px}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}
+main{padding:56px 64px 120px;max-width:1040px}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 42px/1.08 var(--font-body);margin:12px 0 8px}
+h2{font:600 26px/1.12 var(--font-head);letter-spacing:-.015em;margin:48px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 17px/1.3 var(--font-head);margin:28px 0 8px;scroll-margin-top:24px}
+.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:27em}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent)}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:15px;overflow-x:auto;font:12.5px/1.6 var(--font-mono);color:var(--ink)}pre code{color:inherit}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:10px 15px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+.step{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone);border:1px solid var(--hairline);border-radius:20px;padding:4px 10px;margin-right:8px}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:13px 18px;margin:18px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:7px}
+.spectrum{display:flex;height:4px;margin:38px 0 20px}.spectrum span{flex:1}.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{border-left:2px solid var(--accent);padding-left:15px;color:var(--stone)}.signature .name{font:400 italic 17px/1 var(--font-body);color:var(--ink)}.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:860px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:30px 22px 80px}}
+</style></head><body>
+<nav class="toc"><div class="eyebrow">#32 · Task 09</div><div class="doc-title">Scheduler fallback</div>
+<a href="#why">Why</a><a href="#files">Files</a><a href="#s1">1 · Failing tests</a><a href="#s3">3 · Helper</a><a href="#s4">4 · Wire in lifespan</a><a href="#s5">5 · Verify</a></nav>
+<main>
+<div class="eyebrow">Implementation plan · Task 09 · council I1</div>
+<h1>Scheduler-independent <em>fallback</em></h1>
+<div class="meta">Daemon-thread one-shot · needs Task 06</div>
+<p class="statement">If the scheduler fails to start, recovery still happens — off a daemon thread, never blocking the bind.</p>
+
+<h2 id="why">The <em>change</em></h2>
+<p>Council <strong>I1</strong>: the server treats <code>start_scheduler</code> as optional (<code>lifespan</code> catches its failure and keeps serving). With the synchronous startup re-embed gone (Task 05), a scheduler that fails to start would leave missing vectors unhealed indefinitely. When the scheduler did <strong>not</strong> start, kick one reconciliation off a daemon thread. The happy path is unchanged — the scheduler's post-bind <code>next_run_time</code> (Task 07) still drives the first run and the recurring cadence.</p>
+
+<h2 id="files">Files <em>touched</em></h2>
+<table><thead><tr><th>Action</th><th>Path</th></tr></thead><tbody>
+<tr><td>Modify</td><td><code>src/ormah/main.py</code> (add <code>_start_backfill_fallback</code>; call in <code>lifespan</code> ~L68-71)</td></tr>
+<tr><td>Test</td><td><code>tests/test_main_backfill_fallback.py</code></td></tr></tbody></table>
+
+<h2 id="s1"><span class="step">Step 1</span><em>Failing</em> tests</h2>
+<pre><code>"""Scheduler-independent embedding backfill fallback (#32, council I1)."""
+from __future__ import annotations
+
+import time
+
+from ormah import main
+
+
+def test_start_backfill_fallback_runs_job_off_thread(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "ormah.background.embedding_backfill.run_embedding_backfill",
+        lambda engine: calls.append(engine),
+    )
+    sentinel = object()
+    main._start_backfill_fallback(sentinel)
+    for _ in range(100):
+        if calls:
+            break
+        time.sleep(0.01)
+    assert calls == [sentinel]
+
+
+def test_start_backfill_fallback_swallows_errors(monkeypatch):
+    def _boom(engine):
+        raise RuntimeError("backfill blew up in fallback")
+    monkeypatch.setattr(
+        "ormah.background.embedding_backfill.run_embedding_backfill", _boom)
+    main._start_backfill_fallback(object())  # must not raise
+    time.sleep(0.05)</code></pre>
+
+<h3 id="s2">Step 2 · Run to verify it fails</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_main_backfill_fallback.py -v</code> → FAIL (no <code>_start_backfill_fallback</code>).</p>
+
+<h2 id="s3"><span class="step">Step 3</span>The fallback <em>helper</em></h2>
+<pre><code>def _start_backfill_fallback(engine) -> None:
+    """Run one embedding reconciliation off a daemon thread when the scheduler is
+    unavailable, so missing vectors are still healed without it (#32, council I1).
+    Off the bind path -- never blocks startup."""
+    import threading
+
+    def _run():
+        from ormah.background.embedding_backfill import run_embedding_backfill
+        try:
+            run_embedding_backfill(engine)
+        except Exception as e:
+            logger.warning("Embedding backfill fallback failed: %s", e)
+
+    threading.Thread(
+        target=_run, name="embedding-backfill-fallback", daemon=True
+    ).start()</code></pre>
+
+<h2 id="s4"><span class="step">Step 4</span>Wire into <em>lifespan</em></h2>
+<p>After the scheduler <code>try/except</code> block (~L68-71):</p>
+<pre><code>    # If the scheduler did not start, the recurring embedding_backfill job won't run.
+    # Heal missing vectors once off a daemon thread so recovery doesn't depend on it (#32).
+    if not hasattr(app.state, "scheduler"):
+        _start_backfill_fallback(engine)</code></pre>
+
+<h2 id="s5"><span class="step">Step 5</span><em>Verify</em> + commit</h2>
+<pre><code>.venv/bin/python -m pytest tests/test_main_backfill_fallback.py -v
+.venv/bin/ruff check src/ormah/main.py tests/test_main_backfill_fallback.py
+git add src/ormah/main.py tests/test_main_backfill_fallback.py
+git commit -m "feat(server): scheduler-independent embedding backfill fallback (#32)"</code></pre>
+
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah #32 · Task 09</span><span class="role">Scheduler-independent fallback</span></div>
+</main></body></html>
