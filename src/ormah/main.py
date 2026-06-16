@@ -45,6 +45,47 @@ except PackageNotFoundError:
     APP_VERSION = "0.0.0"
 
 
+# Embedding-backfill fallback: how many times the daemon thread retries the
+# reconciliation (with exponential backoff) before giving up. The recurring job /
+# sleep-cycle remains the long-term net; this only covers a scheduler that failed
+# to start plus a transient encoder outage at boot.
+_BACKFILL_FALLBACK_MAX_ATTEMPTS = 5
+_BACKFILL_FALLBACK_BASE_BACKOFF = 30.0  # seconds
+_BACKFILL_FALLBACK_MAX_BACKOFF = 600.0  # seconds
+
+
+def _start_backfill_fallback(engine) -> None:
+    """Run embedding reconciliation off a daemon thread when the scheduler is
+    unavailable, so missing vectors are still healed without it (#32, council I1).
+    Off the bind path -- never blocks startup. Retries with exponential backoff
+    until the gap closes (``run_embedding_backfill`` raises while incomplete) or
+    the attempt budget is exhausted, instead of a single one-shot."""
+    import threading
+    import time
+
+    def _run():
+        from ormah.background.embedding_backfill import run_embedding_backfill
+
+        for attempt in range(_BACKFILL_FALLBACK_MAX_ATTEMPTS):
+            try:
+                run_embedding_backfill(engine)
+                return  # gap closed (the job raises while it is still incomplete)
+            except Exception as e:
+                logger.warning(
+                    "Embedding backfill fallback attempt %d/%d failed: %s",
+                    attempt + 1, _BACKFILL_FALLBACK_MAX_ATTEMPTS, e,
+                )
+                if attempt + 1 < _BACKFILL_FALLBACK_MAX_ATTEMPTS:
+                    time.sleep(min(
+                        _BACKFILL_FALLBACK_BASE_BACKOFF * (2 ** attempt),
+                        _BACKFILL_FALLBACK_MAX_BACKOFF,
+                    ))
+
+    threading.Thread(
+        target=_run, name="embedding-backfill-fallback", daemon=True
+    ).start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -67,6 +108,12 @@ async def lifespan(app: FastAPI):
         logger.info("Background scheduler ready.")
     except Exception as e:
         logger.warning("Background scheduler not started: %s", e)
+
+    # If the scheduler did not start, its recurring embedding_backfill job won't
+    # run. Heal missing vectors off a daemon thread so recovery doesn't depend on
+    # the scheduler (#32, council I1). Off the bind path -- never blocks startup.
+    if not hasattr(app.state, "scheduler"):
+        _start_backfill_fallback(engine)
 
     if not hasattr(app.state, "maintenance_manager"):
         app.state.maintenance_manager = MaintenanceManager(engine)
