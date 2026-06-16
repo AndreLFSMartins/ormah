@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<!-- rich-doc-src-sha256:89acf0336a5e588203c80c24140eba9e6626b0af47a4ba7c7a511b4386ea43ed -->
+<html lang="en" data-mode="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embedding Delta Backfill (#32) — Plan</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 44px/1.08 var(--font-body);letter-spacing:-.01em;margin:14px 0 8px}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline);flex-wrap:wrap}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">Ormah · Plan</div>
+  <div class="doc-title">Embedding delta backfill</div>
+  <a href="#goal">Goal &amp; architecture</a>
+  <a href="#flow">Lifecycle</a>
+  <a href="#files">File map</a>
+  <a href="#order">Task order</a>
+  <a href="#design">Design points</a>
+  <a href="#conventions">Conventions</a>
+</nav>
+<main>
+  <div class="eyebrow">Issue #32 · implementation plan</div>
+  <h1>Embedding delta <em>backfill</em></h1>
+  <div class="meta">2026-06-16 · 8 tasks · branch fix/embedding-delta-backfill</div>
+
+  <p class="statement">Recover only the missing vectors, off the bind path — never re-embed all N nodes to heal a one-node gap.</p>
+
+  <div class="metrics">
+    <div class="metric"><div class="big">8</div><div class="label">TDD tasks</div></div>
+    <div class="metric"><div class="big">5</div><div class="label">files touched</div></div>
+    <div class="metric"><div class="big">2</div><div class="label">recovery modes</div></div>
+    <div class="metric"><div class="big">O(gap)</div><div class="label">startup cost target</div></div>
+  </div>
+
+  <h2 id="goal">Goal &amp; <em>architecture</em></h2>
+  <p><strong>Goal:</strong> bound startup embedding cost to O(gap) and make it non-blocking — recover only missing vectors (delta) via a recurring background reconciliation job, instead of synchronously re-embedding all N nodes before the port binds.</p>
+  <p><strong>Architecture:</strong> move embedding recovery out of <code>MemoryEngine.startup()</code> into a new <code>embedding_backfill</code> job with two modes — <span class="chip on">delta</span> (anti-join → embed only nodes missing from <code>node_vectors_rowids</code>) and <span class="chip">schema bump</span> (full re-embed, version bumped only on success). It follows the existing scheduler pattern (<code>tracked()</code> + <code>JobTracker</code>), joins the 02:00 sleep-cycle <code>run-all</code> pass, and fires once right after the port binds via <code>next_run_time</code>. The write path (<code>_index_embedding</code>) gains bounded retry; the job is the eventual-consistency guarantee.</p>
+  <p><strong>Spec:</strong> <code>docs/superpowers/specs/2026-06-16-embedding-delta-backfill-design.md</code></p>
+
+  <h2 id="flow">The <em>lifecycle</em></h2>
+  <figure>
+<svg id="my-svg" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="flowchart" style="max-width: 557.641px; background-color: transparent;" viewBox="0 0 557.640625 1193.640625" role="graphics-document document" aria-roledescription="flowchart-v2"><style>#my-svg{font-family:Arial,Helvetica,sans-serif;font-size:16px;fill:#141413;}#my-svg .edge-thickness-normal{stroke-width:1px;}#my-svg .edge-pattern-solid{stroke-dasharray:0;}#my-svg .edge-pattern-dotted{stroke-dasharray:2;}#my-svg .marker{fill:#b0aea5;stroke:#b0aea5;}#my-svg .label{font-family:Arial,Helvetica,sans-serif;color:#141413;}#my-svg .label text,#my-svg span{fill:#141413;color:#141413;}#my-svg .node rect,#my-svg .node polygon{fill:#fdf0eb;stroke:#d97757;stroke-width:1px;}#my-svg .node .label text{text-anchor:middle;}#my-svg .edgePath .path{stroke:#b0aea5;stroke-width:1px;}#my-svg .flowchart-link{stroke:#b0aea5;fill:none;}#my-svg .edgeLabel{background-color:#eef4fa;text-align:center;}#my-svg .edgeLabel p{background-color:#eef4fa;}#my-svg .labelBkg{background-color:rgba(238, 244, 250, 0.5);}</style><g><marker id="my-svg_flowchart-v2-pointEnd" class="marker flowchart-v2" viewBox="0 0 10 10" refX="5" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" class="arrowMarkerPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"/></marker><g class="root"><g class="edgePaths"><path d="M271.73,62L271.73,108" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M271.73,190L271.73,236" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M271.73,318L271.73,364" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M223.661,446L215.609,569.232L226.078,584.078" class="edge-thickness-normal edge-pattern-dotted flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M319.8,446L327.852,569.232L317.383,584.078" class="edge-thickness-normal edge-pattern-dotted flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M218.219,700.129L139.553,783.055C123.82,805.641,123.82,820.641,123.82,835.641" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M325.242,700.129L403.908,781.055C419.641,801.641,419.641,812.641,419.641,823.641" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M123.82,893.641L131.336,928.336C138.853,938.365,161.401,949.951,168.917,953.813" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M419.641,905.641L412.124,930.336C404.608,938.365,382.06,949.951,374.544,953.813" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/><path d="M271.73,1057.641L271.73,1103.641" class="edge-thickness-normal edge-pattern-solid flowchart-link" marker-end="url(#my-svg_flowchart-v2-pointEnd)"/></g><g class="edgeLabels"><g class="edgeLabel" transform="translate(173.41513, 509.39361)"><g class="label" transform="translate(-100, -24)"><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="edgeLabel"><p>next_run_time (post-bind, every restart)</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(370.0458, 509.39361)"><g class="label" transform="translate(-96.9296875, -12)"><foreignObject width="193.859375" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>interval / sleep-cycle run-all</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(123.8203125, 790.640625)"><g class="label" transform="translate(-89.6015625, -12)"><foreignObject width="179.203125" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>stored_version &lt; schema</p></span></div></foreignObject></g></g><g class="edgeLabel" transform="translate(419.640625, 790.640625)"><g class="label" transform="translate(-68.4609375, -12)"><foreignObject width="136.921875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" class="labelBkg" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="edgeLabel"><p>else (missing rows)</p></span></div></foreignObject></g></g></g><g class="nodes"><g class="node default" transform="translate(271.73046875, 35)"><rect class="basic label-container" x="-71.34375" y="-27" width="142.6875" height="54"/><g class="label" transform="translate(-41.34375, -12)"><foreignObject width="82.6875" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Server start</p></span></div></foreignObject></g></g><g class="node default" transform="translate(271.73046875, 151)"><rect class="basic label-container" x="-130" y="-39" width="260" height="78"/><g class="label" transform="translate(-100, -24)"><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>startup(): full_rebuild if empty + FTS rebuild</p></span></div></foreignObject></g></g><g class="node default" transform="translate(271.73046875, 279)"><rect class="basic label-container" x="-130" y="-39" width="260" height="78"/><g class="label" transform="translate(-100, -24)"><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Port binds — no embedding wait</p></span></div></foreignObject></g></g><g class="node default" transform="translate(271.73046875, 407)"><rect class="basic label-container" x="-130" y="-39" width="260" height="78"/><g class="label" transform="translate(-100, -24)"><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>scheduler job: embedding_backfill</p></span></div></foreignObject></g></g><g class="node default" transform="translate(271.73046875, 648.8203125)"><polygon points="104.8203125,0 209.640625,-104.8203125 104.8203125,-209.640625 0,-104.8203125" class="label-container" transform="translate(-104.3203125, 104.8203125)"/><g class="label" transform="translate(-77.8203125, -12)"><foreignObject width="155.640625" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>backfill_embeddings()</p></span></div></foreignObject></g></g><g class="node default" transform="translate(123.8203125, 866.640625)"><rect class="basic label-container" x="-115.8203125" y="-27" width="231.640625" height="54"/><g class="label" transform="translate(-85.8203125, -12)"><foreignObject width="171.640625" height="24"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table-cell; white-space: nowrap; line-height: 1.5; max-width: 200px; text-align: center;"><span class="nodeLabel"><p>Full re-embed: all nodes</p></span></div></foreignObject></g></g><g class="node default" transform="translate(419.640625, 866.640625)"><rect class="basic label-container" x="-130" y="-39" width="260" height="78"/><g class="label" transform="translate(-100, -24)"><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Delta: anti-join vs node_vectors_rowids</p></span></div></foreignObject></g></g><g class="node default" transform="translate(271.73046875, 1006.640625)"><rect class="basic label-container" x="-130" y="-51" width="260" height="102"/><g class="label" transform="translate(-100, -36)"><foreignObject width="200" height="72"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>_embed_node_rows(): chunk 100 + wal_checkpoint</p></span></div></foreignObject></g></g><g class="node default" transform="translate(271.73046875, 1146.640625)"><rect class="basic label-container" x="-130" y="-39" width="260" height="78"/><g class="label" transform="translate(-100, -24)"><foreignObject width="200" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="display: table; white-space: break-spaces; line-height: 1.5; max-width: 200px; text-align: center; width: 200px;"><span class="nodeLabel"><p>Bump schema_version only on success</p></span></div></foreignObject></g></g></g></g></g></svg>
+    <figcaption>Port binds without embedding; the job picks delta vs schema and heals the store</figcaption>
+  </figure>
+
+  <h2 id="files">File <em>map</em></h2>
+  <table>
+    <thead><tr><th>File</th><th>Responsibility</th><th>Task</th></tr></thead>
+    <tbody>
+      <tr><td><code>config.py</code></td><td>3 new settings + validators</td><td>01</td></tr>
+      <tr><td><code>memory_engine.py</code></td><td>extract <code>_embed_node_rows(nodes) -&gt; (embedded, failed)</code></td><td>02</td></tr>
+      <tr><td><code>memory_engine.py</code></td><td>new <code>backfill_embeddings()</code> (delta + schema-bump)</td><td>03</td></tr>
+      <tr><td><code>memory_engine.py</code></td><td>bounded retry in <code>_index_embedding</code></td><td>04</td></tr>
+      <tr><td><code>memory_engine.py</code></td><td>remove synchronous embed block from <code>startup()</code></td><td>05</td></tr>
+      <tr><td><code>background/embedding_backfill.py</code></td><td>new <code>run_embedding_backfill(engine)</code></td><td>06</td></tr>
+      <tr><td><code>background/scheduler.py</code></td><td>register job (interval + post-bind <code>next_run_time</code>)</td><td>07</td></tr>
+      <tr><td><code>api/routes_admin.py</code></td><td><code>_TASK_RUNNERS</code>, <code>_TASK_DESCRIPTIONS</code>, <code>_SLEEP_CYCLE_ORDER</code></td><td>08</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="order">Task <em>order</em> &amp; dependencies</h2>
+  <div class="phase p-o"><span class="pn">01</span> Config — no deps</div>
+  <div class="phase p-b"><span class="pn">02</span> _embed_node_rows extraction — no deps (pure refactor)</div>
+  <div class="phase p-g"><span class="pn">03</span> backfill_embeddings — needs 02</div>
+  <div class="phase p-o"><span class="pn">04</span> _index_embedding retry — needs 01</div>
+  <div class="phase p-b"><span class="pn">05</span> Remove startup embed block — needs 03</div>
+  <div class="phase p-g"><span class="pn">06</span> Background job module — needs 03</div>
+  <div class="phase p-o"><span class="pn">07</span> Scheduler registration — needs 01 + 06</div>
+  <div class="phase p-b"><span class="pn">08</span> Admin run-all / sleep-cycle — needs 06</div>
+
+  <h2 id="design">Design <em>points</em> baked in</h2>
+  <ul>
+    <li><strong>Delta is O(gap):</strong> <code>SELECT id, title, content FROM nodes WHERE id NOT IN (SELECT id FROM node_vectors_rowids)</code>.</li>
+    <li><strong>Schema bump is crash-safe:</strong> version is bumped <strong>only after</strong> a fully-successful re-embed (<code>failed == 0</code>); a crash mid-embed leaves the old version so the next run retries.</li>
+    <li><strong>Non-blocking startup:</strong> <code>startup()</code> no longer touches the encoder — the port binds immediately; the job's <code>next_run_time</code> (~10s post-start) does the first reconciliation off the bind path.</li>
+    <li><strong>Operator control:</strong> <code>embedding_backfill_interval_minutes</code> (default 60) can be set to <code>999999</code> to disable in-process and let the 02:00 sleep-cycle drive it — like the other jobs.</li>
+    <li><strong>Concurrency safety:</strong> chunked upserts (100) + <code>wal_checkpoint(TRUNCATE)</code> release the write lock between blocks (avoids the #18/#19 long-lock freeze); APScheduler <code>max_instances=1</code> prevents overlap.</li>
+  </ul>
+  <div class="callout">
+    <span class="label">Schema-version note</span>
+    Because <a href="#order">Task 05</a> removes the version-stamp from <code>startup()</code>, a fresh store has <code>stored_version = 0</code>, so the first <code>backfill_embeddings()</code> runs in <strong>schema</strong> mode (full embed) and then bumps to current — subsequent runs are <strong>delta</strong>. The delta tests set the version to current first to exercise that path directly.
+  </div>
+
+  <h2 id="conventions">Conventions</h2>
+  <ul>
+    <li>Tests via the working-tree interpreter: <code>.venv/bin/python -m pytest &lt;path&gt; -v</code>.</li>
+    <li>Lint: <code>.venv/bin/ruff check src/ tests/</code> (line-length 100, py311).</li>
+    <li>Each task is TDD: failing test → run-to-fail → minimal impl → run-to-pass → lint → commit.</li>
+  </ul>
+
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <span class="name">Ormah — issue #32</span>
+    <span class="role">Implementation plan · 8 tasks</span>
+  </div>
+</main>
+</body>
+</html>
