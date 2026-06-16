@@ -26,6 +26,7 @@ _TASK_RUNNERS = {
     "importance_scorer": ("ormah.background.importance_scorer", "run_importance_scoring"),
     "consolidator": ("ormah.background.consolidator", "run_consolidation"),
     "memory_backup": ("ormah.backup", "run_auto_backup"),
+    "embedding_backfill": ("ormah.background.embedding_backfill", "run_embedding_backfill"),
 }
 
 _TASK_DESCRIPTIONS = {
@@ -39,12 +40,14 @@ _TASK_DESCRIPTIONS = {
     "decay_manager": "Applies time-based decay to memory importance, demoting stale unused memories.",
     "hippocampus": "Scans for structural patterns and promotes frequently accessed working memories to core.",
     "memory_backup": "Creates a local backup of memory source files when one is due.",
+    "embedding_backfill": "Backfills missing vector embeddings (delta) or re-embeds all on an embedding-schema bump. Keeps vector search complete after restarts and overnight ingest (#32).",
 }
 
 # Order for sleep cycle (full maintenance pass)
 _SLEEP_CYCLE_ORDER = [
     "importance_scorer",
     "index_updater",
+    "embedding_backfill",
     "duplicate_merger",
     "conflict_detector",
     "auto_linker",
