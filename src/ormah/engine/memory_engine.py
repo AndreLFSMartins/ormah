@@ -1159,10 +1159,19 @@ class MemoryEngine:
         tier_counts = self.graph.count_by_tier()
         total = sum(tier_counts.values())
         edge_count = self.db.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
+        ver_row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
+        ).fetchone()
         return {
             "total_nodes": total,
             "by_tier": tier_counts,
             "total_edges": edge_count,
+            "vec_count": vec_count,
+            # Embeddable nodes still missing a vector -- the honest embedding gap.
+            # Stays > 0 for any node that cannot be embedded (visible, never masked).
+            "embedding_gap": self._missing_embeddable_count(),
+            "embedding_schema_version": int(ver_row["value"]) if ver_row else 0,
         }
 
     # --- Merge operations ---
