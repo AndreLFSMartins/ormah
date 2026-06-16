@@ -214,3 +214,27 @@ def test_affinity_defaults():
     assert s.affinity_max_boost == 0.15
     assert s.affinity_implicit_weight == 0.8
     assert s.whisper_exploration_enabled is True
+
+
+# --- Embedding backfill / vector-store reconciliation (#32) ---
+
+def test_embedding_backfill_settings_defaults():
+    s = _settings()
+    assert s.embedding_backfill_interval_minutes == 60
+    assert s.embedding_index_max_retries == 2
+    assert s.embedding_index_retry_backoff_seconds == 0.5
+
+
+def test_embedding_backfill_interval_rejects_zero():
+    with pytest.raises(ValidationError):
+        _settings(embedding_backfill_interval_minutes=0)
+
+
+def test_embedding_index_max_retries_rejects_negative():
+    with pytest.raises(ValidationError):
+        _settings(embedding_index_max_retries=-1)
+
+
+def test_embedding_index_retry_backoff_rejects_negative():
+    with pytest.raises(ValidationError):
+        _settings(embedding_index_retry_backoff_seconds=-0.1)
