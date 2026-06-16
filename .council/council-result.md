@@ -1,43 +1,42 @@
-# Council Result — 2026-06-16
+# Council Result — 2026-06-16 (R2, plano revisado)
 
-## Decisão: ❌ Requires changes — arquitetura aprovada, robustez do schema-bump + independência do scheduler precisam de rework antes de implementar.
+## Decisão: ❌ Requires changes — recomendo trocar a quarentena por um design mais simples (sem exclusão permanente).
 
-## Perfis de Review: architecture, performance | Peers: Cursor | Codex | Rodadas: 1
+## Perfis de Review: architecture, performance | Peers: Cursor | Codex | Rodadas: 1 (2ª invocação)
 
 ## Resumo do Debate
-Ambos os peers convergiram sem divergência entre si. Cursor: "Requires changes". Codex: "needs-attention / No-ship". Concordam que o plano resolve bem o problema central (re-embed síncrono O(n) no startup → delta O(gap) + job de reconciliação), mas que o **modo schema-bump** e a **garantia de recuperação** têm falhas concretas no vetor adversarial pedido. Como Senior Dev, aceito os dois achados consequentes — são gaps reais que o próprio plano introduz.
+Segunda rodada sobre o plano revisado (quarentena + fallback + completeness). Ambos os peers convergiram de novo, sem divergência entre si. Cursor: "Requires changes". Codex: "needs-attention / No-ship". Concordam que o R1 matou o loop O(n) (C1), mas que **a quarentena introduziu um problema pior**: exclusão permanente de nós recuperáveis, mascarada como "store completo". Como Senior Dev concordo — o fix do R1 trocou um problema por outro.
 
 ## O que foi aceito
-- **Pontos positivos confirmados:** separação startup vs. reconciliação (padrão `tracked()`/`JobTracker`/sleep-cycle já existente); delta com anti-join O(gap); bump de versão só após sucesso corrige o bug atual de `memory_engine.py:134-138`; chunking+checkpoint reaproveita mitigação #18/#19; retry em `_index_embedding`; `next_run_time` pós-bind.
-- **Findings aceitos:** todos os 7 (2 consequentes + 5 de robustez/observabilidade/doc) — ver abaixo.
+Todos os achados. O ponto central: **quarentena ≠ completo**, e ela não tem path de recuperação.
 
 ## Achados por Severidade
 
 ### 🔴 Críticos — bloqueiam implementação
-- **C1 — Schema-bump entra em loop O(n) permanente com 1 nó "poison"** (Codex crit 0.94; Cursor #1). Enquanto `stored_version < _EMBEDDING_SCHEMA_VERSION`, cada tick faz `SELECT ... FROM nodes` (todos N) e só bumpa se `failed == 0`. Um único nó que falha deterministicamente (encoder instável, conteúdo problemático) impede o bump para sempre → re-embed de todos os N a cada tick. É exatamente o custo O(n) que a mudança deveria eliminar. *Fix:* quarantine/retry-budget por nó; avançar a versão quando as falhas restantes estão todas em quarentena; ticks seguintes re-embarcam só `missing ∪ failed`, não todos os N. Teste com 1 nó poison provando que a 2ª run não reprocessa N.
+- **C2 — Quarentena é exclusão permanente disfarçada de completude** (Codex crit; Cursor #1). Nós em `embedding_quarantine` saem do delta **e** do alvo de completude. Sem un-quarantine (em sucesso, mudança de conteúdo/`file_hash`, fingerprint de encoder/schema, TTL ou retry admin), uma falha transitória (Ollama instável por N ticks) some o nó da busca para sempre. Pior: uma queda sustentada do encoder faz **todos** os nós falharem por `max_attempts` ticks → store inteiro quarentenado → `embedding_gap==0`, job "ok", schema "atual" — degradação silenciosa total. O teste `test_schema_bump_quarantines_poison_node_without_looping` codifica exatamente o comportamento que o foco adversarial proíbe.
 
 ### 🟡 Importantes — devem ser endereçados
-- **I1 — Recuperação depende de scheduler tratado como opcional** (Codex high 0.9; Cursor #4). `lifespan` (main.py:67-68) engole falha de `start_scheduler`; sem scheduler = sem backfill = degradação indefinida. *Fix:* fallback one-shot independente do scheduler após o bind (thread daemon disparando `backfill_embeddings`), ou marcar health degradado com recuperação manual explícita. Teste de `start_scheduler` falho com vetores faltando.
-- **I2 — Critério de sucesso do schema-bump ignora drops silenciosos do sqlite-vec** (Cursor #2). `failed==0` não cobre `vec_count < len(all_items)`; o plano remove a verificação que existia em `_reindex_all_embeddings`. *Fix:* bumpar só se `failed==0 AND vec_count >= embeddable_count`; reintroduzir o check de contagem.
-- **I3 — Janela de degradação pós-restart sem SLA nem teste E2E** (Cursor #3). *Fix:* teste de integração (engine + `start_scheduler` + gap → recupera) e expor `embedding_gap`/`embedding_schema_version` em `stats()`/health.
-- **I4 — JobTracker reporta sucesso com backfill incompleto** (Cursor #5). *Fix:* `run_embedding_backfill` retorna status não-ok / levanta quando `failed>0` ou `vec_count<embeddable_count`.
+- **I5 — "Verificado contra `vec_count`" não está implementado** (Cursor #2). O overview afirma I2, mas o bump usa só `missing == 0` do anti-join; `_embed_node_rows` apenas loga drop silencioso do vec0. Ou implementa `vec_count >= embeddable_count` no critério, ou para de afirmar.
+- **I6 — JobTracker verde com quarentenados sem vetor** (Cursor #3). `missing` exclui quarentenados → health "ok" com vetores ausentes.
+- **I1b — Fallback é one-shot, não recuperação contínua** (Codex high; Cursor #4). Se a única thread de fallback falha (encoder down no startup), não há retry até restart/sleep-cycle. Precisa loop com backoff até `embedding_gap==0` ou estado degradado explícito.
+- **I7 — Schema mode reprocessa todos os não-quarentenados a cada tick** até completar (~75 min se o encoder oscila com 9k nós). Após a 1ª passagem, schema mode deve usar o mesmo anti-join do delta.
 
 ### 🟢 Menores — opcionais
-- **m1 — Nós com texto vazio ficam no delta para sempre** (Cursor #6). *Fix:* excluir texto-vazio do anti-join (ou marcar `unembeddable` em meta) — necessário para o completeness check de I2.
-- **m2 — "startup() não toca o encoder" é falso** (Cursor #7). `_warmup_embedder()` ainda roda no startup. *Fix:* corrigir redação; opcionalmente mover warmup para o thread pós-bind.
-- **Sugestão de escala:** trocar `NOT IN (subquery)` por `LEFT JOIN ... WHERE v.id IS NULL` no anti-join.
+- Caminho feliz híbrido (delta síncrono curto no startup quando schema == atual) — sugestão de redução de janela; não adotado para manter bind não-bloqueante.
 
 ## O que foi rejeitado e por quê
-Nada rejeitado — todos os achados aceitos. Não houve necessidade de Rodada 2: peers concordam entre si e o orquestrador concorda com eles (sem rebuttal).
+Nada rejeitado. Sobre o fix do Codex (fingerprint completo + TTL + admin retry): aceito a **essência** (recuperabilidade), mas evito a complexidade — ver Plano Final.
 
-## Plano Final
-Arquitetura mantida (delta + job de reconciliação). Revisões a aplicar antes de implementar:
-1. **Task 03 (schema-bump):** quarentena de IDs com falha + retry budget; avanço de versão por completeness verificado (`vec_count >= embeddable_count` e falhas restantes em quarentena); ticks seguintes embarcam só `missing ∪ failed`.
-2. **Task 02 (`_embed_node_rows`):** reintroduzir verificação `vec_count`; retornar também o gap; excluir texto-vazio (`embeddable_count`).
-3. **Nova Task (main.py):** fallback one-shot pós-bind independente do scheduler (thread daemon) quando `start_scheduler` falhar.
-4. **Task 06 (job):** status não-ok em backfill incompleto para o JobTracker/health.
-5. **Nova Task (observabilidade):** `embedding_gap` + `embedding_schema_version` em `stats()`/health + teste E2E de recuperação.
-6. **Docs:** corrigir redação do warmup; anti-join via LEFT JOIN.
+## Plano Final (recomendação do Senior Dev — trocar abordagem na Task 03)
+Abandonar a quarentena-como-completude. Design mais simples que fecha C2 + C1 + I5 + I6 + I7 de uma vez:
+1. **Schema bump:** re-embarca todos numa **única** passagem; para cada nó que falha no encode, **deleta o vetor stale** (vira genuinamente `missing`); avança a versão **incondicionalmente após a passagem**. Sem loop O(n): ticks seguintes são delta.
+2. **Delta (recorrente):** anti-join embarca só os `missing` — barato, O(gap), **a cada tick para sempre**. Um nó genuinamente poison continua `missing` e é re-tentado O(1)/tick, **nunca descartado, nunca mascarado**.
+3. **`embedding_gap` é a verdade** (anti-join). Um silent drop do vec0 vira `missing` → re-tentado (I5 resolvido sem check separado). Sem quarentena, sem `embeddable_count` redefinido.
+4. **Health (I6):** job reporta non-ok enquanto `embedding_gap > 0` após sua run — um poison node aparece como degradado honesto (operador corrige conteúdo/modelo).
+5. **Fallback (I1b):** loop com backoff (ex.: até `embedding_gap==0` ou N tentativas) na thread daemon, em vez de one-shot. Teste: scheduler falha + 1ª backfill falha + 2ª sucede.
+6. Remover settings/test de quarentena (`embedding_schema_max_attempts`, teste poison vira "poison fica visível em gap, não some").
+
+Trade-off honesto: um nó permanentemente não-embeddable mantém `embedding_gap > 0` e health degradado — **visível e correto**, em vez de silenciosamente escondido.
 
 ## Próximos passos
-Aprovar as revisões → atualizar as task files (03, 02, 06 + 2 novas) → rerun rápido de `/council` opcional sobre o plano revisado, ou seguir direto para implementação via subagent-driven-development.
+Decisão do André: adotar o redesign (sem quarentena) e atualizar Tasks 02/03/06/09/10 + overview, depois (opcional) um último `/council` ou seguir para implementação. Evitar mais um ciclo de revisão sem sinal do André — convergência já clara.

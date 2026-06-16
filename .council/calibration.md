@@ -11,3 +11,4 @@
 | 2026-06-15 | /council | rejeitou | rejeitou | 1 | convergencia alta, TOCTOU confirmado factualmente | guard le indice obsoleto file-antes-de-DB, soft_delete nao atomico, backfill do  |
 | 2026-06-15 | /council | rejeitou | rejeitou | 1 | convergencia raiz: corrida e arquitetural do write-model do engine | guard nao fecha race file-antes-de-lock, fix raiz e reordenar mutadores |
 | 2026-06-16 | /council | ressalvas | ressalvas | 1 | concordância plena (peers + orquestrador) | schema-bump loops O(n) on poison node; recovery tied to optional scheduler |
+| 2026-06-16 | /council | ressalvas | ressalvas | 1 | concordância plena (peers + orquestrador) | quarantine permanently drops recoverable nodes and masks incomplete store |
