@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<!-- rich-doc-src-sha256:9cdf476c2f6dff9cc789789ba1ca65bcd068bb49750e521f99b2898ca8a98130 -->
+<html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 08 — Wire into run-all (#32)</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/1.55 var(--font-body);display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 28px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.1 var(--font-body);margin:0 0 24px}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}
+main{padding:56px 64px 120px;max-width:1040px}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 42px/1.08 var(--font-body);margin:12px 0 8px}
+h2{font:600 26px/1.12 var(--font-head);letter-spacing:-.015em;margin:48px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 17px/1.3 var(--font-head);margin:28px 0 8px;scroll-margin-top:24px}
+.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:26em}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent)}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:15px;overflow-x:auto;font:12.5px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:10px 15px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+.step{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone);border:1px solid var(--hairline);border-radius:20px;padding:4px 10px;margin-right:8px}
+.spectrum{display:flex;height:4px;margin:38px 0 20px}.spectrum span{flex:1}.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{border-left:2px solid var(--accent);padding-left:15px;color:var(--stone)}.signature .name{font:400 italic 17px/1 var(--font-body);color:var(--ink)}.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:860px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:30px 22px 80px}}
+</style></head><body>
+<nav class="toc"><div class="eyebrow">#32 · Task 08</div><div class="doc-title">Wire into run-all</div>
+<a href="#why">Why</a><a href="#files">Files</a><a href="#s1">1 · Failing tests</a><a href="#s3">3 · _TASK_RUNNERS</a><a href="#s4">4 · Description</a><a href="#s5">5 · Sleep-cycle</a><a href="#s7">7 · Commit</a><a href="#s8">8 · Verify all</a></nav>
+<main>
+<div class="eyebrow">Implementation plan · Task 08</div>
+<h1>Wire into <em>run-all</em></h1>
+<div class="meta">Sleep-cycle integration · needs Task 06</div>
+<p class="statement">The 02:00 sleep-cycle is how the operator runs maintenance with in-process intervals at 999999 — the job must ride it.</p>
+
+<h2 id="why">The <em>change</em></h2>
+<p>Register the job in the admin task registry so the 02:00 sleep-cycle pass (<code>POST /admin/tasks/run-all</code>) runs it. <code>embedding_backfill</code> is a standard <code>(module, function)</code> runner, so it fits <code>_TASK_RUNNERS</code> directly (no <code>index_updater</code>-style special case).</p>
+
+<h2 id="files">Files <em>touched</em></h2>
+<table><thead><tr><th>Action</th><th>Path</th></tr></thead><tbody>
+<tr><td>Modify</td><td><code>src/ormah/api/routes_admin.py</code> (<code>_TASK_RUNNERS</code> ~L20-30; <code>_TASK_DESCRIPTIONS</code> ~L32-44; <code>_SLEEP_CYCLE_ORDER</code> ~L46-58)</td></tr>
+<tr><td>Test</td><td><code>tests/test_api/test_admin_embedding_backfill_task.py</code></td></tr></tbody></table>
+
+<h2 id="s1"><span class="step">Step 1</span><em>Failing</em> tests</h2>
+<pre><code>"""embedding_backfill must be a registered admin task in the sleep-cycle (#32)."""
+from __future__ import annotations
+
+from ormah.api import routes_admin
+
+
+def test_embedding_backfill_in_task_registry():
+    assert "embedding_backfill" in routes_admin._TASK_RUNNERS
+    module, func = routes_admin._TASK_RUNNERS["embedding_backfill"]
+    assert module == "ormah.background.embedding_backfill"
+    assert func == "run_embedding_backfill"
+
+
+def test_embedding_backfill_has_description():
+    assert "embedding_backfill" in routes_admin._TASK_DESCRIPTIONS
+
+
+def test_embedding_backfill_in_sleep_cycle_order():
+    order = routes_admin._SLEEP_CYCLE_ORDER
+    assert "embedding_backfill" in order
+    # runs after the index is updated
+    assert order.index("embedding_backfill") > order.index("index_updater")</code></pre>
+
+<h3 id="s2">Step 2 · Run to verify they fail</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_api/test_admin_embedding_backfill_task.py -v</code> → FAIL (key not in <code>_TASK_RUNNERS</code>).</p>
+
+<h2 id="s3"><span class="step">Step 3</span>Add to <em>_TASK_RUNNERS</em></h2>
+<p>Add to the <code>_TASK_RUNNERS</code> dict (after the <code>memory_backup</code> entry ~L29):</p>
+<pre><code>    "embedding_backfill": ("ormah.background.embedding_backfill", "run_embedding_backfill"),</code></pre>
+
+<h2 id="s4"><span class="step">Step 4</span>Add a <em>description</em></h2>
+<p>Add to the <code>_TASK_DESCRIPTIONS</code> dict (~L32-44):</p>
+<pre><code>    "embedding_backfill": "Backfills missing vector embeddings (delta) or re-embeds all on an embedding-schema bump. Keeps vector search complete after restarts and overnight ingest (#32).",</code></pre>
+
+<h2 id="s5"><span class="step">Step 5</span>Add to <em>sleep-cycle</em> order</h2>
+<p>In the <code>_SLEEP_CYCLE_ORDER</code> list (~L46-58), insert <code>"embedding_backfill"</code> immediately after <code>"index_updater"</code>:</p>
+<pre><code>_SLEEP_CYCLE_ORDER = [
+    "importance_scorer",
+    "index_updater",
+    "embedding_backfill",
+    "duplicate_merger",
+    "conflict_detector",
+    "auto_linker",
+    "auto_cluster",
+    "consolidator",
+    "decay_manager",
+    "forgetting_manager",
+    "memory_backup",
+]</code></pre>
+
+<h3 id="s6">Step 6 · Run to verify they pass</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_api/test_admin_embedding_backfill_task.py -v</code> → PASS (3 tests).</p>
+
+<h2 id="s7"><span class="step">Step 7</span>Full suite + lint + <em>commit</em></h2>
+<pre><code>.venv/bin/python -m pytest tests/ -q
+.venv/bin/ruff check src/ tests/
+git add src/ormah/api/routes_admin.py tests/test_api/test_admin_embedding_backfill_task.py
+git commit -m "feat(api): run embedding_backfill in the sleep-cycle run-all pass (#32)"</code></pre>
+
+<h2 id="s8"><span class="step">Step 8</span>Verify the whole <em>feature</em></h2>
+<p>Run the full fast suite once more and confirm green:</p>
+<pre><code>.venv/bin/python -m pytest tests/ -q</code></pre>
+<p>Expected: PASS (no regressions; new tests from Tasks 01-08 all green).</p>
+
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah #32 · Task 08</span><span class="role">Wire into run-all</span></div>
+</main></body></html>

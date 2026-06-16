@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<!-- rich-doc-src-sha256:cf838740a7dec33268c2b9cfd6bd17b41670fc905b433f6862cbfb9012e0f389 -->
+<html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 03 — backfill_embeddings (#32)</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/1.55 var(--font-body);display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 28px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.1 var(--font-body);margin:0 0 24px}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}
+main{padding:56px 64px 120px;max-width:1040px}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 42px/1.08 var(--font-body);margin:12px 0 8px}
+h2{font:600 26px/1.12 var(--font-head);letter-spacing:-.015em;margin:48px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 17px/1.3 var(--font-head);margin:28px 0 8px;scroll-margin-top:24px}
+.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:26em}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent)}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:15px;overflow-x:auto;font:12.5px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:10px 15px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}.chip.on{color:var(--accent);border-color:var(--accent)}
+.step{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone);border:1px solid var(--hairline);border-radius:20px;padding:4px 10px;margin-right:8px}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:13px 18px;margin:18px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:7px}
+.spectrum{display:flex;height:4px;margin:38px 0 20px}.spectrum span{flex:1}.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{border-left:2px solid var(--accent);padding-left:15px;color:var(--stone)}.signature .name{font:400 italic 17px/1 var(--font-body);color:var(--ink)}.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:860px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:30px 22px 80px}}
+</style></head><body>
+<nav class="toc"><div class="eyebrow">#32 · Task 03</div><div class="doc-title">backfill_embeddings</div>
+<a href="#modes">Modes</a><a href="#files">Files</a><a href="#s1">1 · Failing tests</a><a href="#s3">3 · Implementation</a><a href="#s4">4 · Verify</a><a href="#s5">5 · Commit</a></nav>
+<main>
+<div class="eyebrow">Implementation plan · Task 03</div>
+<h1>backfill_<em>embeddings()</em></h1>
+<div class="meta">Delta + schema-bump · needs Task 02</div>
+<p class="statement">Delta closes gaps in O(gap); a schema bump re-embeds all, and only commits the version on full success.</p>
+
+<h2 id="modes">Two <em>modes</em></h2>
+<table><thead><tr><th>Mode</th><th>Trigger</th><th>Action</th></tr></thead><tbody>
+<tr><td><span class="chip on">delta</span></td><td>schema version matches</td><td>embed only nodes missing from <code>node_vectors_rowids</code></td></tr>
+<tr><td><span class="chip">schema</span></td><td><code>stored_version &lt; _EMBEDDING_SCHEMA_VERSION</code></td><td>re-embed all; bump version only if <code>failed == 0</code></td></tr></tbody></table>
+
+<h2 id="files">Files <em>touched</em></h2>
+<table><thead><tr><th>Action</th><th>Path</th></tr></thead><tbody>
+<tr><td>Modify</td><td><code>src/ormah/engine/memory_engine.py</code> (add method near <code>_reindex_all_embeddings</code>)</td></tr>
+<tr><td>Test</td><td><code>tests/test_engine/test_backfill_embeddings.py</code></td></tr></tbody></table>
+
+<h2 id="s1"><span class="step">Step 1</span><em>Failing</em> tests</h2>
+<p>Create <code>tests/test_engine/test_backfill_embeddings.py</code>:</p>
+<pre><code>"""Tests for MemoryEngine.backfill_embeddings (delta + schema-bump, #32)."""
+from __future__ import annotations
+
+from ormah.models.node import CreateNodeRequest
+
+
+def _set_schema_version(engine, version: int) -> None:
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES "
+            "('embedding_schema_version', ?)",
+            (str(version),),
+        )
+
+
+def test_backfill_delta_closes_the_gap(engine):
+    from ormah.engine.memory_engine import _EMBEDDING_SCHEMA_VERSION
+    ids = []
+    for i in range(3):
+        nid, _ = engine.remember(CreateNodeRequest(title=f"N{i}", content=f"content {i}"))
+        ids.append(nid)
+    # store is already on the current embedding schema -> delta mode (not schema bump)
+    _set_schema_version(engine, _EMBEDDING_SCHEMA_VERSION)
+    # create a 1-node gap
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors WHERE id = ?", (ids[0],))
+
+    result = engine.backfill_embeddings()
+
+    assert result["mode"] == "delta"
+    assert engine.db.conn.execute(
+        "SELECT count(*) FROM node_vectors_rowids WHERE id = ?", (ids[0],)
+    ).fetchone()[0] == 1
+
+
+def test_backfill_delta_is_noop_when_full(engine):
+    from ormah.engine.memory_engine import _EMBEDDING_SCHEMA_VERSION
+    engine.remember(CreateNodeRequest(title="Solo", content="content"))
+    _set_schema_version(engine, _EMBEDDING_SCHEMA_VERSION)
+    # first delta pass settles any startup-created node (e.g. the self node)
+    engine.backfill_embeddings()
+
+    result = engine.backfill_embeddings()
+
+    assert result["mode"] == "delta"
+    assert result["embedded"] == 0
+
+
+def test_backfill_schema_bump_reembeds_all_and_bumps_version(engine):
+    engine.remember(CreateNodeRequest(title="A", content="alpha"))
+    engine.remember(CreateNodeRequest(title="B", content="beta"))
+    _set_schema_version(engine, 1)  # below _EMBEDDING_SCHEMA_VERSION (2)
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors")
+
+    result = engine.backfill_embeddings()
+
+    from ormah.engine.memory_engine import _EMBEDDING_SCHEMA_VERSION
+    assert result["mode"] == "schema"
+    stored = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
+    ).fetchone()["value"]
+    assert int(stored) == _EMBEDDING_SCHEMA_VERSION
+
+
+def test_backfill_schema_bump_does_not_bump_version_on_failure(engine, monkeypatch):
+    engine.remember(CreateNodeRequest(title="A", content="alpha"))
+    _set_schema_version(engine, 1)
+
+    class _BoomEncoder:
+        def encode(self, text):
+            raise RuntimeError("encoder down")
+
+    monkeypatch.setattr(
+        "ormah.embeddings.encoder.get_encoder", lambda settings: _BoomEncoder()
+    )
+
+    result = engine.backfill_embeddings()
+
+    assert result["mode"] == "schema"
+    stored = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
+    ).fetchone()["value"]
+    assert int(stored) == 1  # NOT bumped -- re-embed failed</code></pre>
+
+<h3 id="s2">Step 2 · Run to verify they fail</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_engine/test_backfill_embeddings.py -v</code> → FAIL (<code>AttributeError: ... 'backfill_embeddings'</code>).</p>
+
+<h2 id="s3"><span class="step">Step 3</span>The <em>implementation</em></h2>
+<p>Add this method immediately after <code>_embed_node_rows</code> (from Task 02):</p>
+<pre><code>    def backfill_embeddings(self) -> dict:
+        """Reconcile the vector store. On an embedding-schema bump, re-embed all
+        nodes (bumping the stored version only on full success). Otherwise embed
+        only nodes missing a vector (delta). Safe to run repeatedly; a no-op when
+        the store is already consistent. Returns a summary dict."""
+        count = self.db.conn.execute("SELECT count(*) FROM nodes").fetchone()[0]
+        stored_version_row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
+        ).fetchone()
+        stored_version = int(stored_version_row["value"]) if stored_version_row else 0
+
+        if stored_version &lt; _EMBEDDING_SCHEMA_VERSION:
+            nodes = self.db.conn.execute(
+                "SELECT id, title, content FROM nodes"
+            ).fetchall()
+            logger.info(
+                "Embedding backfill (schema v%d->v%d): re-embedding %d nodes",
+                stored_version, _EMBEDDING_SCHEMA_VERSION, len(nodes),
+            )
+            embedded, failed = self._embed_node_rows(nodes)
+            if failed == 0:
+                with self.db.transaction() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                        "('embedding_schema_version', ?)",
+                        (str(_EMBEDDING_SCHEMA_VERSION),),
+                    )
+            mode = "schema"
+        else:
+            nodes = self.db.conn.execute(
+                "SELECT id, title, content FROM nodes "
+                "WHERE id NOT IN (SELECT id FROM node_vectors_rowids)"
+            ).fetchall()
+            if nodes:
+                logger.info(
+                    "Embedding backfill (delta): embedding %d missing nodes", len(nodes)
+                )
+            embedded, failed = self._embed_node_rows(nodes)
+            mode = "delta"
+
+        vec_count = self.db.conn.execute(
+            "SELECT count(*) FROM node_vectors"
+        ).fetchone()[0]
+        return {
+            "mode": mode,
+            "embedded": embedded,
+            "failed": failed,
+            "vec_count": vec_count,
+            "node_count": count,
+        }</code></pre>
+<div class="callout"><span class="label">Crash safety</span>The version is bumped <strong>only after</strong> a fully-successful re-embed (<code>failed == 0</code>); a crash mid-embed leaves the old version so the next run retries.</div>
+
+<h2 id="s4"><span class="step">Step 4</span><em>Verify</em></h2>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_engine/test_backfill_embeddings.py -v</code> → PASS (4 tests).</p>
+
+<h2 id="s5"><span class="step">Step 5</span>Lint + <em>commit</em></h2>
+<pre><code>.venv/bin/ruff check src/ormah/engine/memory_engine.py tests/test_engine/test_backfill_embeddings.py
+git add src/ormah/engine/memory_engine.py tests/test_engine/test_backfill_embeddings.py
+git commit -m "feat(engine): add backfill_embeddings delta + schema-bump recovery (#32)"</code></pre>
+
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah #32 · Task 03</span><span class="role">backfill_embeddings()</span></div>
+</main></body></html>

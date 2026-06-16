@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<!-- rich-doc-src-sha256:026349e43d6026ee986d302c5b21926f6263f8e073fe6c2dedbe844ec60d1e46 -->
+<html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 07 — Register the job (#32)</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/1.55 var(--font-body);display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 28px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.1 var(--font-body);margin:0 0 24px}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}
+main{padding:56px 64px 120px;max-width:1040px}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 42px/1.08 var(--font-body);margin:12px 0 8px}
+h2{font:600 26px/1.12 var(--font-head);letter-spacing:-.015em;margin:48px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 17px/1.3 var(--font-head);margin:28px 0 8px;scroll-margin-top:24px}
+.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:26em}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent)}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:15px;overflow-x:auto;font:12.5px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:10px 15px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+.step{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone);border:1px solid var(--hairline);border-radius:20px;padding:4px 10px;margin-right:8px}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:13px 18px;margin:18px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:7px}
+.spectrum{display:flex;height:4px;margin:38px 0 20px}.spectrum span{flex:1}.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{border-left:2px solid var(--accent);padding-left:15px;color:var(--stone)}.signature .name{font:400 italic 17px/1 var(--font-body);color:var(--ink)}.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:860px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:30px 22px 80px}}
+</style></head><body>
+<nav class="toc"><div class="eyebrow">#32 · Task 07</div><div class="doc-title">Register the job</div>
+<a href="#why">Why</a><a href="#files">Files</a><a href="#s1">1 · Failing test</a><a href="#s3">3 · timedelta</a><a href="#s4">4 · add_job</a><a href="#s5">5 · Verify</a><a href="#s6">6 · Commit</a></nav>
+<main>
+<div class="eyebrow">Implementation plan · Task 07</div>
+<h1>Register the <em>job</em></h1>
+<div class="meta">Interval + post-bind run · needs Tasks 01, 06</div>
+<p class="statement">Like the other jobs — plus a next_run_time ~10s out, so it heals once right after the port binds, even at interval 999999.</p>
+
+<h2 id="why">The <em>change</em></h2>
+<p>Register the job like the others (<code>tracked()</code> + <code>JobTracker</code>, interval, <code>misfire_grace</code>), but add a <code>next_run_time</code> ~10s after start so it fires once right after the port binds (the core #32 recovery) even when the operator sets the interval to <code>999999</code>.</p>
+
+<h2 id="files">Files <em>touched</em></h2>
+<table><thead><tr><th>Action</th><th>Path</th></tr></thead><tbody>
+<tr><td>Modify</td><td><code>src/ormah/background/scheduler.py</code> (<code>timedelta</code> import ~L5; <code>add_job</code> ~after L61)</td></tr>
+<tr><td>Test</td><td><code>tests/test_background/test_scheduler_embedding_backfill.py</code></td></tr></tbody></table>
+
+<h2 id="s1"><span class="step">Step 1</span><em>Failing</em> test</h2>
+<pre><code>"""The embedding_backfill job must be registered with a post-bind first run (#32)."""
+from __future__ import annotations
+
+from ormah.background.scheduler import start_scheduler
+
+
+def test_embedding_backfill_job_registered(engine):
+    scheduler, _tracker = start_scheduler(engine)
+    try:
+        job = scheduler.get_job("embedding_backfill")
+        assert job is not None
+        assert job.name == "Embedding backfill"
+        # next_run_time is set (post-bind first run), not None/deferred
+        assert job.next_run_time is not None
+    finally:
+        scheduler.shutdown(wait=False)</code></pre>
+
+<h3 id="s2">Step 2 · Run to verify it fails</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_scheduler_embedding_backfill.py -v</code> → FAIL (<code>assert job is not None</code> — job not registered yet).</p>
+
+<h2 id="s3"><span class="step">Step 3</span>Add <em>timedelta</em></h2>
+<p>Change the datetime import (~L5):</p>
+<pre><code>from datetime import datetime, timedelta, timezone</code></pre>
+
+<h2 id="s4"><span class="step">Step 4</span>Register the <em>job</em></h2>
+<p>In <code>start_scheduler()</code>, after the <code>forgetting_manager</code> <code>add_job(...)</code> block (~L54-61), add:</p>
+<pre><code>    from ormah.background.embedding_backfill import run_embedding_backfill
+
+    scheduler.add_job(
+        tracked(tracker, "embedding_backfill", run_embedding_backfill, engine),
+        "interval",
+        minutes=s.embedding_backfill_interval_minutes,
+        id="embedding_backfill",
+        name="Embedding backfill",
+        misfire_grace_time=_MISFIRE_GRACE,
+        max_instances=1,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=10),
+    )</code></pre>
+<div class="callout"><span class="label">max_instances</span><code>max_instances=1</code> is the APScheduler default but stated explicitly here because a slow reconciliation on a large gap must never overlap the next tick.</div>
+
+<h2 id="s5"><span class="step">Step 5</span><em>Verify</em></h2>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_scheduler_embedding_backfill.py -v</code> → PASS.</p>
+
+<h2 id="s6"><span class="step">Step 6</span>Lint + <em>commit</em></h2>
+<pre><code>.venv/bin/ruff check src/ormah/background/scheduler.py tests/test_background/test_scheduler_embedding_backfill.py
+git add src/ormah/background/scheduler.py tests/test_background/test_scheduler_embedding_backfill.py
+git commit -m "feat(background): register embedding_backfill job with post-bind first run (#32)"</code></pre>
+
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah #32 · Task 07</span><span class="role">Register the job</span></div>
+</main></body></html>

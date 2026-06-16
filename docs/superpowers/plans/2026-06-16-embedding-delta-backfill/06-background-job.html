@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<!-- rich-doc-src-sha256:24a1bb71123665902f13203d37e5a09325e33fe70b47a41e6a05e29eb973903c -->
+<html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 06 — embedding_backfill job (#32)</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/1.55 var(--font-body);display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 28px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.1 var(--font-body);margin:0 0 24px}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}
+main{padding:56px 64px 120px;max-width:1040px}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 42px/1.08 var(--font-body);margin:12px 0 8px}
+h2{font:600 26px/1.12 var(--font-head);letter-spacing:-.015em;margin:48px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 17px/1.3 var(--font-head);margin:28px 0 8px;scroll-margin-top:24px}
+.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:26em}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent)}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:15px;overflow-x:auto;font:12.5px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:10px 15px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+.step{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone);border:1px solid var(--hairline);border-radius:20px;padding:4px 10px;margin-right:8px}
+.spectrum{display:flex;height:4px;margin:38px 0 20px}.spectrum span{flex:1}.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{border-left:2px solid var(--accent);padding-left:15px;color:var(--stone)}.signature .name{font:400 italic 17px/1 var(--font-body);color:var(--ink)}.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:860px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:30px 22px 80px}}
+</style></head><body>
+<nav class="toc"><div class="eyebrow">#32 · Task 06</div><div class="doc-title">embedding_backfill job</div>
+<a href="#why">Why</a><a href="#files">Files</a><a href="#s1">1 · Failing test</a><a href="#s3">3 · Module</a><a href="#s4">4 · Verify</a><a href="#s5">5 · Commit</a></nav>
+<main>
+<div class="eyebrow">Implementation plan · Task 06</div>
+<h1>The <em>job</em> module</h1>
+<div class="meta">Thin scheduler wrapper · needs Task 03</div>
+<p class="statement">Call backfill_embeddings, log real work, swallow errors — a background job never crashes the scheduler.</p>
+
+<h2 id="why">The <em>wrapper</em></h2>
+<p>Follows the <code>run_decay(engine)</code> / <code>run_auto_linker(engine)</code> pattern: call <code>engine.backfill_embeddings()</code>, log non-empty work, swallow exceptions.</p>
+
+<h2 id="files">Files <em>touched</em></h2>
+<table><thead><tr><th>Action</th><th>Path</th></tr></thead><tbody>
+<tr><td>Create</td><td><code>src/ormah/background/embedding_backfill.py</code></td></tr>
+<tr><td>Test</td><td><code>tests/test_background/test_embedding_backfill.py</code></td></tr></tbody></table>
+
+<h2 id="s1"><span class="step">Step 1</span><em>Failing</em> test</h2>
+<pre><code>"""Tests for the embedding_backfill background job (#32)."""
+from __future__ import annotations
+
+from ormah.background.embedding_backfill import run_embedding_backfill
+from ormah.models.node import CreateNodeRequest
+
+
+def test_run_embedding_backfill_closes_gap(engine):
+    nid, _ = engine.remember(CreateNodeRequest(title="Job", content="content"))
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors WHERE id = ?", (nid,))
+
+    run_embedding_backfill(engine)  # returns None, like the other jobs
+
+    assert engine.db.conn.execute(
+        "SELECT count(*) FROM node_vectors_rowids WHERE id = ?", (nid,)
+    ).fetchone()[0] == 1
+
+
+def test_run_embedding_backfill_swallows_errors(engine, monkeypatch):
+    def _boom():
+        raise RuntimeError("backfill exploded")
+
+    monkeypatch.setattr(engine, "backfill_embeddings", _boom)
+
+    # must not raise -- background jobs are fail-safe
+    run_embedding_backfill(engine)</code></pre>
+
+<h3 id="s2">Step 2 · Run to verify it fails</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_embedding_backfill.py -v</code><br>
+Expected: FAIL — <code>ModuleNotFoundError: No module named 'ormah.background.embedding_backfill'</code>.</p>
+
+<h2 id="s3"><span class="step">Step 3</span>Create the <em>module</em></h2>
+<p>Create <code>src/ormah/background/embedding_backfill.py</code>:</p>
+<pre><code>"""Vector-store reconciliation job: backfill missing embeddings (#32).
+
+Runs `engine.backfill_embeddings()` -- delta-only when the schema version matches,
+a full re-embed on a schema bump. Registered in the scheduler with a post-bind
+`next_run_time` and included in the sleep-cycle `run-all` pass.
+"""
+
+from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def run_embedding_backfill(engine) -> None:
+    """Embed any nodes missing a vector (or re-embed all on a schema bump)."""
+    try:
+        result = engine.backfill_embeddings()
+        if result.get("embedded"):
+            logger.info(
+                "Embedding backfill (%s): embedded=%d failed=%d vec=%d/%d",
+                result["mode"], result["embedded"], result.get("failed", 0),
+                result["vec_count"], result["node_count"],
+            )
+    except Exception as e:
+        logger.warning("Embedding backfill failed: %s", e)</code></pre>
+
+<h2 id="s4"><span class="step">Step 4</span><em>Verify</em></h2>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_embedding_backfill.py -v</code> → PASS (2 tests).</p>
+
+<h2 id="s5"><span class="step">Step 5</span>Lint + <em>commit</em></h2>
+<pre><code>.venv/bin/ruff check src/ormah/background/embedding_backfill.py tests/test_background/test_embedding_backfill.py
+git add src/ormah/background/embedding_backfill.py tests/test_background/test_embedding_backfill.py
+git commit -m "feat(background): add embedding_backfill reconciliation job (#32)"</code></pre>
+
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah #32 · Task 06</span><span class="role">embedding_backfill job</span></div>
+</main></body></html>
