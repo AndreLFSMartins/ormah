@@ -1222,6 +1222,92 @@ class MemoryEngine:
             "outcome_breakdown": breakdown,
         }
 
+    # SQL proxy for "_embedding_text(title, content) is non-empty": a node is
+    # embeddable when it has non-whitespace content OR title.
+    _EMBEDDABLE_SQL = (
+        "COALESCE(NULLIF(TRIM(content), ''), NULLIF(TRIM(title), '')) IS NOT NULL"
+    )
+
+    def _missing_embeddable_count(self) -> int:
+        """Embeddable nodes with no row in the vector store (the honest gap)."""
+        return self.db.conn.execute(
+            f"SELECT count(*) FROM nodes n "
+            f"LEFT JOIN node_vectors_rowids v ON n.id = v.id "
+            f"WHERE v.id IS NULL AND {self._EMBEDDABLE_SQL}"
+        ).fetchone()[0]
+
+    def backfill_embeddings(self) -> dict:
+        """Reconcile the vector store. Idempotent; safe to run repeatedly.
+
+        Two modes:
+        - **schema bump** (stored version < current): every existing vector was
+          built under an old scheme, so re-embed all embeddable nodes in a single
+          pass. For each node that fails to encode, delete its stale vector so it
+          becomes genuinely missing (caught by future delta runs). Advance the
+          version unconditionally after the pass -- the store has been fully
+          reprocessed; nodes that could not be embedded are now honestly missing.
+        - **delta** (stored version == current): embed only embeddable nodes
+          missing from the vector store (anti-join), O(gap).
+
+        A permanently-failing node simply stays in ``missing`` and is retried each
+        tick -- never dropped, never masked. Returns a summary dict where
+        ``missing`` is the honest embedding gap after the run.
+        """
+        count = self.db.conn.execute("SELECT count(*) FROM nodes").fetchone()[0]
+        ver_row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
+        ).fetchone()
+        stored_version = int(ver_row["value"]) if ver_row else 0
+
+        if stored_version < _EMBEDDING_SCHEMA_VERSION:
+            mode = "schema"
+            rows = self.db.conn.execute(
+                f"SELECT id, title, content FROM nodes WHERE {self._EMBEDDABLE_SQL}"
+            ).fetchall()
+            logger.info(
+                "Embedding backfill (schema v%d->v%d): re-embedding %d nodes",
+                stored_version, _EMBEDDING_SCHEMA_VERSION, len(rows),
+            )
+        else:
+            mode = "delta"
+            rows = self.db.conn.execute(
+                f"SELECT n.id, n.title, n.content FROM nodes n "
+                f"LEFT JOIN node_vectors_rowids v ON n.id = v.id "
+                f"WHERE v.id IS NULL AND {self._EMBEDDABLE_SQL}"
+            ).fetchall()
+            if rows:
+                logger.info("Embedding backfill (delta): embedding %d missing nodes", len(rows))
+
+        embedded_ids, failed_ids = self._embed_node_rows(rows)
+
+        # Schema mode: drop the stale vector of any node that failed to re-embed
+        # under the new scheme, so it is genuinely missing (and retried by delta)
+        # rather than silently kept with an outdated embedding.
+        if mode == "schema" and failed_ids:
+            with self.db.transaction() as conn:
+                for nid in failed_ids:
+                    conn.execute("DELETE FROM node_vectors WHERE id = ?", (nid,))
+
+        # Advance the schema version unconditionally after a full schema pass.
+        if mode == "schema":
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                    "('embedding_schema_version', ?)",
+                    (str(_EMBEDDING_SCHEMA_VERSION),),
+                )
+
+        missing = self._missing_embeddable_count()
+        vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
+        return {
+            "mode": mode,
+            "embedded": len(embedded_ids),
+            "failed": len(failed_ids),
+            "missing": missing,
+            "vec_count": vec_count,
+            "node_count": count,
+        }
+
     def stats(self, days: int | None = None) -> dict[str, Any]:
         """Return the canonical stats payload for tray, CLI, UI, and diagnostics."""
         now = datetime.now(timezone.utc)
