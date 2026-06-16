@@ -1015,57 +1015,68 @@ class MemoryEngine:
         self._reindex_all_embeddings()
         return count
 
+    def _embed_node_rows(self, nodes) -> tuple[list[str], list[str]]:
+        """Embed the given node rows into the vector store.
+
+        Builds embeddings, then upserts in chunks of 100 with a WAL checkpoint
+        between chunks (sqlite-vec vec0 can silently drop rows in large
+        transactions). Returns (embedded_ids, failed_ids). Nodes whose embedding
+        text is empty are skipped (in neither list). Logs a warning if the final
+        vec_count is below the number upserted (possible silent vec0 drop).
+        """
+        from ormah.embeddings.vector_store import VectorStore
+        from ormah.embeddings.encoder import get_encoder
+
+        total = len(nodes)
+        if total == 0:
+            return [], []
+
+        encoder = get_encoder(self.settings)
+        vec_store = VectorStore(self.db)
+        max_chars = self.settings.embedding_max_content_chars
+        log_every = max(1, total // 10)
+
+        all_items: list[tuple[str, Any]] = []
+        failed_ids: list[str] = []
+        for idx, n in enumerate(nodes):
+            text = _embedding_text(n["title"], n["content"], max_chars)
+            if text:
+                try:
+                    embedding = encoder.encode(text)
+                    all_items.append((n["id"], embedding))
+                except Exception as e:
+                    logger.warning("Failed to embed node %s: %s", n["id"][:8], e)
+                    failed_ids.append(n["id"])
+            done = idx + 1
+            if done % log_every == 0 or done == total:
+                logger.info("Embedding memories: %d/%d", done, total)
+
+        # Upsert in small chunks with WAL checkpoint after each.
+        chunk_size = 100
+        for i in range(0, len(all_items), chunk_size):
+            chunk = all_items[i : i + chunk_size]
+            vec_store.upsert_batch(chunk)
+            self.db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        embedded_ids = [item[0] for item in all_items]
+        vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
+        logger.info(
+            "Embedded %d/%d nodes (vec_count=%d, failed=%d)",
+            len(embedded_ids), total, vec_count, len(failed_ids),
+        )
+        if vec_count < len(embedded_ids):
+            logger.warning(
+                "Vec table has fewer entries (%d) than embedded (%d) — "
+                "possible sqlite-vec persistence issue",
+                vec_count, len(embedded_ids),
+            )
+        return embedded_ids, failed_ids
+
     def _reindex_all_embeddings(self) -> None:
         """Re-embed all nodes in the index."""
         try:
-            from ormah.embeddings.vector_store import VectorStore
-            from ormah.embeddings.encoder import get_encoder
-
-            encoder = get_encoder(self.settings)
-            vec_store = VectorStore(self.db)
-
             nodes = self.db.conn.execute("SELECT id, title, content FROM nodes").fetchall()
-            max_chars = self.settings.embedding_max_content_chars
-            total = len(nodes)
-            log_every = max(1, total // 10)  # log every ~10%
-
-            # Build all embeddings first
-            all_items: list[tuple[str, Any]] = []
-            failed = 0
-            for idx, n in enumerate(nodes):
-                text = _embedding_text(n["title"], n["content"], max_chars)
-                if text:
-                    try:
-                        embedding = encoder.encode(text)
-                        all_items.append((n["id"], embedding))
-                    except Exception as e:
-                        logger.warning("Failed to embed node %s: %s", n["id"][:8], e)
-                        failed += 1
-                done = idx + 1
-                if done % log_every == 0 or done == total:
-                    logger.info("Re-embedding memories: %d/%d", done, total)
-
-            # Upsert in small chunks with WAL checkpoint after each.
-            # sqlite-vec vec0 virtual tables can silently drop rows in
-            # large transactions; chunking prevents this.
-            chunk_size = 100
-            for i in range(0, len(all_items), chunk_size):
-                chunk = all_items[i : i + chunk_size]
-                vec_store.upsert_batch(chunk)
-                self.db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-
-            # Verify the count actually matches
-            vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
-            logger.info(
-                "Re-embedded %d/%d nodes (vec_count=%d, failed=%d)",
-                len(all_items), len(nodes), vec_count, failed,
-            )
-            if vec_count < len(all_items):
-                logger.warning(
-                    "Vec table has fewer entries (%d) than embedded (%d) — "
-                    "possible sqlite-vec persistence issue",
-                    vec_count, len(all_items),
-                )
+            self._embed_node_rows(nodes)
         except Exception as e:
             logger.warning("Failed to reindex embeddings: %s", e)
 
