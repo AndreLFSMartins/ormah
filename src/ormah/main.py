@@ -54,11 +54,16 @@ import threading
 # /admin/health while no scheduler exists.
 _BACKFILL_FALLBACK_BASE_BACKOFF = 30.0  # seconds
 _BACKFILL_FALLBACK_MAX_BACKOFF = 600.0  # seconds
+_FALLBACK_JOIN_TIMEOUT = 30.0  # seconds — bounded join for the fallback thread (C1)
 
 _fallback_lock = threading.Lock()
 _fallback_thread: threading.Thread | None = None
 _fallback_stop_event: threading.Event | None = None
 _fallback_degraded: bool = False
+
+# Signals the scheduler's embedding_backfill job to cancel on shutdown.
+# The fallback uses its own _fallback_stop_event; the two paths never coexist.
+_lifecycle_stop_event = threading.Event()
 
 
 def _start_backfill_fallback(engine) -> None:
@@ -105,15 +110,12 @@ def _start_backfill_fallback(engine) -> None:
         thread.start()
 
 
-def _stop_backfill_fallback() -> None:
-    """Signal the fallback thread to stop and join it without a timeout. Idempotent.
+def _stop_backfill_fallback() -> bool:
+    """Signal stop and join the fallback thread with a bounded timeout.
 
-    Mirrors scheduler.shutdown(wait=True): the cooperative cancellation guarantees
-    the thread exits after the in-flight encode completes (the backfill loop is not
-    infinite — once stop_event is set and the current encode finishes, the loop
-    exits and _run returns). Joining without a timeout ensures the engine is never
-    closed while the thread can still touch the DB (C-A), and the handle is cleared
-    only after the thread is confirmed dead, so the singleton guard stays intact (C-B).
+    Returns True if the thread survived the join (caller must skip engine.shutdown()
+    to avoid use-after-close; the handle is kept so the singleton guard still blocks
+    a second fallback — C-A/C-B). Returns False when the thread is confirmed dead.
 
     Lock discipline: signal + read handle under lock; join outside the lock (do not
     hold the lock during a potentially long join); clear handle under lock after join.
@@ -124,10 +126,18 @@ def _stop_backfill_fallback() -> None:
             _fallback_stop_event.set()
         thread = _fallback_thread
     if thread is not None:
-        thread.join()  # no timeout — engine must not close until the thread is dead
+        thread.join(timeout=_FALLBACK_JOIN_TIMEOUT)
+        if thread.is_alive():
+            logger.critical(
+                "Embedding backfill fallback did not stop within %.0fs; keeping the "
+                "thread handle and skipping engine shutdown to avoid use-after-close.",
+                _FALLBACK_JOIN_TIMEOUT,
+            )
+            return True
     with _fallback_lock:
         _fallback_thread = None
         _fallback_stop_event = None
+    return False
 
 
 @asynccontextmanager
@@ -144,8 +154,9 @@ async def lifespan(app: FastAPI):
     try:
         from ormah.background.scheduler import start_scheduler
 
+        _lifecycle_stop_event.clear()  # reset defensivo para reload no mesmo processo
         logger.info("Starting background scheduler...")
-        scheduler, tracker = start_scheduler(engine)
+        scheduler, tracker = start_scheduler(engine, stop_event=_lifecycle_stop_event)
         app.state.scheduler = scheduler
         app.state.job_tracker = tracker
         app.state.maintenance_manager = MaintenanceManager(engine, tracker=tracker)
@@ -182,6 +193,13 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Ask the scheduler's embedding_backfill job to cancel cooperatively.
+    # scheduler.shutdown(wait=True) below honours this: the job exits between
+    # encodes. A single encoder.encode() call mid-flight is not interruptible
+    # (fundamental limit), but wait=True ensures the DB is released before any
+    # close — no corruption.
+    _lifecycle_stop_event.set()
+
     # Shutdown — stop session watcher first
     if hasattr(app.state, "session_watcher_observers"):
         stop_session_watcher(app.state.session_watcher_observers)
@@ -190,13 +208,21 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "hippocampus_observers"):
         stop_hippocampus(app.state.hippocampus_observers)
 
-    # Shutdown — stop the scheduler-independent backfill fallback if it is running
-    _stop_backfill_fallback()
+    # Shutdown — stop the scheduler-independent backfill fallback if it is running.
+    # If the fallback thread survived the bounded join (C1), skip engine.shutdown()
+    # to avoid use-after-close (C-A/C-B); the handle is kept for the singleton guard.
+    fallback_alive = _stop_backfill_fallback()
 
-    # Shutdown — wait for running jobs to finish (up to 10s)
+    # Shutdown — wait for running jobs to finish (job cooperates via _lifecycle_stop_event)
     if hasattr(app.state, "scheduler"):
         app.state.scheduler.shutdown(wait=True)
-    engine.shutdown()
+
+    if not fallback_alive:
+        engine.shutdown()
+    else:
+        logger.critical(
+            "Skipping engine.shutdown(): fallback thread still alive (avoids use-after-close)"
+        )
     logger.info("Ormah stopped")
 
 
