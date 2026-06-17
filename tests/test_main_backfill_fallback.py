@@ -257,6 +257,67 @@ def test_stop_cancels_long_backfill_within_join(monkeypatch):
     assert eng.saw_stop is True
 
 
+# ---------------------------------------------------------------------------
+# C1 — bounded join com política pós-timeout
+# ---------------------------------------------------------------------------
+
+
+def test_stop_returns_true_when_thread_survives_timeout(monkeypatch):
+    """C1: se o join expira (encode travado), _stop retorna True e handle é mantido (C-B)."""
+    monkeypatch.setattr(main, "_FALLBACK_JOIN_TIMEOUT", 0.1)
+    monkeypatch.setattr(main, "_BACKFILL_FALLBACK_BASE_BACKOFF", 0.001)
+
+    release = _threading.Event()
+
+    def _blocking(engine, stop_event=None):
+        # Ignora stop_event mid-call — simula encoder.encode() travado
+        release.wait(timeout=5.0)
+
+    monkeypatch.setattr(
+        "ormah.background.embedding_backfill.run_embedding_backfill",
+        _blocking,
+    )
+
+    main._start_backfill_fallback(object())
+    # Aguarda o thread entrar no blocking
+    _wait_for(lambda: main._fallback_thread is not None
+              and main._fallback_thread.is_alive(), timeout=2.0)
+
+    result = main._stop_backfill_fallback()
+
+    assert result is True, "_stop deve retornar True quando thread sobrevive ao timeout"
+    assert main._fallback_thread is not None, "handle deve ser mantido (C-B) para bloquear segunda instância"
+
+    # Cleanup: libera o encode e espera o thread morrer
+    release.set()
+    _wait_for(lambda: not main._fallback_thread.is_alive(), timeout=3.0)
+    with main._fallback_lock:
+        main._fallback_thread = None
+        main._fallback_stop_event = None
+
+
+def test_stop_returns_false_when_thread_exits(monkeypatch):
+    """C1: quando o thread sai antes do timeout, _stop retorna False e handle é limpo."""
+    monkeypatch.setattr(main, "_FALLBACK_JOIN_TIMEOUT", 5.0)
+    monkeypatch.setattr(main, "_BACKFILL_FALLBACK_BASE_BACKOFF", 0.001)
+
+    def _quick(engine, stop_event=None):
+        return  # sai imediatamente ao receber stop_event
+
+    monkeypatch.setattr(
+        "ormah.background.embedding_backfill.run_embedding_backfill",
+        _quick,
+    )
+
+    main._start_backfill_fallback(object())
+    _wait_for(lambda: main._fallback_thread is not None, timeout=2.0)
+
+    result = main._stop_backfill_fallback()
+
+    assert result is False, "_stop deve retornar False quando thread encerra normalmente"
+    assert main._fallback_thread is None, "handle deve ser limpo quando thread está morto"
+
+
 def test_stop_does_not_return_while_backfill_thread_alive(monkeypatch):
     """M-A: _stop_backfill_fallback must NOT return while the thread is alive.
 
