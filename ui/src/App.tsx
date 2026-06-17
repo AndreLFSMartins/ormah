@@ -248,15 +248,19 @@ export default function App() {
       />
       <div className="graph-container">
         {graph && (
+          // Council C2: pass full graph.nodes/graph.edges + filters prop so filter
+          // toggles cost a reducer refresh(), not a graph rebuild + camera reset.
+          // filteredNodes is kept above only for the TopBar count badge.
           <GraphView
             ref={graphViewRef}
-            nodes={filteredNodes}
-            edges={filteredEdges}
+            nodes={graph.nodes}
+            edges={graph.edges}
             onNodeSelect={handleNodeSelect}
             focusNodeId={focusNodeId}
             userNodeId={userNodeId}
             clusterBySpace={filters.clusterBySpace}
             appearance={graphAppearance}
+            filters={filters}
           />
         )}
       </div>
