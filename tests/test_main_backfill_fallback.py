@@ -255,3 +255,88 @@ def test_stop_cancels_long_backfill_within_join(monkeypatch):
 
     assert main._fallback_thread is None
     assert eng.saw_stop is True
+
+
+def test_stop_does_not_return_while_backfill_thread_alive(monkeypatch):
+    """M-A: _stop_backfill_fallback must NOT return while the thread is alive.
+
+    Simulates encoder.encode() blocking mid-call (ignores stop_event until
+    the encode finishes). With the old join(timeout=5s) the stop returns after
+    ~5s and the handle is cleared while the thread is still alive — C-A/C-B.
+    With the fix (join without timeout) _stop blocks until the encode releases,
+    guaranteeing the engine is never closed while the thread can still touch the DB.
+
+    Protocol:
+    - `entered` fires when the fake encode begins (thread is alive, inside encode).
+    - `release` blocks the fake encode; setting it simulates the encode finishing.
+    - `_stop_backfill_fallback()` runs in a helper thread; `stopped` fires when it returns.
+    - Assert: stopped does NOT fire within 6s while release is not set  → FAILS on old code
+              (old join(5s) would return after 5s; not stopped.wait(6) would be False).
+    - Release the encode, then assert: stopped fires within 3s, handle is None, thread dead.
+    """
+    monkeypatch.setattr(main, "_BACKFILL_FALLBACK_BASE_BACKOFF", 0.001)
+
+    entered = _threading.Event()
+    release = _threading.Event()
+
+    def _blocking_run(engine, stop_event=None):
+        entered.set()
+        # Simulate a long encoder.encode() that does NOT check stop_event mid-call.
+        release.wait()
+        # After the blocking encode finishes, honour the stop_event so the loop exits.
+        if stop_event is not None and stop_event.is_set():
+            return {"mode": "delta", "embedded": 0, "failed": 0, "missing": 1,
+                    "vec_count": 0, "node_count": 1}
+        return {"mode": "delta", "embedded": 0, "failed": 0, "missing": 0,
+                "vec_count": 0, "node_count": 1}
+
+    def _fake_run(engine, stop_event=None):
+        result = _blocking_run(engine, stop_event=stop_event)
+        if result.get("missing", 0) > 0:
+            raise RuntimeError(f"backfill incomplete: {result['missing']} missing")
+
+    monkeypatch.setattr(
+        "ormah.background.embedding_backfill.run_embedding_backfill",
+        _fake_run,
+    )
+
+    main._start_backfill_fallback(object())
+    assert entered.wait(timeout=2.0), "thread never entered the blocking encode"
+
+    # Run _stop in a helper thread so we can observe when it returns.
+    stopped = _threading.Event()
+
+    def _do_stop():
+        main._stop_backfill_fallback()
+        stopped.set()
+
+    stop_thread = _threading.Thread(target=_do_stop, daemon=True)
+    stop_thread.start()
+
+    # CRITICAL assertion: _stop must NOT return while the encode is still blocked.
+    # Old code: join(timeout=5s) returns after ~5s → stopped.wait(6) is True →
+    #           `not stopped.wait(6)` is False → test FAILS on old code.
+    # Fixed code: join() blocks until release → stopped.wait(6) is False →
+    #             `not stopped.wait(6)` is True → test PASSES.
+    assert not stopped.wait(timeout=6), (
+        "_stop_backfill_fallback returned while the encode was still blocking — "
+        "this means join had a timeout and the handle was cleared with the thread alive (C-A/C-B)"
+    )
+
+    # Now release the blocking encode.
+    release.set()
+
+    # _stop must return promptly after the encode finishes.
+    assert stopped.wait(timeout=3), "_stop_backfill_fallback did not return after encode released"
+
+    # Handle must be cleared and thread must be dead.
+    assert main._fallback_thread is None
+    thread_ref = None
+    # Recover thread reference via enumerate to confirm it really died.
+    for t in _threading.enumerate():
+        if t.name == "embedding-backfill-fallback":
+            thread_ref = t
+            break
+    assert thread_ref is None or not thread_ref.is_alive(), (
+        "backfill thread is still alive after _stop_backfill_fallback returned"
+    )

@@ -55,7 +55,6 @@ import threading
 # /admin/health while no scheduler exists.
 _BACKFILL_FALLBACK_BASE_BACKOFF = 30.0  # seconds
 _BACKFILL_FALLBACK_MAX_BACKOFF = 600.0  # seconds
-_FALLBACK_JOIN_TIMEOUT = 5.0  # seconds — bound the shutdown wait on the fallback thread
 
 _fallback_lock = threading.Lock()
 _fallback_thread: threading.Thread | None = None
@@ -108,21 +107,25 @@ def _start_backfill_fallback(engine) -> None:
 
 
 def _stop_backfill_fallback() -> None:
-    """Signal the fallback thread to stop and join it. Idempotent. With the
-    backfill now cancellable, the join succeeds quickly, so the handle is always
-    cleared — the engine can then be shut down safely (no use-after-close)."""
+    """Signal the fallback thread to stop and join it without a timeout. Idempotent.
+
+    Mirrors scheduler.shutdown(wait=True): the cooperative cancellation guarantees
+    the thread exits after the in-flight encode completes (the backfill loop is not
+    infinite — once stop_event is set and the current encode finishes, the loop
+    exits and _run returns). Joining without a timeout ensures the engine is never
+    closed while the thread can still touch the DB (C-A), and the handle is cleared
+    only after the thread is confirmed dead, so the singleton guard stays intact (C-B).
+
+    Lock discipline: signal + read handle under lock; join outside the lock (do not
+    hold the lock during a potentially long join); clear handle under lock after join.
+    """
     global _fallback_thread, _fallback_stop_event
     with _fallback_lock:
         if _fallback_stop_event is not None:
             _fallback_stop_event.set()
         thread = _fallback_thread
     if thread is not None:
-        thread.join(timeout=_FALLBACK_JOIN_TIMEOUT)
-        if thread.is_alive():
-            logger.warning(
-                "Embedding backfill fallback did not stop within %.1fs",
-                _FALLBACK_JOIN_TIMEOUT,
-            )
+        thread.join()  # no timeout — engine must not close until the thread is dead
     with _fallback_lock:
         _fallback_thread = None
         _fallback_stop_event = None
