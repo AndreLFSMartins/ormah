@@ -145,3 +145,33 @@ def test_fallback_stops_on_shutdown(monkeypatch):
     settled = len(calls)
     real_sleep(0.1)
     assert len(calls) == settled  # no further attempts after stop
+
+
+def test_stop_preserves_handle_when_thread_survives_join(monkeypatch):
+    """CR1: if the runner can't stop within the join timeout, keep the handle
+    so the singleton guard still blocks a second fallback."""
+    import threading
+    release = threading.Event()
+    entered = threading.Event()
+
+    def _stuck(engine):
+        entered.set()
+        release.wait(timeout=5.0)   # ignores stop_event — simulates non-interruptible IO
+        raise RuntimeError("incomplete")
+
+    monkeypatch.setattr(
+        "ormah.background.embedding_backfill.run_embedding_backfill", _stuck)
+    monkeypatch.setattr(main, "_FALLBACK_JOIN_TIMEOUT", 0.05)
+    monkeypatch.setattr(main, "_BACKFILL_FALLBACK_BASE_BACKOFF", 0.001)
+
+    main._start_backfill_fallback(object())
+    assert entered.wait(timeout=2.0)
+    main._stop_backfill_fallback()              # join times out — thread still in _stuck
+    assert main._fallback_thread is not None    # handle preserved
+    assert main._fallback_thread.is_alive()
+    first = main._fallback_thread
+    main._start_backfill_fallback(object())     # singleton holds → no-op
+    assert main._fallback_thread is first
+    # cleanup so the thread exits and does not leak into the next test
+    release.set()
+    first.join(timeout=2.0)
