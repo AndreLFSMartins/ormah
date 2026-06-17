@@ -33,18 +33,17 @@ export function tierColor(tier: string, selfRole: SelfRole, appearance: GraphApp
 // the sigma default node program has no border, and dashed borders are deferred
 // (spec: not a parity requirement). Re-add with a bordered node program if revived.
 
-// Sizes are in LAYOUT-POSITION units (sigma is configured with
-// itemSizesReference: "positions" + zoomToSizeRatioFunction: ratio => ratio),
-// so a node's on-screen radius scales 1:1 with zoom, like Obsidian's graph.
-// The settled FA2 layout for this store spans ~475 units across ~1800 nodes,
-// giving a mean neighbour gap of ~11 units; node *diameters* stay below that
-// gap to avoid the overlap that screen-space sizing produced (min Ø4, max Ø10).
-function nodeSize(accessCount: number): number {
-  return Math.min(5, Math.max(2, 2 + Math.log2(accessCount + 1) * 0.5));
+// Sizes are in LAYOUT-POSITION units (sigma uses itemSizesReference: "positions"
+// + zoomToSizeRatioFunction: ratio => ratio), so radius scales 1:1 with zoom.
+// Node size reflects DEGREE (connection count), like Obsidian's graph: isolated
+// nodes stay small (Ø floor), hubs grow but are capped so they don't dominate.
+// Validated on the live graph: deg 0 -> 2, deg 2 (median) -> 4.06, deg 214 (hub) -> 10.
+function nodeSize(degree: number): number {
+  return Math.min(10, 2 + Math.log2(degree + 1) * 1.3);
 }
 
-export function displayNodeSize(accessCount: number, selfRole: SelfRole): number {
-  const size = nodeSize(accessCount);
+export function displayNodeSize(degree: number, selfRole: SelfRole): number {
+  const size = nodeSize(degree);
   return selfRole === "self" ? Math.max(3.5, size) : size;
 }
 

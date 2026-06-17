@@ -35,10 +35,13 @@ describe("visual", () => {
     expect(displayNodeSize(0, "self")).toBeGreaterThanOrEqual(3.5);
   });
 
-  it("keeps node sizes within the position-unit range (Ø below FA2 neighbour gap)", () => {
-    expect(displayNodeSize(0, "")).toBe(2); // floor
-    expect(displayNodeSize(1_000_000, "")).toBeLessThanOrEqual(5); // ceiling
-    expect(displayNodeSize(8, "")).toBeGreaterThan(displayNodeSize(0, "")); // grows with access
+  it("sizes nodes by degree: floor at 2, grows past old cap, capped at 10", () => {
+    expect(displayNodeSize(31, "")).toBeGreaterThan(5);          // FAILS on old formula (old cap = 5)
+    expect(displayNodeSize(0, "")).toBe(2);                       // isolated -> floor
+    expect(displayNodeSize(2, "")).toBeGreaterThan(displayNodeSize(0, "")); // grows
+    expect(displayNodeSize(10, "")).toBeGreaterThan(displayNodeSize(2, "")); // keeps growing
+    expect(displayNodeSize(214, "")).toBeLessThanOrEqual(10);    // hub capped
+    expect(displayNodeSize(10_000, "")).toBeLessThanOrEqual(10); // cap holds
   });
 
   it("labels prefer title, then content slice, then id prefix", () => {
