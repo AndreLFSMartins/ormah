@@ -73,3 +73,8 @@ CLAUDE.md
 .omx/
 .codex
 .codex/
+
+# Local tool artifacts — never versioned (global rule)
+.council/
+docs/superpowers/
+graphify-out/
