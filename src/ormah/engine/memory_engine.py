@@ -1194,7 +1194,7 @@ class MemoryEngine:
         self._reindex_all_embeddings()
         return count
 
-    def _embed_node_rows(self, nodes) -> tuple[list[str], list[str]]:
+    def _embed_node_rows(self, nodes, stop_event=None) -> tuple[list[str], list[str]]:
         """Embed the given node rows into the vector store.
 
         Builds embeddings, then upserts in chunks of 100 with a WAL checkpoint
@@ -1202,6 +1202,10 @@ class MemoryEngine:
         transactions). Returns (embedded_ids, failed_ids). Nodes whose embedding
         text is empty are skipped (in neither list). Logs a warning if the final
         vec_count is below the number upserted (possible silent vec0 drop).
+
+        If ``stop_event`` is provided and becomes set, the encode loop and the
+        upsert loop both exit early (cooperative cancellation). Only ids that
+        were actually written to the DB are returned as ``embedded_ids``.
         """
         from ormah.embeddings.vector_store import VectorStore
         from ormah.embeddings.encoder import get_encoder
@@ -1218,6 +1222,8 @@ class MemoryEngine:
         all_items: list[tuple[str, Any]] = []
         failed_ids: list[str] = []
         for idx, n in enumerate(nodes):
+            if stop_event is not None and stop_event.is_set():
+                break  # cooperative cancel — stop accumulating work
             text = _embedding_text(n["title"], n["content"], max_chars)
             if text:
                 try:
@@ -1232,12 +1238,16 @@ class MemoryEngine:
 
         # Upsert in small chunks with WAL checkpoint after each.
         chunk_size = 100
+        upserted_ids: list[str] = []
         for i in range(0, len(all_items), chunk_size):
+            if stop_event is not None and stop_event.is_set():
+                break  # cooperative cancel — stop before this DB write
             chunk = all_items[i : i + chunk_size]
             vec_store.upsert_batch(chunk)
             self.db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            upserted_ids.extend(item[0] for item in chunk)
 
-        embedded_ids = [item[0] for item in all_items]
+        embedded_ids = upserted_ids
         vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
         logger.info(
             "Embedded %d/%d nodes (vec_count=%d, failed=%d)",
@@ -1348,7 +1358,7 @@ class MemoryEngine:
             f"WHERE v.id IS NULL AND {self._EMBEDDABLE_SQL}"
         ).fetchone()[0]
 
-    def backfill_embeddings(self) -> dict:
+    def backfill_embeddings(self, stop_event=None) -> dict:
         """Reconcile the vector store. Idempotent; safe to run repeatedly.
 
         Two modes:
@@ -1356,10 +1366,13 @@ class MemoryEngine:
           built under an old scheme, so re-embed all embeddable nodes in a single
           pass. For each node that fails to encode, delete its stale vector so it
           becomes genuinely missing (caught by future delta runs). Advance the
-          version unconditionally after the pass -- the store has been fully
-          reprocessed; nodes that could not be embedded are now honestly missing.
+          version only when the pass completes without interruption.
         - **delta** (stored version == current): embed only embeddable nodes
           missing from the vector store (anti-join), O(gap).
+
+        If ``stop_event`` is provided and becomes set, both the encode loop and
+        the upsert loop exit early. The schema version is NOT advanced on an
+        interrupted schema pass — the pass must be re-run as schema next time.
 
         A permanently-failing node simply stays in ``missing`` and is retried each
         tick -- never dropped, never masked. Returns a summary dict where
@@ -1390,7 +1403,9 @@ class MemoryEngine:
             if rows:
                 logger.info("Embedding backfill (delta): embedding %d missing nodes", len(rows))
 
-        embedded_ids, failed_ids = self._embed_node_rows(rows)
+        embedded_ids, failed_ids = self._embed_node_rows(rows, stop_event=stop_event)
+
+        interrupted = stop_event is not None and stop_event.is_set()
 
         # Schema mode: drop the stale vector of any node that failed to re-embed
         # under the new scheme, so it is genuinely missing (and retried by delta)
@@ -1400,8 +1415,10 @@ class MemoryEngine:
                 for nid in failed_ids:
                     conn.execute("DELETE FROM node_vectors WHERE id = ?", (nid,))
 
-        # Advance the schema version unconditionally after a full schema pass.
-        if mode == "schema":
+        # Only advance the version on a COMPLETE schema pass. An interrupted pass
+        # must be re-run as schema next time — advancing here would make a partial
+        # reprocess look complete and hide un-reprocessed nodes from delta runs.
+        if mode == "schema" and not interrupted:
             with self.db.transaction() as conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO meta (key, value) VALUES "
