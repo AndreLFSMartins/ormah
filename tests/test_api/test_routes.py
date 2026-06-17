@@ -325,3 +325,46 @@ def test_maintenance_phase2_apply_completes_via_routes(client):
     finally:
         app.state.engine.get_maintenance_batches = original_batches
         app.state.engine.apply_maintenance_results = original_apply
+
+
+def test_health_degraded_when_scheduler_job_embedding_backfill_failing():
+    """CR2: scheduler present + embedding_backfill last run failed -> health degraded."""
+    from unittest.mock import MagicMock
+
+    from ormah.api import routes_admin
+    from ormah.background.job_tracker import JobTracker
+
+    tracker = JobTracker()
+    tracker.record_failure("embedding_backfill", "encoder down", 12.0)
+
+    request = MagicMock()
+    request.app.state.job_tracker = tracker
+    # no maintenance_manager
+    request.app.state.maintenance_manager = None
+
+    result = routes_admin.health(request)
+
+    assert result["status"] == "degraded"
+    assert "embedding_backfill" in result
+    assert "jobs" in result  # snapshot still attached
+
+
+def test_health_ok_when_scheduler_job_recovered():
+    """A later success after an error leaves health ok."""
+    from unittest.mock import MagicMock
+
+    from ormah.api import routes_admin
+    from ormah.background.job_tracker import JobTracker
+
+    tracker = JobTracker()
+    tracker.record_failure("embedding_backfill", "encoder down", 12.0)
+    time.sleep(0.001)  # ensure success timestamp is strictly later
+    tracker.record_success("embedding_backfill", 8.0)  # recovered
+
+    request = MagicMock()
+    request.app.state.job_tracker = tracker
+    request.app.state.maintenance_manager = None
+
+    result = routes_admin.health(request)
+
+    assert result["status"] == "ok"

@@ -106,7 +106,18 @@ def health(request: Request):
     tracker = getattr(request.app.state, "job_tracker", None)
     result: dict = {"status": "ok"}
     if tracker is not None:
-        result["jobs"] = tracker.snapshot()
+        snap = tracker.snapshot()
+        result["jobs"] = snap
+        # CR2: promote to degraded when embedding_backfill's most recent run
+        # failed — otherwise a scheduler-backed outage stays invisible to callers
+        # that only read the top-level status.
+        job = snap.get("embedding_backfill")
+        if job and job.get("last_error"):
+            ls = job.get("last_success")
+            let = job.get("last_error_time")
+            if ls is None or (let is not None and let > ls):
+                result["status"] = "degraded"
+                result["embedding_backfill"] = "degraded: last run failed"
     else:
         # No scheduler: the backfill fallback is the only healer. Surface a
         # persistent outage that would otherwise be invisible (council CH2).
