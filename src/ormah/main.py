@@ -63,9 +63,11 @@ _fallback_thread: threading.Thread | None = None
 _fallback_stop_event: threading.Event | None = None
 _fallback_degraded: bool = False
 
-# Signals the scheduler's embedding_backfill job to cancel on shutdown.
+# Per-lifespan stop event (R1): created fresh in app.state at each lifespan
+# startup — see lifespan() below. There is no module-level global so that a
+# reload in the same process cannot clear() a previous lifespan's event and
+# rearm an orphan embedding_backfill worker that is still observing it.
 # The fallback uses its own _fallback_stop_event; the two paths never coexist.
-_lifecycle_stop_event = threading.Event()
 
 
 def _start_backfill_fallback(engine) -> None:
@@ -190,13 +192,17 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     logger.info("Memory engine ready.")
 
+    # Per-lifespan stop event (R1): a fresh Event per lifespan so that a prior
+    # lifespan's orphan worker (if shutdown timed out) can never be rearmed by
+    # a new startup — there is nothing to clear(), each lifespan owns its own.
+    app.state.lifecycle_stop_event = threading.Event()
+
     # Start background scheduler if available
     try:
         from ormah.background.scheduler import start_scheduler
 
-        _lifecycle_stop_event.clear()  # reset defensivo para reload no mesmo processo
         logger.info("Starting background scheduler...")
-        scheduler, tracker = start_scheduler(engine, stop_event=_lifecycle_stop_event)
+        scheduler, tracker = start_scheduler(engine, stop_event=app.state.lifecycle_stop_event)
         app.state.scheduler = scheduler
         app.state.job_tracker = tracker
         app.state.maintenance_manager = MaintenanceManager(engine, tracker=tracker)
@@ -238,7 +244,11 @@ async def lifespan(app: FastAPI):
     # encodes. A single encoder.encode() call mid-flight is not interruptible
     # (fundamental limit), but wait=True ensures the DB is released before any
     # close — no corruption.
-    _lifecycle_stop_event.set()
+    # Per-lifespan event (R1): always created in startup above, so direct
+    # attribute access is safe; getattr guard is kept for defensive clarity.
+    stop_ev = getattr(app.state, "lifecycle_stop_event", None)
+    if stop_ev is not None:
+        stop_ev.set()
 
     # Shutdown — stop session watcher first
     if hasattr(app.state, "session_watcher_observers"):
@@ -253,7 +263,7 @@ async def lifespan(app: FastAPI):
     # to avoid use-after-close (C-A/C-B); the handle is kept for the singleton guard.
     fallback_alive = _stop_backfill_fallback()
 
-    # Shutdown — wait for running jobs to finish (job cooperates via _lifecycle_stop_event).
+    # Shutdown — wait for running jobs to finish (job cooperates via app.state.lifecycle_stop_event).
     # Bounded join mirrors the fallback policy (Fix A): if a job is stuck inside a
     # non-interruptible encoder.encode() the scheduler.shutdown(wait=True) would hang
     # indefinitely; we join with _SHUTDOWN_TIMEOUT and treat survival as scheduler_alive.
