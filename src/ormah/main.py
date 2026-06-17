@@ -56,6 +56,7 @@ import threading
 _BACKFILL_FALLBACK_BASE_BACKOFF = 30.0  # seconds
 _BACKFILL_FALLBACK_MAX_BACKOFF = 600.0  # seconds
 _FALLBACK_JOIN_TIMEOUT = 30.0  # seconds — bounded join for the fallback thread (C1)
+_SHUTDOWN_TIMEOUT = 30.0  # seconds — bounded join for scheduler shutdown (Fix A)
 
 _fallback_lock = threading.Lock()
 _fallback_thread: threading.Thread | None = None
@@ -141,6 +142,44 @@ def _stop_backfill_fallback() -> bool:
     return False
 
 
+def _should_close_engine(*, fallback_alive: bool, scheduler_alive: bool) -> bool:
+    """Return True only when both background workers have confirmed exit.
+
+    Called at shutdown to decide whether engine.shutdown() is safe.  If either
+    worker is still alive it may hold a DB transaction, so closing the engine
+    would be a use-after-close.  The connection leaks until SIGTERM kills the
+    daemon threads — acceptable because (a) SQLite is not corrupted by an
+    unclosed reader, (b) the process is terminating anyway, and (c) a finalizer
+    would reopen the same race on hot-reload in the same process (Fix C).
+    """
+    return not fallback_alive and not scheduler_alive
+
+
+def _bounded_scheduler_shutdown(scheduler) -> bool:
+    """Run scheduler.shutdown(wait=True) in a daemon thread with a bounded join.
+
+    Returns True if the shutdown did not complete within _SHUTDOWN_TIMEOUT
+    (job likely stuck in a non-interruptible encoder.encode()); the caller must
+    then skip engine.shutdown() to avoid use-after-close — symmetric with the
+    bounded fallback join (Fix A).
+    """
+    shutdown_thread = threading.Thread(
+        target=lambda: scheduler.shutdown(wait=True),
+        name="scheduler-shutdown",
+        daemon=True,
+    )
+    shutdown_thread.start()
+    shutdown_thread.join(timeout=_SHUTDOWN_TIMEOUT)
+    if shutdown_thread.is_alive():
+        logger.critical(
+            "Scheduler shutdown did not complete within %.0fs (job likely stuck in a "
+            "non-interruptible encode); skipping engine shutdown to avoid use-after-close.",
+            _SHUTDOWN_TIMEOUT,
+        )
+        return True
+    return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -214,15 +253,26 @@ async def lifespan(app: FastAPI):
     # to avoid use-after-close (C-A/C-B); the handle is kept for the singleton guard.
     fallback_alive = _stop_backfill_fallback()
 
-    # Shutdown — wait for running jobs to finish (job cooperates via _lifecycle_stop_event)
+    # Shutdown — wait for running jobs to finish (job cooperates via _lifecycle_stop_event).
+    # Bounded join mirrors the fallback policy (Fix A): if a job is stuck inside a
+    # non-interruptible encoder.encode() the scheduler.shutdown(wait=True) would hang
+    # indefinitely; we join with _SHUTDOWN_TIMEOUT and treat survival as scheduler_alive.
+    scheduler_alive = False
     if hasattr(app.state, "scheduler"):
-        app.state.scheduler.shutdown(wait=True)
+        scheduler_alive = _bounded_scheduler_shutdown(app.state.scheduler)
 
-    if not fallback_alive:
+    # Fix C (best-effort limitation): when either worker survives its timeout, the
+    # engine is not closed cleanly — the SQLite connection leaks until process exit.
+    # Accepted because: (a) no corruption risk, (b) process is terminating (SIGTERM
+    # kills daemon threads), (c) a finalizer would reopen an engine-old-vs-new race
+    # on hot-reload in the same process.
+    if _should_close_engine(fallback_alive=fallback_alive, scheduler_alive=scheduler_alive):
         engine.shutdown()
     else:
         logger.critical(
-            "Skipping engine.shutdown(): fallback thread still alive (avoids use-after-close)"
+            "Skipping engine.shutdown(): background worker still in flight "
+            "(fallback_alive=%s scheduler_alive=%s) — avoids use-after-close",
+            fallback_alive, scheduler_alive,
         )
     logger.info("Ormah stopped")
 
