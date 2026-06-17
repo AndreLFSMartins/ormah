@@ -264,7 +264,7 @@ const GraphView = forwardRef<
       highlightSet: new Set(),
       glowOnly: new Set(),
       focusKind: null,
-      dimmed: { space: new Set(), tier: new Set(), role: new Set(), edge: new Set() },
+      dimmed: { space: new Set(), tier: new Set(), role: new Set(), type: new Set(), edge: new Set() },
       attrsById: new Map(),
       edgeTypeById: new Map(),
       dimColor: appearance.theme === "dark" ? "#2a2a2a" : "#cfd6de",
@@ -353,12 +353,13 @@ const GraphView = forwardRef<
       graphRef.current = graph;
 
       // Build lookup maps for the reducer
-      const attrsById = new Map<string, { space: string; tier: string; selfRole: string }>();
+      const attrsById = new Map<string, { space: string; tier: string; selfRole: string; type: string }>();
       graph.forEachNode((id, a) =>
         attrsById.set(id, {
           space: (a.space as string) ?? "",
           tier: a.tier as string,
           selfRole: a.selfRole as string,
+          type: (a.type as string) ?? "",
         }),
       );
       const edgeTypeById = new Map<string, string>();
@@ -811,11 +812,9 @@ export default GraphView;
 //   filters.spaces    → dimmed.space = spaces NOT in filters.spaces
 //                       (empty filters.spaces = all spaces shown = no dim)
 //   filters.edgeTypes → dimmed.edge  = edge types NOT in filters.edgeTypes
-//   filters.types     → no ViewState.dimmed.role analog (selfRole ≠ NodeType);
-//                       types filtering is intentionally deferred — passing
-//                       graph.nodes means type-filtered nodes stay visible in
-//                       the graph (acceptable C2 parity; follow-up extends
-//                       ViewState with dimmed.type if strict type hiding is needed).
+//   filters.types     → dimmed.type  = node types NOT in filters.types
+//                       (parity: the FilterDrawer node-type control must still
+//                       hide nodes; the reducer dims by node `type` attribute).
 function buildDimmed(
   filters: Filters,
   graph: Graph,
@@ -835,6 +834,10 @@ function buildDimmed(
     });
   }
 
+  // node types: dim types not in the active set (complement, mirrors tiers).
+  const allTypes = ["fact", "decision", "preference", "event", "person", "project", "concept", "procedure", "goal", "observation"];
+  const dimmedType = new Set(allTypes.filter((t) => !filters.types.has(t as never)));
+
   // edgeTypes: dim edge types not in the active set
   const allEdgeTypes = ["supports", "contradicts", "part_of", "defines", "evolved_from", "depends_on", "derived_from", "related_to"];
   const dimmedEdge = new Set(allEdgeTypes.filter((et) => !filters.edgeTypes.has(et as never)));
@@ -843,6 +846,7 @@ function buildDimmed(
     space: dimmedSpace,
     tier: dimmedTier,
     role: new Set(), // role (selfRole) has no filter dimension in App.tsx Filters
+    type: dimmedType,
     edge: dimmedEdge,
   };
 }

@@ -32,6 +32,7 @@ export function buildGraph(data: GraphData, appearance: GraphAppearance): Graph 
       label: nodeLabel(n),
       space: n.space || "",
       tier: n.tier,
+      type: n.type,
       selfRole: role,
     });
   });

@@ -10,7 +10,7 @@ function state(over: Partial<ViewState>): ViewState {
     highlightSet: new Set<string>(),
     glowOnly: new Set<string>(),
     focusKind: null,
-    dimmed: { space: new Set(), tier: new Set(), role: new Set(), edge: new Set() },
+    dimmed: { space: new Set(), tier: new Set(), role: new Set(), type: new Set(), edge: new Set() },
     attrsById: new Map(),
     edgeTypeById: new Map(),
     dimColor: DIM,
@@ -52,8 +52,8 @@ describe("makeNodeReducer", () => {
 
   it("legend focus keeps matching nodes vivid and dims non-matching (Council A1)", () => {
     const attrs = new Map([
-      ["a", { space: "work", tier: "core", selfRole: "" }],
-      ["b", { space: "home", tier: "working", selfRole: "" }],
+      ["a", { space: "work", tier: "core", selfRole: "", type: "fact" }],
+      ["b", { space: "home", tier: "working", selfRole: "", type: "fact" }],
     ]);
     const r = makeNodeReducer(state({ attrsById: attrs, focusKind: { kind: "space", val: "work" } }));
     expect(r("a", { color: "#abc" }).highlighted).toBe(true);
@@ -62,12 +62,18 @@ describe("makeNodeReducer", () => {
 
   it("dims a node when its space, tier, or role is toggled off", () => {
     const attrs = new Map([
-      ["a", { space: "work", tier: "core", selfRole: "" }],
-      ["b", { space: "home", tier: "working", selfRole: "identity" }],
+      ["a", { space: "work", tier: "core", selfRole: "", type: "fact" }],
+      ["b", { space: "home", tier: "working", selfRole: "identity", type: "person" }],
     ]);
-    expect(makeNodeReducer(state({ attrsById: attrs, dimmed: { space: new Set(["work"]), tier: new Set(), role: new Set(), edge: new Set() } }))("a", { color: "#abc" }).color).toBe(DIM);
-    expect(makeNodeReducer(state({ attrsById: attrs, dimmed: { space: new Set(), tier: new Set(["working"]), role: new Set(), edge: new Set() } }))("b", { color: "#abc" }).color).toBe(DIM);
-    expect(makeNodeReducer(state({ attrsById: attrs, dimmed: { space: new Set(), tier: new Set(), role: new Set(["identity"]), edge: new Set() } }))("b", { color: "#abc" }).color).toBe(DIM);
+    expect(makeNodeReducer(state({ attrsById: attrs, dimmed: { space: new Set(["work"]), tier: new Set(), role: new Set(), type: new Set(), edge: new Set() } }))("a", { color: "#abc" }).color).toBe(DIM);
+    expect(makeNodeReducer(state({ attrsById: attrs, dimmed: { space: new Set(), tier: new Set(["working"]), role: new Set(), type: new Set(), edge: new Set() } }))("b", { color: "#abc" }).color).toBe(DIM);
+    expect(makeNodeReducer(state({ attrsById: attrs, dimmed: { space: new Set(), tier: new Set(), role: new Set(["identity"]), type: new Set(), edge: new Set() } }))("b", { color: "#abc" }).color).toBe(DIM);
+  });
+
+  it("dims a node when its node type is toggled off (Council C2 — FilterDrawer type filter)", () => {
+    const attrs = new Map([["a", { space: "", tier: "working", selfRole: "", type: "person" }]]);
+    const r = makeNodeReducer(state({ attrsById: attrs, dimmed: { space: new Set(), tier: new Set(), role: new Set(), type: new Set(["person"]), edge: new Set() } }));
+    expect(r("a", { color: "#abc" }).color).toBe(DIM);
   });
 });
 

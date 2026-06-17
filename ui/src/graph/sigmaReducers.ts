@@ -12,7 +12,7 @@ export interface EdgeAttrs {
   [key: string]: unknown;
 }
 
-export interface NodeAttr { space: string; tier: string; selfRole: string }
+export interface NodeAttr { space: string; tier: string; selfRole: string; type: string }
 export type FocusKind = { kind: "space" | "tier" | "role" | "edge"; val: string } | null;
 
 export interface ViewState {
@@ -21,18 +21,19 @@ export interface ViewState {
   highlightSet: Set<string>;                                   // Council H1: multi-highlight (focus+dim), separate from hover
   glowOnly: Set<string>;                                       // Council A4: search-hover — highlight WITHOUT dimming others
   focusKind: FocusKind;                                        // Council A1: legend focus — match stays vivid, rest dims
-  dimmed: { space: Set<string>; tier: Set<string>; role: Set<string>; edge: Set<string> }; // Council C2: App.tsx filters (HIDE)
+  dimmed: { space: Set<string>; tier: Set<string>; role: Set<string>; type: Set<string>; edge: Set<string> }; // Council C2: App.tsx filters (HIDE)
   attrsById: Map<string, NodeAttr>;
   edgeTypeById: Map<string, string>;
   dimColor: string;
 }
 
-// Council C2: App.tsx filters dim/hide a node.
+// Council C2: App.tsx filters dim/hide a node. `type` covers the FilterDrawer
+// node-type filter (parity: that control must still hide nodes).
 function nodeIsFilterDimmed(node: string, state: ViewState): boolean {
   const a = state.attrsById.get(node);
   if (!a) return false;
-  const { space, tier, role } = state.dimmed;
-  return space.has(a.space) || tier.has(a.tier) || role.has(a.selfRole);
+  const { space, tier, role, type } = state.dimmed;
+  return space.has(a.space) || tier.has(a.tier) || role.has(a.selfRole) || type.has(a.type);
 }
 
 // Council A1: does this node match the active legend focus?
