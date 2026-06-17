@@ -4,6 +4,7 @@ export interface NodeAttrs {
   label?: string;
   size?: number;
   highlighted?: boolean;
+  forceLabel?: boolean;
   [key: string]: unknown;
 }
 export interface EdgeAttrs {
@@ -53,6 +54,10 @@ export function makeNodeReducer(state: ViewState) {
   const dim = (out: NodeAttrs) => { out.color = dimColor; out.label = undefined; return out; };
   return (node: string, data: NodeAttrs): NodeAttrs => {
     const out: NodeAttrs = { ...data };
+
+    // Label visibility: show ONLY for the hovered node. Everything else: no label.
+    const isHovered = hoveredNode != null && node === hoveredNode;
+    if (isHovered) out.forceLabel = true; else out.label = undefined;
 
     // 1) Filter-dim (App.tsx) wins — a filtered-out node always dims.
     if (nodeIsFilterDimmed(node, state)) return dim(out);
