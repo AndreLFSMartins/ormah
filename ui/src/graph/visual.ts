@@ -1,5 +1,4 @@
 import {
-  GRAPH_DISPLAY_SCALE,
   type GraphAppearance,
   type GraphTheme,
 } from "../graphAppearance";
@@ -34,14 +33,19 @@ export function tierColor(tier: string, selfRole: SelfRole, appearance: GraphApp
 // the sigma default node program has no border, and dashed borders are deferred
 // (spec: not a parity requirement). Re-add with a bordered node program if revived.
 
+// Sizes are in LAYOUT-POSITION units (sigma is configured with
+// itemSizesReference: "positions" + zoomToSizeRatioFunction: ratio => ratio),
+// so a node's on-screen radius scales 1:1 with zoom, like Obsidian's graph.
+// The settled FA2 layout for this store spans ~475 units across ~1800 nodes,
+// giving a mean neighbour gap of ~11 units; node *diameters* stay below that
+// gap to avoid the overlap that screen-space sizing produced (min Ø4, max Ø10).
 function nodeSize(accessCount: number): number {
-  const baseSize = Math.min(56, Math.max(24, 24 + Math.log2(accessCount + 1) * 6));
-  return Math.round(baseSize * GRAPH_DISPLAY_SCALE);
+  return Math.min(5, Math.max(2, 2 + Math.log2(accessCount + 1) * 0.5));
 }
 
 export function displayNodeSize(accessCount: number, selfRole: SelfRole): number {
   const size = nodeSize(accessCount);
-  return selfRole === "self" ? Math.max(Math.round(36 * GRAPH_DISPLAY_SCALE), size) : size;
+  return selfRole === "self" ? Math.max(3.5, size) : size;
 }
 
 export function edgeColor(edgeType: string, theme: GraphTheme): string {

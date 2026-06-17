@@ -7,8 +7,6 @@ export interface GraphAppearance {
   colors: Record<Tier, string>;
 }
 
-export const GRAPH_DISPLAY_SCALE = 1.2;
-
 export const DEFAULT_GRAPH_APPEARANCE: GraphAppearance = {
   theme: "dark",
   colors: {

@@ -380,6 +380,12 @@ const GraphView = forwardRef<
       const renderer = new Sigma(graph, containerRef.current, {
         enableEdgeEvents: true,
         labelRenderedSizeThreshold: 8,
+        // Node sizes live in layout-position units and scale 1:1 with zoom, like
+        // Obsidian's graph: zoom out -> nodes shrink with the gaps (dots), zoom in
+        // -> readable. Default "screen" keeps sizes fixed in px, which overlapped
+        // ~1800 nodes into an unreadable blob. See visual.ts nodeSize().
+        itemSizesReference: "positions",
+        zoomToSizeRatioFunction: (ratio) => ratio,
         nodeReducer: (node, data) => makeNodeReducer(viewStateRef.current)(node, data),
         edgeReducer: (edge, data) =>
           makeEdgeReducer(viewStateRef.current, (e) => [graph.source(e), graph.target(e)])(edge, data),

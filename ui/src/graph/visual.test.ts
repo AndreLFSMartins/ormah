@@ -32,7 +32,13 @@ describe("visual", () => {
   });
 
   it("sizes self nodes at least the self floor", () => {
-    expect(displayNodeSize(0, "self")).toBeGreaterThanOrEqual(Math.round(36 * 1.2));
+    expect(displayNodeSize(0, "self")).toBeGreaterThanOrEqual(3.5);
+  });
+
+  it("keeps node sizes within the position-unit range (Ø below FA2 neighbour gap)", () => {
+    expect(displayNodeSize(0, "")).toBe(2); // floor
+    expect(displayNodeSize(1_000_000, "")).toBeLessThanOrEqual(5); // ceiling
+    expect(displayNodeSize(8, "")).toBeGreaterThan(displayNodeSize(0, "")); // grows with access
   });
 
   it("labels prefer title, then content slice, then id prefix", () => {
