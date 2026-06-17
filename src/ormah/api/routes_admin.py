@@ -107,6 +107,14 @@ def health(request: Request):
     result: dict = {"status": "ok"}
     if tracker is not None:
         result["jobs"] = tracker.snapshot()
+    else:
+        # No scheduler: the backfill fallback is the only healer. Surface a
+        # persistent outage that would otherwise be invisible (council CH2).
+        from ormah import main as _main
+
+        if getattr(_main, "_fallback_degraded", False):
+            result["status"] = "degraded"
+            result["embedding_backfill"] = "degraded: fallback retrying"
     manager = getattr(request.app.state, "maintenance_manager", None)
     if manager is not None:
         result["maintenance"] = manager.get_status()

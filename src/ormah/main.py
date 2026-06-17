@@ -44,45 +44,75 @@ except PackageNotFoundError:
     APP_VERSION = "0.0.0"
 
 
-# Embedding-backfill fallback: how many times the daemon thread retries the
-# reconciliation (with exponential backoff) before giving up. The recurring job /
-# sleep-cycle remains the long-term net; this only covers a scheduler that failed
-# to start plus a transient encoder outage at boot.
-_BACKFILL_FALLBACK_MAX_ATTEMPTS = 5
+import threading
+
+# Embedding-backfill fallback (#32, council C2/CH1/CH2): when the scheduler fails
+# to start, a daemon thread heals missing vectors off the bind path. It retries
+# indefinitely with backoff (capped) so a persistent encoder outage recovers
+# automatically when the encoder returns. Lifecycle is controlled by a stop event
+# and a singleton guard; _fallback_degraded exposes a persistent outage to
+# /admin/health while no scheduler exists.
 _BACKFILL_FALLBACK_BASE_BACKOFF = 30.0  # seconds
 _BACKFILL_FALLBACK_MAX_BACKOFF = 600.0  # seconds
 
+_fallback_thread: threading.Thread | None = None
+_fallback_stop_event: threading.Event | None = None
+_fallback_degraded: bool = False
+
 
 def _start_backfill_fallback(engine) -> None:
-    """Run embedding reconciliation off a daemon thread when the scheduler is
-    unavailable, so missing vectors are still healed without it (#32, council I1).
-    Off the bind path -- never blocks startup. Retries with exponential backoff
-    until the gap closes (``run_embedding_backfill`` raises while incomplete) or
-    the attempt budget is exhausted, instead of a single one-shot."""
-    import threading
+    """Heal missing vectors off a daemon thread when the scheduler is unavailable
+    (#32). Off the bind path -- never blocks startup. Retries with backoff
+    (capped) until the gap closes; never gives up, so a persistent encoder outage
+    recovers automatically. Singleton: a second call while one thread is alive is
+    a no-op, so a lifespan restart cannot accumulate concurrent fallbacks."""
+    global _fallback_thread, _fallback_stop_event, _fallback_degraded
     import time
 
+    if _fallback_thread is not None and _fallback_thread.is_alive():
+        return  # singleton guard (CH1)
+
+    stop_event = threading.Event()
+    _fallback_stop_event = stop_event
+    _fallback_degraded = False
+
     def _run():
+        global _fallback_degraded
         from ormah.background.embedding_backfill import run_embedding_backfill
 
-        for attempt in range(_BACKFILL_FALLBACK_MAX_ATTEMPTS):
+        delay = _BACKFILL_FALLBACK_BASE_BACKOFF
+        attempt = 0
+        while not stop_event.is_set():
+            attempt += 1
             try:
                 run_embedding_backfill(engine)
-                return  # gap closed (the job raises while it is still incomplete)
+                _fallback_degraded = False  # gap closed (CH2: recovery observable)
+                return
             except Exception as e:
+                _fallback_degraded = True  # CH2: persistent outage is observable
                 logger.warning(
-                    "Embedding backfill fallback attempt %d/%d failed: %s",
-                    attempt + 1, _BACKFILL_FALLBACK_MAX_ATTEMPTS, e,
+                    "Embedding backfill fallback attempt %d failed: %s", attempt, e,
                 )
-                if attempt + 1 < _BACKFILL_FALLBACK_MAX_ATTEMPTS:
-                    time.sleep(min(
-                        _BACKFILL_FALLBACK_BASE_BACKOFF * (2 ** attempt),
-                        _BACKFILL_FALLBACK_MAX_BACKOFF,
-                    ))
+                # Interruptible sleep -- shutdown wakes us immediately (CH1).
+                if stop_event.wait(delay):
+                    return
+                delay = min(delay * 2, _BACKFILL_FALLBACK_MAX_BACKOFF)
 
-    threading.Thread(
+    thread = threading.Thread(
         target=_run, name="embedding-backfill-fallback", daemon=True
-    ).start()
+    )
+    _fallback_thread = thread
+    thread.start()
+
+
+def _stop_backfill_fallback() -> None:
+    """Signal the fallback thread to stop and join it (CH1). Idempotent."""
+    global _fallback_thread
+    if _fallback_stop_event is not None:
+        _fallback_stop_event.set()
+    if _fallback_thread is not None:
+        _fallback_thread.join(timeout=5.0)
+        _fallback_thread = None
 
 
 @asynccontextmanager
@@ -144,6 +174,9 @@ async def lifespan(app: FastAPI):
     # Shutdown — stop hippocampus watchers
     if hasattr(app.state, "hippocampus_observers"):
         stop_hippocampus(app.state.hippocampus_observers)
+
+    # Shutdown — stop the scheduler-independent backfill fallback if it is running
+    _stop_backfill_fallback()
 
     # Shutdown — wait for running jobs to finish (up to 10s)
     if hasattr(app.state, "scheduler"):
