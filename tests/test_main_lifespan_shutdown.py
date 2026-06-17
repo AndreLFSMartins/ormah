@@ -15,6 +15,8 @@ exercise the decision logic via:
   3. An integration-style test that wires `_stop_backfill_fallback` + the
      scheduler bounded block together and asserts engine.shutdown() is NOT
      called when either is alive.
+  4. Per-lifespan stop event (R1): each lifespan execution creates a fresh
+     Event in app.state so a reload cannot rearm an orphan worker.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ import threading as _threading
 import time as _time
 
 import pytest
+from fastapi import FastAPI
 
 from ormah import main
 
@@ -221,3 +224,101 @@ def test_engine_closed_when_both_exit_cleanly(monkeypatch):
     assert fallback_alive is False
     assert scheduler_alive is False
     assert shutdown_called == [True], "engine.shutdown() must be called when both exit cleanly"
+
+
+# ---------------------------------------------------------------------------
+# 4. Per-lifespan stop event (R1)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_each_lifespan_gets_its_own_stop_event(tmp_path, monkeypatch):
+    """R1: each lifespan execution must create a NEW threading.Event in
+    app.state.lifecycle_stop_event. A reload must never reuse (or clear) the
+    event from a previous lifespan so that orphan workers from a prior,
+    expired shutdown cannot be rearmed.
+
+    We monkeypatch heavy I/O (MemoryEngine, start_scheduler, watchers) so the
+    test is fast and hermetic. The key invariants:
+      - sched_ev1 is not sched_ev2  (distinct object per lifespan execution)
+      - ev1 is sched_ev1 / ev2 is sched_ev2  (app.state holds the same object
+        that was passed to start_scheduler)
+    """
+    import sys
+    import threading
+
+    # --- lightweight fakes ---
+
+    class _FakeEngine:
+        def startup(self): pass
+        def shutdown(self): pass
+
+    class _FakeScheduler:
+        def shutdown(self, wait=True): pass
+
+    class _FakeTracker:
+        pass
+
+    captured_stop_events: list[threading.Event] = []
+
+    def _fake_start_scheduler(engine, stop_event=None):
+        captured_stop_events.append(stop_event)
+        return _FakeScheduler(), _FakeTracker()
+
+    monkeypatch.setattr("ormah.main.MemoryEngine", lambda settings: _FakeEngine())
+    monkeypatch.setattr(
+        "ormah.main.settings",
+        type("S", (), {"port": 8787, "memory_dir": str(tmp_path)})(),
+    )
+    monkeypatch.setattr("ormah.main.MaintenanceManager", lambda *a, **kw: object())
+
+    # Use monkeypatch.setitem so pytest restores sys.modules on teardown,
+    # preventing contamination of later tests (e.g. test_ingest_stores_node_ids).
+    _fake_hippocampus = type(sys)("_fake_hippo")
+    _fake_hippocampus.start_hippocampus = lambda engine: []
+    _fake_hippocampus.stop_hippocampus = lambda obs: None
+    monkeypatch.setitem(sys.modules, "ormah.background.hippocampus", _fake_hippocampus)
+
+    _fake_session_watcher = type(sys)("_fake_sw")
+    _fake_session_watcher.start_session_watcher = lambda engine: []
+    _fake_session_watcher.stop_session_watcher = lambda obs: None
+    monkeypatch.setitem(sys.modules, "ormah.background.session_watcher", _fake_session_watcher)
+
+    _fake_scheduler_mod = type(sys)("_fake_sched")
+    _fake_scheduler_mod.start_scheduler = _fake_start_scheduler
+    monkeypatch.setitem(sys.modules, "ormah.background.scheduler", _fake_scheduler_mod)
+
+    app = FastAPI(lifespan=main.lifespan)
+
+    # --- first lifespan execution ---
+    async with main.lifespan(app):
+        ev1 = app.state.lifecycle_stop_event
+        assert isinstance(ev1, threading.Event), "lifecycle_stop_event must be a threading.Event"
+
+    # --- second lifespan execution (simulates in-process reload) ---
+    async with main.lifespan(app):
+        ev2 = app.state.lifecycle_stop_event
+        assert isinstance(ev2, threading.Event), "lifecycle_stop_event must be a threading.Event"
+
+    # Both lifespans must have passed a stop_event to start_scheduler
+    assert len(captured_stop_events) == 2, (
+        f"Expected 2 captured stop events, got {len(captured_stop_events)}"
+    )
+    sched_ev1, sched_ev2 = captured_stop_events
+
+    # Invariant 1: each lifespan creates a DISTINCT Event — the R1 bug was
+    # reusing (and clear()-ing) a single global Event across lifespans.
+    assert sched_ev1 is not sched_ev2, (
+        "Each lifespan must create a DISTINCT Event; reload must not reuse the old one (R1)"
+    )
+
+    # Invariant 2: app.state holds the same object that was passed to the scheduler
+    assert ev1 is sched_ev1, (
+        "app.state.lifecycle_stop_event must be the exact event passed to start_scheduler"
+    )
+    assert ev2 is sched_ev2, (
+        "app.state.lifecycle_stop_event must be the exact event passed to start_scheduler"
+    )
+
+    # Invariant 3: both events were signalled during their respective shutdowns
+    assert sched_ev1.is_set(), "First lifespan stop event must be set after its shutdown"
+    assert sched_ev2.is_set(), "Second lifespan stop event must be set after its shutdown"
