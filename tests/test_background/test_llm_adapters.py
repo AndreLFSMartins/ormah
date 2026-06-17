@@ -32,6 +32,10 @@ def test_ollama_adapter_success():
     call_kwargs = mock_post.call_args
     assert call_kwargs[1]["json"]["format"] == "json"
     assert call_kwargs[1]["json"]["options"] == {"num_predict": 4096}
+    # Thinking is disabled so the num_predict budget is spent on the JSON, not
+    # on reasoning tokens (which starved extraction and produced empty/truncated
+    # responses on large transcripts). Safely ignored by non-thinking models.
+    assert call_kwargs[1]["json"]["think"] is False
 
 
 def test_ollama_adapter_custom_num_predict():
@@ -48,6 +52,8 @@ def test_ollama_adapter_custom_num_predict():
     payload = call_kwargs[1]["json"]
     assert payload["options"] == {"num_predict": 1024}
     assert "format" not in payload
+    # think:False is sent regardless of json_mode
+    assert payload["think"] is False
 
 
 def test_ollama_adapter_timeout():

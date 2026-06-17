@@ -7,6 +7,7 @@ import hashlib
 import logging
 import math
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,24 +119,11 @@ class MemoryEngine:
                     "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_needs_rebuild', '0')"
                 )
 
-        # Re-embed nodes if the vector store is missing entries or schema version changed
-        vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
-        stored_version_row = self.db.conn.execute(
-            "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
-        ).fetchone()
-        stored_version = int(stored_version_row["value"]) if stored_version_row else 0
-        needs_reindex = (count > 0 and vec_count < count) or stored_version < _EMBEDDING_SCHEMA_VERSION
-
-        if needs_reindex:
-            reason = "schema version change" if stored_version < _EMBEDDING_SCHEMA_VERSION else "missing entries"
-            logger.info("Re-indexing embeddings (%s): vec=%d, nodes=%d, schema v%d→v%d",
-                        reason, vec_count, count, stored_version, _EMBEDDING_SCHEMA_VERSION)
-            self._reindex_all_embeddings()
-            with self.db.transaction() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('embedding_schema_version', ?)",
-                    (str(_EMBEDDING_SCHEMA_VERSION),),
-                )
+        # Embedding recovery (delta + schema bump) is no longer done synchronously
+        # here -- it would block the port bind on a full O(n) re-embed. It now lives
+        # in backfill_embeddings(), driven by the embedding_backfill background job
+        # (and a scheduler-independent fallback). The encoder is still warmed below
+        # via _warmup_embedder(). (#32)
 
         # One-time FSRS data migration: seed stability from access patterns
         self._migrate_fsrs()
@@ -1015,69 +1003,194 @@ class MemoryEngine:
         self._reindex_all_embeddings()
         return count
 
+    def _embed_node_rows(self, nodes, stop_event=None) -> tuple[list[str], list[str]]:
+        """Embed the given node rows into the vector store.
+
+        Builds embeddings, then upserts in chunks of 100 with a WAL checkpoint
+        between chunks (sqlite-vec vec0 can silently drop rows in large
+        transactions). Returns (embedded_ids, failed_ids). Nodes whose embedding
+        text is empty are skipped (in neither list). Logs a warning if the final
+        vec_count is below the number upserted (possible silent vec0 drop).
+
+        If ``stop_event`` is provided and becomes set, the encode loop and the
+        upsert loop both exit early (cooperative cancellation). Only ids that
+        were actually written to the DB are returned as ``embedded_ids``.
+        """
+        from ormah.embeddings.vector_store import VectorStore
+        from ormah.embeddings.encoder import get_encoder
+
+        total = len(nodes)
+        if total == 0:
+            return [], []
+
+        encoder = get_encoder(self.settings)
+        vec_store = VectorStore(self.db)
+        max_chars = self.settings.embedding_max_content_chars
+        log_every = max(1, total // 10)
+
+        all_items: list[tuple[str, Any]] = []
+        failed_ids: list[str] = []
+        for idx, n in enumerate(nodes):
+            if stop_event is not None and stop_event.is_set():
+                break  # cooperative cancel — stop accumulating work
+            text = _embedding_text(n["title"], n["content"], max_chars)
+            if text:
+                try:
+                    embedding = encoder.encode(text)
+                    all_items.append((n["id"], embedding))
+                except Exception as e:
+                    logger.warning("Failed to embed node %s: %s", n["id"][:8], e)
+                    failed_ids.append(n["id"])
+            done = idx + 1
+            if done % log_every == 0 or done == total:
+                logger.info("Embedding memories: %d/%d", done, total)
+
+        # Upsert in small chunks with WAL checkpoint after each.
+        chunk_size = 100
+        upserted_ids: list[str] = []
+        for i in range(0, len(all_items), chunk_size):
+            if stop_event is not None and stop_event.is_set():
+                break  # cooperative cancel — stop before this DB write
+            chunk = all_items[i : i + chunk_size]
+            vec_store.upsert_batch(chunk)
+            self.db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            upserted_ids.extend(item[0] for item in chunk)
+
+        embedded_ids = upserted_ids
+        vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
+        logger.info(
+            "Embedded %d/%d nodes (vec_count=%d, failed=%d)",
+            len(embedded_ids), total, vec_count, len(failed_ids),
+        )
+        if vec_count < len(embedded_ids):
+            logger.warning(
+                "Vec table has fewer entries (%d) than embedded (%d) — "
+                "possible sqlite-vec persistence issue",
+                vec_count, len(embedded_ids),
+            )
+        return embedded_ids, failed_ids
+
     def _reindex_all_embeddings(self) -> None:
         """Re-embed all nodes in the index."""
         try:
-            from ormah.embeddings.vector_store import VectorStore
-            from ormah.embeddings.encoder import get_encoder
-
-            encoder = get_encoder(self.settings)
-            vec_store = VectorStore(self.db)
-
             nodes = self.db.conn.execute("SELECT id, title, content FROM nodes").fetchall()
-            max_chars = self.settings.embedding_max_content_chars
-            total = len(nodes)
-            log_every = max(1, total // 10)  # log every ~10%
-
-            # Build all embeddings first
-            all_items: list[tuple[str, Any]] = []
-            failed = 0
-            for idx, n in enumerate(nodes):
-                text = _embedding_text(n["title"], n["content"], max_chars)
-                if text:
-                    try:
-                        embedding = encoder.encode(text)
-                        all_items.append((n["id"], embedding))
-                    except Exception as e:
-                        logger.warning("Failed to embed node %s: %s", n["id"][:8], e)
-                        failed += 1
-                done = idx + 1
-                if done % log_every == 0 or done == total:
-                    logger.info("Re-embedding memories: %d/%d", done, total)
-
-            # Upsert in small chunks with WAL checkpoint after each.
-            # sqlite-vec vec0 virtual tables can silently drop rows in
-            # large transactions; chunking prevents this.
-            chunk_size = 100
-            for i in range(0, len(all_items), chunk_size):
-                chunk = all_items[i : i + chunk_size]
-                vec_store.upsert_batch(chunk)
-                self.db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-
-            # Verify the count actually matches
-            vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
-            logger.info(
-                "Re-embedded %d/%d nodes (vec_count=%d, failed=%d)",
-                len(all_items), len(nodes), vec_count, failed,
-            )
-            if vec_count < len(all_items):
-                logger.warning(
-                    "Vec table has fewer entries (%d) than embedded (%d) — "
-                    "possible sqlite-vec persistence issue",
-                    vec_count, len(all_items),
-                )
+            self._embed_node_rows(nodes)
         except Exception as e:
             logger.warning("Failed to reindex embeddings: %s", e)
+
+    # SQL proxy for "_embedding_text(title, content) is non-empty": a node is
+    # embeddable when it has non-whitespace content OR title.
+    _EMBEDDABLE_SQL = (
+        "COALESCE(NULLIF(TRIM(content), ''), NULLIF(TRIM(title), '')) IS NOT NULL"
+    )
+
+    def _missing_embeddable_count(self) -> int:
+        """Embeddable nodes with no row in the vector store (the honest gap)."""
+        return self.db.conn.execute(
+            f"SELECT count(*) FROM nodes n "
+            f"LEFT JOIN node_vectors_rowids v ON n.id = v.id "
+            f"WHERE v.id IS NULL AND {self._EMBEDDABLE_SQL}"
+        ).fetchone()[0]
+
+    def backfill_embeddings(self, stop_event=None) -> dict:
+        """Reconcile the vector store. Idempotent; safe to run repeatedly.
+
+        Two modes:
+        - **schema bump** (stored version < current): every existing vector was
+          built under an old scheme, so re-embed all embeddable nodes in a single
+          pass. For each node that fails to encode, delete its stale vector so it
+          becomes genuinely missing (caught by future delta runs). Advance the
+          version only when the pass completes without interruption.
+        - **delta** (stored version == current): embed only embeddable nodes
+          missing from the vector store (anti-join), O(gap).
+
+        If ``stop_event`` is provided and becomes set, both the encode loop and
+        the upsert loop exit early. The schema version is NOT advanced on an
+        interrupted schema pass — the pass must be re-run as schema next time.
+
+        A permanently-failing node simply stays in ``missing`` and is retried each
+        tick -- never dropped, never masked. Returns a summary dict where
+        ``missing`` is the honest embedding gap after the run.
+        """
+        count = self.db.conn.execute("SELECT count(*) FROM nodes").fetchone()[0]
+        ver_row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
+        ).fetchone()
+        stored_version = int(ver_row["value"]) if ver_row else 0
+
+        if stored_version < _EMBEDDING_SCHEMA_VERSION:
+            mode = "schema"
+            rows = self.db.conn.execute(
+                f"SELECT id, title, content FROM nodes WHERE {self._EMBEDDABLE_SQL}"
+            ).fetchall()
+            logger.info(
+                "Embedding backfill (schema v%d->v%d): re-embedding %d nodes",
+                stored_version, _EMBEDDING_SCHEMA_VERSION, len(rows),
+            )
+        else:
+            mode = "delta"
+            rows = self.db.conn.execute(
+                f"SELECT n.id, n.title, n.content FROM nodes n "
+                f"LEFT JOIN node_vectors_rowids v ON n.id = v.id "
+                f"WHERE v.id IS NULL AND {self._EMBEDDABLE_SQL}"
+            ).fetchall()
+            if rows:
+                logger.info("Embedding backfill (delta): embedding %d missing nodes", len(rows))
+
+        embedded_ids, failed_ids = self._embed_node_rows(rows, stop_event=stop_event)
+
+        interrupted = stop_event is not None and stop_event.is_set()
+
+        # Schema mode: drop the stale vector of any node that failed to re-embed
+        # under the new scheme, so it is genuinely missing (and retried by delta)
+        # rather than silently kept with an outdated embedding.
+        # Guard with `not interrupted`: an interrupted pass must not write anything —
+        # consistent with the version-advance guard immediately below (Fix B).
+        if mode == "schema" and failed_ids and not interrupted:
+            with self.db.transaction() as conn:
+                for nid in failed_ids:
+                    conn.execute("DELETE FROM node_vectors WHERE id = ?", (nid,))
+
+        # Only advance the version on a COMPLETE schema pass. An interrupted pass
+        # must be re-run as schema next time — advancing here would make a partial
+        # reprocess look complete and hide un-reprocessed nodes from delta runs.
+        if mode == "schema" and not interrupted:
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                    "('embedding_schema_version', ?)",
+                    (str(_EMBEDDING_SCHEMA_VERSION),),
+                )
+
+        missing = self._missing_embeddable_count()
+        vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
+        return {
+            "mode": mode,
+            "embedded": len(embedded_ids),
+            "failed": len(failed_ids),
+            "missing": missing,
+            "vec_count": vec_count,
+            "node_count": count,
+        }
 
     def stats(self) -> dict:
         """Get memory store statistics."""
         tier_counts = self.graph.count_by_tier()
         total = sum(tier_counts.values())
         edge_count = self.db.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
+        ver_row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
+        ).fetchone()
         return {
             "total_nodes": total,
             "by_tier": tier_counts,
             "total_edges": edge_count,
+            "vec_count": vec_count,
+            # Embeddable nodes still missing a vector -- the honest embedding gap.
+            # Stays > 0 for any node that cannot be embedded (visible, never masked).
+            "embedding_gap": self._missing_embeddable_count(),
+            "embedding_schema_version": int(ver_row["value"]) if ver_row else 0,
         }
 
     # --- Merge operations ---
@@ -1781,17 +1894,32 @@ class MemoryEngine:
             return None
 
     def _index_embedding(self, node: MemoryNode) -> None:
-        try:
-            from ormah.embeddings.vector_store import VectorStore
-            from ormah.embeddings.encoder import get_encoder
+        from ormah.embeddings.vector_store import VectorStore
+        from ormah.embeddings.encoder import get_encoder
 
-            encoder = get_encoder(self.settings)
-            vec_store = VectorStore(self.db)
-            text = _embedding_text(node.title, node.content, self.settings.embedding_max_content_chars)
-            embedding = encoder.encode(text)
-            vec_store.upsert(node.id, embedding)
-        except Exception as e:
-            logger.warning("Failed to index embedding for node %s: %s", node.id[:8], e)
+        text = _embedding_text(
+            node.title, node.content, self.settings.embedding_max_content_chars
+        )
+        if not text:
+            return
+
+        max_retries = self.settings.embedding_index_max_retries
+        backoff = self.settings.embedding_index_retry_backoff_seconds
+        for attempt in range(max_retries + 1):
+            try:
+                encoder = get_encoder(self.settings)
+                vec_store = VectorStore(self.db)
+                embedding = encoder.encode(text)
+                vec_store.upsert(node.id, embedding)
+                return
+            except Exception as e:
+                if attempt < max_retries:
+                    time.sleep(backoff * (2 ** attempt))
+                    continue
+                logger.warning(
+                    "Failed to index embedding for node %s after %d attempts: %s",
+                    node.id[:8], max_retries + 1, e,
+                )
 
     def _auto_link_node(self, node: MemoryNode) -> list[tuple[str, str, float]]:
         """Find similar existing nodes and create edges. Returns [(id, title, similarity)]."""

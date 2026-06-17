@@ -29,6 +29,10 @@ class OllamaAdapter(LLMAdapter):
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            # Disable thinking: reasoning tokens consume the num_predict budget
+            # and on large transcripts starve the JSON, yielding empty/truncated
+            # extractions. Non-thinking models ignore this flag.
+            "think": False,
             "options": {"num_predict": self.num_predict},
         }
         if json_mode:
