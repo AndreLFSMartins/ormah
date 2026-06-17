@@ -290,11 +290,14 @@ def run_task(task_id: str, request: Request):
 def run_all_tasks(request: Request):
     """Run all background tasks sequentially in sleep-cycle order."""
     import importlib
+    import time as _time
 
     engine = request.app.state.engine
+    tracker = getattr(request.app.state, "job_tracker", None)
     results: dict[str, str] = {}
 
     for task_id in _SLEEP_CYCLE_ORDER:
+        t0 = _time.monotonic()
         try:
             if task_id == "index_updater":
                 engine.builder.incremental_update()
@@ -304,8 +307,14 @@ def run_all_tasks(request: Request):
                 runner = getattr(module, func_name)
                 runner(engine)
             results[task_id] = "ok"
+            if tracker is not None:
+                tracker.record_success(task_id, (_time.monotonic() - t0) * 1000)
         except Exception as exc:
             results[task_id] = f"error: {exc}"
+            # CRC: persist the failure so /admin/health reflects this manual run
+            # instead of reverting to a stale ok.
+            if tracker is not None:
+                tracker.record_failure(task_id, str(exc), (_time.monotonic() - t0) * 1000)
 
     has_errors = any(v.startswith("error:") for v in results.values())
     if has_errors:
