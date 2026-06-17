@@ -27,7 +27,6 @@ export function buildGraph(data: GraphData, appearance: GraphAppearance): Graph 
     graph.addNode(n.id, {
       x,
       y,
-      size: displayNodeSize(n.access_count, role),
       color: tierColor(n.tier, role, appearance),
       label: nodeLabel(n),
       space: n.space || "",
@@ -50,6 +49,13 @@ export function buildGraph(data: GraphData, appearance: GraphAppearance): Graph 
     });
   }
 
+  // Size by UNIQUE NEIGHBOUR count (not edge degree — the graph is a multigraph
+  // with parallel edges, council R2). Known only after edges are added.
+  // Single deterministic pass over every node — the source of truth for size.
+  graph.forEachNode((id) => {
+    graph.setNodeAttribute(id, "size", displayNodeSize(graph.neighbors(id).length, roles.get(id) ?? ""));
+  });
+
   return graph;
 }
 
@@ -62,7 +68,7 @@ export function applyAppearance(graph: Graph, data: GraphData, appearance: Graph
     if (!graph.hasNode(n.id)) continue;
     const role = roles.get(n.id) ?? "";
     graph.setNodeAttribute(n.id, "color", tierColor(n.tier, role, appearance));
-    graph.setNodeAttribute(n.id, "size", displayNodeSize(n.access_count, role));
+    graph.setNodeAttribute(n.id, "size", displayNodeSize(graph.neighbors(n.id).length, role));
   }
   graph.forEachEdge((edge, attr) => {
     graph.setEdgeAttribute(edge, "color", edgeColor((attr.edgeType as string) ?? "", appearance.theme));
