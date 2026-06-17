@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import logging
+import threading
+from typing import Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -17,11 +19,17 @@ logger = logging.getLogger(__name__)
 _MISFIRE_GRACE = 120
 
 
-def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTracker]:
+def start_scheduler(
+    engine: MemoryEngine,
+    stop_event: Optional[threading.Event] = None,
+) -> tuple[BackgroundScheduler, JobTracker]:
     """Register and start all background jobs.
 
     Returns ``(scheduler, tracker)`` so the caller can inspect job health
     via ``tracker.snapshot()``.
+
+    ``stop_event``, when provided, is forwarded to the embedding_backfill job so
+    it can cancel cooperatively between encodes on scheduler shutdown.
     """
     scheduler = BackgroundScheduler()
     tracker = JobTracker()
@@ -127,13 +135,19 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
 
     from ormah.background.embedding_backfill import run_embedding_backfill
 
+    # Closure captures stop_event so the scheduler job can cancel cooperatively
+    # between encodes when shutdown is requested (C2). tracked() calls fn(*args);
+    # with a no-arg closure it calls _run_embedding_backfill() directly.
+    def _run_embedding_backfill():
+        run_embedding_backfill(engine, stop_event=stop_event)
+
     # Reconcile the vector store (delta + schema bump). A post-bind first run
     # (~10s after start) guarantees recovery right after the port binds even when
     # the operator sets the interval to a very large value (999999) to rely on the
     # 02:00 sleep-cycle instead. max_instances=1: a slow run on a large gap must
     # never overlap the next tick.
     scheduler.add_job(
-        tracked(tracker, "embedding_backfill", run_embedding_backfill, engine),
+        tracked(tracker, "embedding_backfill", _run_embedding_backfill),
         "interval",
         minutes=s.embedding_backfill_interval_minutes,
         id="embedding_backfill",
