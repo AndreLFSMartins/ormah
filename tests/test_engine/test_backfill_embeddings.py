@@ -173,3 +173,58 @@ def test_schema_version_not_advanced_when_interrupted(engine):
     before_val = before["value"] if before else None
     after_val = after["value"] if after else None
     assert before_val == after_val
+
+
+def test_schema_mode_does_not_delete_when_interrupted(engine, monkeypatch):
+    """Fix B: an interrupted schema pass must NOT delete stale vectors.
+
+    The DELETE is guarded by `not interrupted` — consistent with the version-advance
+    guard already in place. A cancel mid-schema stops the encode but must not execute
+    the DELETE that follows it.
+    """
+    # Create a node that will fail encoding (simulates a real encoder error).
+    nid_poison, _ = engine.remember(CreateNodeRequest(title="poison", content="POISON"))
+    engine.remember(CreateNodeRequest(title="ok", content="fine"))
+    # Downgrade schema version so schema mode is triggered.
+    _set_schema_version(engine, 1)
+
+    dim = engine.settings.embedding_dim
+
+    class _FailingEncoder:
+        def encode(self, text):
+            if "POISON" in text:
+                raise RuntimeError("encode failure")
+            return np.ones(dim, dtype="float32")
+
+    monkeypatch.setattr("ormah.embeddings.encoder.get_encoder", lambda s: _FailingEncoder())
+
+    # Ensure the poison node already has a stale vector in the store.
+    # vec0 virtual tables do not support INSERT OR REPLACE — use DELETE + INSERT.
+    import struct
+    stale_vec = struct.pack(f"{dim}f", *[0.5] * dim)
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors WHERE id = ?", (nid_poison,))
+        conn.execute(
+            "INSERT INTO node_vectors (id, embedding) VALUES (?, ?)",
+            (nid_poison, stale_vec),
+        )
+
+    # Confirm the stale vector exists before the interrupted call.
+    before_count = engine.db.conn.execute(
+        "SELECT count(*) FROM node_vectors WHERE id = ?", (nid_poison,)
+    ).fetchone()[0]
+    assert before_count == 1, "stale vector should exist before the interrupted call"
+
+    # Run backfill with stop_event already set → interrupted=True.
+    stop = threading.Event()
+    stop.set()
+    result = engine.backfill_embeddings(stop_event=stop)
+
+    # The stale vector must NOT have been deleted (interrupted guard applied).
+    after_count = engine.db.conn.execute(
+        "SELECT count(*) FROM node_vectors WHERE id = ?", (nid_poison,)
+    ).fetchone()[0]
+    assert after_count == 1, (
+        "stale vector was deleted despite interrupted=True — "
+        "DELETE must be guarded by `not interrupted`"
+    )
