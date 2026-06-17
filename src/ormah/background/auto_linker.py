@@ -113,7 +113,7 @@ def _llm_classify_link(settings, node_row, other_row) -> dict | None:
     Returns parsed dict with keys relationship, reason — or None if the LLM
     is unavailable or returns invalid output.
     """
-    from ormah.background.llm_client import llm_generate
+    from ormah.background.llm_client import extract_json, llm_generate
 
     def _get(row, key, default="unknown"):
         try:
@@ -137,7 +137,7 @@ def _llm_classify_link(settings, node_row, other_row) -> dict | None:
         return None  # LLM UNAVAILABLE — transient; caller leaves the node unresolved
 
     try:
-        result = json.loads(raw)
+        result = json.loads(extract_json(raw))
         if "relationship" not in result:
             return {"relationship": "error", "reason": "missing relationship field"}
         result["relationship"] = normalize_link_type(result["relationship"])

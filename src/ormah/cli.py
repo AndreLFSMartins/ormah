@@ -61,6 +61,19 @@ def _cmd_server_start(args):
     else:
         import uvicorn
         from ormah.config import settings
+        from ormah.console import info
+        from ormah.server_manager import is_port_in_use
+
+        # Pre-flight: if the port is already taken (typically by an existing
+        # ormah server), exit cleanly instead of letting uvicorn crash on bind.
+        # Under launchd/systemd KeepAlive this prevents a respawn loop that would
+        # re-run expensive startup work on every restart.
+        if is_port_in_use(settings.host, settings.port):
+            info(
+                f"A process is already listening on {settings.host}:{settings.port}; "
+                "assuming an ormah server is already running. Exiting."
+            )
+            return
 
         uvicorn.run(
             "ormah.main:app",
