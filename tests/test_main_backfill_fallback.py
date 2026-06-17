@@ -7,6 +7,7 @@ a persistent outage to /admin/health while no scheduler exists.
 """
 from __future__ import annotations
 
+import threading as _threading
 import time as _time
 
 import pytest
@@ -150,8 +151,6 @@ def test_fallback_stops_on_shutdown(monkeypatch):
 # ---------------------------------------------------------------------------
 # Task B — new tests (CRB: atomic singleton, CR1 revert, stop_event forwarding)
 # ---------------------------------------------------------------------------
-
-import threading as _threading
 
 
 class _FakeEngine:
