@@ -10,7 +10,17 @@ export type NodeType =
   | "goal"
   | "observation";
 
+// Canonical runtime list of every NodeType. Keep in sync with the union above
+// (a missing value silently breaks type-based filtering/dimming). Single source
+// of truth for App.tsx filters and GraphView's buildDimmed.
+export const ALL_NODE_TYPES: NodeType[] = [
+  "fact", "decision", "preference", "event", "person",
+  "project", "concept", "procedure", "goal", "observation",
+];
+
 export type Tier = "core" | "working" | "archival";
+
+export const ALL_TIERS: Tier[] = ["core", "working", "archival"];
 
 export type EdgeType =
   | "related_to"
@@ -21,6 +31,11 @@ export type EdgeType =
   | "depends_on"
   | "defines"
   | "evolved_from";
+
+export const ALL_EDGE_TYPES: EdgeType[] = [
+  "related_to", "supports", "contradicts", "part_of",
+  "derived_from", "depends_on", "defines", "evolved_from",
+];
 
 export interface MemoryNode {
   id: string;

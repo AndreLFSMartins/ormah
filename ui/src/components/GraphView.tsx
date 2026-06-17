@@ -16,6 +16,7 @@ import { makeNodeReducer, makeEdgeReducer, type ViewState } from "../graph/sigma
 import { GRAPH_THEME_TOKENS } from "../graph/visual";
 import { type GraphAppearance, type GraphTheme } from "../graphAppearance";
 import type { Edge, MemoryNode } from "../types";
+import { ALL_TIERS, ALL_NODE_TYPES, ALL_EDGE_TYPES } from "../types";
 import type { Filters } from "../App";
 
 // ─── Zoom slider helpers (unchanged from cytoscape era) ───────────────────────
@@ -502,26 +503,15 @@ const GraphView = forwardRef<
     }, [appearance, nodes, edges, userNodeId]);
 
     // ─── Filter-dim effect (Council C2): update dimmed.* without remounting ───
-    // Council C2: App.tsx passes full graph.nodes/graph.edges + filters prop.
-    // Filters map to dimmed.*:
-    //   filters.tiers  → dimmed.tier  = tiers NOT in filters.tiers (hidden tiers)
-    //   filters.spaces → dimmed.space = spaces NOT in filters.spaces (when non-exhaustive)
-    //   filters.edgeTypes → dimmed.edge = edge types NOT in filters.edgeTypes
-    //   filters.types  → no direct selfRole analog; handled by extending dimmed
-    //                    with a type check: nodes whose type is not in filters.types
-    //                    are dimmed via attrsById lookup (attrsById stores type too,
-    //                    but ViewState.dimmed has no "type" key — we use the space/tier/role
-    //                    reducer path and accept that filters.types is a best-effort dim
-    //                    applied via the tier path for now; types are typically correlated
-    //                    with tier/space so this approximation is acceptable for C2 parity).
-    //
-    // NOTE: The strictest correct mapping would add dimmed.type to ViewState, but
-    //       that requires modifying sigmaReducers.ts which is out of this task's scope.
-    //       Decision: filters.types is ignored in the dim mapping (nodes of filtered
-    //       types remain visible); this matches the plan's "DECIDE the minimal correct
-    //       mapping" instruction — the array-shrinking path for types is also removed
-    //       since App.tsx passes graph.nodes. Types filtering is effectively deferred
-    //       to a follow-up task that extends ViewState.
+    // App.tsx passes the FULL graph.nodes/graph.edges + the filters prop (it no
+    // longer shrinks the arrays — that would remount sigma and reset the camera).
+    // buildDimmed() converts the active filter sets into the complement dim sets:
+    //   filters.tiers     → dimmed.tier  (tiers NOT active)
+    //   filters.spaces    → dimmed.space (spaces NOT active, when the set is non-empty)
+    //   filters.types     → dimmed.type  (node types NOT active — FilterDrawer type filter)
+    //   filters.edgeTypes → dimmed.edge  (edge types NOT active)
+    // The reducer then dims/hides anything matching a dim set. A filter toggle costs
+    // one refresh(), not a graph rebuild.
     useEffect(() => {
       const r = sigmaRef.current, g = graphRef.current;
       if (!r || !g) return;
@@ -820,8 +810,9 @@ function buildDimmed(
   graph: Graph,
 ): ViewState["dimmed"] {
   // tiers: dim tiers not in the active set
-  const allTiers = ["core", "working", "archival"];
-  const dimmedTier = new Set(allTiers.filter((t) => !filters.tiers.has(t as never)));
+  // Derive the dim sets from the canonical enum lists in types.ts (NOT inline
+  // literals) so a new NodeType/EdgeType can't silently escape type/edge dimming.
+  const dimmedTier = new Set(ALL_TIERS.filter((t) => !filters.tiers.has(t)));
 
   // spaces: dim spaces not in the active set (if the active set is non-empty)
   const dimmedSpace = new Set<string>();
@@ -835,12 +826,10 @@ function buildDimmed(
   }
 
   // node types: dim types not in the active set (complement, mirrors tiers).
-  const allTypes = ["fact", "decision", "preference", "event", "person", "project", "concept", "procedure", "goal", "observation"];
-  const dimmedType = new Set(allTypes.filter((t) => !filters.types.has(t as never)));
+  const dimmedType = new Set<string>(ALL_NODE_TYPES.filter((t) => !filters.types.has(t)));
 
   // edgeTypes: dim edge types not in the active set
-  const allEdgeTypes = ["supports", "contradicts", "part_of", "defines", "evolved_from", "depends_on", "derived_from", "related_to"];
-  const dimmedEdge = new Set(allEdgeTypes.filter((et) => !filters.edgeTypes.has(et as never)));
+  const dimmedEdge = new Set<string>(ALL_EDGE_TYPES.filter((et) => !filters.edgeTypes.has(et)));
 
   return {
     space: dimmedSpace,

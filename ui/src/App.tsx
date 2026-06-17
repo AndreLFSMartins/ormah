@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchGraph, fetchNodeDetail } from "./api";
 import type { Edge, GraphData, MemoryNode, NodeDetail, Tier, NodeType, EdgeType } from "./types";
+import { ALL_TIERS, ALL_NODE_TYPES, ALL_EDGE_TYPES } from "./types";
 import GraphView from "./components/GraphView";
 import TopBar from "./components/TopBar";
 import NodeDetailPanel from "./components/NodeDetail";
@@ -27,16 +28,9 @@ export interface Filters {
   clusterBySpace: boolean;
 }
 
-const ALL_TIERS: Tier[] = ["core", "working", "archival"];
-const ALL_TYPES: NodeType[] = [
-  "fact", "decision", "preference", "event", "person",
-  "project", "concept", "procedure", "goal", "observation",
-];
-const ALL_EDGE_TYPES: EdgeType[] = [
-  "supports", "contradicts", "part_of", "defines",
-  "evolved_from", "depends_on", "derived_from",
-  "related_to",
-];
+// Canonical enum lists live in types.ts (single source of truth shared with
+// GraphView's buildDimmed). ALL_TYPES kept as a local alias for readability.
+const ALL_TYPES = ALL_NODE_TYPES;
 const DEFAULT_EDGE_TYPES = new Set<EdgeType>(ALL_EDGE_TYPES);
 
 type PanelId = "settings" | "insights" | "admin" | null;
