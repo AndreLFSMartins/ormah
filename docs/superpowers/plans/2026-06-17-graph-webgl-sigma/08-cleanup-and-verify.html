@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Plan</title>
+    <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+
+    </style>
+</head>
+<body>
+<nav class="toc"><span class="eyebrow">Plan</span><div class="doc-title"><em>Plan</em></div><a href="#task-8-remove-cytoscape-final-verification" class="lvl-3">Task 8: Remove cytoscape + final verification</a></nav>
+<main>
+<h3 id="task-8-remove-cytoscape-final-verification">Task 8: Remove cytoscape + final verification</h3>
+<p><code>GraphView.tsx</code> no longer imports cytoscape. Remove the dependencies and any code they left orphaned, then verify the whole UI is green.</p>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: `ui/package.json`</li>
+<li>Modify/remove: any now-dead helper in `ui/src/components/GraphView.tsx` (zoom helpers, cola edge-length, `clusterBySpace` graph mutations) that nothing references after Task 6.</li>
+</ul>
+<ul>
+<li><input type="checkbox" disabled> **Step 1: Confirm nothing still imports cytoscape**</li>
+</ul>
+<p>Run: <code>grep -rn &quot;cytoscape\|cola\|fcose&quot; ui/src</code></p>
+<p>Expected: no matches. If any remain, they are dead code from the old body — remove them (do not re-add a renderer).</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 2: Remove the dependencies**</li>
+</ul>
+<pre><code>( cd ui &amp;&amp; npm uninstall cytoscape cytoscape-cola cytoscape-fcose @types/cytoscape )</code></pre>
+<p>Expected: <code>package.json</code> no longer lists them.</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 3: Typecheck, unit tests, build**</li>
+</ul>
+<pre><code>( cd ui &amp;&amp; npx tsc --noEmit )
+( cd ui &amp;&amp; npm run test )
+( cd ui &amp;&amp; npm run build )</code></pre>
+<p>Expected: no type errors; all unit tests pass; build succeeds.</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 4: Re-run the visual test (regression)**</li>
+</ul>
+<pre><code>make restart
+uv run --with playwright python ui/playwright/test_graph_layout.py</code></pre>
+<p>Expected: <code>PASS</code> with organic clusters in <code>/tmp/ormah_sigma_layout.png</code>.</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 5: Manual parity pass against the spec success criteria**</li>
+</ul>
+<p>Open http://localhost:8787 and confirm, citing what you see:</p>
+<ul>
+<li>Organic clusters, isolated nodes on the periphery, **no grid/losango**.</li>
+<li>Colors by tier/space/self; node size varies with access_count; edge colors by type.</li>
+<li>Labels appear (zoom-gated); zoom/pan works; hover highlights node + neighbors and dims others.</li>
+<li>Legend space toggles dim/restore; selection opens the side panel.</li>
+<li>Main thread stays responsive while the layout settles.</li>
+</ul>
+<ul>
+<li><input type="checkbox" disabled> **Step 6: Keep the knowledge graph current**</li>
+</ul>
+<pre><code>graphify update .</code></pre>
+<ul>
+<li><input type="checkbox" disabled> **Step 7: Commit**</li>
+</ul>
+<pre><code>git add -A ui/
+git commit -m &quot;chore(ui): remove cytoscape deps + dead code after sigma migration&quot;</code></pre>
+<ul>
+<li><input type="checkbox" disabled> **Step 8: Finish the branch**</li>
+</ul>
+<p>Invoke <code>superpowers:finishing-a-development-branch</code> to decide merge/PR. The branch is <code>feat/graph-webgl-sigma</code>.</p>
+<div class="callout"><p>**Known carry-over (surface in the PR, do not silently fix):** the spec commit `36f9091` is embedded in the pushed `fix/embedding-delta-backfill` (#32) history; those two doc files will ride along when #32 merges. Removing it would require rewriting a pushed branch — out of scope here. Flag it on #32 for an optional interactive rebase before merge.</p></div>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature">
+    <div class="name">Rich Doc</div>
+    <div class="role">Generated from Markdown Plan</div>
+</div>
+</main>
+<!-- rich-doc-src-sha256:f0f2b7d477dc35a1ae12a7b33c0e64f994ba28302baf40269b568a8b9ec2cea3 -->
+</body>
+</html>

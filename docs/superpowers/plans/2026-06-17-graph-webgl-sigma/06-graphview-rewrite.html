@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Plan</title>
+    <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+
+    </style>
+</head>
+<body>
+<nav class="toc"><span class="eyebrow">Plan</span><div class="doc-title"><em>Plan</em></div><a href="#task-6-rewrite-graphview-as-a-sigma-orchestrator" class="lvl-3">Task 6: Rewrite GraphView as a sigma orchestrator</a></nav>
+<main>
+<h3 id="task-6-rewrite-graphview-as-a-sigma-orchestrator">Task 6: Rewrite GraphView as a sigma orchestrator</h3>
+<p>The big one. Replace the cytoscape body of <code>ui/src/components/GraphView.tsx</code> with sigma + FA2, <strong>preserving the component&#x27;s external contract</strong> so its callers keep working.</p>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify (rewrite body): `ui/src/components/GraphView.tsx`</li>
+</ul>
+<div class="callout"><p>**Before writing anything, read the entire current `ui/src/components/GraphView.tsx`.** It is ~1198 lines. You must preserve two contracts exactly:</p></div>
+<div class="callout"><p>1. **Props** (current lines 23–31): `nodes`, `edges`, `onNodeSelect`, `focusNodeId`, `userNodeId`, `clusterBySpace`, `appearance`. Keep the same names/types.</p></div>
+<div class="callout"><p>2. **Imperative ref API** (current lines 444–502): `focusNode(id)`, `highlightNode(id)`, `highlightNodes(ids)`, `clearHighlight()`. These are called by the Insights/Review panels. Step 4 re-implements them on sigma.</p></div>
+<p>&gt;</p>
+<div class="callout"><p>Find callers to confirm the contract before/after: `grep -rn &quot;GraphView\|focusNode\|highlightNodes&quot; ui/src` .</p></div>
+<p>This task is decomposed into verifiable sub-steps. Commit after each sub-step.</p>
+<p>#### 6.1 — Mount sigma + build graph + run layout</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 1: Replace imports and the rendering body**</li>
+</ul>
+<p>At the top of <code>GraphView.tsx</code>, remove the cytoscape imports (<code>cytoscape</code>, <code>cytoscape-cola</code>, the <code>cytoscape.use(cola)</code> line) and add:</p>
+<pre><code>import Graph from &quot;graphology&quot;;
+import Sigma from &quot;sigma&quot;;
+import { buildGraph } from &quot;../graph/graphModel&quot;;
+import { createForceLayout, type ForceLayout } from &quot;../graph/forceLayout&quot;;
+import { makeNodeReducer, makeEdgeReducer, type ViewState } from &quot;../graph/sigmaReducers&quot;;
+import { GRAPH_THEME_TOKENS } from &quot;../graph/visual&quot;;</code></pre>
+<ul>
+<li><input type="checkbox" disabled> **Step 2: Mount sigma in an effect**</li>
+</ul>
+<p>Inside the component, keep <code>containerRef</code>. Replace the cytoscape mount <code>useLayoutEffect</code> with:</p>
+<pre><code>const sigmaRef = useRef&lt;Sigma | null&gt;(null);
+const graphRef = useRef&lt;Graph | null&gt;(null);
+const layoutRef = useRef&lt;ForceLayout | null&gt;(null);
+const viewStateRef = useRef&lt;ViewState&gt;({
+  hoveredNode: null,
+  neighbors: new Set(),
+  dimmedSpaces: new Set(),
+  spaceById: new Map(),
+  dimColor: appearance.theme === &quot;dark&quot; ? &quot;#2a2a2a&quot; : &quot;#cfd6de&quot;,
+});
+
+useEffect(() =&gt; {
+  if (!containerRef.current) return;
+
+  const graph = buildGraph({ nodes, edges, user_node_id: userNodeId }, appearance);
+  graphRef.current = graph;
+
+  const spaceById = new Map&lt;string, string&gt;();
+  graph.forEachNode((id, attr) =&gt; spaceById.set(id, (attr.space as string) ?? &quot;&quot;));
+  viewStateRef.current.spaceById = spaceById;
+
+  const renderer = new Sigma(graph, containerRef.current, {
+    enableEdgeEvents: true,
+    labelRenderedSizeThreshold: 8,
+    nodeReducer: (node, data) =&gt; makeNodeReducer(viewStateRef.current)(node, data),
+    edgeReducer: (edge, data) =&gt;
+      makeEdgeReducer(viewStateRef.current, (e) =&gt; [graph.source(e), graph.target(e)])(edge, data),
+  });
+  sigmaRef.current = renderer;
+
+  const layout = createForceLayout(graph);
+  layoutRef.current = layout;
+  layout.start();
+
+  return () =&gt; {
+    layout.kill();
+    renderer.kill();
+    sigmaRef.current = null;
+    graphRef.current = null;
+    layoutRef.current = null;
+  };
+  // Rebuild when the data or appearance changes.
+}, [nodes, edges, userNodeId, appearance]);</code></pre>
+<ul>
+<li><input type="checkbox" disabled> **Step 3: Build, run, eyeball**</li>
+</ul>
+<p>Run: <code>( cd ui &amp;&amp; npm run build )</code> → Expected: compiles (legend/zoom JSX may still reference removed cytoscape refs; if so, temporarily stub them — they&#x27;re rewired in 6.3/6.4. Prefer doing 6.1→6.4 in one branch of edits, committing per sub-step once each compiles.)</p>
+<p>Start the app (<code>make restart</code>, then open http://localhost:8787) and confirm: nodes render in WebGL, the graph <strong>spreads into organic clusters and settles</strong> (no rigid grid), colors match tiers/spaces. Screenshot it.</p>
+<ul>
+<li><input type="checkbox" disabled> **Commit:** `git commit -am &quot;feat(ui): mount sigma + FA2 layout in GraphView&quot;`</li>
+</ul>
+<p>#### 6.2 — Hover highlight + selection</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 4: Wire pointer events to reducer state**</li>
+</ul>
+<p>After creating <code>renderer</code> in the mount effect, add:</p>
+<pre><code>function neighborsOf(id: string): Set&lt;string&gt; {
+  const s = new Set&lt;string&gt;();
+  graph.forEachNeighbor(id, (n) =&gt; s.add(n));
+  return s;
+}
+function setHover(id: string | null) {
+  viewStateRef.current.hoveredNode = id;
+  viewStateRef.current.neighbors = id ? neighborsOf(id) : new Set();
+  renderer.refresh();
+}
+
+renderer.on(&quot;enterNode&quot;, ({ node }) =&gt; setHover(node));
+renderer.on(&quot;leaveNode&quot;, () =&gt; setHover(null));
+renderer.on(&quot;clickNode&quot;, ({ node }) =&gt; onNodeSelectRef.current(node));
+renderer.on(&quot;clickStage&quot;, () =&gt; setHover(null));</code></pre>
+<p>Keep the existing <code>onNodeSelectRef</code> pattern (current lines 426–427).</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 5: Verify hover**</li>
+</ul>
+<p>Rebuild + reload. Hovering a node highlights it + neighbors and dims the rest; clicking a node fires selection (side panel opens); clicking empty space clears. Screenshot the hover state.</p>
+<ul>
+<li><input type="checkbox" disabled> **Commit:** `git commit -am &quot;feat(ui): sigma hover highlight + click selection&quot;`</li>
+</ul>
+<p>#### 6.3 — Imperative ref API on sigma</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 6: Re-implement the ref methods**</li>
+</ul>
+<p>Replace the <code>useImperativeHandle(ref, ...)</code> block (current lines 444–502) with sigma equivalents, keeping the <strong>same method names/signatures</strong>:</p>
+<pre><code>useImperativeHandle(ref, () =&gt; ({
+  focusNode(id: string) {
+    const r = sigmaRef.current, g = graphRef.current;
+    if (!r || !g || !g.hasNode(id)) return;
+    const { x, y } = r.getNodeDisplayData(id)!;
+    r.getCamera().animate({ x, y, ratio: 0.4 }, { duration: 400 });
+  },
+  highlightNode(id: string) {
+    const g = graphRef.current, r = sigmaRef.current;
+    if (!g || !r || !g.hasNode(id)) return;
+    viewStateRef.current.hoveredNode = id;
+    const s = new Set&lt;string&gt;();
+    g.forEachNeighbor(id, (n) =&gt; s.add(n));
+    viewStateRef.current.neighbors = s;
+    r.refresh();
+  },
+  highlightNodes(ids: string[]) {
+    const g = graphRef.current, r = sigmaRef.current;
+    if (!g || !r) return;
+    const present = ids.filter((i) =&gt; g.hasNode(i));
+    viewStateRef.current.hoveredNode = present[0] ?? null;
+    viewStateRef.current.neighbors = new Set(present);
+    r.refresh();
+  },
+  clearHighlight() {
+    const r = sigmaRef.current;
+    viewStateRef.current.hoveredNode = null;
+    viewStateRef.current.neighbors = new Set();
+    r?.refresh();
+  },
+}));</code></pre>
+<ul>
+<li><input type="checkbox" disabled> **Step 7: Verify callers**</li>
+</ul>
+<p>From the Insights or Review panel, trigger a node focus/highlight (the actions that call <code>highlightNodes</code>). Confirm the graph highlights the right nodes. Rebuild + reload first.</p>
+<ul>
+<li><input type="checkbox" disabled> **Commit:** `git commit -am &quot;feat(ui): port GraphView imperative ref API to sigma&quot;`</li>
+</ul>
+<p>#### 6.4 — Legend reuse + space dimming</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 8: Keep the legend JSX, rewire its handlers**</li>
+</ul>
+<p>The tier/space/role/edge legend (<code>spaceLegend</code>/<code>tierLegend</code>/<code>roleLegend</code>/<code>edgeLegend</code>, current ~lines 915–960, plus their JSX further down) is DOM and renderer-independent — <strong>port it verbatim</strong>. Replace only the click behavior: where a space row currently set cytoscape <code>legendFocus</code>, it now toggles <code>dimmedSpaces</code>:</p>
+<pre><code>const [dimmedSpaces, setDimmedSpaces] = useState&lt;Set&lt;string&gt;&gt;(new Set());
+
+function toggleSpace(space: string) {
+  setDimmedSpaces((prev) =&gt; {
+    const next = new Set(prev);
+    if (next.has(space)) next.delete(space); else next.add(space);
+    viewStateRef.current.dimmedSpaces = next;
+    sigmaRef.current?.refresh();
+    return next;
+  });
+}</code></pre>
+<p>Wire each space legend row&#x27;s <code>onClick</code> to <code>toggleSpace(name)</code> (use the raw space key <code>&quot;&quot;</code> for &quot;(no space)&quot;), and render dimmed rows with reduced opacity to mirror state. Drop the old cytoscape-based <code>legendFocus</code>/<code>clusterBySpace</code> graph mutations; <code>clusterBySpace</code> now only affects legend visibility (<code>showLegend</code>), not layout.</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 9: Verify legend dimming**</li>
+</ul>
+<p>Rebuild + reload. Clicking a space in the legend dims that space&#x27;s nodes; clicking again restores. Screenshot.</p>
+<ul>
+<li><input type="checkbox" disabled> **Commit:** `git commit -am &quot;feat(ui): wire legend space toggles to sigma dimming&quot;`</li>
+</ul>
+<p>#### 6.5 — Node drag (reheat) + hover tooltip</p>
+<p>Closes two parity items from the spec&#x27;s visual-mapping table: &quot;drag a node → re-heat FA2&quot; and the hover tooltip.</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 10: Drag a node and re-heat the layout**</li>
+</ul>
+<p>In the mount effect, track a dragged node and pin it under the cursor; release re-heats FA2:</p>
+<p>Follow sigma&#x27;s canonical drag pattern (camera panning is suppressed by <code>preventSigmaDefault()</code>, not a camera enable/disable API — that does not exist):</p>
+<pre><code>let dragged: string | null = null;
+renderer.on(&quot;downNode&quot;, ({ node }) =&gt; {
+  dragged = node;
+  layout.stop();              // freeze sim while dragging
+});
+renderer.getMouseCaptor().on(&quot;mousemovebody&quot;, (e) =&gt; {
+  if (!dragged) return;
+  const pos = renderer.viewportToGraph(e);
+  graph.setNodeAttribute(dragged, &quot;x&quot;, pos.x);
+  graph.setNodeAttribute(dragged, &quot;y&quot;, pos.y);
+  e.preventSigmaDefault();    // stop the camera from panning during drag
+  e.original.preventDefault();
+  e.original.stopPropagation();
+});
+renderer.getMouseCaptor().on(&quot;mouseup&quot;, () =&gt; {
+  if (!dragged) return;
+  dragged = null;
+  layout.reheat();            // settle around the moved node
+});</code></pre>
+<ul>
+<li><input type="checkbox" disabled> **Step 11: Hover tooltip (label + space)**</li>
+</ul>
+<p>Add a positioned DOM tooltip driven by <code>enterNode</code>/<code>leaveNode</code>. Reuse the existing tooltip element/styles if the old GraphView had one; otherwise add a <code>div</code> with <code>position: absolute; pointer-events: none</code>. In <code>setHover</code> (Step 4) extend the enter handler:</p>
+<pre><code>renderer.on(&quot;enterNode&quot;, ({ node }) =&gt; {
+  setHover(node);
+  const { x, y } = renderer.getNodeDisplayData(node)!;
+  const label = graph.getNodeAttribute(node, &quot;label&quot;) as string;
+  const space = (graph.getNodeAttribute(node, &quot;space&quot;) as string) || &quot;(no space)&quot;;
+  showTooltip(label, space, x, y); // sets text + left/top, makes the div visible
+});
+renderer.on(&quot;leaveNode&quot;, () =&gt; { setHover(null); hideTooltip(); });</code></pre>
+<p>Implement <code>showTooltip</code>/<code>hideTooltip</code> as small helpers over a <code>tooltipRef</code> div rendered in the component (mirror the current view&#x27;s tooltip markup if present).</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 12: Verify drag + tooltip**</li>
+</ul>
+<p>Rebuild + reload. Dragging a node moves it and the layout re-settles on release; hovering shows the label + space tooltip. Screenshot both.</p>
+<ul>
+<li><input type="checkbox" disabled> **Step 13: Run the full unit suite + typecheck**</li>
+</ul>
+<p>Run: <code>( cd ui &amp;&amp; npm run test &amp;&amp; npx tsc --noEmit )</code></p>
+<p>Expected: all unit tests pass; no type errors.</p>
+<ul>
+<li><input type="checkbox" disabled> **Commit:** `git commit -am &quot;feat(ui): node drag reheat + hover tooltip&quot;`</li>
+</ul>
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature">
+    <div class="name">Rich Doc</div>
+    <div class="role">Generated from Markdown Plan</div>
+</div>
+</main>
+<!-- rich-doc-src-sha256:c9db0406d0bc3873fd6be980b26c2980a6cc97e51baaf10dce28e97afdba48cf -->
+</body>
+</html>
