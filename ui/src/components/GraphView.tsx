@@ -13,6 +13,7 @@ import Sigma from "sigma";
 import { buildGraph, applyAppearance } from "../graph/graphModel";
 import { createForceLayout, type ForceLayout } from "../graph/forceLayout";
 import { makeNodeReducer, makeEdgeReducer, type ViewState } from "../graph/sigmaReducers";
+import { focusFitIds } from "./legendFit";
 import { GRAPH_THEME_TOKENS } from "../graph/visual";
 import { type GraphAppearance, type GraphTheme } from "../graphAppearance";
 import type { Edge, MemoryNode } from "../types";
@@ -78,30 +79,6 @@ function fitToNodes(renderer: Sigma, graph: Graph, ids: string[]): void {
   // (don't over-zoom in beyond the current view or 0.25).
   const ratio = Math.min(camera.ratio, Math.max(fitRatio, 0.25));
   camera.animate({ x: cx, y: cy, ratio }, { duration: 400 });
-}
-
-// ─── idsMatching helper (for legend FOCUS) ────────────────────────────────────
-// Returns node ids whose attribute matches the legend kind/val.
-// For "edge" kind, returns endpoints of matching edges.
-function idsMatching(graph: Graph, kind: string, val: string): string[] {
-  if (kind === "edge") {
-    const ids = new Set<string>();
-    graph.forEachEdge((edge, attr, source, target) => {
-      if ((attr.edgeType as string ?? "") === val) {
-        ids.add(source);
-        ids.add(target);
-      }
-    });
-    return Array.from(ids);
-  }
-  // space / tier / role
-  const attrKey = kind === "space" ? "space" : kind === "tier" ? "tier" : "selfRole";
-  const ids: string[] = [];
-  graph.forEachNode((id, attr) => {
-    const nodeVal = (attr[attrKey] as string) ?? "";
-    if (nodeVal === val) ids.push(id);
-  });
-  return ids;
 }
 
 // ─── Styles (unchanged from cytoscape era) ───────────────────────────────────
@@ -534,8 +511,11 @@ const GraphView = forwardRef<
         const next = prev && prev.kind === kind && prev.val === val ? null : { kind, val };
         viewStateRef.current.focusKind = next;
         const r = sigmaRef.current, g = graphRef.current;
-        if (next && r && g) {
-          fitToNodes(r, g, idsMatching(g, kind, val));
+        // Fit on focus AND on clear: clearing re-fits the whole graph, so the
+        // camera returns to "everything visible" instead of staying parked on the
+        // prior focus (which made the result look like it had vanished).
+        if (r && g) {
+          fitToNodes(r, g, focusFitIds(g, next));
         }
         r?.refresh();
         return next;
