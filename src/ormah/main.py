@@ -55,6 +55,7 @@ import threading
 # /admin/health while no scheduler exists.
 _BACKFILL_FALLBACK_BASE_BACKOFF = 30.0  # seconds
 _BACKFILL_FALLBACK_MAX_BACKOFF = 600.0  # seconds
+_FALLBACK_JOIN_TIMEOUT = 5.0  # seconds — bound the shutdown wait on the fallback thread
 
 _fallback_thread: threading.Thread | None = None
 _fallback_stop_event: threading.Event | None = None
@@ -107,13 +108,25 @@ def _start_backfill_fallback(engine) -> None:
 
 
 def _stop_backfill_fallback() -> None:
-    """Signal the fallback thread to stop and join it (CH1). Idempotent."""
+    """Signal the fallback thread to stop and join it (CH1). Idempotent.
+    Only clears the handle when the thread actually exits. If it is still alive
+    after the join timeout (e.g. stuck in non-interruptible backfill IO), the
+    handle is kept so the singleton guard keeps blocking a second fallback from
+    starting against a closed/recreated engine (council CR1)."""
     global _fallback_thread
     if _fallback_stop_event is not None:
         _fallback_stop_event.set()
-    if _fallback_thread is not None:
-        _fallback_thread.join(timeout=5.0)
-        _fallback_thread = None
+    thread = _fallback_thread
+    if thread is not None:
+        thread.join(timeout=_FALLBACK_JOIN_TIMEOUT)
+        if thread.is_alive():
+            logger.warning(
+                "Embedding backfill fallback did not stop within %.1fs; keeping "
+                "the thread handle so no concurrent fallback can start.",
+                _FALLBACK_JOIN_TIMEOUT,
+            )
+        else:
+            _fallback_thread = None
 
 
 @asynccontextmanager
