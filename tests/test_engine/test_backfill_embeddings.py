@@ -8,6 +8,8 @@ nodes missing from the vector store. A permanently-failing node stays visible in
 """
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from ormah.models.node import CreateNodeRequest
@@ -115,3 +117,59 @@ def test_schema_bump_poison_node_stays_visible_and_advances_version(engine, monk
     assert r2["failed"] == 1
     assert r2["missing"] == 1
     assert enc.encode_calls == calls_after_schema + 1  # one retry, not a full re-embed
+
+
+# ---------------------------------------------------------------------------
+# Cooperative cancellation via stop_event (Task A — CRA/IA)
+# ---------------------------------------------------------------------------
+
+def test_backfill_stops_before_db_writes_when_event_set(engine):
+    """A stop_event that is already set causes backfill to embed nothing."""
+    engine.remember(CreateNodeRequest(title="C1", content="cancel me one"))
+    engine.remember(CreateNodeRequest(title="C2", content="cancel me two"))
+    # Force delta mode (version already current) and create a gap.
+    _set_schema_version(engine, _EMBEDDING_SCHEMA_VERSION)
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors")
+
+    stop = threading.Event()
+    stop.set()  # already cancelled before the call
+    result = engine.backfill_embeddings(stop_event=stop)
+
+    assert result["embedded"] == 0
+    assert result["missing"] > 0
+
+
+def test_backfill_completes_when_event_not_set(engine):
+    """A stop_event that is never set does not interfere with normal completion."""
+    engine.remember(CreateNodeRequest(title="D1", content="do embed one"))
+    engine.remember(CreateNodeRequest(title="D2", content="do embed two"))
+    _set_schema_version(engine, _EMBEDDING_SCHEMA_VERSION)
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors")
+
+    result = engine.backfill_embeddings(stop_event=threading.Event())  # never set
+
+    assert result["missing"] == 0
+
+
+def test_schema_version_not_advanced_when_interrupted(engine):
+    """An interrupted schema pass must NOT advance embedding_schema_version."""
+    engine.remember(CreateNodeRequest(title="S1", content="schema node one"))
+    _set_schema_version(engine, 1)  # trigger schema mode (stored < current)
+
+    before = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key='embedding_schema_version'"
+    ).fetchone()
+
+    stop = threading.Event()
+    stop.set()
+    engine.backfill_embeddings(stop_event=stop)
+
+    after = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key='embedding_schema_version'"
+    ).fetchone()
+
+    before_val = before["value"] if before else None
+    after_val = after["value"] if after else None
+    assert before_val == after_val
