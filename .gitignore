@@ -73,3 +73,6 @@ CLAUDE.md
 .omx/
 .codex
 .codex/
+
+# Council ephemerals (run artifacts, tool-managed)
+.council/

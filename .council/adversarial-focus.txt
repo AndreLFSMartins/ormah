@@ -1,1 +1,0 @@
-Verify quarantine never permanently drops recoverable nodes and the schema version advances only when the store is truly complete
