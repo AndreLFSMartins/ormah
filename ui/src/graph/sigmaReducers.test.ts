@@ -76,11 +76,11 @@ describe("makeNodeReducer", () => {
     expect(r("a", { color: "#abc" }).color).toBe(DIM);
   });
 
-  it("shows label only for the hovered node", () => {
+  it("hovered node does NOT force native label (HTML tooltip covers hover; all nodes label=undefined)", () => {
     const r = makeNodeReducer(state({ hoveredNode: "a" }));
     const hovered = r("a", { label: "A", color: "#abc" });
-    expect(hovered.label).toBe("A");
-    expect(hovered.forceLabel).toBe(true);
+    expect(hovered.label).toBeUndefined();        // no native label — HTML tooltip handles it
+    expect(hovered.forceLabel).toBeUndefined();   // forceLabel must not be set
 
     const notHovered = r("b", { label: "B", color: "#abc" });
     expect(notHovered.label).toBeUndefined();
@@ -96,11 +96,11 @@ describe("makeNodeReducer", () => {
     expect(node2.label).toBeUndefined();
   });
 
-  it("hovered node keeps label even while a neighbor is shown (only the node under the mouse, NOT neighbors)", () => {
+  it("hovered node has no native label and neighbor also has none (HTML tooltip handles hover display)", () => {
     const r = makeNodeReducer(state({ hoveredNode: "a", neighbors: new Set(["b"]) }));
     const hovered = r("a", { label: "A", color: "#abc" });
-    expect(hovered.label).toBe("A");
-    expect(hovered.forceLabel).toBe(true);
+    expect(hovered.label).toBeUndefined();        // no native label on hovered node
+    expect(hovered.forceLabel).toBeUndefined();   // forceLabel must not be set
 
     const neighbor = r("b", { label: "B", color: "#abc" });
     expect(neighbor.label).toBeUndefined();

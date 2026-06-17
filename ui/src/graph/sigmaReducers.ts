@@ -55,9 +55,8 @@ export function makeNodeReducer(state: ViewState) {
   return (node: string, data: NodeAttrs): NodeAttrs => {
     const out: NodeAttrs = { ...data };
 
-    // Label visibility: show ONLY for the hovered node. Everything else: no label.
-    const isHovered = hoveredNode != null && node === hoveredNode;
-    if (isHovered) out.forceLabel = true; else out.label = undefined;
+    // Label visibility: native labels always hidden — HTML tooltip handles hover display.
+    out.label = undefined;
 
     // 1) Filter-dim (App.tsx) wins — a filtered-out node always dims.
     if (nodeIsFilterDimmed(node, state)) return dim(out);
