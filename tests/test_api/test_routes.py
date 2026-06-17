@@ -235,6 +235,42 @@ def test_maintenance_reuses_single_inflight_job(client):
         release.set()
 
 
+def test_health_degraded_when_no_scheduler_and_fallback_failing(monkeypatch):
+    """CH2: with no scheduler, a degraded fallback makes /admin/health degraded."""
+    from unittest.mock import MagicMock
+
+    from ormah import main as _main
+    from ormah.api import routes_admin
+
+    monkeypatch.setattr(_main, "_fallback_degraded", True)
+
+    request = MagicMock()
+    # No job_tracker on app.state -> getattr returns the default (None).
+    request.app.state = MagicMock(spec=[])  # empty spec: no job_tracker, no manager
+
+    result = routes_admin.health(request)
+
+    assert result["status"] == "degraded"
+    assert result["embedding_backfill"].startswith("degraded")
+
+
+def test_health_ok_when_no_scheduler_and_fallback_healthy(monkeypatch):
+    """Inverse: a healthy fallback (flag False) leaves health ok."""
+    from unittest.mock import MagicMock
+
+    from ormah import main as _main
+    from ormah.api import routes_admin
+
+    monkeypatch.setattr(_main, "_fallback_degraded", False)
+
+    request = MagicMock()
+    request.app.state = MagicMock(spec=[])
+
+    result = routes_admin.health(request)
+
+    assert result["status"] == "ok"
+
+
 def test_maintenance_phase2_apply_completes_via_routes(client):
     app = client.app
     original_batches = app.state.engine.get_maintenance_batches
