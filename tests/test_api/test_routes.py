@@ -375,3 +375,37 @@ def test_health_ok_when_scheduler_job_recovered():
     result = routes_admin.health(request)
 
     assert result["status"] == "ok"
+
+
+def test_run_all_records_failure_in_tracker_so_health_degrades():
+    """CRC: a failed task in run-all must persist to the JobTracker so a later
+    GET /admin/health reports degraded (not a stale ok)."""
+    from unittest.mock import MagicMock
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from ormah.api.routes_admin import router as admin_router
+    from ormah.background.job_tracker import JobTracker
+
+    class _EngineWhereBackfillRaises:
+        """Minimal engine double: backfill_embeddings raises; other attrs are mocks."""
+
+        def __getattr__(self, name):
+            # builder.incremental_update() and other runner calls go through here
+            return MagicMock(return_value=None)
+
+        def backfill_embeddings(self, *args, **kwargs):
+            raise RuntimeError("encoder down (test double)")
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.state.engine = _EngineWhereBackfillRaises()
+    app.state.job_tracker = JobTracker()
+    app.state.maintenance_manager = None
+
+    with TestClient(app) as c:
+        r = c.post("/admin/tasks/run-all")
+        assert r.status_code == 503
+        h = c.get("/admin/health")
+        assert h.json()["status"] == "degraded"
