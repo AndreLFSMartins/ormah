@@ -23,7 +23,7 @@ describe("makeNodeReducer", () => {
     const r = makeNodeReducer(state({}));
     const out = r("a", { color: "#abc", label: "A" });
     expect(out.color).toBe("#abc");
-    expect(out.label).toBe("A");
+    expect(out.label).toBeUndefined(); // labels hidden when nothing is hovered
   });
 
   it("dims non-hovered, non-neighbor nodes and highlights the hovered one", () => {
@@ -74,6 +74,36 @@ describe("makeNodeReducer", () => {
     const attrs = new Map([["a", { space: "", tier: "working", selfRole: "", type: "person" }]]);
     const r = makeNodeReducer(state({ attrsById: attrs, dimmed: { space: new Set(), tier: new Set(), role: new Set(), type: new Set(["person"]), edge: new Set() } }));
     expect(r("a", { color: "#abc" }).color).toBe(DIM);
+  });
+
+  it("shows label only for the hovered node", () => {
+    const r = makeNodeReducer(state({ hoveredNode: "a" }));
+    const hovered = r("a", { label: "A", color: "#abc" });
+    expect(hovered.label).toBe("A");
+    expect(hovered.forceLabel).toBe(true);
+
+    const notHovered = r("b", { label: "B", color: "#abc" });
+    expect(notHovered.label).toBeUndefined();
+    expect(notHovered.forceLabel).toBeUndefined();
+  });
+
+  it("hides all labels when nothing is hovered", () => {
+    const r = makeNodeReducer(state({ hoveredNode: null }));
+    const node1 = r("a", { label: "A", color: "#abc" });
+    expect(node1.label).toBeUndefined();
+
+    const node2 = r("b", { label: "B", color: "#abc" });
+    expect(node2.label).toBeUndefined();
+  });
+
+  it("hovered node keeps label even while a neighbor is shown (only the node under the mouse, NOT neighbors)", () => {
+    const r = makeNodeReducer(state({ hoveredNode: "a", neighbors: new Set(["b"]) }));
+    const hovered = r("a", { label: "A", color: "#abc" });
+    expect(hovered.label).toBe("A");
+    expect(hovered.forceLabel).toBe(true);
+
+    const neighbor = r("b", { label: "B", color: "#abc" });
+    expect(neighbor.label).toBeUndefined();
   });
 });
 
