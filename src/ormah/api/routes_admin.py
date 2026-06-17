@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -287,4 +288,12 @@ def run_all_tasks(request: Request):
         except Exception as exc:
             results[task_id] = f"error: {exc}"
 
+    has_errors = any(v.startswith("error:") for v in results.values())
+    if has_errors:
+        # I1: a partial failure must not look like success to HTTP-only callers
+        # (cron, scripts). Surface it as 503 while keeping the per-task body.
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "results": results},
+        )
     return {"status": "completed", "results": results}
