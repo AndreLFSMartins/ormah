@@ -1286,7 +1286,9 @@ class MemoryEngine:
         # Schema mode: drop the stale vector of any node that failed to re-embed
         # under the new scheme, so it is genuinely missing (and retried by delta)
         # rather than silently kept with an outdated embedding.
-        if mode == "schema" and failed_ids:
+        # Guard with `not interrupted`: an interrupted pass must not write anything —
+        # consistent with the version-advance guard immediately below (Fix B).
+        if mode == "schema" and failed_ids and not interrupted:
             with self.db.transaction() as conn:
                 for nid in failed_ids:
                     conn.execute("DELETE FROM node_vectors WHERE id = ?", (nid,))
