@@ -56,6 +56,7 @@ _BACKFILL_FALLBACK_BASE_BACKOFF = 30.0  # seconds
 _BACKFILL_FALLBACK_MAX_BACKOFF = 600.0  # seconds
 _FALLBACK_JOIN_TIMEOUT = 5.0  # seconds — bound the shutdown wait on the fallback thread
 
+_fallback_lock = threading.Lock()
 _fallback_thread: threading.Thread | None = None
 _fallback_stop_event: threading.Event | None = None
 _fallback_degraded: bool = False
@@ -68,64 +69,62 @@ def _start_backfill_fallback(engine) -> None:
     recovers automatically. Singleton: a second call while one thread is alive is
     a no-op, so a lifespan restart cannot accumulate concurrent fallbacks."""
     global _fallback_thread, _fallback_stop_event, _fallback_degraded
-    import time
+    with _fallback_lock:  # CRB: make the singleton check-and-set atomic
+        if _fallback_thread is not None and _fallback_thread.is_alive():
+            return  # singleton guard (CH1)
 
-    if _fallback_thread is not None and _fallback_thread.is_alive():
-        return  # singleton guard (CH1)
+        stop_event = threading.Event()
+        _fallback_stop_event = stop_event
+        _fallback_degraded = False
 
-    stop_event = threading.Event()
-    _fallback_stop_event = stop_event
-    _fallback_degraded = False
+        def _run():
+            global _fallback_degraded
+            from ormah.background.embedding_backfill import run_embedding_backfill
 
-    def _run():
-        global _fallback_degraded
-        from ormah.background.embedding_backfill import run_embedding_backfill
-
-        delay = _BACKFILL_FALLBACK_BASE_BACKOFF
-        attempt = 0
-        while not stop_event.is_set():
-            attempt += 1
-            try:
-                run_embedding_backfill(engine)
-                _fallback_degraded = False  # gap closed (CH2: recovery observable)
-                return
-            except Exception as e:
-                _fallback_degraded = True  # CH2: persistent outage is observable
-                logger.warning(
-                    "Embedding backfill fallback attempt %d failed: %s", attempt, e,
-                )
-                # Interruptible sleep -- shutdown wakes us immediately (CH1).
-                if stop_event.wait(delay):
+            delay = _BACKFILL_FALLBACK_BASE_BACKOFF
+            attempt = 0
+            while not stop_event.is_set():
+                attempt += 1
+                try:
+                    run_embedding_backfill(engine, stop_event=stop_event)
+                    _fallback_degraded = False  # gap closed (CH2: recovery observable)
                     return
-                delay = min(delay * 2, _BACKFILL_FALLBACK_MAX_BACKOFF)
+                except Exception as e:
+                    _fallback_degraded = True  # CH2: persistent outage is observable
+                    logger.warning(
+                        "Embedding backfill fallback attempt %d failed: %s", attempt, e,
+                    )
+                    # Interruptible sleep -- shutdown wakes us immediately (CH1).
+                    if stop_event.wait(delay):
+                        return
+                    delay = min(delay * 2, _BACKFILL_FALLBACK_MAX_BACKOFF)
 
-    thread = threading.Thread(
-        target=_run, name="embedding-backfill-fallback", daemon=True
-    )
-    _fallback_thread = thread
-    thread.start()
+        thread = threading.Thread(
+            target=_run, name="embedding-backfill-fallback", daemon=True
+        )
+        _fallback_thread = thread
+        thread.start()
 
 
 def _stop_backfill_fallback() -> None:
-    """Signal the fallback thread to stop and join it (CH1). Idempotent.
-    Only clears the handle when the thread actually exits. If it is still alive
-    after the join timeout (e.g. stuck in non-interruptible backfill IO), the
-    handle is kept so the singleton guard keeps blocking a second fallback from
-    starting against a closed/recreated engine (council CR1)."""
-    global _fallback_thread
-    if _fallback_stop_event is not None:
-        _fallback_stop_event.set()
-    thread = _fallback_thread
+    """Signal the fallback thread to stop and join it. Idempotent. With the
+    backfill now cancellable, the join succeeds quickly, so the handle is always
+    cleared — the engine can then be shut down safely (no use-after-close)."""
+    global _fallback_thread, _fallback_stop_event
+    with _fallback_lock:
+        if _fallback_stop_event is not None:
+            _fallback_stop_event.set()
+        thread = _fallback_thread
     if thread is not None:
         thread.join(timeout=_FALLBACK_JOIN_TIMEOUT)
         if thread.is_alive():
             logger.warning(
-                "Embedding backfill fallback did not stop within %.1fs; keeping "
-                "the thread handle so no concurrent fallback can start.",
+                "Embedding backfill fallback did not stop within %.1fs",
                 _FALLBACK_JOIN_TIMEOUT,
             )
-        else:
-            _fallback_thread = None
+    with _fallback_lock:
+        _fallback_thread = None
+        _fallback_stop_event = None
 
 
 @asynccontextmanager
