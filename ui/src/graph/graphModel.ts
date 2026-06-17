@@ -32,7 +32,11 @@ export function buildGraph(data: GraphData, appearance: GraphAppearance): Graph 
       label: nodeLabel(n),
       space: n.space || "",
       tier: n.tier,
-      type: n.type,
+      // NOTE: store the domain node type under `nodeType`, NOT `type` — sigma
+      // reserves the node `type` attribute to pick the render program (e.g.
+      // "circle"); a domain value like "concept" makes sigma throw
+      // "could not find a suitable program for node type". See FilterDrawer type filter.
+      nodeType: n.type,
       selfRole: role,
     });
   });

@@ -359,7 +359,7 @@ const GraphView = forwardRef<
           space: (a.space as string) ?? "",
           tier: a.tier as string,
           selfRole: a.selfRole as string,
-          type: (a.type as string) ?? "",
+          type: (a.nodeType as string) ?? "",
         }),
       );
       const edgeTypeById = new Map<string, string>();
