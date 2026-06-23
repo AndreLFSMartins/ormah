@@ -211,12 +211,18 @@ def cmd_stats(args):
             r = c.get("/admin/stats")
             r.raise_for_status()
             data = r.json()
+            u = c.get("/agent/stats")
+            u.raise_for_status()
+            usage = u.json()
             if args.json:
-                print(json.dumps(data, indent=2))
+                print(json.dumps({**data, "usage": usage}, indent=2))
             else:
                 total = data.get("total_nodes", 0)
                 edges = data.get("total_edges", 0)
                 by_tier = data.get("by_tier", {})
+                week = usage.get("whispers_used_this_week", 0)
+                used_total = usage.get("whispers_used_total", 0)
+                print(f"Whispers used: {week} this week  ({used_total} total)")
                 print(f"Memories: {total}  Edges: {edges}")
                 for tier, count in sorted(by_tier.items()):
                     print(f"  {tier}: {count}")
