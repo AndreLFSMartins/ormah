@@ -1,0 +1,83 @@
+name: Desktop release (macOS)
+
+# Builds, signs, notarizes, and publishes the Ormah .dmg on tagged releases.
+# Requires the Apple + Tauri signing secrets listed in desktop/README.md.
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+
+jobs:
+  build-dmg:
+    # Build per-arch so each .dmg ships a matching frozen sidecar.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64-apple-darwin
+            runner: macos-14
+          - arch: x86_64-apple-darwin
+            runner: macos-13
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build the frozen server sidecar
+        run: bash desktop/scripts/build-sidecar.sh
+
+      - name: Generate app icons
+        working-directory: desktop/src-tauri
+        run: cargo tauri icon icons/icon.png
+
+      - name: Build, sign, and bundle the app
+        working-directory: desktop
+        env:
+          # Code signing (Developer ID Application cert, base64 .p12)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Notarization (notarytool)
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Tauri updater signing (Sparkle-style appcast signatures)
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --target ${{ matrix.arch }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ormah-${{ matrix.arch }}
+          path: |
+            desktop/src-tauri/target/${{ matrix.arch }}/release/bundle/dmg/*.dmg
+            desktop/src-tauri/target/${{ matrix.arch }}/release/bundle/macos/*.app.tar.gz*
+
+  publish:
+    needs: build-dmg
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Attach .dmg + updater artifacts to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+      # TODO: regenerate + publish the updater appcast (latest.json) to the
+      # endpoint configured in tauri.conf.json so existing installs auto-update.
