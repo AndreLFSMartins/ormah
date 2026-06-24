@@ -214,6 +214,8 @@ def test_affinity_defaults():
     assert s.affinity_max_boost == 0.15
     assert s.affinity_implicit_weight == 0.8
     assert s.whisper_exploration_enabled is True
+    assert s.feedback_llm_judge_enabled is False
+    assert s.feedback_llm_judge_min_confidence == 0.75
 
 
 # --- Embedding backfill / vector-store reconciliation (#32) ---
@@ -269,3 +271,10 @@ def test_deletion_retrievability_floor_must_be_unit_range():
     from ormah.config import Settings
     with pytest.raises(ValueError):
         Settings(deletion_retrievability_floor=1.5)
+
+
+# --- Feedback LLM judge (#21 / #40) ---
+
+def test_feedback_llm_judge_min_confidence_range():
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(feedback_llm_judge_min_confidence=1.5)

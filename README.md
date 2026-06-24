@@ -1,19 +1,33 @@
-# Ormah
+<p align="center">
+  <img src="docs/banner.png" alt="Ormah" width="100%">
+</p>
 
-Website: https://www.ormah.me/
+<p align="center">
+  <a href="https://pypi.org/project/ormah/"><img src="https://img.shields.io/pypi/v/ormah.svg" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/ormah/"><img src="https://img.shields.io/pypi/pyversions/ormah.svg" alt="Python versions"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
+  <a href="https://www.ormah.me/docs/getting-started/quickstart"><img src="https://img.shields.io/badge/docs-ormah.me-orange.svg" alt="Docs"></a>
+</p>
 
-Ormah is the collective, self-maintaining memory layer all your agents can tap into.
+**The collective, self-maintaining memory layer all your agents can tap into.**
 
 The core idea is simple: memory should be involuntary. Your agents should not have to remember to remember. Ormah works in the background, learning your preferences, decisions, patterns, mistakes, and ongoing work, then whispering the right memory at the right time.
 
 Your memory has always been yours. Ormah helps keep it that way.
 
-Local. Private. Portable.
-Yours to keep. Yours to move.
+**Local. Private. Portable. Yours to keep. Yours to move.**
+
+```bash
+bash <(curl -fsSL https://ormah.me/install.sh)
+```
 
 <p align="center">
-  <img src="docs/graph.png" alt="Ormah knowledge graph" width="100%">
+  <a href="https://www.youtube.com/watch?v=IngB55jdnlc">
+    <img src="docs/graph.png" alt="Ormah knowledge graph — click to watch the demo" width="100%">
+  </a>
 </p>
+
+<p align="center"><a href="https://www.youtube.com/watch?v=IngB55jdnlc">▶ Watch Ormah in action</a></p>
 
 The name comes from the Malayalam word ഓർമ (`ormah`), meaning "memory" or "remember."
 
@@ -74,7 +88,9 @@ Ormah supports both deliberate recall and involuntary recall.
 
 When an agent knows it needs something, it can explicitly search memory. But memory should not always wait to be asked. Ormah is built to whisper the right memory at the right time, before the next prompt, so the agent starts with context instead of having to go looking for it.
 
-Read more: [Whisper - Involuntary Recall](<docs/04 - Whisper - Involuntary Recall.md>), [Search and Ranking](<docs/03 - Search and Ranking.md>), [Affinity and Feedback](<docs/09 - Affinity and Feedback.md>)
+Whisper feedback can learn from transcript files after they stop changing: a local heuristic records clear usage for free, and an optional LLM judge can classify ambiguous turns into positive, negative, or uncertain retrieval signals.
+
+Read more: [Whisper - Involuntary Recall](https://www.ormah.me/docs/how-ormah-works/whisper), [Search and Ranking](https://www.ormah.me/docs/how-ormah-works/search-and-ranking), [Affinity and Feedback](https://www.ormah.me/docs/operations/affinity-and-feedback)
 
 ### Memory Capture
 
@@ -82,7 +98,7 @@ Memory is only useful if it keeps growing with you.
 
 Ormah can capture memory from ongoing sessions, stored transcripts, and external markdown sources. `whisper store` turns conversations into durable memory, the session watcher ingests completed sessions automatically, and Hippocampus watches note directories so project docs, journals, and markdown knowledge can flow into the graph over time.
 
-Read more: [Hippocampus and Session Watcher](<docs/10 - Hippocampus and Session Watcher.md>), [Storage Layer](<docs/02 - Storage Layer.md>)
+Read more: [Hippocampus and Session Watcher](https://www.ormah.me/docs/operations/hippocampus-and-session-watcher), [Storage Layer](https://www.ormah.me/docs/how-ormah-works/storage-layer)
 
 ### Self-Maintaining Memory
 
@@ -90,7 +106,7 @@ Memory should not become a junk drawer.
 
 Ormah continuously maintains the graph in the background: linking related memories, detecting conflicts, tracking belief evolution, merging duplicates, consolidating overlap, scoring importance, and decaying stale context. Some of that work is automatic, and some of it can be delegated to an agent when judgment is required.
 
-Read more: [Background Jobs](<docs/05 - Background Jobs.md>)
+Read more: [Background Jobs](https://www.ormah.me/docs/how-ormah-works/background-jobs)
 
 ### Local Backups
 
@@ -98,7 +114,7 @@ Memories should be hard to lose.
 
 Ormah can create timestamped local backups of the source-of-truth memory files and keeps the latest 10 by default. Backups include active and deleted memory nodes, but exclude derived indexes, logs, config, and API keys. When memory nodes exist, the server checks for a due backup in the background. Manual workflows are available through `ormah backup create`, `ormah backup list`, `ormah backup status`, and `ormah backup restore`.
 
-Read more: [Configuration Reference](<docs/12 - Configuration Reference.md>)
+Read more: [Configuration Reference](https://www.ormah.me/docs/operations/configuration-reference)
 
 ### Agent-Agnostic Surfaces
 
@@ -106,13 +122,13 @@ Ormah is not tied to a single agent.
 
 It can integrate wherever there is a usable hook or interface. Ormah exposes multiple surfaces for that: hooks for whisper, MCP for tool-calling agents, a CLI for direct workflows, and an HTTP API for custom integrations. The memory layer stays the same even when the agent changes.
 
-Read more: [MCP and Adapters](<docs/07 - MCP and Adapters.md>), [API Surface](<docs/08 - API Surface.md>), [Setup and Installation](<docs/11 - Setup and Installation.md>)
+Read more: [MCP and Adapters](https://www.ormah.me/docs/integrations/mcp-and-adapters), [API Surface](https://www.ormah.me/docs/reference/api-surface), [Installation](https://www.ormah.me/docs/getting-started/installation), [Setup](https://www.ormah.me/docs/getting-started/setup)
 
 ### Agent-Assisted or Independent
 
 Ormah can use the intelligence of the agents you already work with, like Codex or Claude Code, for judgment-heavy tasks such as maintenance. But it does not have to depend on them. If you want Ormah to run those features independently, you can configure your own provider and API key.
 
-Read more: [Configuration Reference](<docs/12 - Configuration Reference.md>), [Setup and Installation](<docs/11 - Setup and Installation.md>)
+Read more: [Configuration Reference](https://www.ormah.me/docs/operations/configuration-reference), [Installation](https://www.ormah.me/docs/getting-started/installation), [Setup](https://www.ormah.me/docs/getting-started/setup)
 
 ### Graph UI
 
@@ -146,7 +162,7 @@ Main integration surfaces:
 - CLI — setup, server management, memory ops, ingestion, whisper hooks, evals
 - HTTP API — `/agent/*`, `/admin/*`, `/ingest/*`, `/ui/*`
 
-Read more: [Setup and Installation](<docs/11 - Setup and Installation.md>), [MCP and Adapters](<docs/07 - MCP and Adapters.md>), [API Surface](<docs/08 - API Surface.md>), [Configuration Reference](<docs/12 - Configuration Reference.md>)
+Read more: [Installation](https://www.ormah.me/docs/getting-started/installation), [Setup](https://www.ormah.me/docs/getting-started/setup), [MCP and Adapters](https://www.ormah.me/docs/integrations/mcp-and-adapters), [API Surface](https://www.ormah.me/docs/reference/api-surface), [Configuration Reference](https://www.ormah.me/docs/operations/configuration-reference)
 
 ## Development
 
