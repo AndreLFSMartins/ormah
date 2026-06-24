@@ -1126,3 +1126,84 @@ def test_concurrent_ingest_skipped(engine, tmp_path):
         t1.join(timeout=5)
 
     assert calls == 1
+
+
+# --- Test 19: in-flight skip reschedules the dropped event (no lost tail) ---
+
+def test_inflight_skip_reschedules(engine, tmp_path):
+    """A modify event skipped because an ingest is in flight must be rescheduled, not dropped."""
+    import threading
+
+    from ormah.background import session_watcher as sw
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+
+    scheduled = []
+
+    class FakeTimer:
+        def __init__(self, delay, fn, args=()):
+            self.delay = delay
+            self.fn = fn
+            self.args = args
+            self.daemon = False
+        def start(self):
+            scheduled.append(self)
+        def cancel(self):
+            pass
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_ingest(content, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return []
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=blocking_ingest), \
+         patch.object(sw, "Timer", FakeTimer):
+        handler = sw.SessionHandler(
+            engine, watch_dir, debounce_seconds=60, min_turns=5, idle_threshold=30,
+        )
+        t1 = threading.Thread(target=handler._do_ingest, args=(jsonl,))
+        t1.start()
+        assert started.wait(timeout=5)   # ingest A is in flight
+        handler._do_ingest(jsonl)        # skipped — must mark pending
+        assert scheduled == []           # nothing rescheduled while A still runs
+        release.set()
+        t1.join(timeout=5)
+
+    # After A finishes, the skipped event was rescheduled as a fresh debounce
+    assert len(scheduled) == 1
+    assert scheduled[0].delay == 60
+
+
+# --- Test 20: shrink resets node_ids provenance, not just turn count ---
+
+def test_shrink_resets_node_ids(engine, tmp_path):
+    """A file that shrinks below the stored offset must not carry stale node_ids forward."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    rel = str(jsonl.relative_to(watch_dir))
+
+    _make_jsonl(jsonl, user_turns=10)
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+    first_nodes = list(state[rel]["node_ids"])
+    assert first_nodes  # first ingest produced at least one node
+
+    _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset → full re-ingest
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+
+    # Full re-ingest (prev_offset reset to 0): stale node_ids must not be concatenated,
+    # so the stored provenance carries no duplicates.
+    nodes = state[rel]["node_ids"]
+    assert len(nodes) == len(set(nodes))

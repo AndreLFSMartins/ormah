@@ -766,9 +766,11 @@ def _ingest_session(
         return False
 
     new_node_ids = [m["node_id"] for m in ingested] if isinstance(ingested, list) else []
-    prev_node_ids = existing.get("node_ids", []) if existing else []
-    # prev_offset == 0 means a fresh/whole re-ingest; don't carry stale cumulative turns.
-    prev_turns = existing.get("user_turns", 0) if (existing and prev_offset > 0) else 0
+    # prev_offset == 0 means a fresh/whole re-ingest; don't carry stale cumulative
+    # turns or node_ids forward (the new ingest re-covers them).
+    carry = existing and prev_offset > 0
+    prev_node_ids = existing.get("node_ids", []) if carry else []
+    prev_turns = existing.get("user_turns", 0) if carry else 0
 
     state[rel] = {
         "hash": h,
@@ -854,6 +856,7 @@ class SessionHandler(FileSystemEventHandler):
         self._state = _load_state(watch_dir)
         self._timers: dict[str, Timer] = {}
         self._ingesting: set[str] = set()
+        self._pending: set[str] = set()
         self._lock = Lock()
 
     def _schedule_ingest(self, path: Path) -> None:
@@ -888,7 +891,11 @@ class SessionHandler(FileSystemEventHandler):
         with self._lock:
             self._timers.pop(key, None)
             if key in self._ingesting:
-                return  # an ingest for this path is already running; skip
+                # An ingest for this path is already running and has already parsed
+                # its slice; mark the path so the new content is re-ingested once it
+                # finishes, instead of dropping this event.
+                self._pending.add(key)
+                return
             self._ingesting.add(key)
         try:
             _ingest_session(
@@ -899,6 +906,10 @@ class SessionHandler(FileSystemEventHandler):
         finally:
             with self._lock:
                 self._ingesting.discard(key)
+                rerun = key in self._pending
+                self._pending.discard(key)
+        if rerun:
+            self._schedule_ingest(path)  # re-process content that arrived mid-ingest
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".jsonl"):
