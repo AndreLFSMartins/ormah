@@ -57,7 +57,7 @@ function ratioToSliderValue(ratio: number): number {
 // Mirrors cy.fit(collection, 120) + clamp logic using graphology positions and sigma camera.
 const FIT_PADDING_RATIO = 0.15; // ~120px padding at default 900px viewport height
 
-function fitToNodes(renderer: Sigma, graph: Graph, ids: string[]): void {
+function fitToNodes(renderer: Sigma, graph: Graph, ids: string[], forceFit = false): void {
   if (!ids.length) return;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const id of ids) {
@@ -75,9 +75,9 @@ function fitToNodes(renderer: Sigma, graph: Graph, ids: string[]): void {
   const spanX = Math.max(maxX - minX, 1e-6), spanY = Math.max(maxY - minY, 1e-6);
   const graphToView = Math.max(spanX / width, spanY / height);
   const fitRatio = graphToView * (1 + FIT_PADDING_RATIO);
-  // Parity clamp: sigma ratio is inverse of zoom, so clamp the ratio to a max
-  // (don't over-zoom in beyond the current view or 0.25).
-  const ratio = Math.min(camera.ratio, Math.max(fitRatio, 0.25));
+  // forceFit (used on legend clear): always zoom out to show the whole graph.
+  // Normal fit: don't over-zoom in beyond the current view or 0.25.
+  const ratio = forceFit ? Math.max(fitRatio, 0.25) : Math.min(camera.ratio, Math.max(fitRatio, 0.25));
   camera.animate({ x: cx, y: cy, ratio }, { duration: 400 });
 }
 
@@ -515,7 +515,7 @@ const GraphView = forwardRef<
         // camera returns to "everything visible" instead of staying parked on the
         // prior focus (which made the result look like it had vanished).
         if (r && g) {
-          fitToNodes(r, g, focusFitIds(g, next));
+          fitToNodes(r, g, focusFitIds(g, next), next === null);
         }
         r?.refresh();
         return next;
