@@ -309,3 +309,68 @@ class TestParseTranscript:
         assert result.user_turn_count == 1
         assert result.conversation == "User: Show me the current metrics"
         assert prompts == ["Show me the current metrics"]
+
+
+class TestSafeBoundary:
+    def test_safe_offset_and_payload_stop_at_last_complete_pair(self, tmp_path):
+        """safe_* must exclude a dangling user turn; raw fields still include it."""
+        lines = [
+            {"type": "user",      "message": {"content": "Turn 1 user"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Turn 1 assistant"}]}},
+            {"type": "user",      "message": {"content": "Turn 2 user"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Turn 2 assistant"}]}},
+            {"type": "user",      "message": {"content": "Turn 3 dangling user"}},
+        ]
+        path = _write_jsonl(tmp_path, lines)
+        result = parse_transcript(path)
+
+        assert result.user_turn_count == 3
+        assert "Turn 3" in result.conversation
+
+        assert result.safe_user_turn_count == 2
+        assert "Turn 3" not in result.safe_conversation
+        assert "Turn 2 assistant" in result.safe_conversation
+        assert 0 < result.safe_end_offset < result.end_offset
+
+        tail = parse_transcript(path, start_offset=result.safe_end_offset)
+        assert tail.user_turn_count == 1
+        assert "Turn 3" in tail.conversation
+
+    def test_safe_equals_full_when_last_turn_is_assistant(self, tmp_path):
+        lines = [
+            {"type": "user",      "message": {"content": "U1"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "A1"}]}},
+        ]
+        path = _write_jsonl(tmp_path, lines)
+        result = parse_transcript(path)
+        assert result.safe_end_offset == result.end_offset
+        assert result.safe_user_turn_count == result.user_turn_count
+        assert result.safe_conversation == result.conversation
+
+    def test_user_then_tooluse_then_text_is_one_pair(self, tmp_path):
+        """tool_use followed by a text assistant must form ONE pair, not fragment."""
+        lines = [
+            {"type": "user",      "message": {"content": "Please read the file"}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "read", "input": {}}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Here is the summary"}]}},
+        ]
+        path = _write_jsonl(tmp_path, lines)
+        result = parse_transcript(path)
+        assert result.safe_end_offset == result.end_offset
+        assert "Please read the file" in result.safe_conversation
+        assert "Here is the summary" in result.safe_conversation
+        assert result.safe_user_turn_count == 1
+
+    def test_terminal_toolonly_assistant_does_not_advance_boundary(self, tmp_path):
+        """A trailing tool-only assistant (no text) leaves the pair pending (known limitation)."""
+        lines = [
+            {"type": "user",      "message": {"content": "U1"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "A1"}]}},
+            {"type": "user",      "message": {"content": "U2 asks for a tool"}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "read", "input": {}}]}},
+        ]
+        path = _write_jsonl(tmp_path, lines)
+        result = parse_transcript(path)
+        assert result.safe_user_turn_count == 1
+        assert "U2" not in result.safe_conversation
+        assert result.safe_end_offset < result.end_offset

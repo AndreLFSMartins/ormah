@@ -28,6 +28,9 @@ class TranscriptResult:
     cleaned_chars: int  # After stripping
     session_id: str  # From filename stem (UUID)
     end_offset: int = 0  # Byte position after last line read
+    safe_end_offset: int = 0       # byte position after last text-bearing assistant turn
+    safe_conversation: str = ""    # conversation text up to safe_end_offset only
+    safe_user_turn_count: int = 0  # user turns within the safe boundary
     turns: list[TranscriptTurn] = field(default_factory=list)
     source: str = "agent_jsonl"
 
@@ -176,22 +179,28 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
     user_turn_count = 0
     source = "agent_jsonl"
 
+    _safe_end = start_offset
+    _safe_len = 0  # len(turns) captured at the last safe boundary
+    _safe_users = 0
     with open(path) as f:
         if start_offset > 0:
             f.seek(start_offset)
-        for line in f:
-            line = line.strip()
+        while True:
+            line = f.readline()
             if not line:
+                break
+            stripped = line.strip()
+            if not stripped:
                 continue
 
             try:
-                entry = json.loads(line)
+                entry = json.loads(stripped)
             except (json.JSONDecodeError, ValueError):
                 continue
 
             entry_source = _source_for_entry(entry)
             if source == "agent_jsonl" and entry_source is not None:
-                source = entry_source
+                source = entry_source  # first-wins (preserved from original)
 
             entry_type, content = _coerce_entry(entry)
             if entry_type not in ("user", "assistant"):
@@ -209,10 +218,18 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
                 text = _extract_assistant_text(content)
                 if text:
                     turns.append(TranscriptTurn(role="assistant", text=text))
+                    # Boundary advances only after a text-bearing assistant turn:
+                    # tool-only assistant lines do not complete a pair, so a later text
+                    # assistant for the same turn is not misread as a new slice.
+                    _safe_end = f.tell()
+                    _safe_len = len(turns)
+                    _safe_users = user_turn_count
 
         end_offset = f.tell()
 
     conversation = _conversation_from_turns(turns)
+    safe_turns = turns[:_safe_len]
+    safe_conversation = _conversation_from_turns(safe_turns)
     return TranscriptResult(
         conversation=conversation,
         user_turn_count=user_turn_count,
@@ -220,6 +237,9 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
         cleaned_chars=len(conversation),
         session_id=path.stem,
         end_offset=end_offset,
+        safe_end_offset=_safe_end,
+        safe_conversation=safe_conversation,
+        safe_user_turn_count=_safe_users,
         turns=turns,
         source=source,
     )
