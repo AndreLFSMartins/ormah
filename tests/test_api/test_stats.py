@@ -103,6 +103,19 @@ def test_weekly_window_excludes_old(stats_setup):
     assert data["whispers_used_this_week"] == 1
 
 
+def test_clients_endpoint(stats_setup, monkeypatch):
+    """GET /agent/clients returns the local AI-tool detection for the app list."""
+    client, _ = stats_setup
+    import ormah.setup as setup
+    monkeypatch.setattr(
+        setup, "detect_clients",
+        lambda: {"claude_code": True, "codex": False, "claude_desktop": True},
+    )
+    resp = client.get("/agent/clients")
+    assert resp.status_code == 200
+    assert resp.json() == {"claude_code": True, "codex": False, "claude_desktop": True}
+
+
 def test_custom_window(stats_setup):
     client, engine = stats_setup
     old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()

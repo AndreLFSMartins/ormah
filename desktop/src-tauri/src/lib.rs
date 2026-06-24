@@ -24,21 +24,20 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::setup_agents,
             commands::fetch_stats,
+            commands::detect_agents,
             commands::open_graph_cmd,
+            commands::graph_url,
             commands::mark_onboarded,
             commands::is_onboarded,
         ])
         .setup(|app| {
-            // Start the bundled server the moment the app launches.
+            // Start the bundled server the moment the app launches. The main
+            // window (declared in tauri.conf.json) shows the install/boot flow
+            // and then loads the graph from the local server.
             sidecar::start(app.handle().clone());
 
-            // Build the menubar tray; it owns the stats poller.
+            // Build the tray; it owns the stats poller and a quick "Open graph".
             tray::build(app)?;
-
-            // First run: no onboarding marker yet → show the onboarding window.
-            if !commands::onboarded(app.handle()) {
-                commands::open_onboarding(app.handle())?;
-            }
 
             Ok(())
         })

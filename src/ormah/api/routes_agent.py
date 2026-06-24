@@ -204,6 +204,15 @@ def mark_outdated(node_id: str, request: Request, body: MarkOutdatedBody | None 
     return TextResponse(text=text, node_id=node_id)
 
 
+@router.get("/clients")
+def get_clients():
+    """Which supported AI tools are installed on this machine (for the app's
+    detection list). Pure local detection — no wiring, no side effects."""
+    from ormah.setup import detect_clients
+
+    return detect_clients()
+
+
 @router.get("/stats")
 def get_stats(
     request: Request,

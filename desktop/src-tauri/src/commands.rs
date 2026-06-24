@@ -1,7 +1,7 @@
 //! Tauri commands + small helpers shared by the tray and the onboarding webview.
 
 use serde_json::Value;
-use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_shell::ShellExt;
 
@@ -15,8 +15,20 @@ pub fn base_url() -> String {
 
 // ---- graph -----------------------------------------------------------------
 
+/// The URL the main window navigates to once the server is up — the existing
+/// web UI, served by the local server. No reimplementation.
+#[tauri::command]
+pub fn graph_url() -> String {
+    base_url()
+}
+
+/// Bring the main window forward (the graph lives inside it).
 pub fn open_graph<R: Runtime>(app: &AppHandle<R>) {
-    let _ = app.shell().open(base_url(), None);
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
 }
 
 #[tauri::command]
@@ -29,6 +41,21 @@ pub fn open_graph_cmd<R: Runtime>(app: AppHandle<R>) {
 #[tauri::command]
 pub async fn fetch_stats() -> Result<Stats, String> {
     stats::fetch().await.map_err(|e| e.to_string())
+}
+
+/// Which supported AI tools are installed (for the detection list).
+#[tauri::command]
+pub async fn detect_agents() -> Result<Value, String> {
+    let url = format!("{}/agent/clients", base_url());
+    reqwest::Client::new()
+        .get(url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json::<Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---- agent setup -----------------------------------------------------------
@@ -116,15 +143,5 @@ pub fn mark_onboarded<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         }
         std::fs::write(&p, b"1").map_err(|e| e.to_string())?;
     }
-    Ok(())
-}
-
-pub fn open_onboarding<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    WebviewWindowBuilder::new(app, "onboarding", WebviewUrl::App("index.html".into()))
-        .title("Welcome to Ormah")
-        .inner_size(520.0, 620.0)
-        .resizable(false)
-        .center()
-        .build()?;
     Ok(())
 }

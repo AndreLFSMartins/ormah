@@ -4,28 +4,45 @@
   "version": "0.1.0",
   "identifier": "dev.ormah.desktop",
   "build": {
-    "frontendDist": "../onboarding"
+    "frontendDist": "../shell"
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [],
+    "windows": [
+      {
+        "label": "main",
+        "title": "Ormah",
+        "url": "index.html",
+        "width": 1180,
+        "height": 820,
+        "minWidth": 860,
+        "minHeight": 600,
+        "center": true,
+        "visible": true
+      }
+    ],
     "security": {
       "csp": null
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": ["deb", "appimage", "app", "dmg"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns"
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
-    "externalBin": ["binaries/ormah-server"],
     "category": "Productivity",
-    "shortDescription": "Ambient memory for your AI agents",
-    "longDescription": "Ormah is a local-first persistent memory system for AI agents. The menubar app keeps your ambient whisper counter in view, bundles the server, and wires your agents with one click.",
+    "shortDescription": "Local-first memory for your AI tools",
+    "longDescription": "Ormah is a local-first persistent memory system for AI agents. The app installs and runs everything for you, then puts your memory graph one click away.",
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+      }
+    },
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": null,

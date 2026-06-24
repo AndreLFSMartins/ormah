@@ -3,7 +3,7 @@
 use tauri::{
     menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    App, Manager,
+    App,
 };
 use tauri_plugin_autostart::ManagerExt;
 
@@ -46,7 +46,7 @@ pub fn build(app: &App) -> tauri::Result<()> {
 
     let tray = TrayIconBuilder::with_id("ormah-tray")
         .icon(tauri::include_image!("icons/icon.png"))
-        .icon_as_template(true)
+        .icon_as_template(false)
         .title("…")
         .tooltip("Ormah")
         .menu(&menu)
