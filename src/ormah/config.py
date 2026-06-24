@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     hippocampus_enabled: bool = True
     hippocampus_ignore_patterns: list[str] = []
 
-    # Session watcher (auto-ingest Claude Code transcripts)
+    # Session watcher (auto-ingest agent transcripts; default path is Claude Code)
     session_watcher_enabled: bool = False
     session_watcher_dir: Path = Path("~/.claude/projects")
     session_watcher_debounce_seconds: float = 60.0
@@ -180,6 +180,8 @@ class Settings(BaseSettings):
     affinity_max_boost: float = 0.15
     affinity_implicit_weight: float = 0.8
     whisper_exploration_enabled: bool = True
+    feedback_llm_judge_enabled: bool = False
+    feedback_llm_judge_min_confidence: float = 0.75
 
     # Space prioritization
     space_boost_global: float = 1.0
@@ -352,7 +354,12 @@ class Settings(BaseSettings):
             raise ValueError(f"rrf_min_spread_ratio must be 0–1, got {v}")
         return v
 
-    @field_validator("similarity_threshold", "auto_link_similarity_threshold", "auto_merge_threshold")
+    @field_validator(
+        "similarity_threshold",
+        "auto_link_similarity_threshold",
+        "auto_merge_threshold",
+        "feedback_llm_judge_min_confidence",
+    )
     @classmethod
     def _threshold_range(cls, v: float) -> float:
         if not 0 <= v <= 1:
