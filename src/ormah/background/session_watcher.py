@@ -694,6 +694,8 @@ def _ingest_session(
     state: dict,
     watch_dir: Path,
     min_turns: int,
+    idle_threshold: float = 30.0,
+    on_defer_active=None,
 ) -> bool:
     """Ingest a single JSONL session transcript if changed. Returns True if ingested."""
     rel = str(path.relative_to(watch_dir))
@@ -724,8 +726,20 @@ def _ingest_session(
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return False
 
-    if result.user_turn_count < min_turns:
-        return False  # too few NEW turns; offset unchanged so they're reconsidered later
+    # Bug 1: no complete new user+assistant pair — cursor stays put.
+    if result.safe_end_offset == prev_offset:
+        return False
+
+    # Bug 2: short tail — defer unless the session looks idle/finished.
+    if result.safe_user_turn_count < min_turns:
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            age = idle_threshold + 1  # treat unstatable file as idle
+        if age <= idle_threshold:
+            if on_defer_active is not None:
+                on_defer_active()  # schedule a retry so the tail is not lost
+            return False
 
     result.session_id = _resolve_transcript_session_id(
         engine,
@@ -738,7 +752,7 @@ def _ingest_session(
 
     try:
         ingested = engine.ingest_conversation(
-            content=result.conversation,
+            content=result.safe_conversation,
             space=space,
             agent_id=result.source,
             extra_tags=["session-transcript"],
@@ -758,12 +772,12 @@ def _ingest_session(
 
     state[rel] = {
         "hash": h,
-        "end_offset": result.end_offset,
+        "end_offset": result.safe_end_offset,
         "last_ingested": datetime.now(timezone.utc).isoformat(),
         "session_id": result.session_id,
         "source": result.source,
         "space": space,
-        "user_turns": prev_turns + result.user_turn_count,
+        "user_turns": prev_turns + result.safe_user_turn_count,
         "node_ids": prev_node_ids + new_node_ids,
         "signals_recorded": signals_recorded,
     }
@@ -830,13 +844,16 @@ class SessionHandler(FileSystemEventHandler):
         watch_dir: Path,
         debounce_seconds: float,
         min_turns: int,
+        idle_threshold: float = 30.0,
     ) -> None:
         self.engine = engine
         self.watch_dir = watch_dir
         self.debounce_seconds = debounce_seconds
         self.min_turns = min_turns
+        self.idle_threshold = idle_threshold
         self._state = _load_state(watch_dir)
         self._timers: dict[str, Timer] = {}
+        self._ingesting: set[str] = set()
         self._lock = Lock()
 
     def _schedule_ingest(self, path: Path) -> None:
@@ -854,11 +871,34 @@ class SessionHandler(FileSystemEventHandler):
             self._timers[key] = timer
             timer.start()
 
-    def _do_ingest(self, path: Path) -> None:
-        """Actually ingest the session (called after debounce)."""
+    def _schedule_retry(self, path: Path) -> None:
+        """Re-attempt ingestion after idle_threshold so an active short tail is not lost."""
+        key = str(path)
         with self._lock:
-            self._timers.pop(str(path), None)
-        _ingest_session(self.engine, path, self._state, self.watch_dir, self.min_turns)
+            if key in self._timers:
+                self._timers[key].cancel()
+            timer = Timer(self.idle_threshold, self._do_ingest, args=(path,))
+            timer.daemon = True
+            self._timers[key] = timer
+            timer.start()
+
+    def _do_ingest(self, path: Path) -> None:
+        """Actually ingest the session (called after debounce or retry)."""
+        key = str(path)
+        with self._lock:
+            self._timers.pop(key, None)
+            if key in self._ingesting:
+                return  # an ingest for this path is already running; skip
+            self._ingesting.add(key)
+        try:
+            _ingest_session(
+                self.engine, path, self._state, self.watch_dir, self.min_turns,
+                idle_threshold=self.idle_threshold,
+                on_defer_active=lambda: self._schedule_retry(path),
+            )
+        finally:
+            with self._lock:
+                self._ingesting.discard(key)
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".jsonl"):
@@ -896,6 +936,7 @@ def start_session_watcher(engine: MemoryEngine) -> list[Observer]:
         # Start real-time watcher
         handler = SessionHandler(
             engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
+            s.session_watcher_idle_threshold,
         )
         observer = Observer()
         observer.schedule(handler, str(watch_dir), recursive=True)

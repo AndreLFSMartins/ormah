@@ -885,3 +885,244 @@ def test_shrink_resets_cursor(engine, tmp_path):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
 
     assert "User message 0 " in captured[1]
+
+
+# --- New tests: safe-payload ingest, idle flush + retry, in-flight guard ---
+
+import os  # noqa: E402
+
+
+def _append_pair(path, i):
+    with path.open("a") as f:
+        f.write(json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": f"User message {i} with enough text to parse"},
+        }) + "\n")
+        f.write(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": f"Assistant response {i} with some detail"},
+            ]},
+        }) + "\n")
+
+
+def _append_user(path, i):
+    with path.open("a") as f:
+        f.write(json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": f"User message {i} with enough text to parse"},
+        }) + "\n")
+
+
+def _append_assistant(path, i):
+    with path.open("a") as f:
+        f.write(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": f"Assistant response {i} with some detail"},
+            ]},
+        }) + "\n")
+
+
+def test_mid_turn_race(engine, tmp_path):
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    rel = str(jsonl.relative_to(watch_dir))
+
+    _make_jsonl(jsonl, user_turns=5)
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+    cursor1 = state[rel]["end_offset"]
+
+    _append_user(jsonl, 5)
+    calls = 0
+    real_ingest = engine.ingest_conversation
+
+    def counting(content, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_ingest(content=content, **kwargs)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=counting):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is False
+    assert calls == 0
+    assert state[rel]["end_offset"] == cursor1
+
+    _append_assistant(jsonl, 5)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=counting):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+    assert calls == 1
+    assert state[rel]["end_offset"] > cursor1
+
+
+def test_idle_tail_with_dangling_user_no_duplicate(engine, tmp_path):
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+
+    _make_jsonl(jsonl, user_turns=6)
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    _append_pair(jsonl, 6)
+    _append_pair(jsonl, 7)
+    _append_user(jsonl, 8)
+    now = time.time()
+    os.utime(jsonl, (now, now - 120))
+
+    captured = []
+    real_ingest = engine.ingest_conversation
+
+    def capture(content, **kwargs):
+        captured.append(content)
+        return real_ingest(content=content, **kwargs)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=capture):
+        assert _ingest_session(
+            engine, jsonl, state, watch_dir, min_turns=5, idle_threshold=30
+        ) is True
+        assert "User message 8 " not in captured[-1]
+
+        _append_assistant(jsonl, 8)
+        now2 = time.time()
+        os.utime(jsonl, (now2, now2 - 120))
+        assert _ingest_session(
+            engine, jsonl, state, watch_dir, min_turns=1, idle_threshold=30
+        ) is True
+
+    joined = "\n".join(captured)
+    assert joined.count("User message 8 ") == 1
+
+
+def test_session_tail_idle_ingested(engine, tmp_path):
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+
+    _make_jsonl(jsonl, user_turns=6)
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    _append_pair(jsonl, 6)
+    _append_pair(jsonl, 7)
+    now = time.time()
+    os.utime(jsonl, (now, now - 120))
+
+    calls = 0
+    real_ingest = engine.ingest_conversation
+
+    def counting(content, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_ingest(content=content, **kwargs)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=counting):
+        assert _ingest_session(
+            engine, jsonl, state, watch_dir, min_turns=5, idle_threshold=30
+        ) is True
+    assert calls == 1
+
+
+def test_retry_fires_and_ingests_after_idle(engine, tmp_path):
+    from ormah.background import session_watcher as sw
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+
+    _make_jsonl(jsonl, user_turns=6)
+
+    captured_timers = []
+
+    class FakeTimer:
+        def __init__(self, delay, fn, args=()):
+            self.delay = delay
+            self.fn = fn
+            self.args = args
+            self.daemon = False
+        def start(self):
+            captured_timers.append(self)
+        def cancel(self):
+            pass
+
+    calls = 0
+    real_ingest = engine.ingest_conversation
+
+    def counting(content, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_ingest(content=content, **kwargs)
+
+    # Seed state outside counting context so the initial 6-pair ingest is not counted.
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(sw, "Timer", FakeTimer):
+        handler = sw.SessionHandler(
+            engine, watch_dir, debounce_seconds=60, min_turns=5, idle_threshold=30,
+        )
+        sw._ingest_session(engine, jsonl, handler._state, watch_dir, min_turns=5)
+
+    _append_pair(jsonl, 6)
+    _append_pair(jsonl, 7)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=counting), \
+         patch.object(sw, "Timer", FakeTimer):
+        handler._do_ingest(jsonl)
+        assert calls == 0
+        assert len(captured_timers) == 1
+        assert captured_timers[0].delay == 30
+
+        now = time.time()
+        os.utime(jsonl, (now, now - 120))
+        timer = captured_timers[0]
+        timer.fn(*timer.args)
+
+    assert calls == 1
+
+
+def test_concurrent_ingest_skipped(engine, tmp_path):
+    import threading
+    from ormah.background import session_watcher as sw
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def blocking_ingest(content, **kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        release.wait(timeout=5)
+        return []
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=blocking_ingest):
+        handler = sw.SessionHandler(
+            engine, watch_dir, debounce_seconds=60, min_turns=5, idle_threshold=30,
+        )
+        t1 = threading.Thread(target=handler._do_ingest, args=(jsonl,))
+        t1.start()
+        assert started.wait(timeout=5)
+        handler._do_ingest(jsonl)
+        release.set()
+        t1.join(timeout=5)
+
+    assert calls == 1
