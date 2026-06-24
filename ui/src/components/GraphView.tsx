@@ -484,11 +484,9 @@ const GraphView = forwardRef<
         const next = prev && prev.kind === kind && prev.val === val ? null : { kind, val };
         viewStateRef.current.focusKind = next;
         const r = sigmaRef.current, g = graphRef.current;
-        // Fit on focus AND on clear: clearing re-fits the whole graph, so the
-        // camera returns to "everything visible" instead of staying parked on the
-        // prior focus (which made the result look like it had vanished).
+        // Fit on focus AND on clear: focusFitIds returns the whole graph when next === null.
         if (r && g) {
-          fitToNodes(r, g, focusFitIds(g, next), next === null);
+          fitToNodes(r, g, focusFitIds(g, next));
         }
         r?.refresh();
         return next;
