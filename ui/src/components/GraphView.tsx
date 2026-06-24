@@ -140,17 +140,19 @@ const ZOOM_RANGE_STYLE: CSSProperties = {
   cursor: "pointer",
 };
 
-// ─── LegendRow component (unchanged) ─────────────────────────────────────────
+// ─── LegendRow component ─────────────────────────────────────────────────────
 // One clickable legend row: swatch + content as children, dimmed when another
-// row is active (focus system A1).
+// row is active (focus system A1). Forwards data-testid to the root element.
 function LegendRow({
   active,
   onClick,
   children,
+  "data-testid": dataTestId,
 }: {
   active: boolean;
   onClick: () => void;
   children: ReactNode;
+  "data-testid"?: string;
 }) {
   return (
     <div
@@ -160,6 +162,7 @@ function LegendRow({
         transition: "opacity 0.15s",
       }}
       onClick={onClick}
+      data-testid={dataTestId}
     >
       {children}
     </div>
@@ -725,6 +728,7 @@ const GraphView = forwardRef<
                         return (
                           <LegendRow
                             key={sp.name}
+                            data-testid={`legend-space-${sp.name}`}
                             active={!legendFocus || (legendFocus.kind === "space" && legendFocus.val === val)}
                             onClick={() => focusLegend("space", val)}
                           >
