@@ -1,0 +1,49 @@
+{
+  "name": "ormah-pi",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Ormah local memory layer integration for the Pi coding agent — whisper recall, memory tools, transcript capture, self-maintenance.",
+  "main": "ormah-pi.ts",
+  "files": [
+    "ormah-pi.ts",
+    "src",
+    "agents"
+  ],
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "ormah",
+    "memory",
+    "agent"
+  ],
+  "license": "MIT",
+  "author": "r-spade",
+  "homepage": "https://ormah.me",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/r-spade/ormah.git",
+    "directory": "integrations/pi-plugin"
+  },
+  "bugs": {
+    "url": "https://github.com/r-spade/ormah/issues"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": { "optional": false },
+    "@earendil-works/pi-coding-agent": { "optional": false },
+    "typebox": { "optional": false }
+  },
+  "pi": {
+    "extensions": [
+      "./ormah-pi.ts"
+    ]
+  }
+}

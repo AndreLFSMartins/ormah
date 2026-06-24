@@ -34,6 +34,8 @@ CLAUDE_MD_SENTINEL_START = "<!-- ormah:start -->"
 CLAUDE_MD_SENTINEL_END = "<!-- ormah:end -->"
 CODEX_AGENTS_SENTINEL_START = "<!-- ormah:start -->"
 CODEX_AGENTS_SENTINEL_END = "<!-- ormah:end -->"
+PI_AGENTS_MD_SENTINEL_START = "<!-- ormah:start -->"
+PI_AGENTS_MD_SENTINEL_END = "<!-- ormah:end -->"
 
 # Provider definitions: (display name, provider, env var for API key, default model)
 LLM_PROVIDERS = [
@@ -610,6 +612,66 @@ def install_claude_commands() -> None:
     ok("Slash command installed — /ormah-maintenance available")
 
 
+def _pi_agents_md_target() -> Path:
+    """Return the global Pi instructions file (~/.pi/agent/AGENTS.md)."""
+    return Path.home() / ".pi" / "agent" / "AGENTS.md"
+
+
+def install_pi_md(scope: str = "user", cwd: Path | None = None) -> None:
+    """Install ormah instructions into Pi's AGENTS.md (global or project)."""
+    if scope == "project":
+        base = cwd or Path.cwd()
+        target, label = base / "AGENTS.md", "./AGENTS.md"
+    else:  # user — Pi's global instructions file
+        target, label = _pi_agents_md_target(), "~/.pi/agent/AGENTS.md"
+    _install_markdown_block(
+        target,
+        "pi_instructions.md",
+        PI_AGENTS_MD_SENTINEL_START,
+        PI_AGENTS_MD_SENTINEL_END,
+    )
+    ok(f"Instructions added to {label}")
+
+
+def install_pi_agents() -> None:
+    """Install the Ormah maintenance subagent prompt into ~/.pi/agent/agents/."""
+    target = Path.home() / ".pi" / "agent" / "agents"
+    target.mkdir(parents=True, exist_ok=True)
+    content = resources.files("ormah").joinpath("agents/ormah-pi-maintenance.md").read_text()
+    (target / "ormah-maintenance.md").write_text(content)
+    ok("Agent definition installed — ormah-maintenance subagent available in Pi")
+
+
+def configure_pi_extension(ormah_bin: str) -> None:
+    """Wire Pi into Ormah.
+
+    Pi has no external hooks.json or MCP config to write — the ormah-pi extension
+    registers its own before_agent_start whisper hook and HTTP-proxied memory tools,
+    so "wiring Pi" means ensuring the extension is installed/enabled. The extension
+    is distributed as a pi-package (npm/git), mirroring how the Claude plugin is
+    marketplace-distributed rather than copied by setup.
+    """
+    pi_dir = Path.home() / ".pi" / "agent"
+    ext_dir = pi_dir / "extensions" / "ormah-pi"
+    installed = ext_dir.exists()
+    if not installed:
+        settings_path = pi_dir / "settings.json"
+        if settings_path.exists():
+            try:
+                data = json.loads(settings_path.read_text())
+                candidates = list(data.get("packages", [])) + list(data.get("extensions", []))
+                installed = any("ormah-pi" in str(c) for c in candidates)
+            except (json.JSONDecodeError, ValueError):
+                pass
+    if installed:
+        ok("ormah-pi extension detected — whisper + memory tools active after /reload")
+    else:
+        info("ormah-pi extension not detected. Install it as a pi-package:")
+        print('    Add to ~/.pi/agent/settings.json "packages": "npm:ormah-pi"')
+        print('    or "git:github.com/<owner>/ormah@main", then run /reload in Pi.')
+        info("For a source checkout: pi -e ./integrations/pi-plugin/ormah-pi.ts")
+
+
 def _remove_claude_agents() -> None:
     """Remove ormah agent definitions from ~/.claude/agents/."""
     agent_file = Path.home() / ".claude" / "agents" / "ormah-maintenance.md"
@@ -1129,19 +1191,21 @@ def backfill_transcripts() -> None:
     ok(f"Backfill complete: {total_memories} memories from {len(selected)} transcripts")
 
 
-def configure_agent_maintenance(has_claude_code: bool, has_codex: bool) -> bool:
+def configure_agent_maintenance(has_claude_code: bool, has_codex: bool, has_pi: bool = False) -> bool:
     """Ask whether to enable automatic agent-backed maintenance.
 
     Returns True if maintenance was enabled, False if skipped.
     """
-    if has_claude_code and has_codex:
-        agent_label = "Claude Code or Codex"
-    elif has_claude_code:
-        agent_label = "Claude Code"
-    elif has_codex:
-        agent_label = "Codex"
-    else:
+    agents = []
+    if has_claude_code:
+        agents.append("Claude Code")
+    if has_codex:
+        agents.append("Codex")
+    if has_pi:
+        agents.append("Pi")
+    if not agents:
         return False
+    agent_label = " or ".join(agents)
 
     print(f"\n  Use {agent_label} for automatic memory maintenance?")
     print("  (Runs judgment-heavy graph maintenance in the background when due,")
@@ -1153,6 +1217,8 @@ def configure_agent_maintenance(has_claude_code: bool, has_codex: bool) -> bool:
     if answer not in ("n", "no"):
         env = _read_env_file()
         env["ORMAH_CLAUDE_MAINTENANCE_ENABLED"] = "true"
+        if has_pi:
+            env["ORMAH_PI_MAINTENANCE_ENABLED"] = "true"
         _write_env_file(env)
         if has_codex:
             _enable_codex_feature("multi_agent")
@@ -1349,6 +1415,23 @@ def _remove_codex_md_block() -> None:
         ok(f"Removed ormah block from {target}")
 
 
+def _remove_pi_md_block() -> None:
+    """Remove the ormah instructions block from ~/.pi/agent/AGENTS.md."""
+    target = _pi_agents_md_target()
+    if _remove_markdown_block(
+        target, PI_AGENTS_MD_SENTINEL_START, PI_AGENTS_MD_SENTINEL_END, "~/.pi/agent/AGENTS.md"
+    ):
+        ok("Removed ormah block from ~/.pi/agent/AGENTS.md")
+
+
+def _remove_pi_agents() -> None:
+    """Remove the Ormah maintenance subagent from ~/.pi/agent/agents/."""
+    agent_file = Path.home() / ".pi" / "agent" / "agents" / "ormah-maintenance.md"
+    if agent_file.exists():
+        agent_file.unlink()
+        ok("Removed ormah-maintenance Pi agent definition")
+
+
 def _get_running_server_data_dir() -> Path | None:
     """Return the data directory of the running ormah server by inspecting its open files.
 
@@ -1523,6 +1606,8 @@ def run_uninstall(yes: bool = False) -> None:
     _remove_codex_agents()
     _remove_claude_agents()
     _remove_claude_commands()
+    _remove_pi_md_block()
+    _remove_pi_agents()
 
     # e. Delete data directories
     step("Deleting data directories")
@@ -1598,15 +1683,18 @@ def run_setup(
     # 2. Detect supported coding agents and offer maintenance upfront — no API key needed
     has_claude_code = shutil.which("claude") is not None
     has_codex = shutil.which("codex") is not None or (Path.home() / ".codex").exists()
+    has_pi = shutil.which("pi") is not None or (Path.home() / ".pi").exists()
     agent_maintenance = False
-    if (has_claude_code or has_codex) and not ci and not update and not skip_client_setup:
-        if has_claude_code and has_codex:
-            step("Claude Code and Codex detected")
-        elif has_claude_code:
-            step("Claude Code detected")
-        else:
-            step("Codex detected")
-        agent_maintenance = configure_agent_maintenance(has_claude_code, has_codex)
+    if (has_claude_code or has_codex or has_pi) and not ci and not update and not skip_client_setup:
+        detected = []
+        if has_claude_code:
+            detected.append("Claude Code")
+        if has_codex:
+            detected.append("Codex")
+        if has_pi:
+            detected.append("Pi")
+        step(f"{' and '.join(detected)} detected")
+        agent_maintenance = configure_agent_maintenance(has_claude_code, has_codex, has_pi)
 
     # 3. Configure LLM — skip if agent-backed maintenance is handling background jobs
     if ci:
@@ -1680,13 +1768,19 @@ def run_setup(
             install_codex_md()
             install_codex_agents()
 
+        if has_pi:
+            step("Hooking up Pi")
+            configure_pi_extension(ormah_bin)
+            install_pi_md()
+            install_pi_agents()
+
         desktop_configured = configure_claude_desktop(ormah_bin)
 
-        if not has_claude_code and not has_codex and not desktop_configured:
-            warn("No Claude Code, Claude Desktop, or Codex detected")
+        if not has_claude_code and not has_codex and not has_pi and not desktop_configured:
+            warn("No Claude Code, Claude Desktop, Codex, or Pi detected")
             info("You can manually configure MCP in your AI client:")
             print(f"    Command: {ormah_bin} mcp")
-            info("Or run 'ormah setup' again after installing Claude Code, Claude Desktop, or Codex")
+            info("Or run 'ormah setup' again after installing Claude Code, Claude Desktop, Codex, or Pi")
 
     # 7. Cold start backfill (needs server + LLM)
     if server_ok and not ci:
