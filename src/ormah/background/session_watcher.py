@@ -785,7 +785,7 @@ def _ingest_session(
 
     logger.info(
         "Session watcher ingested %s (%d new turns, %d memories extracted, %d signals recorded)",
-        rel, result.user_turn_count, count, signals_recorded,
+        rel, result.safe_user_turn_count, count, signals_recorded,
     )
     return True
 
