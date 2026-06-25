@@ -391,8 +391,16 @@ def _insert_affinity(
 def _record_whisper_usage_signals(
     engine: MemoryEngine,
     transcript: TranscriptResult,
+    turns: list | None = None,
 ) -> int:
-    """Mine transcript responses for clear usage of injected whisper memories."""
+    """Mine transcript responses for clear usage of injected whisper memories.
+
+    *turns* restricts mining to a subset of ``transcript.turns`` (e.g. only the
+    closed/safe blocks of an active session, so a still-growing assistant response
+    is not judged from a partial body). Defaults to all turns.
+    """
+    if turns is None:
+        turns = transcript.turns
     llm_judge_enabled = _feedback_llm_judge_enabled(engine)
     rows = engine.db.conn.execute(
         """
@@ -432,7 +440,7 @@ def _record_whisper_usage_signals(
         prompt_text = row["prompt_text"] or ""
         if prompt_text not in response_cache:
             response_cache[prompt_text] = _assistant_response_after_prompt(
-                transcript.turns,
+                turns,
                 prompt_text,
             )
         response = response_cache[prompt_text]
@@ -694,6 +702,8 @@ def _ingest_session(
     state: dict,
     watch_dir: Path,
     min_turns: int,
+    idle_threshold: float = 30.0,
+    on_defer_active=None,
 ) -> bool:
     """Ingest a single JSONL session transcript if changed. Returns True if ingested."""
     rel = str(path.relative_to(watch_dir))
@@ -703,18 +713,67 @@ def _ingest_session(
     except OSError as e:
         logger.warning("Cannot read %s: %s", path, e)
         return False
-
-    existing = state.get(rel)
-    if existing and existing.get("hash") == h:
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        logger.warning("Cannot stat %s: %s", path, e)
         return False
 
+    # Incremental: only parse the turns appended since the last ingest.
+    existing = state.get(rel)
+    prev_offset = existing.get("end_offset", 0) if existing else 0
+    # Skip an unchanged file only if the previous ingest already consumed it whole. A stored
+    # offset behind EOF means a pending tail or a legacy mid-response cursor still to process,
+    # which must be re-parsed (so recovery can run) even when the hash is unchanged.
+    if existing and existing.get("hash") == h and prev_offset >= size:
+        return False
+    if prev_offset > size:
+        prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
+
     try:
-        result = parse_transcript(path)
+        result = parse_transcript(path, start_offset=prev_offset)
+        if result.leading_orphan:
+            # A cursor left mid-response by an older version: re-parse the whole file so
+            # the dropped tail is recovered and re-paired with its prompt. A one-time
+            # re-ingest of this file; the background dedup jobs reconcile any overlap.
+            logger.info("Session watcher recovering legacy mid-response cursor for %s", rel)
+            prev_offset = 0
+            result = parse_transcript(path, start_offset=0)
     except Exception as e:
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return False
 
-    if result.user_turn_count < min_turns:
+    # Commit only the "safe" payload — the closed boundary, content proven complete by a
+    # terminal stop_reason (Claude Code), a Codex task_complete event, or a following user
+    # turn. This never splits a multi-record response from its prompt. A trailing block
+    # with no completion signal yet is genuinely in-flight and is held back; once it
+    # completes the file changes and the next parse picks it up. (A response left forever
+    # in-flight — a process killed mid-turn — is intentionally never ingested.)
+    payload_offset = result.safe_end_offset
+    payload_conversation = result.safe_conversation
+    payload_users = result.safe_user_turn_count
+    payload_turns = result.safe_turns
+
+    # When the file looks idle/finished, commit whatever is closed even below min_turns,
+    # so a short finished session is not stranded.
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        age = idle_threshold + 1  # treat unstatable file as idle
+    is_idle = age > idle_threshold
+
+    # Nothing new to commit at the closed boundary.
+    if payload_offset <= prev_offset:
+        # Active session with appended-but-unclosed content (a still-streaming response):
+        # schedule a retry so the turn is committed once it completes.
+        if not is_idle and result.end_offset > prev_offset and on_defer_active is not None:
+            on_defer_active()
+        return False
+
+    # Short tail on an active session — defer until more turns close or the session idles.
+    if not is_idle and payload_users < min_turns:
+        if on_defer_active is not None:
+            on_defer_active()  # schedule a retry so the tail is not lost
         return False
 
     result.session_id = _resolve_transcript_session_id(
@@ -724,11 +783,11 @@ def _ingest_session(
         result.source,
     )
     space = _space_for_transcript(engine, path, result)
-    signals_recorded = _record_whisper_usage_signals(engine, result)
+    signals_recorded = _record_whisper_usage_signals(engine, result, turns=payload_turns)
 
     try:
         ingested = engine.ingest_conversation(
-            content=result.conversation,
+            content=payload_conversation,
             space=space,
             agent_id=result.source,
             extra_tags=["session-transcript"],
@@ -742,23 +801,28 @@ def _ingest_session(
         return False
 
     new_node_ids = [m["node_id"] for m in ingested] if isinstance(ingested, list) else []
-    prev_node_ids = existing.get("node_ids", []) if existing else []
+    # prev_offset == 0 means a fresh/whole re-ingest; don't carry stale cumulative
+    # turns or node_ids forward (the new ingest re-covers them).
+    carry = existing and prev_offset > 0
+    prev_node_ids = existing.get("node_ids", []) if carry else []
+    prev_turns = existing.get("user_turns", 0) if carry else 0
 
     state[rel] = {
         "hash": h,
+        "end_offset": payload_offset,
         "last_ingested": datetime.now(timezone.utc).isoformat(),
         "session_id": result.session_id,
         "source": result.source,
         "space": space,
-        "user_turns": result.user_turn_count,
+        "user_turns": prev_turns + payload_users,
         "node_ids": prev_node_ids + new_node_ids,
         "signals_recorded": signals_recorded,
     }
     _save_state(watch_dir, state)
 
     logger.info(
-        "Session watcher ingested %s (%d turns, %d memories extracted, %d signals recorded)",
-        rel, result.user_turn_count, count, signals_recorded,
+        "Session watcher ingested %s (%d new turns, %d memories extracted, %d signals recorded)",
+        rel, payload_users, count, signals_recorded,
     )
     return True
 
@@ -817,13 +881,17 @@ class SessionHandler(FileSystemEventHandler):
         watch_dir: Path,
         debounce_seconds: float,
         min_turns: int,
+        idle_threshold: float = 30.0,
     ) -> None:
         self.engine = engine
         self.watch_dir = watch_dir
         self.debounce_seconds = debounce_seconds
         self.min_turns = min_turns
+        self.idle_threshold = idle_threshold
         self._state = _load_state(watch_dir)
         self._timers: dict[str, Timer] = {}
+        self._ingesting: set[str] = set()
+        self._pending: set[str] = set()
         self._lock = Lock()
 
     def _schedule_ingest(self, path: Path) -> None:
@@ -841,11 +909,42 @@ class SessionHandler(FileSystemEventHandler):
             self._timers[key] = timer
             timer.start()
 
-    def _do_ingest(self, path: Path) -> None:
-        """Actually ingest the session (called after debounce)."""
+    def _schedule_retry(self, path: Path) -> None:
+        """Re-attempt ingestion after idle_threshold so an active short tail is not lost."""
+        key = str(path)
         with self._lock:
-            self._timers.pop(str(path), None)
-        _ingest_session(self.engine, path, self._state, self.watch_dir, self.min_turns)
+            if key in self._timers:
+                self._timers[key].cancel()
+            timer = Timer(self.idle_threshold, self._do_ingest, args=(path,))
+            timer.daemon = True
+            self._timers[key] = timer
+            timer.start()
+
+    def _do_ingest(self, path: Path) -> None:
+        """Actually ingest the session (called after debounce or retry)."""
+        key = str(path)
+        with self._lock:
+            self._timers.pop(key, None)
+            if key in self._ingesting:
+                # An ingest for this path is already running and has already parsed
+                # its slice; mark the path so the new content is re-ingested once it
+                # finishes, instead of dropping this event.
+                self._pending.add(key)
+                return
+            self._ingesting.add(key)
+        try:
+            _ingest_session(
+                self.engine, path, self._state, self.watch_dir, self.min_turns,
+                idle_threshold=self.idle_threshold,
+                on_defer_active=lambda: self._schedule_retry(path),
+            )
+        finally:
+            with self._lock:
+                self._ingesting.discard(key)
+                rerun = key in self._pending
+                self._pending.discard(key)
+        if rerun:
+            self._schedule_ingest(path)  # re-process content that arrived mid-ingest
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".jsonl"):
@@ -883,6 +982,7 @@ def start_session_watcher(engine: MemoryEngine) -> list[Observer]:
         # Start real-time watcher
         handler = SessionHandler(
             engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
+            s.session_watcher_idle_threshold,
         )
         observer = Observer()
         observer.schedule(handler, str(watch_dir), recursive=True)
