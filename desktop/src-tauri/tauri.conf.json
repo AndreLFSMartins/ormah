@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ormah",
+  "version": "0.1.0",
+  "identifier": "dev.ormah.desktop",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "beforeBuildCommand": "npm --prefix ../ui run build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage", "app", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Local-first memory for your AI tools",
+    "longDescription": "Ormah is a local-first persistent memory system for AI agents. The app installs and runs everything for you, then puts your memory graph one click away.",
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": null,
+      "entitlements": "entitlements.plist",
+      "exceptionDomain": "127.0.0.1"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://ormah.dev/appcast/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": "REPLACE_WITH_TAURI_SIGNING_PUBLIC_KEY"
+    }
+  }
+}

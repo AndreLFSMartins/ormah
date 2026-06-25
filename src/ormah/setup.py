@@ -1577,6 +1577,82 @@ def run_uninstall(yes: bool = False) -> None:
     ok("Ormah has been uninstalled")
 
 
+def detect_clients() -> dict[str, bool]:
+    """Detect which supported agent clients are installed on this machine.
+
+    Pure detection, no side effects — safe for the Mac app to call before
+    showing the one-click "Set up agent" button.
+    """
+    import platform as _platform
+
+    desktop = False
+    if _platform.system() == "Darwin":
+        desktop = os.path.exists(
+            os.path.expanduser("~/Library/Application Support/Claude")
+        )
+    return {
+        "claude_code": shutil.which("claude") is not None,
+        "codex": shutil.which("codex") is not None or (Path.home() / ".codex").exists(),
+        "claude_desktop": desktop,
+    }
+
+
+def run_setup_json() -> dict:
+    """Non-interactive agent wiring for the Mac app's one-click setup button.
+
+    Wires hooks/MCP/guidance for every detected client and returns a structured
+    result the app can render. Deliberately narrow vs. run_setup(): no LLM
+    prompts, no server start (the app owns the bundled server sidecar), no
+    browser launch, no animations.
+
+    Human-readable progress from the underlying configure_* helpers is sent to
+    stderr so stdout stays clean JSON for the caller to parse.
+    """
+    import contextlib
+    import sys
+
+    ormah_bin = get_ormah_bin_path()
+    detected = detect_clients()
+    wired: list[str] = []
+    errors: dict[str, str] = {}
+
+    def _wire(name: str, *steps) -> None:
+        try:
+            for fn in steps:
+                fn()
+            wired.append(name)
+        except Exception as exc:  # noqa: BLE001 — report, don't crash the app
+            errors[name] = f"{type(exc).__name__}: {exc}"
+
+    with contextlib.redirect_stdout(sys.stderr):
+        if detected["claude_code"]:
+            _wire(
+                "claude_code",
+                lambda: configure_claude_hooks(ormah_bin),
+                lambda: configure_claude_code_mcp(ormah_bin),
+                install_claude_md,
+                install_claude_agents,
+                install_claude_commands,
+            )
+        if detected["codex"]:
+            _wire(
+                "codex",
+                lambda: configure_codex_hooks(ormah_bin),
+                lambda: configure_codex_mcp(ormah_bin),
+                install_codex_md,
+                install_codex_agents,
+            )
+        if detected["claude_desktop"]:
+            _wire("claude_desktop", lambda: configure_claude_desktop(ormah_bin))
+
+    return {
+        "ormah_bin": ormah_bin,
+        "detected": [k for k, v in detected.items() if v],
+        "wired": wired,
+        "errors": errors,
+    }
+
+
 def run_setup(
     ci: bool = False,
     update: bool = False,

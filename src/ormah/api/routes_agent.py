@@ -204,6 +204,25 @@ def mark_outdated(node_id: str, request: Request, body: MarkOutdatedBody | None 
     return TextResponse(text=text, node_id=node_id)
 
 
+@router.get("/clients")
+def get_clients():
+    """Which supported AI tools are installed on this machine (for the app's
+    detection list). Pure local detection — no wiring, no side effects."""
+    from ormah.setup import detect_clients
+
+    return detect_clients()
+
+
+@router.get("/stats")
+def get_stats(
+    request: Request,
+    days: int = Query(7, ge=1, le=365, description="Rolling window in days for the *_this_week counts"),
+):
+    """Ambient usage counts for the menubar/CLI surface (F09 counter)."""
+    engine = request.app.state.engine
+    return engine.get_stats(days=days)
+
+
 @router.get("/insights")
 def get_insights(request: Request):
     """Get belief evolutions and conflicting ideas detected by the system."""

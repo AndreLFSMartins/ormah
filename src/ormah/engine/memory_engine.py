@@ -2145,6 +2145,53 @@ class MemoryEngine:
 
         return f"Feedback recorded for node {resolved_node_id[:8]}..."
 
+    def get_stats(self, days: int = 7) -> dict[str, Any]:
+        """Return ambient usage counts for the menubar/CLI surface (F09/F10).
+
+        A "whisper used" is a single whisper call that actually injected at
+        least one memory. ``whisper_log`` writes one row per candidate sharing
+        the same ``logged_at`` per call, so distinct used calls are counted by
+        the ``(session_id, prompt_hash, logged_at)`` triple where
+        ``was_injected = 1``. Memory counts come straight from ``nodes``.
+
+        ISO-8601 UTC timestamps compare correctly lexicographically, so the
+        rolling window is a simple string ``>=`` against a Python-computed
+        cutoff — no SQLite date math, no timezone surprises.
+        """
+        from datetime import timedelta
+
+        conn = self.db.conn
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        used_key = "session_id || '|' || prompt_hash || '|' || logged_at"
+        whispers_total = conn.execute(
+            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log WHERE was_injected = 1"
+        ).fetchone()[0]
+        whispers_week = conn.execute(
+            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log "
+            "WHERE was_injected = 1 AND logged_at >= ?",
+            (cutoff,),
+        ).fetchone()[0]
+
+        # Exclude system-seeded bootstrap nodes (e.g. the "Self" node) so a
+        # fresh install honestly reads zero memories.
+        not_system = "source NOT LIKE 'system:%'"
+        memories_total = conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {not_system}"
+        ).fetchone()[0]
+        memories_week = conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {not_system} AND created >= ?", (cutoff,)
+        ).fetchone()[0]
+
+        return {
+            "whispers_used_this_week": whispers_week,
+            "whispers_used_total": whispers_total,
+            "memories_this_week": memories_week,
+            "memories_total": memories_total,
+            "window_days": days,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""
         try:

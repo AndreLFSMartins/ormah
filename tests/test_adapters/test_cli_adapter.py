@@ -354,8 +354,12 @@ def test_outdated_no_reason(monkeypatch):
 
 def test_stats_text(monkeypatch):
     def handler(request):
-        assert "/admin/stats" in str(request.url)
-        return _mock_response({"total_nodes": 42, "by_tier": {"core": 5, "working": 30, "archival": 7}, "total_edges": 18})
+        url = str(request.url)
+        if "/admin/stats" in url:
+            return _mock_response({"total_nodes": 42, "by_tier": {"core": 5, "working": 30, "archival": 7}, "total_edges": 18})
+        if "/agent/stats" in url:
+            return _mock_response({"whispers_used_this_week": 7, "whispers_used_total": 42})
+        return _mock_response({}, status_code=404)
 
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
@@ -367,13 +371,17 @@ def test_stats_text(monkeypatch):
     assert "42" in out
     assert "18" in out
     assert "core: 5" in out
+    assert "7" in out  # whispers_used_this_week
 
 
 def test_stats_json(monkeypatch):
-    response_data = {"total_nodes": 42, "by_tier": {"core": 5}, "total_edges": 18}
-
     def handler(request):
-        return _mock_response(response_data)
+        url = str(request.url)
+        if "/admin/stats" in url:
+            return _mock_response({"total_nodes": 42, "by_tier": {"core": 5}, "total_edges": 18})
+        if "/agent/stats" in url:
+            return _mock_response({"whispers_used_this_week": 3, "whispers_used_total": 10})
+        return _mock_response({}, status_code=404)
 
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
@@ -384,6 +392,7 @@ def test_stats_json(monkeypatch):
     assert code == 0
     parsed = json.loads(out)
     assert parsed["total_nodes"] == 42
+    assert parsed["usage"]["whispers_used_this_week"] == 3
 
 
 # --- error handling ---

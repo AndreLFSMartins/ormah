@@ -1,0 +1,25 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the Ormah onboarding webview to drive setup + read stats.",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
+    "shell:allow-open",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [{ "name": "binaries/ormah-server", "sidecar": true }]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [{ "name": "binaries/ormah-server", "sidecar": true }]
+    },
+    "autostart:default",
+    "updater:default",
+    "notification:default"
+  ]
+}
