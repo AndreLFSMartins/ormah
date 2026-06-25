@@ -35,11 +35,12 @@ export default function InstallPanel({ onDone }: { onDone: () => void }) {
     setStatus("Wiring your tools…");
     let succeeded = false;
     try {
-      const res = await invoke<{ wired?: string[]; errors?: string[] }>("setup_agents");
-      const errors = res.errors ?? [];
+      const res = await invoke<{ wired?: string[]; errors?: Record<string, string> }>("setup_agents");
+      const errors = res.errors ?? {};
+      const errorEntries = Object.entries(errors);
       const names = (res.wired ?? []).map((k) => TOOLS.find((t) => t.key === k)?.name ?? k);
-      if (errors.length) {
-        setStatus(`Setup incomplete: ${errors.join("; ")}`);
+      if (errorEntries.length > 0) {
+        setStatus(`Setup incomplete: ${errorEntries.map(([k, v]) => `${k}: ${v}`).join("; ")}`);
       } else {
         setStatus(names.length ? `Connected ${names.join(", ")}` : "Nothing to connect.");
         succeeded = true;
