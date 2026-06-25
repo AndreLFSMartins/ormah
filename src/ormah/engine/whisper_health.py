@@ -74,11 +74,25 @@ def compute_whisper_health(conn: sqlite3.Connection, now: datetime) -> dict:
     semantics and known undercount.
     """
     since_7d = (now - timedelta(days=7)).isoformat()
-    all_time = _window(conn, None)
-    # Surface legacy/unattributable feedback (whisper_log_id IS NULL) so the
-    # linked-only ratios don't silently hide it. all_time only — the 7d cohort
-    # is injection-anchored and has no NULL side.
-    all_time["unlinked_feedback_rows"] = conn.execute(
-        "SELECT COUNT(*) FROM affinity WHERE whisper_log_id IS NULL"
-    ).fetchone()[0]
-    return {"all_time": all_time, "last_7d": _window(conn, since_7d)}
+    # Read every aggregate under one BEGIN DEFERRED snapshot. Without it, a
+    # concurrent writer (FastAPI handler, session_watcher) inserting an injected
+    # whisper_log + its affinity between the `injected` count and the
+    # `feedback_rows` count could make coverage exceed 100%. The store runs
+    # isolation_level=None (autocommit), so the transaction is opened explicitly;
+    # the in_transaction guard makes this safe to call inside a caller's tx too.
+    own_tx = not conn.in_transaction
+    if own_tx:
+        conn.execute("BEGIN DEFERRED")
+    try:
+        all_time = _window(conn, None)
+        # Surface legacy/unattributable feedback (whisper_log_id IS NULL) so the
+        # linked-only ratios don't silently hide it. all_time only — the 7d
+        # cohort is injection-anchored and has no NULL side.
+        all_time["unlinked_feedback_rows"] = conn.execute(
+            "SELECT COUNT(*) FROM affinity WHERE whisper_log_id IS NULL"
+        ).fetchone()[0]
+        last_7d = _window(conn, since_7d)
+    finally:
+        if own_tx:
+            conn.execute("COMMIT")
+    return {"all_time": all_time, "last_7d": last_7d}

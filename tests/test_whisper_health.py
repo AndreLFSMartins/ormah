@@ -8,7 +8,9 @@ ISO = NOW.isoformat()
 
 
 def _db() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+    # isolation_level=None mirrors the production Database (autocommit; the
+    # whisper-health read opens its own BEGIN DEFERRED snapshot explicitly).
+    conn = sqlite3.connect(":memory:", isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute(
         "CREATE TABLE whisper_log "
@@ -135,6 +137,18 @@ def test_mixed_confirmed_at_format_still_counted():
     out = compute_whisper_health(conn, NOW)["last_7d"]
     assert out["feedback_rows"] == 1
     assert out["coverage"] == 1.0
+
+
+def test_reads_under_snapshot_no_transaction_leak():
+    # Council-PR I1: the aggregates run inside one BEGIN DEFERRED snapshot so a
+    # concurrent insert can't push coverage above 100%. Verify the snapshot is
+    # opened and closed cleanly (no dangling transaction on the connection).
+    conn = _db()
+    _inject(conn, 1)
+    _feedback(conn, 1, 1)
+    out = compute_whisper_health(conn, NOW)["all_time"]
+    assert out["coverage"] == 1.0
+    assert conn.in_transaction is False
 
 
 def test_seven_day_cutoff():
