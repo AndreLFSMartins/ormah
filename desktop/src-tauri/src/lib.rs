@@ -62,6 +62,7 @@ pub fn run() {
                 .inner_size(1180.0, 820.0)
                 .min_inner_size(860.0, 600.0)
                 .center()
+                .decorations(false) // custom dark title bar drawn in the UI
                 .initialization_script(HIDE_SCROLLBARS)
                 .build()?;
 

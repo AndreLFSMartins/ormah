@@ -26,3 +26,13 @@ export async function waitForServer(onSlow?: () => void): Promise<boolean> {
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Window controls for the custom (decorationless) title bar.
+function currentWindow(): { minimize?: () => Promise<void>; close?: () => Promise<void>; toggleMaximize?: () => Promise<void>; startDragging?: () => Promise<void> } | null {
+  const w = window as unknown as { __TAURI__?: { window?: { getCurrentWindow?: () => unknown } } };
+  return (w.__TAURI__?.window?.getCurrentWindow?.() as never) ?? null;
+}
+export const winMinimize = () => currentWindow()?.minimize?.();
+export const winClose = () => currentWindow()?.close?.();
+export const winToggleMaximize = () => currentWindow()?.toggleMaximize?.();
+export const winStartDragging = () => currentWindow()?.startDragging?.();

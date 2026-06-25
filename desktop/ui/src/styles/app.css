@@ -75,9 +75,36 @@ h1, h2, h3, h4, .display {
 
 .istatus { margin-top: 16px; font-size: 12px; color: #555; min-height: 16px; }
 
-/* whole-app dissolve into the graph */
-#root { transition: opacity .7s ease; }
-#root.dissolve { opacity: 0; }
+/* ---- custom title bar (native decorations are off) ---- */
+.titlebar {
+  position: fixed; top: 0; left: 0; right: 0; height: 34px; z-index: 10000;
+  display: flex; align-items: stretch; background: #0a0a0a;
+  border-bottom: 1px solid #161616; user-select: none;
+}
+.titlebar-drag { flex: 1; display: flex; align-items: center; padding: 0 12px; }
+.titlebar-mark {
+  font-family: "Ormah Display", "Questrial", sans-serif; font-size: 13px;
+  letter-spacing: 0.04em; color: #d4a574; opacity: 0.85;
+}
+.titlebar-controls { display: flex; }
+.tbtn {
+  width: 46px; height: 34px; display: flex; align-items: center; justify-content: center;
+  border: 0; background: transparent; color: #888; cursor: pointer; transition: background .12s, color .12s;
+}
+.tbtn:hover { background: #1c1c1c; color: #ccc; }
+.tbtn.close:hover { background: #c0392b; color: #fff; }
+
+/* ---- graph iframe (below the title bar) ---- */
+.graph-frame {
+  position: fixed; top: 34px; left: 0; right: 0; bottom: 0;
+  width: 100%; height: calc(100vh - 34px); border: 0; background: #0a0a0a;
+  opacity: 0; animation: frameIn .5s ease forwards;
+}
+@keyframes frameIn { to { opacity: 1; } }
+
+/* fade the intro out as we hand off to the graph */
+.stage-wrap { transition: opacity .6s ease; }
+#root.to-graph .stage-wrap { opacity: 0; }
 
 @media (prefers-reduced-motion: reduce) {
   .install, .scrim, .tool { transition: none !important; animation: none !important; }

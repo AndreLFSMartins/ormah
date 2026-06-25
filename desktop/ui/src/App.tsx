@@ -2,33 +2,44 @@ import { useEffect, useRef, useState } from "react";
 import GraphCanvas from "@/components/GraphCanvas";
 import Act1Void from "@/components/Act1Void";
 import InstallPanel from "./InstallPanel";
-import { invoke, graphUrl, waitForServer, sleep } from "./lib/bridge";
+import { invoke, graphUrl, waitForServer, sleep, winMinimize, winClose } from "./lib/bridge";
 
-type Phase = "intro" | "connect";
+type Phase = "intro" | "connect" | "graph";
+
+function TitleBar() {
+  return (
+    <div className="titlebar">
+      <div className="titlebar-drag" data-tauri-drag-region />
+      <div className="titlebar-controls">
+        <button className="tbtn" aria-label="Minimize" onClick={() => winMinimize()}>
+          <svg width="11" height="11" viewBox="0 0 11 11"><rect x="1" y="5" width="9" height="1" fill="currentColor" /></svg>
+        </button>
+        <button className="tbtn close" aria-label="Close" onClick={() => winClose()}>
+          <svg width="11" height="11" viewBox="0 0 11 11"><path d="M1 1l9 9M10 1l-9 9" stroke="currentColor" strokeWidth="1.1" /></svg>
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
-  // progress stays at 0 → wordmark centered, the self-node births and arcs to
-  // center on its own (time-based, not scroll). This is the real web intro.
   const progressRef = useRef(0);
   const selfNodeReadyRef = useRef<{ x: number; y: number } | null>(null);
   const [phase, setPhase] = useState<Phase>("intro");
+  const [graphSrc, setGraphSrc] = useState("");
   const started = useRef(false);
 
-  // Cache-bust the navigation: WebKitGTK aggressively caches the graph page,
-  // so without this the webview can serve a stale UI build across launches.
-  function bust(url: string) {
-    return url + (url.includes("?") ? "&" : "?") + "_=" + Date.now();
-  }
-
-  async function dissolveToGraph() {
+  async function goGraph() {
     const url = await graphUrl();
-    document.getElementById("root")?.classList.add("dissolve");
-    await sleep(720);
-    window.location.replace(bust(url));
+    // Cache-bust so a fresh UI build is always loaded in the webview.
+    setGraphSrc(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now());
+    document.getElementById("root")?.classList.add("to-graph");
+    await sleep(620);
+    setPhase("graph");
   }
 
   useEffect(() => {
-    if (started.current) return; // guard StrictMode double-invoke
+    if (started.current) return;
     started.current = true;
 
     (async () => {
@@ -40,13 +51,10 @@ export default function App() {
       if (!ready) return;
 
       if (onboarded) {
-        // Return visit: let the orb balloon up, then fade into the graph.
         await sleep(Math.max(0, 2200 - (Date.now() - t0)));
-        dissolveToGraph();
+        goGraph();
         return;
       }
-
-      // First run: let the full intro breathe (birth ~4s + arc ~4.2s), then connect.
       await sleep(Math.max(0, 5200 - (Date.now() - t0)));
       setPhase("connect");
     })();
@@ -54,9 +62,16 @@ export default function App() {
 
   return (
     <>
-      <GraphCanvas progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
-      <Act1Void progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
-      {phase === "connect" && <InstallPanel onDone={dissolveToGraph} />}
+      <TitleBar />
+      {phase === "graph" ? (
+        <iframe className="graph-frame" src={graphSrc} title="Ormah graph" />
+      ) : (
+        <div className="stage-wrap">
+          <GraphCanvas progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
+          <Act1Void progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
+          {phase === "connect" && <InstallPanel onDone={goGraph} />}
+        </div>
+      )}
     </>
   );
 }
