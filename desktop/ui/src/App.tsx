@@ -2,10 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import GraphCanvas from "@/components/GraphCanvas";
 import Act1Void from "@/components/Act1Void";
 import InstallPanel from "./InstallPanel";
-import { invoke, graphUrl, waitForServer, sleep, winMinimize, winClose } from "./lib/bridge";
+import {
+  invoke, graphUrl, waitForServer, sleep,
+  winMinimize, winClose, winToggleMaximize,
+} from "./lib/bridge";
 
-type Phase = "intro" | "connect" | "graph";
+type Phase = "intro" | "connect";
 
+// Title bar for the intro/connect phase (frameless window). On the graph view
+// the graph's own top bar carries the window controls.
 function TitleBar() {
   return (
     <div className="titlebar">
@@ -13,6 +18,9 @@ function TitleBar() {
       <div className="titlebar-controls">
         <button className="tbtn" aria-label="Minimize" onClick={() => winMinimize()}>
           <svg width="11" height="11" viewBox="0 0 11 11"><rect x="1" y="5" width="9" height="1" fill="currentColor" /></svg>
+        </button>
+        <button className="tbtn" aria-label="Maximize" onClick={() => winToggleMaximize()}>
+          <svg width="11" height="11" viewBox="0 0 11 11"><rect x="1.5" y="1.5" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
         </button>
         <button className="tbtn close" aria-label="Close" onClick={() => winClose()}>
           <svg width="11" height="11" viewBox="0 0 11 11"><path d="M1 1l9 9M10 1l-9 9" stroke="currentColor" strokeWidth="1.1" /></svg>
@@ -26,16 +34,15 @@ export default function App() {
   const progressRef = useRef(0);
   const selfNodeReadyRef = useRef<{ x: number; y: number } | null>(null);
   const [phase, setPhase] = useState<Phase>("intro");
-  const [graphSrc, setGraphSrc] = useState("");
   const started = useRef(false);
 
   async function goGraph() {
     const url = await graphUrl();
-    // Cache-bust so a fresh UI build is always loaded in the webview.
-    setGraphSrc(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now());
     document.getElementById("root")?.classList.add("to-graph");
     await sleep(620);
-    setPhase("graph");
+    // Navigate to the graph; its TopBar becomes the window title bar.
+    // Cache-bust so a fresh UI build always loads in the webview.
+    window.location.replace(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now());
   }
 
   useEffect(() => {
@@ -63,15 +70,11 @@ export default function App() {
   return (
     <>
       <TitleBar />
-      {phase === "graph" ? (
-        <iframe className="graph-frame" src={graphSrc} title="Ormah graph" />
-      ) : (
-        <div className="stage-wrap">
-          <GraphCanvas progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
-          <Act1Void progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
-          {phase === "connect" && <InstallPanel onDone={goGraph} />}
-        </div>
-      )}
+      <div className="stage-wrap">
+        <GraphCanvas progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
+        <Act1Void progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
+        {phase === "connect" && <InstallPanel onDone={goGraph} />}
+      </div>
     </>
   );
 }
