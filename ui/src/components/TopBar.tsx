@@ -39,9 +39,13 @@ export default function TopBar({
       .__TAURI__?.window?.getCurrentWindow?.();
   const inApp = typeof window !== "undefined" && !!(window as unknown as { __TAURI__?: unknown }).__TAURI__;
   // Manual drag: data-tauri-drag-region isn't honored on the navigated remote
-  // graph page, so call startDragging() on a left-button press of the bar.
+  // graph page, so call startDragging() on a left-button press anywhere on the
+  // bar except interactive elements (search, buttons, the controls).
   const startDrag = (e: React.PointerEvent) => {
-    if (e.button === 0) tauriWin()?.startDragging?.();
+    if (e.button !== 0) return;
+    const el = e.target as HTMLElement;
+    if (el.closest("input, button, a, .search-wrapper, .win-controls, .app-actions, .top-bar-actions")) return;
+    tauriWin()?.startDragging?.();
   };
 
   const actionButtons = (
@@ -148,8 +152,8 @@ export default function TopBar({
   );
 
   return (
-    <div className="top-bar">
-      <div className="top-bar-logo" onPointerDown={startDrag}>
+    <div className="top-bar" onPointerDown={startDrag}>
+      <div className="top-bar-logo">
         <span>o</span>
         <span className="top-bar-logo-r">
           r
@@ -202,7 +206,7 @@ export default function TopBar({
         )}
       </div>
       <span className="top-bar-stats">{nodeCount} nodes</span>
-      <div className="top-bar-spacer" onPointerDown={startDrag} />
+      <div className="top-bar-spacer" />
       {/* Web: actions live inline in the bar. App: only window controls in the
           bar; the actions move to a group just below them (see app-actions). */}
       {!inApp && <div className="top-bar-actions">{actionButtons}</div>}
