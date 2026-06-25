@@ -68,7 +68,7 @@ def test_mixed_signals_precision():
 
 
 def test_distinct_guards_against_double_count():
-    # In production idx_affinity_node_whisper_log_unique (db.py:234) forbids two
+    # In production idx_affinity_node_whisper_log_unique (schema.sql:126) forbids two
     # affinity rows on one whisper_log_id, so this two-row shape can't occur for
     # real. The minimal schema here omits that index on purpose, to assert the
     # DISTINCT clause is a defensive guard that keeps coverage <= 1.0 regardless.
