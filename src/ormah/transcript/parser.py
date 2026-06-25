@@ -28,9 +28,19 @@ class TranscriptResult:
     cleaned_chars: int  # After stripping
     session_id: str  # From filename stem (UUID)
     end_offset: int = 0  # Byte position after last line read
-    safe_end_offset: int = 0       # byte position after last text-bearing assistant turn
+    # "safe" = the closed boundary: content proven complete, so the cursor may advance
+    # past it without ever splitting a response. A response closes at an assistant record
+    # with a terminal stop_reason (Claude Code), a Codex task_complete event, or the start
+    # of the next user turn (universal — covers interrupts and any signal-less source).
+    safe_end_offset: int = 0       # byte position after the last closed response
     safe_conversation: str = ""    # conversation text up to safe_end_offset only
     safe_user_turn_count: int = 0  # user turns within the safe boundary
+    safe_turns: list[TranscriptTurn] = field(default_factory=list)
+    # True when an incremental slice (start_offset > 0) began with text-bearing assistant
+    # content before any user turn — i.e. a cursor an older version left mid-response. The
+    # orphan is dropped here; the caller should re-parse from offset 0 to recover the
+    # prompt and re-pair the response.
+    leading_orphan: bool = False
     turns: list[TranscriptTurn] = field(default_factory=list)
     source: str = "agent_jsonl"
 
@@ -113,6 +123,34 @@ def _source_for_entry(entry: dict) -> str | None:
     return None
 
 
+# A terminal stop_reason means the response is finished and no further record belongs
+# to it (the cursor may advance past it). tool_use / pause_turn are non-terminal: a
+# continuation follows, so advancing there would strand a later record from its prompt.
+_TERMINAL_STOP_REASONS = ("end_turn", "stop_sequence", "max_tokens", "refusal")
+
+
+def _assistant_is_terminal(entry: dict) -> bool:
+    """True when an assistant record ends its response (reliable for Claude Code)."""
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return False
+    return message.get("stop_reason") in _TERMINAL_STOP_REASONS
+
+
+def _is_turn_complete_event(entry: dict) -> bool:
+    """True for a Codex ``task_complete`` event_msg — a reliable end-of-turn signal.
+
+    Codex (response_item) records have no stop_reason, but each turn ends with a
+    ``task_complete`` event. Treating it as a closure lets the cursor advance past a
+    finished Codex turn without waiting for the next user turn — and without splitting a
+    multi-record Codex response.
+    """
+    if entry.get("type") != "event_msg":
+        return False
+    payload = entry.get("payload")
+    return isinstance(payload, dict) and payload.get("type") == "task_complete"
+
+
 def _is_bootstrap_user_text(text: str) -> bool:
     """Return True when text is client/bootstrap context, not a real user turn."""
     stripped = text.strip()
@@ -179,13 +217,20 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
     user_turn_count = 0
     source = "agent_jsonl"
 
+    # safe_* is the closed boundary: content proven complete, so the cursor may advance
+    # past it without ever splitting a response. A response closes at a terminal
+    # stop_reason (Claude Code), a Codex task_complete event, or the start of the next
+    # user turn. A response with no completion signal yet stays open (held back).
     _safe_end = start_offset
-    _safe_len = 0  # len(turns) captured at the last safe boundary
+    _safe_len = 0
     _safe_users = 0
+    _seen_assistant_text = False  # a text-bearing assistant appeared in the current block
+    _leading_orphan = False  # dropped assistant content before the first user (bad cursor)
     with open(path) as f:
         if start_offset > 0:
             f.seek(start_offset)
         while True:
+            pos_before = f.tell()  # byte offset at the start of this line
             line = f.readline()
             if not line:
                 break
@@ -202,6 +247,16 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
             if source == "agent_jsonl" and entry_source is not None:
                 source = entry_source  # first-wins (preserved from original)
 
+            if _is_turn_complete_event(entry):
+                # Codex end-of-turn: the open response is complete, advance the closed
+                # boundary past it (so a multi-record Codex turn is never split).
+                if _seen_assistant_text:
+                    _safe_end = f.tell()
+                    _safe_len = len(turns)
+                    _safe_users = user_turn_count
+                    _seen_assistant_text = False
+                continue
+
             entry_type, content = _coerce_entry(entry)
             if entry_type not in ("user", "assistant"):
                 continue
@@ -211,25 +266,47 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
             if entry_type == "user":
                 text = _extract_user_text(content)
                 if text and not _is_bootstrap_user_text(text):
+                    # A new user turn definitively closes any still-open response (an
+                    # interrupt, or a Codex turn with no stop_reason): the safe boundary
+                    # advances to the start of this user line. This never splits a
+                    # response — the whole prior block is on the closed side.
+                    if _seen_assistant_text:
+                        _safe_end = pos_before  # boundary = start of this user line
+                        _safe_len = len(turns)
+                        _safe_users = user_turn_count
+                        _seen_assistant_text = False
                     turns.append(TranscriptTurn(role="user", text=text))
                     user_turn_count += 1
 
             elif entry_type == "assistant":
                 text = _extract_assistant_text(content)
-                if text:
+                # Drop assistant content that precedes the first user turn in this slice:
+                # its prompt lies before start_offset (a cursor left mid-response by an
+                # older version), so committing it would emit an orphan fragment without
+                # its prompt. A correct cursor always starts a slice on a user turn, so
+                # this never drops legitimate content. The caller re-parses from 0 (see
+                # leading_orphan) to recover the dropped content with its prompt.
+                if text and user_turn_count == 0 and start_offset > 0:
+                    _leading_orphan = True
+                if text and user_turn_count > 0:
                     turns.append(TranscriptTurn(role="assistant", text=text))
-                    # Boundary advances only after a text-bearing assistant turn:
-                    # tool-only assistant lines do not complete a pair, so a later text
-                    # assistant for the same turn is not misread as a new slice.
-                    _safe_end = f.tell()
-                    _safe_len = len(turns)
-                    _safe_users = user_turn_count
+                    if _assistant_is_terminal(entry):
+                        # Reliable completion signal (Claude Code): the response is done,
+                        # so the safe boundary may advance past it even with no following
+                        # user turn. A non-terminal record (tool_use / streaming) leaves
+                        # the block open so a later record of the same response is never
+                        # stranded from its prompt.
+                        _safe_end = f.tell()
+                        _safe_len = len(turns)
+                        _safe_users = user_turn_count
+                        _seen_assistant_text = False
+                    else:
+                        _seen_assistant_text = True
 
         end_offset = f.tell()
 
     conversation = _conversation_from_turns(turns)
     safe_turns = turns[:_safe_len]
-    safe_conversation = _conversation_from_turns(safe_turns)
     return TranscriptResult(
         conversation=conversation,
         user_turn_count=user_turn_count,
@@ -238,8 +315,10 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
         session_id=path.stem,
         end_offset=end_offset,
         safe_end_offset=_safe_end,
-        safe_conversation=safe_conversation,
+        safe_conversation=_conversation_from_turns(safe_turns),
         safe_user_turn_count=_safe_users,
+        safe_turns=safe_turns,
+        leading_orphan=_leading_orphan,
         turns=turns,
         source=source,
     )

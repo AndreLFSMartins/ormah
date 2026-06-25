@@ -50,7 +50,8 @@ def _make_transcript(user_turns: int = 6) -> str:
         }))
         lines.append(json.dumps({
             "type": "assistant",
-            "message": {"content": [{"type": "text", "text": f"Response {i} with details"}]},
+            "message": {"stop_reason": "end_turn",
+                        "content": [{"type": "text", "text": f"Response {i} with details"}]},
         }))
     return "\n".join(lines) + "\n"
 
@@ -339,6 +340,89 @@ class TestWhisperStoreCursor:
         assert "sess1" in cursors
         assert cursors["sess1"] > 0
         assert cursors["sess1"] == transcript.stat().st_size
+
+    def test_cursor_holds_back_dangling_prompt(self, monkeypatch, tmp_path):
+        """A store fired while a prompt's response is not written yet must not ingest the
+        dangling prompt or advance the cursor past it — the prompt stays with its response
+        on the next run (no split)."""
+        monkeypatch.setattr("ormah.adapters.cli_adapter.settings.whisper_out_min_turns", 1)
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text(_make_transcript(6))  # 6 complete (end_turn) turns
+        with transcript.open("a") as f:
+            f.write(json.dumps({"type": "user",
+                "message": {"content": "Dangling prompt about the new feature"}}) + "\n")
+
+        bodies = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(
+            "ormah.adapters.cli_adapter._whisper_store_client",
+            lambda: httpx.Client(transport=transport, base_url="http://test"),
+        )
+        hook_input = json.dumps({
+            "transcript_path": str(transcript), "cwd": "/tmp",
+            "session_id": "sess1", "trigger": "auto",
+        })
+
+        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
+        cursors = json.loads(_WHISPER_CURSOR_FILE.read_text())
+        assert "Dangling prompt" not in bodies[0]["content"]       # held back
+        assert cursors["sess1"] < transcript.stat().st_size        # cursor before it
+
+        # The response arrives; the next run pairs the prompt with its response.
+        with transcript.open("a") as f:
+            f.write(json.dumps({"type": "assistant",
+                "message": {"stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "Answer to the new feature"}]}}) + "\n")
+        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+        assert "Dangling prompt" in bodies[1]["content"]
+        assert "Answer to the new feature" in bodies[1]["content"]
+
+    def test_legacy_mid_response_cursor_recovered(self, monkeypatch, tmp_path):
+        """A whisper cursor left mid-response by an older version is recovered: the store
+        re-parses from 0 so the dropped tail is sent with its prompt, not orphaned."""
+        monkeypatch.setattr("ormah.adapters.cli_adapter.settings.whisper_out_min_turns", 1)
+        transcript = tmp_path / "session.jsonl"
+        records = [
+            {"type": "user", "message": {"content": "Prompt about the architecture decision"}},
+            {"type": "assistant", "message": {"stop_reason": "tool_use",
+                "content": [{"type": "text", "text": "First part"}]}},
+            {"type": "assistant", "message": {"stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Second part answer"}]}},
+        ]
+        transcript.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+        raw = transcript.read_bytes().splitlines(keepends=True)
+        mid = len(raw[0]) + len(raw[1])  # cursor saved mid-response
+
+        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE, _WHISPER_CURSOR_DIR
+        _WHISPER_CURSOR_DIR.mkdir(parents=True, exist_ok=True)
+        _WHISPER_CURSOR_FILE.write_text(json.dumps({"sess1": mid}))
+
+        bodies = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(
+            "ormah.adapters.cli_adapter._whisper_store_client",
+            lambda: httpx.Client(transport=transport, base_url="http://test"),
+        )
+        hook_input = json.dumps({
+            "transcript_path": str(transcript), "cwd": "/tmp",
+            "session_id": "sess1", "trigger": "auto",
+        })
+        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+
+        assert "Prompt about the architecture decision" in bodies[0]["content"]
+        assert "First part" in bodies[0]["content"]
+        assert "Second part answer" in bodies[0]["content"]
 
     def test_cursor_skips_already_processed(self, monkeypatch, tmp_path):
         """Second run on unchanged file → no HTTP call."""
