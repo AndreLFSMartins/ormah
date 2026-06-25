@@ -20,6 +20,7 @@ from ormah.engine.maintenance_signal import (
     is_maintenance_due_signal,
 )
 from ormah.engine.tier_manager import TierManager
+from ormah.engine.whisper_health import compute_whisper_health
 from ormah.engine.traversal import (
     format_node_with_neighbors,
     format_search_results,
@@ -1228,6 +1229,9 @@ class MemoryEngine:
             # Stays > 0 for any node that cannot be embedded (visible, never masked).
             "embedding_gap": self._missing_embeddable_count(),
             "embedding_schema_version": int(ver_row["value"]) if ver_row else 0,
+            "whisper_health": compute_whisper_health(
+                self.db.conn, datetime.now(timezone.utc)
+            ),
         }
 
     # --- Merge operations ---
