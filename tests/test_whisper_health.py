@@ -148,3 +148,45 @@ def test_seven_day_cutoff():
     assert out["last_7d"]["injected"] == 0
     assert out["last_7d"]["coverage"] is None
     assert out["last_7d"]["precision"] is None
+
+
+def test_stats_exposes_whisper_health(engine):
+    out = engine.stats()
+    assert "whisper_health" in out
+    wh = out["whisper_health"]
+    assert set(wh) == {"all_time", "last_7d"}
+    assert set(wh["last_7d"]) == {
+        "injected", "feedback_rows", "coverage",
+        "positive", "negative", "precision",
+    }
+    assert set(wh["all_time"]) == {
+        "injected", "feedback_rows", "coverage",
+        "positive", "negative", "precision", "unlinked_feedback_rows",
+    }
+    assert wh["all_time"]["injected"] == 0
+    assert wh["all_time"]["coverage"] is None
+
+
+def test_stats_whisper_health_seeded(engine):
+    # I2 (council r2): exercise real schema (NOT NULL cols + JOIN), not just empty.
+    from datetime import datetime, timezone
+
+    conn = engine.db.conn
+    conn.execute(
+        "INSERT INTO whisper_log "
+        "(session_id, prompt_hash, prompt_vec, node_id, score, was_injected, logged_at) "
+        "VALUES ('s1', 'h1', X'00', 'n1', 0.5, 1, ?)",
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    wid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO affinity "
+        "(prompt_vec, node_id, signal, source, confirmed_at, session_id, whisper_log_id) "
+        "VALUES (X'00', 'n1', 1, 'explicit', datetime('now'), 's1', ?)",
+        (wid,),
+    )
+    wh = engine.stats()["whisper_health"]["all_time"]
+    assert wh["injected"] == 1
+    assert wh["feedback_rows"] == 1
+    assert wh["coverage"] == 1.0
+    assert wh["precision"] == 1.0
