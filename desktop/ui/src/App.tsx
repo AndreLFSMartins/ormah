@@ -14,11 +14,17 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>("intro");
   const started = useRef(false);
 
+  // Cache-bust the navigation: WebKitGTK aggressively caches the graph page,
+  // so without this the webview can serve a stale UI build across launches.
+  function bust(url: string) {
+    return url + (url.includes("?") ? "&" : "?") + "_=" + Date.now();
+  }
+
   async function dissolveToGraph() {
     const url = await graphUrl();
     document.getElementById("root")?.classList.add("dissolve");
     await sleep(720);
-    window.location.replace(url);
+    window.location.replace(bust(url));
   }
 
   useEffect(() => {

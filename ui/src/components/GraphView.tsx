@@ -442,22 +442,23 @@ function VerticalZoomSlider({
       <div
         style={{
           position: "absolute", left: "50%", top: 0, transform: "translateX(-50%)",
-          width: 3, height: "100%", borderRadius: 2, background: "rgba(255,255,255,0.16)",
+          width: 4, height: "100%", borderRadius: 3, background: "#3a3a3a",
         }}
       />
       {/* filled portion (from bottom up to the thumb) */}
       <div
         style={{
           position: "absolute", left: "50%", bottom: 0, transform: "translateX(-50%)",
-          width: 3, height: `${filled * 100}%`, borderRadius: 2, background: "#d4a574",
+          width: 4, height: `${filled * 100}%`, borderRadius: 3, background: "#d4a574",
         }}
       />
       {/* thumb */}
       <div
         style={{
           position: "absolute", left: "50%", top: `${(1 - filled) * 100}%`,
-          transform: "translate(-50%, -50%)", width: 14, height: 14, borderRadius: "50%",
-          background: "#d4a574", boxShadow: "0 0 0 2px rgba(10,10,10,0.6), 0 1px 3px rgba(0,0,0,0.6)",
+          transform: "translate(-50%, -50%)", width: 16, height: 16, borderRadius: "50%",
+          background: "#d4a574", border: "2px solid #0a0a0a",
+          boxShadow: "0 1px 4px rgba(0,0,0,0.6)",
         }}
       />
     </div>
