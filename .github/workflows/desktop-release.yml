@@ -1,13 +1,17 @@
 name: Desktop release (macOS)
 
-# Builds, signs, notarizes, and publishes the Ormah .dmg on tagged releases.
-# Requires the Apple + Tauri signing secrets listed in desktop/README.md.
+# NOT YET ACTIVE — Stage 2 (PyInstaller sidecar bundling) is required before
+# this workflow can produce a working .dmg. Re-enable the triggers below once
+# build-sidecar.sh produces a valid binary and tauri.conf.json has externalBin.
+# See desktop/README.md "Stage 2: bundled runtime" for what's needed.
 
 on:
-  push:
-    tags:
-      - "desktop-v*"
+  # push:
+  #   tags:
+  #     - "desktop-v*"
   workflow_dispatch:
+    # Manually triggerable for testing the build steps before Stage 2 ships.
+    # Will fail at "Build, sign, and bundle" without a real sidecar binary.
 
 jobs:
   build-dmg:

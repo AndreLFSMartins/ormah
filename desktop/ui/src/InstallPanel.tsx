@@ -33,15 +33,26 @@ export default function InstallPanel({ onDone }: { onDone: () => void }) {
   async function connect() {
     setBusy(true);
     setStatus("Wiring your tools…");
+    let succeeded = false;
     try {
-      const res = await invoke<{ wired?: string[] }>("setup_agents");
+      const res = await invoke<{ wired?: string[]; errors?: string[] }>("setup_agents");
+      const errors = res.errors ?? [];
       const names = (res.wired ?? []).map((k) => TOOLS.find((t) => t.key === k)?.name ?? k);
-      setStatus(names.length ? `Connected ${names.join(", ")}` : "Nothing to connect.");
+      if (errors.length) {
+        setStatus(`Setup incomplete: ${errors.join("; ")}`);
+      } else {
+        setStatus(names.length ? `Connected ${names.join(", ")}` : "Nothing to connect.");
+        succeeded = true;
+      }
     } catch (e) {
       setStatus(`Couldn't finish: ${e}`);
     }
-    try { await invoke("mark_onboarded"); } catch { /* ignore */ }
-    setTimeout(onDone, 1100);
+    if (succeeded) {
+      try { await invoke("mark_onboarded"); } catch { /* ignore */ }
+      setTimeout(onDone, 1100);
+    } else {
+      setBusy(false);
+    }
   }
 
   async function skip() {
