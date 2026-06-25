@@ -1,0 +1,84 @@
+/* Bundled display face so the wordmark renders with the web's elegance on
+   every OS. Questrial (OFL) is the canonical free Century-Gothic substitute —
+   the geometric face the site's `Century Gothic` stack intends. */
+@font-face {
+  font-family: "Ormah Display";
+  src: url("/fonts/Questrial-Regular.ttf") format("truetype");
+  font-weight: 400 600; font-style: normal; font-display: block;
+}
+
+html, body, #root { height: 100%; margin: 0; background: #0a0a0a; overflow: hidden; }
+* { box-sizing: border-box; }
+
+/* Wordmark + headings use the bundled display face first. */
+h1, h2, h3, h4, .display {
+  font-family: "Ormah Display", "URW Gothic", "Century Gothic", "Futura", sans-serif !important;
+}
+
+/* Minimal shim for the few Tailwind utilities the reused components use,
+   so we don't pull in all of Tailwind. */
+.fixed { position: fixed; }
+.absolute { position: absolute; }
+.relative { position: relative; }
+.inset-0 { inset: 0; }
+.z-0 { z-index: 0; }
+.z-20 { z-index: 20; }
+.h-screen { height: 100vh; }
+.w-full { width: 100%; }
+.flex { display: flex; }
+.inline-block { display: inline-block; }
+.block { display: block; }
+.rounded-full { border-radius: 9999px; }
+.whitespace-nowrap { white-space: nowrap; }
+.tracking-tight { letter-spacing: -0.015em; }
+
+/* ---- install bottom-sheet over the living void ---- */
+.scrim {
+  position: fixed; left: 0; right: 0; bottom: 0; height: 56%; z-index: 25;
+  pointer-events: none; opacity: 0; transition: opacity .6s ease;
+  background: linear-gradient(to top, #0a0a0a 18%, rgba(10,10,10,0.85) 48%, transparent 100%);
+}
+.scrim.show { opacity: 1; }
+
+.install {
+  position: fixed; left: 50%; bottom: 0; transform: translateX(-50%) translateY(24px);
+  z-index: 26; width: 100%; max-width: 440px; padding: 0 32px 40px; text-align: center;
+  font-family: var(--font-mono, ui-monospace, monospace); color: #999;
+  opacity: 0; transition: opacity .55s ease, transform .55s cubic-bezier(.25,.46,.45,.94);
+}
+.install.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+.install h2 { font-weight: 400; color: #ccc; font-size: 20px; margin: 0 0 8px; }
+.install .lead { color: #999; font-size: 13px; line-height: 1.7; margin: 0 auto 4px; max-width: 380px; }
+
+.ledger { margin: 22px auto 0; max-width: 360px; text-align: left; }
+.tool { display: flex; align-items: center; gap: 12px; padding: 12px 4px;
+        border-bottom: 1px solid #242424; opacity: 0; transform: translateX(-6px);
+        animation: rowIn .4s ease forwards; }
+@keyframes rowIn { to { opacity: 1; transform: translateX(0); } }
+.tool .tdot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
+  background: transparent; box-shadow: inset 0 0 0 1.5px #333; transition: all .3s ease; }
+.tool.found .tdot { background: #74b3a5; box-shadow: 0 0 6px #74b3a5, 0 0 14px rgba(116,179,165,0.4); }
+.tool .tname { flex: 1; font-size: 13px; color: #555; }
+.tool.found .tname { color: #ccc; }
+.tool .tstate { font-size: 11px; letter-spacing: 0.04em; color: #555; }
+.tool.found .tstate { color: #8fd4c4; }
+
+.actions { margin-top: 28px; display: flex; gap: 10px; justify-content: center; }
+.btn { font-family: inherit; font-size: 13px; cursor: pointer; padding: 11px 22px;
+       border-radius: 7px; border: 0; transition: filter .15s ease, box-shadow .2s ease, color .15s ease; }
+.btn.primary { background: #d4a574; color: #1b1305; font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.07); box-shadow: 0 0 24px rgba(212,165,116,0.25); }
+.btn.ghost { background: transparent; color: #999; box-shadow: inset 0 0 0 1px #333; }
+.btn.ghost:hover { box-shadow: inset 0 0 0 1px #d4a574; color: #d4a574; }
+.btn:disabled { opacity: .4; cursor: default; filter: none; box-shadow: none; }
+
+.istatus { margin-top: 16px; font-size: 12px; color: #555; min-height: 16px; }
+
+/* whole-app dissolve into the graph */
+#root { transition: opacity .7s ease; }
+#root.dissolve { opacity: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .install, .scrim, .tool { transition: none !important; animation: none !important; }
+}

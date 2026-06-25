@@ -60,23 +60,28 @@ pub async fn detect_agents() -> Result<Value, String> {
 
 // ---- agent setup -----------------------------------------------------------
 
-/// Run the bundled `ormah setup --json` and return its parsed result.
+/// Run `ormah setup --json` and return its parsed result. Prefers the bundled
+/// sidecar; falls back to a system `ormah` on PATH (dev / pre-bundle).
 #[tauri::command]
 pub async fn setup_agents<R: Runtime>(app: AppHandle<R>) -> Result<Value, String> {
-    let output = app
-        .shell()
-        .sidecar("ormah-server")
-        .map_err(|e| e.to_string())?
+    // Bundled sidecar first.
+    if let Ok(cmd) = app.shell().sidecar("ormah-server") {
+        if let Ok(out) = cmd.args(["setup", "--json"]).output().await {
+            if let Ok(v) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&out.stdout)) {
+                return Ok(v);
+            }
+        }
+    }
+    // Fallback: system `ormah`.
+    let out = std::process::Command::new("ormah")
         .args(["setup", "--json"])
         .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+        .map_err(|e| format!("ormah setup failed: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
     serde_json::from_str::<Value>(&stdout).map_err(|e| {
         format!(
-            "could not parse setup output: {e}\nstdout: {stdout}\nstderr: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "could not parse setup output: {e}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
         )
     })
 }

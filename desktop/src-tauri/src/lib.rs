@@ -10,7 +10,27 @@ mod sidecar;
 mod stats;
 mod tray;
 
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
+
+// Hide scrollbar chrome across every page the webview loads (the install shell
+// *and* the graph it navigates to). Scrolling still works; only the visual bar
+// is removed — kills the spurious horizontal scrollbar on the graph view.
+const HIDE_SCROLLBARS: &str = r#"
+(function () {
+  var css = '::-webkit-scrollbar{width:0!important;height:0!important;background:transparent!important}'
+          + 'html{scrollbar-width:none!important;-ms-overflow-style:none!important}';
+  var apply = function () {
+    if (document.getElementById('__ormah_noscroll')) return;
+    var s = document.createElement('style');
+    s.id = '__ormah_noscroll';
+    s.appendChild(document.createTextNode(css));
+    (document.head || document.documentElement).appendChild(s);
+  };
+  apply();
+  document.addEventListener('DOMContentLoaded', apply);
+})();
+"#;
 
 pub fn run() {
     tauri::Builder::default()
@@ -31,10 +51,19 @@ pub fn run() {
             commands::is_onboarded,
         ])
         .setup(|app| {
-            // Start the bundled server the moment the app launches. The main
-            // window (declared in tauri.conf.json) shows the install/boot flow
-            // and then loads the graph from the local server.
+            // Start the bundled server the moment the app launches.
             sidecar::start(app.handle().clone());
+
+            // Main window: shows the install/boot flow, then navigates to the
+            // graph. Built in Rust so we can attach the scrollbar-hiding init
+            // script that also applies after navigating to the graph.
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("Ormah")
+                .inner_size(1180.0, 820.0)
+                .min_inner_size(860.0, 600.0)
+                .center()
+                .initialization_script(HIDE_SCROLLBARS)
+                .build()?;
 
             // Build the tray; it owns the stats poller and a quick "Open graph".
             tray::build(app)?;

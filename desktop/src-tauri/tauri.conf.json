@@ -4,23 +4,12 @@
   "version": "0.1.0",
   "identifier": "dev.ormah.desktop",
   "build": {
-    "frontendDist": "../shell"
+    "frontendDist": "../ui/dist",
+    "beforeBuildCommand": "npm --prefix ../ui run build"
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "label": "main",
-        "title": "Ormah",
-        "url": "index.html",
-        "width": 1180,
-        "height": 820,
-        "minWidth": 860,
-        "minHeight": 600,
-        "center": true,
-        "visible": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
