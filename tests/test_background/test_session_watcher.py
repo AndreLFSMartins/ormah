@@ -163,6 +163,43 @@ def test_ingest_session_basic(engine, tmp_path):
     assert len(entry["node_ids"]) == 1
 
 
+def test_subagent_transcript_is_not_ingested(engine, tmp_path):
+    """Subagent transcripts (<uuid>/subagents/agent-*.jsonl) are internal agent scratch.
+
+    They must never be ingested as memories, even with turns above min_turns — otherwise
+    every Task-tool spawn balloons the store with low-value granular memories.
+    """
+    watch_dir = tmp_path / "projects"
+    sub_dir = watch_dir / "-Users-alice-Code-myproject" / "abc123" / "subagents"
+    sub_dir.mkdir(parents=True)
+    jsonl = sub_dir / "agent-deadbeef.jsonl"
+    _make_jsonl(jsonl, user_turns=6)  # well above min_turns
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    assert result is False
+    assert state == {}
+
+
+def test_scan_skips_subagents_keeps_primary(engine, tmp_path):
+    """A scan ingests the primary session transcript but skips sibling subagent transcripts."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    sub_dir = project_dir / "abc123" / "subagents"
+    sub_dir.mkdir(parents=True)
+    _make_jsonl(project_dir / "abc123.jsonl", user_turns=6)
+    _make_jsonl(sub_dir / "agent-deadbeef.jsonl", user_turns=6)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        ingested = _scan_sessions(engine, watch_dir, min_turns=5, lookback_hours=9999)
+
+    assert ingested == 1
+    state = _load_state(watch_dir)
+    assert "subagents" not in str(list(state.keys()))
+
+
 def test_ingest_codex_session_resolves_rollout_session_id_and_space(engine, tmp_path):
     """Codex rollout filenames are matched back to the whisper_log hook session id."""
     watch_dir = tmp_path / ".codex" / "sessions"
