@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     session_watcher_debounce_seconds: float = 60.0
     session_watcher_min_turns: int = 5
     session_watcher_lookback_hours: int = 72
+    session_watcher_idle_threshold: float = 30.0
 
     # Tier limits
     core_memory_cap: int = 50

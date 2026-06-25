@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -46,11 +47,21 @@ def _make_jsonl(path: Path, user_turns: int = 6) -> None:
         }))
         lines.append(json.dumps({
             "type": "assistant",
-            "message": {"role": "assistant", "content": [
+            "message": {"role": "assistant", "stop_reason": "end_turn", "content": [
                 {"type": "text", "text": f"Assistant response {i} with some detail"},
             ]},
         }))
     path.write_text("\n".join(lines) + "\n")
+
+
+def _mark_idle(path: Path) -> None:
+    """Backdate mtime so _ingest_session treats the transcript as finished (idle flush).
+
+    A fresh file is considered active, so its trailing user+assistant block is held back
+    until a following user turn (or the idle flush) confirms the response is complete.
+    """
+    now = time.time()
+    os.utime(path, (now, now - 120))
 
 
 def _write_turn_jsonl(path: Path, prompt: str, response: str) -> None:
@@ -63,6 +74,7 @@ def _write_turn_jsonl(path: Path, prompt: str, response: str) -> None:
             "type": "assistant",
             "message": {
                 "role": "assistant",
+                "stop_reason": "end_turn",
                 "content": [{"type": "text", "text": response}],
             },
         },
@@ -88,6 +100,7 @@ def _write_codex_turn_jsonl(path: Path, prompt: str, response: str) -> None:
                 "content": [{"type": "output_text", "text": response}],
             },
         },
+        {"type": "event_msg", "payload": {"type": "task_complete"}},  # closes the turn
     ]
     path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
 
@@ -163,6 +176,7 @@ def test_ingest_codex_session_resolves_rollout_session_id_and_space(engine, tmp_
         "instead of trusting the transcript filename stem."
     )
     _write_codex_turn_jsonl(jsonl, prompt, response)
+    _mark_idle(jsonl)  # finished single-turn session → idle flush
 
     node_id, _ = engine.remember(CreateNodeRequest(
         content="Codex watcher rollout filenames should be resolved through whisper_log session ids.",
@@ -204,6 +218,7 @@ def test_ingest_codex_session_without_whisper_log_does_not_infer_date_space(engi
     transcript_dir.mkdir(parents=True)
     jsonl = transcript_dir / "rollout-2026-06-24T12-00-00-no-log.jsonl"
     _write_codex_turn_jsonl(jsonl, "Prompt with enough content", "Response with enough content")
+    _mark_idle(jsonl)  # finished single-turn session → idle flush
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
@@ -885,3 +900,458 @@ def test_shrink_resets_cursor(engine, tmp_path):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
 
     assert "User message 0 " in captured[1]
+
+
+# --- New tests: safe-payload ingest, idle flush + retry, in-flight guard ---
+
+
+def _append_pair(path, i):
+    with path.open("a") as f:
+        f.write(json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": f"User message {i} with enough text to parse"},
+        }) + "\n")
+        f.write(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": "end_turn", "content": [
+                {"type": "text", "text": f"Assistant response {i} with some detail"},
+            ]},
+        }) + "\n")
+
+
+def _append_user(path, i):
+    with path.open("a") as f:
+        f.write(json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": f"User message {i} with enough text to parse"},
+        }) + "\n")
+
+
+def _append_assistant(path, i, stop_reason="end_turn"):
+    """Append one assistant text record. stop_reason=None / "tool_use" marks it as a
+    non-terminal record of a still-open response (more records to come)."""
+    with path.open("a") as f:
+        f.write(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": stop_reason, "content": [
+                {"type": "text", "text": f"Assistant response {i} with some detail"},
+            ]},
+        }) + "\n")
+
+
+def _append_codex_turn(path, i, *, records=1, complete=True):
+    """Append a Codex turn: a user message, `records` assistant text records (multi-record
+    when >1), and a task_complete event unless `complete=False` (still in flight)."""
+    with path.open("a") as f:
+        f.write(json.dumps({"type": "response_item", "payload": {"type": "message",
+            "role": "user", "content": [
+                {"type": "input_text", "text": f"User message {i} with enough text to parse"}]}}) + "\n")
+        for r in range(records):
+            f.write(json.dumps({"type": "response_item", "payload": {"type": "message",
+                "role": "assistant", "content": [
+                    {"type": "output_text", "text": f"Assistant response {i} part {r} detail"}]}}) + "\n")
+        if complete:
+            f.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n")
+
+
+def test_inflight_multirecord_response_not_split(engine, tmp_path):
+    """An in-flight response (non-terminal stop_reason) is held back until its terminal
+    record arrives, so a multi-record assistant response is never split from its prompt.
+    Claude Code detects completion via stop_reason, not the next user turn.
+    """
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    rel = str(jsonl.relative_to(watch_dir))
+
+    _make_jsonl(jsonl, user_turns=6)  # 6 complete (end_turn) pairs
+    state = {}
+    captured: list[str] = []
+    real_ingest = engine.ingest_conversation
+
+    def capture(content, **kwargs):
+        captured.append(content)
+        return real_ingest(content=content, **kwargs)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=capture):
+        # Every pair is terminal -> all committed; the cursor sits after the last one.
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        cursor1 = state[rel]["end_offset"]
+
+        # New turn: prompt + a FIRST assistant record still in flight (tool_use). The
+        # response is not complete, so nothing new commits and the cursor must not move
+        # into the middle of the response.
+        _append_user(jsonl, 6)
+        _append_assistant(jsonl, 6, stop_reason="tool_use")
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is False
+        assert state[rel]["end_offset"] == cursor1
+
+        # The response completes with a terminal record: prompt + BOTH assistant records
+        # commit together — never split.
+        _append_assistant(jsonl, 6, stop_reason="end_turn")
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+
+    committed = captured[-1]
+    assert "User message 6 " in committed
+    assert committed.count("Assistant response 6 ") == 2  # both records, not split
+    assert state[rel]["end_offset"] > cursor1
+
+
+def test_codex_multirecord_turn_committed_whole_via_task_complete(engine, tmp_path):
+    """A multi-record Codex turn commits as one block at its task_complete; an in-flight
+    turn (no task_complete yet) is held back, never split."""
+    watch_dir = tmp_path / ".codex" / "sessions"
+    transcript_dir = watch_dir / "2026" / "06" / "25"
+    transcript_dir.mkdir(parents=True)
+    jsonl = transcript_dir / "rollout-2026-06-25T12-00-00-sess-multi.jsonl"
+
+    _append_codex_turn(jsonl, 0, records=3, complete=True)
+    _append_codex_turn(jsonl, 1, records=2, complete=True)
+    # In-flight final turn: two assistant records, no task_complete yet.
+    _append_codex_turn(jsonl, 2, records=2, complete=False)
+
+    state = {}
+    captured: list[str] = []
+    real_ingest = engine.ingest_conversation
+
+    def capture(content, **kwargs):
+        captured.append(content)
+        return real_ingest(content=content, **kwargs)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=capture):
+        # Fresh/active: the two task_complete turns commit whole; the in-flight one waits.
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+
+    committed = captured[-1]
+    assert committed.count("Assistant response 0 part ") == 3  # turn 0 not split
+    assert committed.count("Assistant response 1 part ") == 2  # turn 1 not split
+    assert "User message 2 " not in committed                  # in-flight turn held back
+
+
+def test_legacy_mid_response_cursor_recovered(engine, tmp_path):
+    """A watcher cursor an older version left BETWEEN two assistant records of one response
+    triggers a full re-parse so the tail is recovered with its prompt — not orphaned."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    rel = str(jsonl.relative_to(watch_dir))
+
+    records = [
+        {"type": "user", "message": {"role": "user",
+            "content": "Prompt with the memory detail and enough text to parse"}},
+        {"type": "assistant", "message": {"role": "assistant", "stop_reason": "tool_use",
+            "content": [{"type": "text", "text": "First part of the response"}]}},
+        {"type": "assistant", "message": {"role": "assistant", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Second part with the actual answer"}]}},
+    ]
+    jsonl.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    # A legacy state cursor saved mid-response (after the first assistant record), with the
+    # CORRECT file hash — the file is unchanged. Recovery must still fire because the stored
+    # offset is behind EOF (the hash short-circuit only skips a fully-consumed file).
+    from ormah.background.session_watcher import _file_hash
+    raw = jsonl.read_bytes().splitlines(keepends=True)
+    mid = len(raw[0]) + len(raw[1])
+    state = {rel: {"end_offset": mid, "hash": _file_hash(jsonl), "node_ids": [], "user_turns": 1}}
+
+    captured: list[str] = []
+    real_ingest = engine.ingest_conversation
+
+    def capture(content, **kwargs):
+        captured.append(content)
+        return real_ingest(content=content, **kwargs)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=capture):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+
+    committed = captured[-1]
+    assert "Prompt with the memory detail" in committed   # prompt recovered
+    assert "First part of the response" in committed       # both response records,
+    assert "Second part with the actual answer" in committed  # paired with the prompt
+    assert state[rel]["end_offset"] > mid
+
+    # Recovery is one-time: the cursor is now a safe boundary (file fully consumed), so a
+    # second pass on the unchanged file skips without re-recovering.
+    assert state[rel]["end_offset"] == jsonl.stat().st_size
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is False
+
+
+def test_codex_inflight_turn_not_split_on_idle(engine, tmp_path):
+    """An in-flight Codex turn (no task_complete yet) is held back even when the file
+    looks idle — there is no idle flush that could split it."""
+    watch_dir = tmp_path / ".codex" / "sessions"
+    transcript_dir = watch_dir / "2026" / "06" / "25"
+    transcript_dir.mkdir(parents=True)
+    jsonl = transcript_dir / "rollout-2026-06-25T12-30-00-sess-sticky.jsonl"
+    rel = str(jsonl.relative_to(watch_dir))
+
+    _append_codex_turn(jsonl, 0, records=2, complete=True)
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+    cursor = state[rel]["end_offset"]
+
+    # In-flight multi-record turn, file now idle. The turn has no closure signal, so it is
+    # held back — never flushed mid-response.
+    _append_codex_turn(jsonl, 1, records=2, complete=False)
+    now = time.time()
+    os.utime(jsonl, (now, now - 120))
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1,
+                               idle_threshold=30) is False
+    assert state[rel]["end_offset"] == cursor
+
+
+def test_idle_tail_with_dangling_user_no_duplicate(engine, tmp_path):
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+
+    _make_jsonl(jsonl, user_turns=6)
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    _append_pair(jsonl, 6)
+    _append_pair(jsonl, 7)
+    _append_user(jsonl, 8)
+    now = time.time()
+    os.utime(jsonl, (now, now - 120))
+
+    captured = []
+    real_ingest = engine.ingest_conversation
+
+    def capture(content, **kwargs):
+        captured.append(content)
+        return real_ingest(content=content, **kwargs)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=capture):
+        assert _ingest_session(
+            engine, jsonl, state, watch_dir, min_turns=5, idle_threshold=30
+        ) is True
+        assert "User message 8 " not in captured[-1]
+
+        _append_assistant(jsonl, 8)
+        now2 = time.time()
+        os.utime(jsonl, (now2, now2 - 120))
+        assert _ingest_session(
+            engine, jsonl, state, watch_dir, min_turns=1, idle_threshold=30
+        ) is True
+
+    joined = "\n".join(captured)
+    assert joined.count("User message 8 ") == 1
+
+
+def test_session_tail_idle_ingested(engine, tmp_path):
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+
+    _make_jsonl(jsonl, user_turns=6)
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    _append_pair(jsonl, 6)
+    _append_pair(jsonl, 7)
+    now = time.time()
+    os.utime(jsonl, (now, now - 120))
+
+    calls = 0
+    real_ingest = engine.ingest_conversation
+
+    def counting(content, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_ingest(content=content, **kwargs)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=counting):
+        assert _ingest_session(
+            engine, jsonl, state, watch_dir, min_turns=5, idle_threshold=30
+        ) is True
+    assert calls == 1
+
+
+def test_retry_fires_and_ingests_after_idle(engine, tmp_path):
+    from ormah.background import session_watcher as sw
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+
+    _make_jsonl(jsonl, user_turns=6)
+
+    captured_timers = []
+
+    class FakeTimer:
+        def __init__(self, delay, fn, args=()):
+            self.delay = delay
+            self.fn = fn
+            self.args = args
+            self.daemon = False
+        def start(self):
+            captured_timers.append(self)
+        def cancel(self):
+            pass
+
+    calls = 0
+    real_ingest = engine.ingest_conversation
+
+    def counting(content, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_ingest(content=content, **kwargs)
+
+    # Seed state outside counting context so the initial 6-pair ingest is not counted.
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(sw, "Timer", FakeTimer):
+        handler = sw.SessionHandler(
+            engine, watch_dir, debounce_seconds=60, min_turns=5, idle_threshold=30,
+        )
+        sw._ingest_session(engine, jsonl, handler._state, watch_dir, min_turns=5)
+
+    _append_pair(jsonl, 6)
+    _append_pair(jsonl, 7)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=counting), \
+         patch.object(sw, "Timer", FakeTimer):
+        handler._do_ingest(jsonl)
+        assert calls == 0
+        assert len(captured_timers) == 1
+        assert captured_timers[0].delay == 30
+
+        now = time.time()
+        os.utime(jsonl, (now, now - 120))
+        timer = captured_timers[0]
+        timer.fn(*timer.args)
+
+    assert calls == 1
+
+
+def test_concurrent_ingest_skipped(engine, tmp_path):
+    import threading
+    from ormah.background import session_watcher as sw
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def blocking_ingest(content, **kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        release.wait(timeout=5)
+        return []
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=blocking_ingest):
+        handler = sw.SessionHandler(
+            engine, watch_dir, debounce_seconds=60, min_turns=5, idle_threshold=30,
+        )
+        t1 = threading.Thread(target=handler._do_ingest, args=(jsonl,))
+        t1.start()
+        assert started.wait(timeout=5)
+        handler._do_ingest(jsonl)
+        release.set()
+        t1.join(timeout=5)
+
+    assert calls == 1
+
+
+# --- Test 19: in-flight skip reschedules the dropped event (no lost tail) ---
+
+def test_inflight_skip_reschedules(engine, tmp_path):
+    """A modify event skipped because an ingest is in flight must be rescheduled, not dropped."""
+    import threading
+
+    from ormah.background import session_watcher as sw
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+
+    scheduled = []
+
+    class FakeTimer:
+        def __init__(self, delay, fn, args=()):
+            self.delay = delay
+            self.fn = fn
+            self.args = args
+            self.daemon = False
+        def start(self):
+            scheduled.append(self)
+        def cancel(self):
+            pass
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_ingest(content, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return []
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(engine, "ingest_conversation", side_effect=blocking_ingest), \
+         patch.object(sw, "Timer", FakeTimer):
+        handler = sw.SessionHandler(
+            engine, watch_dir, debounce_seconds=60, min_turns=5, idle_threshold=30,
+        )
+        t1 = threading.Thread(target=handler._do_ingest, args=(jsonl,))
+        t1.start()
+        assert started.wait(timeout=5)   # ingest A is in flight
+        handler._do_ingest(jsonl)        # skipped — must mark pending
+        assert scheduled == []           # nothing rescheduled while A still runs
+        release.set()
+        t1.join(timeout=5)
+
+    # After A finishes, the skipped event was rescheduled as a fresh debounce
+    assert len(scheduled) == 1
+    assert scheduled[0].delay == 60
+
+
+# --- Test 20: shrink resets node_ids provenance, not just turn count ---
+
+def test_shrink_resets_node_ids(engine, tmp_path):
+    """A file that shrinks below the stored offset must not carry stale node_ids forward."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "active.jsonl"
+    rel = str(jsonl.relative_to(watch_dir))
+
+    _make_jsonl(jsonl, user_turns=10)
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+    first_nodes = list(state[rel]["node_ids"])
+    assert first_nodes  # first ingest produced at least one node
+
+    _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset → full re-ingest
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+
+    # Full re-ingest (prev_offset reset to 0): stale node_ids must not be concatenated,
+    # so the stored provenance carries no duplicates.
+    nodes = state[rel]["node_ids"]
+    assert len(nodes) == len(set(nodes))

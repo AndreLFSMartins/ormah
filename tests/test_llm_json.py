@@ -59,9 +59,11 @@ def test_auto_linker_recovers_fenced_response_instead_of_poisoning():
     assert result["relationship"] != "error"
 
 
-def test_auto_linker_returns_none_on_unparseable_output():
-    """Genuinely unparseable output (no JSON anywhere) still yields no link —
-    fence tolerance must not turn garbage into a spurious relationship."""
+def test_auto_linker_treats_unparseable_output_as_poison():
+    """Genuinely unparseable output (no JSON anywhere) yields an "error" result, never a
+    spurious real relationship. The caller treats "error" like "none" (no edge) but counts
+    the node as resolved so the watermark advances — poison content must not stall the queue.
+    This is distinct from a transient None (LLM unavailable), which leaves the node unresolved."""
     from ormah.background import auto_linker
 
     node = {"title": "A", "type": "fact", "space": "x", "content": "ca"}
@@ -72,4 +74,5 @@ def test_auto_linker_returns_none_on_unparseable_output():
     ):
         result = auto_linker._llm_classify_link(mock.Mock(), node, other)
 
-    assert result is None
+    assert result is not None
+    assert result["relationship"] == "error"
