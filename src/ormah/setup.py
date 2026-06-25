@@ -970,7 +970,10 @@ def _discover_transcripts() -> list[tuple[Path, str | None]]:
 
     Returns list of (path, space_name) tuples.
     """
-    from ormah.background.session_watcher import _space_from_encoded_dir
+    from ormah.background.session_watcher import (
+        _is_subagent_transcript,
+        _space_from_encoded_dir,
+    )
 
     projects_dir = Path.home() / ".claude" / "projects"
     if not projects_dir.exists():
@@ -978,6 +981,8 @@ def _discover_transcripts() -> list[tuple[Path, str | None]]:
 
     transcripts: list[tuple[Path, str | None, float]] = []
     for jsonl_file in projects_dir.rglob("*.jsonl"):
+        if _is_subagent_transcript(jsonl_file):
+            continue  # internal agent scratch — never backfill (see session_watcher)
         try:
             mtime = jsonl_file.stat().st_mtime
         except OSError:

@@ -25,6 +25,7 @@ from ormah.setup import (
     CODEX_AGENTS_SENTINEL_START,
     CLAUDE_MD_SENTINEL_END,
     CLAUDE_MD_SENTINEL_START,
+    _discover_transcripts,
     _merge_json_file,
     _preload_local_models,
     _print_setup_summary,
@@ -52,6 +53,25 @@ from ormah.setup import (
     run_setup,
     run_uninstall,
 )
+
+
+class TestDiscoverTranscripts:
+    def test_skips_subagent_transcripts(self, tmp_path):
+        """Backfill discovery must not surface subagent scratch transcripts."""
+        projects = tmp_path / ".claude" / "projects"
+        primary = projects / "-Users-alice-Code-myproject" / "abc123.jsonl"
+        subagent = projects / "-Users-alice-Code-myproject" / "abc123" / "subagents" / "agent-x.jsonl"
+        primary.parent.mkdir(parents=True)
+        subagent.parent.mkdir(parents=True)
+        primary.write_text("{}\n")
+        subagent.write_text("{}\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            found = _discover_transcripts()
+
+        paths = [p for p, _ in found]
+        assert primary in paths
+        assert subagent not in paths
 
 
 # --- server_manager tests ---
