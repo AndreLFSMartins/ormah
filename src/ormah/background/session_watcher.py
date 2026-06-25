@@ -562,6 +562,15 @@ def _record_whisper_usage_signals(
     return recorded
 
 
+def _is_subagent_transcript(path: Path) -> bool:
+    """True for subagent transcripts (Claude Code writes them under ``<uuid>/subagents/``).
+
+    These are internal agent scratch, not user-facing sessions — ingesting them balloons
+    the store with low-value granular memories under a junk ``subagents`` space.
+    """
+    return path.parent.name == "subagents"
+
+
 def _space_from_encoded_dir(dirname: str) -> str | None:
     """Extract project space from an encoded transcript directory name.
 
@@ -706,6 +715,8 @@ def _ingest_session(
     on_defer_active=None,
 ) -> bool:
     """Ingest a single JSONL session transcript if changed. Returns True if ingested."""
+    if _is_subagent_transcript(path):
+        return False
     rel = str(path.relative_to(watch_dir))
 
     try:
@@ -948,11 +959,15 @@ class SessionHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".jsonl"):
-            self._schedule_ingest(Path(event.src_path))
+            path = Path(event.src_path)
+            if not _is_subagent_transcript(path):
+                self._schedule_ingest(path)
 
     def on_modified(self, event):
         if not event.is_directory and event.src_path.endswith(".jsonl"):
-            self._schedule_ingest(Path(event.src_path))
+            path = Path(event.src_path)
+            if not _is_subagent_transcript(path):
+                self._schedule_ingest(path)
 
 
 def start_session_watcher(engine: MemoryEngine) -> list[Observer]:
