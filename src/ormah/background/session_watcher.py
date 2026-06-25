@@ -566,9 +566,10 @@ def _is_subagent_transcript(path: Path) -> bool:
     """True for subagent transcripts (Claude Code writes them under ``<uuid>/subagents/``).
 
     These are internal agent scratch, not user-facing sessions — ingesting them balloons
-    the store with low-value granular memories under a junk ``subagents`` space.
+    the store with low-value granular memories under a junk ``subagents`` space. Matches a
+    ``subagents`` segment at any depth so nested layouts are covered too.
     """
-    return path.parent.name == "subagents"
+    return "subagents" in path.parts
 
 
 def _space_from_encoded_dir(dirname: str) -> str | None:

@@ -197,7 +197,8 @@ def test_scan_skips_subagents_keeps_primary(engine, tmp_path):
 
     assert ingested == 1
     state = _load_state(watch_dir)
-    assert "subagents" not in str(list(state.keys()))
+    sub_rel = str((sub_dir / "agent-deadbeef.jsonl").relative_to(watch_dir))
+    assert sub_rel not in state
 
 
 def test_ingest_codex_session_resolves_rollout_session_id_and_space(engine, tmp_path):
