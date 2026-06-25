@@ -80,6 +80,39 @@ Required GitHub secrets:
 Also set `plugins.updater.pubkey` in `tauri.conf.json` to the matching public
 key, and point `plugins.updater.endpoints` at where you host the appcast.
 
+## Stage 2: bundled runtime + keeping whisper working
+
+The app's one-click setup runs `ormah setup --json`, which wires **MCP and the
+whisper hooks** into Claude Code / Codex:
+
+- `UserPromptSubmit` → `<ormah_bin> whisper inject` (involuntary recall)
+- `PreCompact` / `SessionEnd` → `<ormah_bin> whisper store`
+
+These hooks run inside the *agent's* process, not the app, so `<ormah_bin>` must
+be a **stable executable on the user's machine**. For the dev / `curl` install
+that's `~/.local/bin/ormah` and whisper works as-is. For a fully **bundled** app
+(non-devs with no system `ormah`), the in-bundle binary is **not** a stable
+path:
+
+- An **AppImage** mounts at a fresh `/tmp/.mount_xxxx` every launch, so a hook
+  pointing at the in-bundle binary breaks on the next run.
+- The hook CLI also needs the server's `ORMAH_PORT`; if the bundled app doesn't
+  use the default port, `whisper inject` would hit the wrong server.
+
+**Required Stage-2 work so whisper survives in the bundled app:**
+
+1. On setup, install a **stable CLI shim on `PATH`** — e.g. `~/.local/bin/ormah`
+   — a tiny launcher that `exec`s the bundled `ormah-server` with the app's
+   `ORMAH_PORT` exported. Point the whisper hooks at this shim, not the
+   ephemeral bundle path.
+2. Make setup **port-aware**: write the shim/hooks with the same port the
+   bundled server runs on (and decide that port — see Risks: 8787 clashes with a
+   dev's existing server).
+3. Re-run/refresh the shim on app update so the path/port stay correct.
+
+Until this lands, whisper only works when a real `ormah` CLI is already on
+`PATH` (the dev/`curl` install).
+
 ## Risks / known follow-ups
 
 - **Bundling rabbit hole** — `sqlite-vec`, `sentence-transformers`/`torch`, and
@@ -95,9 +128,14 @@ key, and point `plugins.updater.endpoints` at where you host the appcast.
 
 ## Verification status
 
-The Rust shell, configs, scripts, CI, and onboarding UI in this directory were
-authored on Linux and are **not yet compiled or run** — they require a Mac.
-What *is* tested (in the main pytest suite) is everything the app depends on:
+The app **builds and runs on Linux** (`cargo build` + `cargo tauri dev`/run):
+intro → install flow → in-app graph all work against a server with the F10
+endpoints. The **macOS** build (`.dmg`, signing, notarization) still needs a Mac
+or the CI runner. **Stage 2** (frozen-runtime bundling + the whisper CLI shim
+above) is not done yet, so today the app relies on a real `ormah` already on
+`PATH`.
+
+Backend the app depends on is covered by the pytest suite:
 
 - `GET /agent/stats` — `tests/test_api/test_stats.py`
-- `ormah setup --json` (`detect_clients`, `run_setup_json`) — `tests/test_setup_json.py`
+- `GET /agent/clients` + `ormah setup --json` — `tests/test_api/test_stats.py`, `tests/test_setup_json.py`
