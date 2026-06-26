@@ -284,3 +284,23 @@ def test_consolidation_max_nodes_zero_rejected():
 def test_consolidation_inverted_bounds_rejected():
     with pytest.raises(ValidationError, match="consolidation_max_cluster_nodes"):
         _settings(consolidation_min_cluster_size=3, consolidation_max_cluster_nodes=2)
+
+
+# --- Session watcher reconcile (#34) ---
+
+def test_reconcile_interval_default_is_five():
+    assert _settings().session_watcher_reconcile_interval_minutes == 5
+
+
+def test_reconcile_interval_must_be_positive():
+    with pytest.raises(ValidationError):
+        _settings(session_watcher_reconcile_interval_minutes=0)
+
+
+def test_reconcile_cap_default_is_fifty():
+    assert _settings().session_watcher_reconcile_max_per_tick == 50
+
+
+def test_reconcile_cap_must_be_positive():
+    with pytest.raises(ValidationError):
+        _settings(session_watcher_reconcile_max_per_tick=0)
