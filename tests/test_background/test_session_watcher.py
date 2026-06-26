@@ -1693,6 +1693,124 @@ def test_reconcile_never_parks_transient_failures(engine, tmp_path):
     assert handler._reconcile_attempts.get(rel) is None
 
 
+# --- Council-PR H1/H2: change-token park key + TRANSIENT deprioritization ---
+
+def test_reconcile_unparks_after_same_size_content_change(engine, tmp_path):
+    """H1: a same-byte-size content rewrite (new mtime) un-parks a NO_PROGRESS file.
+
+    If a parked file's content is repaired but byte length is unchanged, the mtime_ns
+    changes. The new (size, mtime_ns) token differs from the parked token, so the file
+    is un-parked and _do_ingest is called again on the next tick.
+    """
+    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    # Seed state: seen file with a pending tail (cursor behind EOF).
+    handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    ingest_calls = {"n": 0}
+
+    def always_no_progress(path):
+        ingest_calls["n"] += 1
+        return IngestResult.NO_PROGRESS
+
+    handler._do_ingest = always_no_progress
+
+    # Drive reconcile MAX_RECONCILE_RETRIES times to park the file.
+    for _ in range(MAX_RECONCILE_RETRIES):
+        handler.reconcile()
+    assert ingest_calls["n"] == MAX_RECONCILE_RETRIES
+
+    # File is now parked: further reconcile calls must NOT call _do_ingest.
+    handler.reconcile()
+    assert ingest_calls["n"] == MAX_RECONCILE_RETRIES  # count did not increase → parked
+
+    # Rewrite with identical byte size but a bumped mtime (content changed, size unchanged).
+    original_size = jsonl.stat().st_size
+    content = jsonl.read_bytes()
+    jsonl.write_bytes(content)  # same bytes = same size; write bumps mtime_ns
+    assert jsonl.stat().st_size == original_size  # size unchanged — regression guard
+
+    # Now reconcile must call _do_ingest again (token changed → un-parked).
+    handler.reconcile()
+    assert ingest_calls["n"] == MAX_RECONCILE_RETRIES + 1
+
+
+def test_reconcile_deprioritizes_persistent_transient_behind_valid(engine, tmp_path):
+    """H2: files that keep returning TRANSIENT are deprioritized, not starved-out, so an
+    older valid file is still ingested within a bounded number of ticks.
+
+    Setup: cap=2 newest files → always TRANSIENT; 1 older file → returns OK.
+    After TRANSIENT files cross MAX_RECONCILE_RETRIES ticks at their token, they sort
+    behind the valid file and the valid file is ingested.
+    """
+    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+
+    cap = 2
+    engine.settings.session_watcher_reconcile_max_per_tick = cap
+
+    now = time.time()
+
+    # Two newest TRANSIENT files.
+    transient_files = []
+    for i in range(cap):
+        p = project_dir / f"new-{i:03d}.jsonl"
+        _make_jsonl(p, user_turns=6)
+        mtime = now - i  # newest first (decreasing by 1s)
+        os.utime(p, (mtime, mtime))
+        transient_files.append(p)
+
+    # One older valid file.
+    valid = project_dir / "old-valid.jsonl"
+    _make_jsonl(valid, user_turns=6)
+    old_mtime = now - 1000  # clearly older
+    os.utime(valid, (old_mtime, old_mtime))
+    rel_valid = str(valid.relative_to(watch_dir))
+
+    # Seed all as seen with a pending tail.
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    for p in transient_files + [valid]:
+        rel = str(p.relative_to(watch_dir))
+        handler._state[rel] = {"hash": "x", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    transient_paths = {str(p) for p in transient_files}
+    valid_path = str(valid)
+    ingested_paths: list[str] = []
+
+    def selective_ingest(path):
+        ingested_paths.append(str(path))
+        if str(path) in transient_paths:
+            return IngestResult.TRANSIENT
+        return IngestResult.OK
+
+    handler._do_ingest = selective_ingest
+
+    # Run enough ticks for TRANSIENT files to cross MAX_RECONCILE_RETRIES at their token
+    # and become deprioritized, then for the valid file to be picked up.
+    max_ticks = MAX_RECONCILE_RETRIES + 3
+    for _ in range(max_ticks):
+        handler.reconcile()
+        if valid_path in ingested_paths:
+            break
+
+    assert valid_path in ingested_paths, (
+        f"Valid file was never ingested after {max_ticks} ticks — it was starved. "
+        f"ingested_paths={ingested_paths}"
+    )
+
+
 # --- Council-PR F2/F3: per-tick time budget + lookback<0 never-seen guard ---
 
 def test_reconcile_respects_per_tick_time_budget(engine, tmp_path):
