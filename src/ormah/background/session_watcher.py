@@ -982,8 +982,10 @@ class SessionHandler(FileSystemEventHandler):
         never-seen (within lookback) or a state cursor not at EOF — then routes up to
         ``session_watcher_reconcile_max_per_tick`` of them through ``self._do_ingest`` (the
         single state owner, so no clobber / no double-ingest). A file with a pending or failed
-        tail (``end_offset != size``) is re-checked every tick until fully consumed, so a
-        transient ingest failure never strands it. Returns transcripts recovered.
+        tail (``end_offset != size``) is retried each tick — bounded to
+        ``MAX_RECONCILE_RETRIES`` attempts per size so an abandoned in-flight tail is not
+        re-hashed forever — so a transient ingest failure never strands it. Returns
+        transcripts recovered.
         """
         cutoff = time.time() - (self.lookback_hours * 3600) if self.lookback_hours > 0 else 0
         cap = self.engine.settings.session_watcher_reconcile_max_per_tick
