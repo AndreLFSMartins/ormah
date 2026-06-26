@@ -720,6 +720,7 @@ def _ingest_session(
     min_turns: int,
     idle_threshold: float = 30.0,
     on_defer_active=None,
+    state_lock=None,
 ) -> bool:
     """Ingest a single JSONL session transcript if changed. Returns True if ingested."""
     if _is_subagent_transcript(path):
@@ -825,7 +826,7 @@ def _ingest_session(
     prev_node_ids = existing.get("node_ids", []) if carry else []
     prev_turns = existing.get("user_turns", 0) if carry else 0
 
-    state[rel] = {
+    entry = {
         "hash": h,
         "end_offset": payload_offset,
         "last_ingested": datetime.now(timezone.utc).isoformat(),
@@ -836,7 +837,13 @@ def _ingest_session(
         "node_ids": prev_node_ids + new_node_ids,
         "signals_recorded": signals_recorded,
     }
-    _save_state(watch_dir, state)
+    if state_lock is not None:
+        with state_lock:
+            state[rel] = entry
+            _save_state(watch_dir, state)
+    else:
+        state[rel] = entry
+        _save_state(watch_dir, state)
 
     logger.info(
         "Session watcher ingested %s (%d new turns, %d memories extracted, %d signals recorded)",
@@ -900,17 +907,20 @@ class SessionHandler(FileSystemEventHandler):
         debounce_seconds: float,
         min_turns: int,
         idle_threshold: float = 30.0,
+        lookback_hours: int = 72,
     ) -> None:
         self.engine = engine
         self.watch_dir = watch_dir
         self.debounce_seconds = debounce_seconds
         self.min_turns = min_turns
         self.idle_threshold = idle_threshold
+        self.lookback_hours = lookback_hours
         self._state = _load_state(watch_dir)
         self._timers: dict[str, Timer] = {}
         self._ingesting: set[str] = set()
         self._pending: set[str] = set()
         self._lock = Lock()
+        self._state_lock = Lock()
 
     def _schedule_ingest(self, path: Path) -> None:
         """Schedule a debounced ingestion for the given file."""
@@ -938,23 +948,27 @@ class SessionHandler(FileSystemEventHandler):
             self._timers[key] = timer
             timer.start()
 
-    def _do_ingest(self, path: Path) -> None:
-        """Actually ingest the session (called after debounce or retry)."""
+    def _do_ingest(self, path: Path) -> bool:
+        """Ingest the session (after debounce, retry, or reconcile). Returns True if ingested.
+
+        The heavy work (parse/LLM/DB) runs lock-free; only the state read-modify-write
+        serializes via ``self._state_lock`` (passed into ``_ingest_session``), so a backlog
+        reconcile never blocks the live fast path.
+        """
         key = str(path)
         with self._lock:
             self._timers.pop(key, None)
             if key in self._ingesting:
-                # An ingest for this path is already running and has already parsed
-                # its slice; mark the path so the new content is re-ingested once it
-                # finishes, instead of dropping this event.
                 self._pending.add(key)
-                return
+                return False
             self._ingesting.add(key)
+        ingested = False
         try:
-            _ingest_session(
+            ingested = _ingest_session(
                 self.engine, path, self._state, self.watch_dir, self.min_turns,
                 idle_threshold=self.idle_threshold,
                 on_defer_active=lambda: self._schedule_retry(path),
+                state_lock=self._state_lock,
             )
         finally:
             with self._lock:
@@ -962,7 +976,8 @@ class SessionHandler(FileSystemEventHandler):
                 rerun = key in self._pending
                 self._pending.discard(key)
         if rerun:
-            self._schedule_ingest(path)  # re-process content that arrived mid-ingest
+            self._schedule_ingest(path)
+        return bool(ingested)
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".jsonl"):

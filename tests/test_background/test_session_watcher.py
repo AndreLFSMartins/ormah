@@ -1393,3 +1393,18 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     # so the stored provenance carries no duplicates.
     nodes = state[rel]["node_ids"]
     assert len(nodes) == len(set(nodes))
+
+
+def test_do_ingest_returns_true_when_it_ingests(engine, tmp_path):
+    """_do_ingest reports whether it ingested, so reconcile can count recoveries."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler._do_ingest(jsonl) is True
+        assert handler._do_ingest(jsonl) is False  # nothing new the second time
