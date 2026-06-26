@@ -1810,6 +1810,51 @@ def test_reconcile_deprioritizes_persistent_transient_behind_valid(engine, tmp_p
     )
 
 
+def test_reconcile_deprioritized_transients_retried_oldest_first(engine, tmp_path):
+    """H2': among already-deprioritized TRANSIENT files, the OLDEST is retried first (FIFO).
+
+    Non-deprioritized candidates sort newest-first (fresh drops recover soonest), but within the
+    deprioritized group oldest-first avoids a long-failing transient that just became recoverable
+    being starved behind newer deprioritized peers.
+    """
+    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    now = time.time()
+
+    older = project_dir / "older.jsonl"
+    newer = project_dir / "newer.jsonl"
+    _make_jsonl(older, user_turns=6)
+    _make_jsonl(newer, user_turns=6)
+    os.utime(older, (now - 1000, now - 1000))
+    os.utime(newer, (now - 1, now - 1))
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler.engine.settings.session_watcher_reconcile_max_per_tick = 1  # one slot per tick
+
+    # Seed both as seen-pending AND already deprioritized at their current token.
+    for p in (older, newer):
+        rel = str(p.relative_to(watch_dir))
+        st = p.stat()
+        handler._state[rel] = {"hash": "x", "end_offset": 0, "node_ids": [], "user_turns": 0}
+        handler._reconcile_transient[rel] = (st.st_size, st.st_mtime_ns, MAX_RECONCILE_RETRIES)
+
+    calls: list[str] = []
+
+    def record_ingest(path):
+        calls.append(str(path))
+        return IngestResult.TRANSIENT
+
+    handler._do_ingest = record_ingest
+    handler.reconcile()  # cap=1 -> only the first-sorted deprioritized candidate runs
+
+    assert calls == [str(older)], (
+        f"Oldest deprioritized file should be retried first (FIFO), got {calls}"
+    )
+
+
 # --- Council-PR F2/F3: per-tick time budget + lookback<0 never-seen guard ---
 
 def test_reconcile_respects_per_tick_time_budget(engine, tmp_path):
