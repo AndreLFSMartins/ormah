@@ -279,3 +279,19 @@ def test_reconcile_cap_default_is_fifty():
 def test_reconcile_cap_must_be_positive():
     with pytest.raises(ValidationError):
         _settings(session_watcher_reconcile_max_per_tick=0)
+
+
+# --- Session watcher per-tick time budget (council-pr F2) ---
+
+def test_reconcile_max_seconds_default():
+    assert _settings().session_watcher_reconcile_max_seconds == 30.0
+
+
+def test_reconcile_max_seconds_rejects_zero():
+    with pytest.raises(ValidationError, match="session_watcher_reconcile_max_seconds must be > 0"):
+        _settings(session_watcher_reconcile_max_seconds=0)
+
+
+def test_reconcile_max_seconds_rejects_negative():
+    with pytest.raises(ValidationError, match="session_watcher_reconcile_max_seconds must be > 0"):
+        _settings(session_watcher_reconcile_max_seconds=-1.0)
