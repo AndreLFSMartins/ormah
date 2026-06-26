@@ -1719,3 +1719,42 @@ def test_cancelled_debounce_timer_tail_recovered_by_catchup(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):   # "next start" catch-up
         sw._run_catchup([(wd, handler)], threading.Event(), 72)
     assert "p/s.jsonl" in _load_state(wd)                 # tail recovered
+
+
+def test_start_session_watcher_cleans_up_on_partial_failure(engine, tmp_path):
+    """If an observer fails to start mid-loop, the already-started observers are torn down
+    (stop_event set, timers cancelled, stopped + joined) so no leaked handler can write to the DB
+    after engine.shutdown() (council-pr codex #2 — transactional startup)."""
+    import ormah.background.session_watcher as sw
+    wd1 = tmp_path / "d1"
+    wd1.mkdir()
+    wd2 = tmp_path / "d2"
+    wd2.mkdir()
+    engine.settings.session_watcher_enabled = True
+    calls = {"n": 0}
+    instances = []
+    real_observer = sw.Observer
+
+    class FlakyObserver(real_observer):
+        def start(self):
+            calls["n"] += 1
+            instances.append(self)
+            if calls["n"] == 2:
+                raise RuntimeError("boom")
+            return super().start()
+
+    try:
+        with patch.object(sw, "_session_watch_dirs", return_value=[wd1, wd2]), \
+             patch.object(sw, "Observer", FlakyObserver):
+            with pytest.raises(RuntimeError, match="boom"):
+                sw.start_session_watcher(engine)
+        # the first observer was started, so cleanup must have stopped + joined it
+        assert len(instances) == 2
+        assert not instances[0].is_alive()
+    finally:
+        for o in instances:
+            try:
+                o.stop()
+                o.join(timeout=2)
+            except Exception:
+                pass
