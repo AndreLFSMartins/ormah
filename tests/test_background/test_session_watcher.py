@@ -1552,3 +1552,33 @@ def test_reconcile_while_live_ingesting_defers_then_retries(engine, tmp_path):
     handler._pending.discard(str(jsonl))
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert handler.reconcile() == 1               # not poisoned -> retried and recovered
+
+
+def test_reconcile_bounds_retries_for_abandoned_inflight_tail(engine, tmp_path):
+    """A seen tail that never converges (always no-op) is retried a bounded number of
+    times, not re-attempted (re-hashed) every tick forever."""
+    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    # Seen file stuck below EOF that never makes progress (abandoned in-flight tail).
+    handler._state[rel] = {"hash": "x", "end_offset": 1, "node_ids": [], "user_turns": 0}
+
+    calls = {"n": 0}
+
+    def noop(path):
+        calls["n"] += 1
+        return False  # never makes progress (size + safe boundary frozen)
+
+    handler._do_ingest = noop
+    for _ in range(8):
+        handler.reconcile()
+
+    assert calls["n"] == MAX_RECONCILE_RETRIES  # bounded, not 8
