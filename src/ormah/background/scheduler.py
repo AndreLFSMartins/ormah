@@ -128,3 +128,28 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
     scheduler.start()
     logger.info("Background scheduler started with %d jobs", len(scheduler.get_jobs()))
     return scheduler, tracker
+
+
+def register_session_reconcile_job(scheduler, tracker, watches, interval_minutes: int) -> None:
+    """Register the session-watcher reconcile job on an already-started scheduler.
+
+    Registered after the watchers start (they do not exist when start_scheduler runs), so the job
+    can reach the live handlers/observers. ``coalesce=True`` + a full-interval misfire grace mean a
+    slightly-long tick is never silently dropped; reconcile re-scans disk each run, so a coalesced
+    tick loses no work. No-op when there are no watchers.
+    """
+    if not watches:
+        return
+    from ormah.background.session_watcher import run_session_reconcile
+
+    scheduler.add_job(
+        tracked(tracker, "session_reconcile", run_session_reconcile, watches),
+        "interval",
+        minutes=interval_minutes,
+        id="session_reconcile",
+        name="Session reconcile",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=max(_MISFIRE_GRACE, interval_minutes * 60),
+    )
+    logger.info("Session reconcile job registered (every %d min)", interval_minutes)
