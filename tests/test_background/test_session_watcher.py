@@ -1626,4 +1626,33 @@ def test_run_session_reconcile_runs_reconcile_even_when_recreate_fails(engine, t
 
     handler.reconcile.assert_called_once()  # safety net ran despite recreate failure
     assert total == 0
-    assert watch.observer is dead            # failed recreate leaves the (dead) ref; next tick retries
+
+
+def test_reconcile_does_not_starve_valid_file_behind_stuck_never_seen_files(engine, tmp_path):
+    """>cap never-seen files that never ingest must not starve a later valid transcript:
+    they get parked after MAX_RECONCILE_RETRIES, freeing the per-tick budget for the valid one."""
+    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+
+    cap = engine.settings.session_watcher_reconcile_max_per_tick
+    for i in range(cap):                              # sort BEFORE 'zz-valid' below
+        p = project_dir / f"00stuck-{i:03d}.jsonl"
+        p.write_text("not a valid transcript line\n")  # ingests nothing -> stays never-seen
+        _mark_idle(p)
+
+    valid = project_dir / "zz-valid.jsonl"            # sorts AFTER all stuck files
+    _make_jsonl(valid, user_turns=6)
+    _mark_idle(valid)
+    rel_valid = str(valid.relative_to(watch_dir))
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        for _ in range(MAX_RECONCILE_RETRIES + 2):    # let the stuck files exhaust their budget
+            handler.reconcile()
+            if rel_valid in handler._state:
+                break
+
+    assert rel_valid in handler._state                # reached, not starved

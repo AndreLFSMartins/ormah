@@ -1004,21 +1004,20 @@ class SessionHandler(FileSystemEventHandler):
                 # Never-seen: lookback cutoff applies (mirrors _scan_sessions).
                 if cutoff > 0 and st.st_mtime < cutoff:
                     continue
-                candidates.append(jsonl_file)
-            elif entry.get("end_offset", 0) != st.st_size:
-                # Seen but the cursor is not at EOF: pending/failed tail (or a rewrite).
-                # Bounded retry: a tail whose safe boundary never advances (abandoned
-                # in-flight response) is retried a few times then parked until its size
-                # changes, so it is not re-hashed every tick forever (which would starve
-                # genuinely-new dropped sessions from the per-tick budget). A transient
-                # ingest failure still retries, because the size is unchanged and the
-                # attempt count has not yet hit the cap.
-                attempt = self._reconcile_attempts.get(rel)
-                if attempt is not None and attempt[0] == st.st_size \
-                        and attempt[1] >= MAX_RECONCILE_RETRIES:
-                    continue
-                candidates.append(jsonl_file)
-            # else: fully consumed -> skip cheaply (no hash, no _do_ingest).
+            elif entry.get("end_offset", 0) == st.st_size:
+                # Fully consumed -> skip cheaply (no hash, no _do_ingest).
+                continue
+            # else: seen with cursor not at EOF -> pending/failed tail (or a rewrite).
+            # Bounded retry applies to BOTH never-seen and seen-pending files: a file attempted
+            # MAX_RECONCILE_RETRIES times at the same size without progress (a corrupt transcript,
+            # a session that died before any turn closed, or a persistent ingest failure) is parked
+            # until its size changes, so a cluster of stuck files cannot consume the per-tick budget
+            # every tick and starve a genuinely-ingestible transcript.
+            attempt = self._reconcile_attempts.get(rel)
+            if attempt is not None and attempt[0] == st.st_size \
+                    and attempt[1] >= MAX_RECONCILE_RETRIES:
+                continue
+            candidates.append(jsonl_file)
         recovered = 0
         for jsonl_file in candidates[:cap]:
             rel = str(jsonl_file.relative_to(self.watch_dir))
