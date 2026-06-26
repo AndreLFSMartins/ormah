@@ -255,6 +255,14 @@ async def lifespan(app: FastAPI):
     if stop_ev is not None:
         stop_ev.set()
 
+    # Stop the reconcile job before stopping the watchers, so a tick landing in the
+    # shutdown window cannot recreate an Observer that nothing then stops (thread/FD leak).
+    if hasattr(app.state, "scheduler"):
+        try:
+            app.state.scheduler.remove_job("session_reconcile")
+        except Exception:
+            pass
+
     # Shutdown — stop session watcher first
     if hasattr(app.state, "session_watcher_observers"):
         stop_session_watcher(app.state.session_watcher_observers)
