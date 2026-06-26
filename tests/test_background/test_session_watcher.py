@@ -1362,3 +1362,15 @@ def test_catchup_concurrency_must_be_positive():
     assert Settings().session_watcher_catchup_concurrency == 1
     with pytest.raises(ValueError):
         Settings(session_watcher_catchup_concurrency=0)
+
+
+def test_ingest_session_accepts_state_lock(engine, tmp_path):
+    import threading
+    from ormah.background.session_watcher import _ingest_session
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        ok = _ingest_session(engine, f, state, wd, 5, state_lock=threading.Lock())
+    assert ok is True
+    assert "p/s.jsonl" in state
