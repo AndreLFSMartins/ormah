@@ -255,8 +255,12 @@ async def lifespan(app: FastAPI):
     if stop_ev is not None:
         stop_ev.set()
 
-    # Stop the reconcile job before stopping the watchers, so a tick landing in the
-    # shutdown window cannot recreate an Observer that nothing then stops (thread/FD leak).
+    # Unschedule the reconcile job before stopping the watchers, to shrink the window where
+    # a tick recreates an Observer that nothing then stops. remove_job() only cancels future
+    # triggers, not an already-running tick, so a single in-flight tick can still recreate one
+    # Observer; that leaked daemon thread dies with the process (same tradeoff as the engine
+    # connection below). Fully closing it would require shutting the scheduler down before the
+    # watchers, which the bind-sensitive shutdown order avoids.
     if hasattr(app.state, "scheduler"):
         try:
             app.state.scheduler.remove_job("session_reconcile")
