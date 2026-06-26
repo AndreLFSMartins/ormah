@@ -15,11 +15,9 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             uv_asset: uv-aarch64-apple-darwin.tar.gz
-            updater_platform: darwin-aarch64
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             uv_asset: uv-x86_64-unknown-linux-gnu.tar.gz
-            updater_platform: linux-x86_64
 
     runs-on: ${{ matrix.os }}
 
@@ -75,40 +73,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --target ${{ matrix.target }}
 
-      - name: Collect updater metadata
-        id: meta
-        shell: bash
-        run: |
-          # Find the .sig file Tauri generated alongside the update bundle.
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            SIG=$(find desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos \
-              -name "*.app.tar.gz.sig" | head -1)
-            BUNDLE=$(echo "$SIG" | sed 's/\.sig$//')
-          else
-            SIG=$(find desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage \
-              -name "*.AppImage.tar.gz.sig" | head -1)
-            BUNDLE=$(echo "$SIG" | sed 's/\.sig$//')
-          fi
-          SIGNATURE=$(cat "$SIG")
-          FILENAME=$(basename "$BUNDLE")
-          echo "sig=$SIGNATURE" >> $GITHUB_OUTPUT
-          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
-
-      - name: Write per-platform updater fragment
-        shell: bash
-        run: |
-          TAG="${GITHUB_REF_NAME:-desktop-v0.0.0}"
-          VERSION="${TAG#desktop-v}"
-          DOWNLOAD_BASE="https://github.com/r-spade/ormah/releases/download/${TAG}"
-          cat > updater-${{ matrix.updater_platform }}.json <<EOF
-          {
-            "platform": "${{ matrix.updater_platform }}",
-            "version": "${VERSION}",
-            "url": "${DOWNLOAD_BASE}/${{ steps.meta.outputs.filename }}",
-            "signature": "${{ steps.meta.outputs.sig }}"
-          }
-          EOF
-
       - name: Upload artifacts (macOS)
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
@@ -117,7 +81,6 @@ jobs:
           path: |
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz*
-            updater-${{ matrix.updater_platform }}.json
 
       - name: Upload artifacts (Linux)
         if: runner.os == 'Linux'
@@ -127,7 +90,6 @@ jobs:
           path: |
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage*
             desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
-            updater-${{ matrix.updater_platform }}.json
 
   publish:
     needs: build
@@ -138,37 +100,6 @@ jobs:
         with:
           path: dist
 
-      - name: Generate latest.json
-        shell: bash
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#desktop-v}"
-          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-          # Build the platforms object from per-platform fragments.
-          PLATFORMS="{}"
-          for frag in dist/**/updater-*.json; do
-            PLATFORM=$(python3 -c "import json,sys; d=json.load(open('$frag')); print(d['platform'])")
-            URL=$(python3 -c "import json,sys; d=json.load(open('$frag')); print(d['url'])")
-            SIG=$(python3 -c "import json,sys; d=json.load(open('$frag')); print(d['signature'])")
-            PLATFORMS=$(echo "$PLATFORMS" | python3 -c "
-          import json,sys
-          d=json.load(sys.stdin)
-          d['$PLATFORM']={'url':'$URL','signature':'$SIG'}
-          print(json.dumps(d))")
-          done
-
-          python3 -c "
-          import json
-          print(json.dumps({
-            'version': '$VERSION',
-            'notes': 'See https://github.com/r-spade/ormah/releases/tag/$TAG',
-            'pub_date': '$PUB_DATE',
-            'platforms': $PLATFORMS
-          }, indent=2))" > dist/latest.json
-
-          cat dist/latest.json
-
       - name: Attach artifacts to GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -177,4 +108,4 @@ jobs:
             dist/**/*.AppImage*
             dist/**/*.deb
             dist/**/*.app.tar.gz*
-            dist/latest.json
+      # TODO: generate latest.json for auto-updater once .sig generation is confirmed
