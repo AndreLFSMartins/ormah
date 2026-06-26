@@ -48,10 +48,9 @@ jobs:
         run: |
           URL="https://github.com/astral-sh/uv/releases/latest/download/${{ matrix.uv_asset }}"
           curl -fsSL "$URL" | tar -xz -C /tmp
-          TRIPLE=$(rustc -Vv | sed -n 's/host: //p')
           mkdir -p desktop/src-tauri/binaries
-          cp /tmp/uv "desktop/src-tauri/binaries/uv-${TRIPLE}"
-          chmod +x "desktop/src-tauri/binaries/uv-${TRIPLE}"
+          cp /tmp/uv-${{ matrix.target }}/uv "desktop/src-tauri/binaries/uv-${{ matrix.target }}"
+          chmod +x "desktop/src-tauri/binaries/uv-${{ matrix.target }}"
 
       - name: Build desktop UI
         working-directory: desktop/ui
