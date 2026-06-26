@@ -15,9 +15,6 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             uv_asset: uv-aarch64-apple-darwin.tar.gz
-          - os: macos-13
-            target: x86_64-apple-darwin
-            uv_asset: uv-x86_64-apple-darwin.tar.gz
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             uv_asset: uv-x86_64-unknown-linux-gnu.tar.gz
@@ -63,23 +60,11 @@ jobs:
       - name: Build and bundle (macOS)
         if: runner.os == 'macOS'
         working-directory: desktop
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --target ${{ matrix.target }}
 
       - name: Build and bundle (Linux)
         if: runner.os == 'Linux'
         working-directory: desktop
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --target ${{ matrix.target }}
 
       - name: Upload artifacts (macOS)
