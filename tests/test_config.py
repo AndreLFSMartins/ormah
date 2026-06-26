@@ -278,3 +278,23 @@ def test_deletion_retrievability_floor_must_be_unit_range():
 def test_feedback_llm_judge_min_confidence_range():
     with pytest.raises(ValidationError, match="threshold must be 0"):
         _settings(feedback_llm_judge_min_confidence=1.5)
+
+
+# --- Session watcher reconcile (#34) ---
+
+def test_reconcile_interval_default_is_five():
+    assert _settings().session_watcher_reconcile_interval_minutes == 5
+
+
+def test_reconcile_interval_must_be_positive():
+    with pytest.raises(ValidationError):
+        _settings(session_watcher_reconcile_interval_minutes=0)
+
+
+def test_reconcile_cap_default_is_fifty():
+    assert _settings().session_watcher_reconcile_max_per_tick == 50
+
+
+def test_reconcile_cap_must_be_positive():
+    with pytest.raises(ValidationError):
+        _settings(session_watcher_reconcile_max_per_tick=0)
