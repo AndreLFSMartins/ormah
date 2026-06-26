@@ -1420,3 +1420,27 @@ def test_ingest_after_stop_is_rejected(engine, tmp_path):
     assert status == "stopped"
     assert calls["n"] == 0                        # neither path touched _ingest_session / the DB
     assert handler.in_flight_count() == 0
+
+
+def test_catchup_ingests_each_tail_exactly_once(engine, tmp_path):
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    handler = sw.SessionHandler(engine, wd, 0.1, 5)
+    stop = threading.Event()
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        sw._run_catchup([(wd, handler)], stop, 72)
+        first = _load_state(wd)["p/s.jsonl"]["end_offset"]
+        sw._run_catchup([(wd, handler)], stop, 72)   # unchanged -> no re-ingest
+        second = _load_state(wd)["p/s.jsonl"]["end_offset"]
+    assert first == second
+
+
+def test_catchup_ingest_reports_in_flight(engine, tmp_path):
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    handler = sw.SessionHandler(engine, wd, 0.1, 5)
+    handler._ingesting.add(str(f))               # pretend a live ingest owns it
+    assert handler.catchup_ingest(f) == "in_flight"
