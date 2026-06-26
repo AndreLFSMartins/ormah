@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     session_watcher_min_turns: int = 5
     session_watcher_lookback_hours: int = 72
     session_watcher_idle_threshold: float = 30.0
+    session_watcher_catchup_concurrency: int = 1
 
     # Tier limits
     core_memory_cap: int = 50
@@ -362,6 +363,13 @@ class Settings(BaseSettings):
     def _session_watcher_debounce_min(cls, v: float) -> float:
         if v < 10.0:
             raise ValueError(f"session_watcher_debounce_seconds must be >= 10.0, got {v}")
+        return v
+
+    @field_validator("session_watcher_catchup_concurrency")
+    @classmethod
+    def _catchup_concurrency_min(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"session_watcher_catchup_concurrency must be >= 1, got {v}")
         return v
 
     @field_validator("decay_interval_hours")
