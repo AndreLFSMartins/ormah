@@ -770,13 +770,13 @@ def test_lifecycle_start_stop(engine, tmp_path):
     observers = start_session_watcher(engine)
     try:
         assert len(observers) == 1
-        assert observers[0].is_alive()
+        assert observers[0].observer.is_alive()
     finally:
         stop_session_watcher(observers)
 
     # Give observer thread a moment to stop
     time.sleep(0.1)
-    assert not observers[0].is_alive()
+    assert not observers[0].observer.is_alive()
 
 
 def test_lifecycle_includes_codex_sessions_when_using_default_agent_dir(
@@ -799,7 +799,7 @@ def test_lifecycle_includes_codex_sessions_when_using_default_agent_dir(
     observers = start_session_watcher(engine)
     try:
         assert len(observers) == 2
-        assert all(observer.is_alive() for observer in observers)
+        assert all(w.observer.is_alive() for w in observers)
     finally:
         stop_session_watcher(observers)
 
@@ -1582,3 +1582,27 @@ def test_reconcile_bounds_retries_for_abandoned_inflight_tail(engine, tmp_path):
         handler.reconcile()
 
     assert calls["n"] == MAX_RECONCILE_RETRIES  # bounded, not 8
+
+
+def test_run_session_reconcile_recreates_dead_observer(engine, tmp_path):
+    """A dead Observer is stopped/joined and recreated; reconcile still runs."""
+    from ormah.background.session_watcher import SessionWatch, run_session_reconcile
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+
+    dead = MagicMock()
+    dead.is_alive.return_value = False
+    watch = SessionWatch(watch_dir=watch_dir, handler=handler, observer=dead)
+
+    with patch("ormah.background.session_watcher.Observer") as MockObserver:
+        new_obs = MockObserver.return_value
+        total = run_session_reconcile([watch])
+
+    dead.stop.assert_called_once()        # old observer cleaned up before recreate
+    dead.join.assert_called_once()
+    new_obs.schedule.assert_called_once()
+    new_obs.start.assert_called_once()
+    assert watch.observer is new_obs
+    assert total == 0  # empty dir, nothing to recover

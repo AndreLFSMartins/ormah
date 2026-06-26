@@ -231,8 +231,14 @@ async def lifespan(app: FastAPI):
     try:
         from ormah.background.session_watcher import start_session_watcher, stop_session_watcher
 
-        session_observers = start_session_watcher(engine)
-        app.state.session_watcher_observers = session_observers
+        session_watches = start_session_watcher(engine)
+        app.state.session_watcher_observers = session_watches
+        if hasattr(app.state, "scheduler"):
+            from ormah.background.scheduler import register_session_reconcile_job
+            register_session_reconcile_job(
+                app.state.scheduler, app.state.job_tracker, session_watches,
+                engine.settings.session_watcher_reconcile_interval_minutes,
+            )
     except Exception as e:
         logger.warning("Session watcher not started: %s", e)
 
