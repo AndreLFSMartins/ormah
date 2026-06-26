@@ -21,6 +21,7 @@ from ormah.transcript.parser import TranscriptResult, TranscriptTurn, parse_tran
 logger = logging.getLogger(__name__)
 
 _STATE_FILENAME = ".session_watcher_state"
+MAX_RECONCILE_RETRIES = 3
 _HEURISTIC_SOURCE = "transcript_watcher_heuristic"
 _LLM_JUDGE_SOURCE = "transcript_watcher_llm_judge"
 _HEURISTIC_AFFINITY_SOURCE = "auto_heuristic"
@@ -921,6 +922,7 @@ class SessionHandler(FileSystemEventHandler):
         self._pending: set[str] = set()
         self._lock = Lock()
         self._state_lock = Lock()
+        self._reconcile_attempts: dict[str, tuple[int, int]] = {}  # rel -> (size_at_attempt, no_progress_count)
 
     def _schedule_ingest(self, path: Path) -> None:
         """Schedule a debounced ingestion for the given file."""
@@ -1008,12 +1010,32 @@ class SessionHandler(FileSystemEventHandler):
                 candidates.append(jsonl_file)
             elif entry.get("end_offset", 0) != st.st_size:
                 # Seen but the cursor is not at EOF: pending/failed tail (or a rewrite).
+                # Bounded retry: a tail whose safe boundary never advances (abandoned
+                # in-flight response) is retried a few times then parked until its size
+                # changes, so it is not re-hashed every tick forever (which would starve
+                # genuinely-new dropped sessions from the per-tick budget). A transient
+                # ingest failure still retries, because the size is unchanged and the
+                # attempt count has not yet hit the cap.
+                attempt = self._reconcile_attempts.get(rel)
+                if attempt is not None and attempt[0] == st.st_size \
+                        and attempt[1] >= MAX_RECONCILE_RETRIES:
+                    continue
                 candidates.append(jsonl_file)
             # else: fully consumed -> skip cheaply (no hash, no _do_ingest).
         recovered = 0
         for jsonl_file in candidates[:cap]:
+            rel = str(jsonl_file.relative_to(self.watch_dir))
+            try:
+                size = jsonl_file.stat().st_size
+            except OSError:
+                continue
             if self._do_ingest(jsonl_file):
                 recovered += 1
+                self._reconcile_attempts.pop(rel, None)  # progress -> reset
+            else:
+                prev = self._reconcile_attempts.get(rel)
+                count = prev[1] + 1 if (prev is not None and prev[0] == size) else 1
+                self._reconcile_attempts[rel] = (size, count)
         if recovered:
             logger.info(
                 "Session watcher reconcile recovered %d transcript(s) the live path missed",
