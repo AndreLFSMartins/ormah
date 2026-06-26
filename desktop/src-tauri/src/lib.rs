@@ -32,6 +32,11 @@ const HIDE_SCROLLBARS: &str = r#"
 })();
 "#;
 
+// Marks the webview as running inside the desktop app on every page load —
+// including after navigating to http://localhost:8787 where window.__TAURI__
+// is not injected (remote URL). The UI checks this to apply in-app styles.
+const MARK_IN_APP: &str = "window.__ORMAH_DESKTOP__ = true;";
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -64,6 +69,7 @@ pub fn run() {
                 .center()
                 .decorations(false) // custom dark title bar drawn in the UI
                 .initialization_script(HIDE_SCROLLBARS)
+                .initialization_script(MARK_IN_APP)
                 .build()?;
 
             // Build the tray; it owns the stats poller and a quick "Open graph".

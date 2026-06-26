@@ -179,6 +179,17 @@ body {
   gap: 6px;
 }
 
+/* In-app overrides: WebKitGTK doesn't render backdrop-filter, so panels look
+   transparent. Use fully opaque backgrounds instead (incl. the tier-core tint,
+   which is otherwise a translucent rgba). */
+body.in-app .node-detail,
+body.in-app .side-panel,
+body.in-app .node-detail.tier-core {
+  background: #141414;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .search-wrapper {
   position: relative;
   flex: 1;

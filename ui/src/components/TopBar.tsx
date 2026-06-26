@@ -37,7 +37,12 @@ export default function TopBar({
   const tauriWin = () =>
     (window as unknown as { __TAURI__?: { window?: { getCurrentWindow?: () => { minimize?: () => void; toggleMaximize?: () => void; close?: () => void; startDragging?: () => void } } } })
       .__TAURI__?.window?.getCurrentWindow?.();
-  const inApp = typeof window !== "undefined" && !!(window as unknown as { __TAURI__?: unknown }).__TAURI__;
+  const inApp = typeof window !== "undefined" && (
+    !!(window as unknown as { __TAURI__?: unknown }).__TAURI__ ||
+    !!(window as unknown as { __ORMAH_DESKTOP__?: unknown }).__ORMAH_DESKTOP__
+  );
+  // Mark <body> so CSS can apply in-app overrides (e.g. opaque panels).
+  if (inApp) document.body.classList.add("in-app");
   // Manual drag: data-tauri-drag-region isn't honored on the navigated remote
   // graph page, so call startDragging() on a left-button press anywhere on the
   // bar except interactive elements (search, buttons, the controls).
@@ -207,9 +212,7 @@ export default function TopBar({
       </div>
       <span className="top-bar-stats">{nodeCount} nodes</span>
       <div className="top-bar-spacer" />
-      {/* Web: actions live inline in the bar. App: only window controls in the
-          bar; the actions move to a group just below them (see app-actions). */}
-      {!inApp && <div className="top-bar-actions">{actionButtons}</div>}
+      <div className="top-bar-actions">{actionButtons}</div>
       {inApp && (
         <div className="win-controls">
           <button className="win-btn" aria-label="Minimize" onClick={() => tauriWin()?.minimize?.()}>
@@ -223,7 +226,6 @@ export default function TopBar({
           </button>
         </div>
       )}
-      {inApp && <div className="app-actions">{actionButtons}</div>}
     </div>
   );
 }

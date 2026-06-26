@@ -1,86 +1,106 @@
 //! Lifecycle for the Ormah server.
 //!
-//! Distribution builds ship a frozen `ormah-server` sidecar (self-contained,
-//! no system Python). During development — and on platforms where the sidecar
-//! isn't bundled yet — we fall back to an `ormah` already on PATH so the app
-//! runs end-to-end today.
-
-use std::sync::Mutex;
+//! On first launch the bundled `uv` sidecar installs the `ormah` Python
+//! package from PyPI. Subsequent launches skip the install and start the
+//! server directly. Falls back to a system `ormah` on PATH when the `uv`
+//! sidecar is absent (dev builds).
 
 use once_cell::sync::Lazy;
-use tauri::{AppHandle, Runtime};
-use tauri_plugin_shell::{process::CommandChild, ShellExt};
+use std::sync::Mutex;
+use tauri::{AppHandle, Emitter, Runtime};
+use tauri_plugin_shell::ShellExt;
 
-/// Whatever we spawned, so we can kill it on quit.
-enum Server {
-    Bundled(CommandChild),
-    System(std::process::Child),
+// Must stay in sync with the Python package version — update on each release.
+const ORMAH_VERSION: &str = "0.12.4";
+
+/// Phase emitted on the "ormah://status" event so the UI can show progress.
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum Phase {
+    Installing { version: &'static str },
+    Starting,
+    Failed { reason: String },
 }
 
-static SERVER: Lazy<Mutex<Option<Server>>> = Lazy::new(|| Mutex::new(None));
+static SERVER: Lazy<Mutex<Option<std::process::Child>>> = Lazy::new(|| Mutex::new(None));
 
-/// Start the server: bundled sidecar if it spawns, else system `ormah`.
 pub fn start<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
-        if !try_bundled(&app) {
-            spawn_system();
-        }
+        ensure_running(app).await;
     });
 }
 
-/// Returns true only if the bundled sidecar actually spawned. The lookup can
-/// succeed while the spawn fails (no binary in dev builds), so both are guarded.
-fn try_bundled<R: Runtime>(app: &AppHandle<R>) -> bool {
-    let cmd = match app.shell().sidecar("ormah-server") {
+async fn ensure_running<R: Runtime>(app: AppHandle<R>) {
+    if !ormah_on_path() {
+        let _ = app.emit("ormah://status", Phase::Installing { version: ORMAH_VERSION });
+        if !install_via_uv(&app).await {
+            let _ = app.emit(
+                "ormah://status",
+                Phase::Failed {
+                    reason: "Could not install ormah. Check your internet connection.".into(),
+                },
+            );
+            return;
+        }
+    }
+    let _ = app.emit("ormah://status", Phase::Starting);
+    spawn_server();
+}
+
+async fn install_via_uv<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let uv = match app.shell().sidecar("uv") {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(e) => {
+            eprintln!("uv sidecar not available ({e}); ormah must be on PATH");
+            return false;
+        }
     };
-    match cmd.args(["server", "start"]).spawn() {
-        Ok((mut rx, child)) => {
-            *SERVER.lock().unwrap() = Some(Server::Bundled(child));
-            // Drain events so the pipe never stalls; clear on exit.
-            tauri::async_runtime::spawn(async move {
-                use tauri_plugin_shell::process::CommandEvent;
-                while let Some(event) = rx.recv().await {
-                    if let CommandEvent::Terminated(payload) = event {
-                        eprintln!("ormah server exited: {payload:?}");
-                        *SERVER.lock().unwrap() = None;
-                        break;
-                    }
-                }
-            });
+    let spec = format!("ormah=={}", ORMAH_VERSION);
+    match uv.args(["tool", "install", &spec]).output().await {
+        Ok(out) if out.status.success() => {
+            eprintln!("uv: installed {}", spec);
             true
         }
+        Ok(out) => {
+            eprintln!(
+                "uv install failed:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            false
+        }
         Err(e) => {
-            eprintln!("bundled sidecar present but spawn failed ({e}); trying system ormah");
+            eprintln!("uv sidecar error: {e}");
             false
         }
     }
 }
 
-fn spawn_system() {
+fn ormah_on_path() -> bool {
+    std::process::Command::new("ormah")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn spawn_server() {
     match std::process::Command::new("ormah")
         .args(["server", "start"])
         .spawn()
     {
         Ok(child) => {
-            eprintln!("started system `ormah` server (no bundled sidecar)");
-            *SERVER.lock().unwrap() = Some(Server::System(child));
+            eprintln!("ormah server started (pid {})", child.id());
+            *SERVER.lock().unwrap() = Some(child);
         }
-        Err(e) => eprintln!("no bundled sidecar and no system `ormah` on PATH: {e}"),
+        Err(e) => eprintln!("failed to start ormah server: {e}"),
     }
 }
 
 /// Kill the server. Safe to call multiple times.
 pub fn stop() {
-    if let Some(server) = SERVER.lock().unwrap().take() {
-        match server {
-            Server::Bundled(child) => {
-                let _ = child.kill();
-            }
-            Server::System(mut child) => {
-                let _ = child.kill();
-            }
-        }
+    if let Some(mut child) = SERVER.lock().unwrap().take() {
+        let _ = child.kill();
     }
 }

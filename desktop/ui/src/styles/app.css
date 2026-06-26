@@ -106,6 +106,13 @@ h1, h2, h3, h4, .display {
 .stage-wrap { transition: opacity .6s ease; }
 #root.to-graph .stage-wrap { opacity: 0; }
 
+/* First-launch status shown during uv install / server start */
+.boot-status {
+  position: fixed; bottom: 40px; left: 0; right: 0;
+  text-align: center; font-size: 12px; color: #555;
+  pointer-events: none; letter-spacing: 0.03em;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .install, .scrim, .tool { transition: none !important; animation: none !important; }
 }

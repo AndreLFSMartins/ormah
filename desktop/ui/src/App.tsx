@@ -4,7 +4,7 @@ import Act1Void from "@/components/Act1Void";
 import InstallPanel from "./InstallPanel";
 import {
   invoke, graphUrl, waitForServer, sleep,
-  winMinimize, winClose, winToggleMaximize,
+  winMinimize, winClose, winToggleMaximize, onServerStatus,
 } from "./lib/bridge";
 
 type Phase = "intro" | "connect";
@@ -34,7 +34,16 @@ export default function App() {
   const progressRef = useRef(0);
   const selfNodeReadyRef = useRef<{ x: number; y: number } | null>(null);
   const [phase, setPhase] = useState<Phase>("intro");
+  const [statusMsg, setStatusMsg] = useState("");
   const started = useRef(false);
+
+  useEffect(() => {
+    return onServerStatus((s) => {
+      if (s.phase === "installing") setStatusMsg(`Installing ormah ${s.version}…`);
+      else if (s.phase === "starting") setStatusMsg("Starting up…");
+      else if (s.phase === "failed") setStatusMsg(`Setup failed: ${s.reason}`);
+    });
+  }, []);
 
   async function goGraph() {
     const url = await graphUrl();
@@ -73,6 +82,9 @@ export default function App() {
       <div className="stage-wrap">
         <GraphCanvas progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
         <Act1Void progressRef={progressRef} selfNodeReadyRef={selfNodeReadyRef} />
+        {phase === "intro" && statusMsg && (
+          <div className="boot-status">{statusMsg}</div>
+        )}
         {phase === "connect" && <InstallPanel onDone={goGraph} />}
       </div>
     </>
