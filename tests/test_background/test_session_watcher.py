@@ -729,16 +729,16 @@ def test_lifecycle_start_stop(engine, tmp_path):
     engine.settings.session_watcher_dir = watch_dir
     engine.settings.session_watcher_debounce_seconds = 10.0
 
-    observers = start_session_watcher(engine)
+    handle = start_session_watcher(engine)
     try:
-        assert len(observers) == 1
-        assert observers[0].is_alive()
+        assert len(handle.observers) == 1
+        assert handle.observers[0].is_alive()
     finally:
-        stop_session_watcher(observers)
+        stop_session_watcher(handle)
 
     # Give observer thread a moment to stop
     time.sleep(0.1)
-    assert not observers[0].is_alive()
+    assert not handle.observers[0].is_alive()
 
 
 def test_lifecycle_includes_codex_sessions_when_using_default_agent_dir(
@@ -758,12 +758,12 @@ def test_lifecycle_includes_codex_sessions_when_using_default_agent_dir(
     engine.settings.session_watcher_dir = Path("~/.claude/projects")
     engine.settings.session_watcher_debounce_seconds = 10.0
 
-    observers = start_session_watcher(engine)
+    handle = start_session_watcher(engine)
     try:
-        assert len(observers) == 2
-        assert all(observer.is_alive() for observer in observers)
+        assert len(handle.observers) == 2
+        assert all(o.is_alive() for o in handle.observers)
     finally:
-        stop_session_watcher(observers)
+        stop_session_watcher(handle)
 
 
 # --- Test 8: Disabled returns empty ---
@@ -771,8 +771,9 @@ def test_lifecycle_includes_codex_sessions_when_using_default_agent_dir(
 def test_disabled_returns_empty(engine, tmp_path):
     """session_watcher_enabled=False → empty list."""
     engine.settings.session_watcher_enabled = False
-    observers = start_session_watcher(engine)
-    assert observers == []
+    handle = start_session_watcher(engine)
+    assert handle.observers == []
+    assert handle.catchup_thread is None
 
 
 # --- Test 9: State persistence ---
@@ -807,8 +808,8 @@ def test_nonexistent_watch_dir(engine, tmp_path):
     engine.settings.session_watcher_enabled = True
     engine.settings.session_watcher_dir = tmp_path / "does-not-exist"
 
-    observers = start_session_watcher(engine)
-    assert observers == []
+    handle = start_session_watcher(engine)
+    assert handle.observers == []
 
 
 # --- Test 11: Incremental — only appended turns are re-ingested ---
