@@ -1650,6 +1650,57 @@ def test_run_catchup_lookback_zero_ingests_all(engine, tmp_path):
     assert "p/s.jsonl" in _load_state(wd)
 
 
+def test_stop_drains_before_engine_shutdown(engine, tmp_path):
+    """Lifespan order (main.py): stop_session_watcher() fully drains the in-flight ingest BEFORE
+    engine.shutdown() runs, so db.close() never races a live ingest (final two-peer round #1/#5)."""
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f)
+    _mark_idle(f)
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = wd
+    engine.settings.session_watcher_lookback_hours = -1   # catch-up skips never-seen -> only the live ingest
+    order = []
+    started = threading.Event()
+    release = threading.Event()
+    real = sw._ingest_session
+
+    def probing(*a, **k):
+        started.set()
+        release.wait(5)
+        r = real(*a, **k)
+        order.append("ingest_done")
+        return r
+
+    def traced_shutdown():
+        order.append("db_close")                          # trace only; the fixture owns the real close
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(sw, "_ingest_session", probing), \
+         patch.object(engine, "shutdown", traced_shutdown):
+        handle = sw.start_session_watcher(engine)
+        live = threading.Thread(target=handle.handlers[0]._do_ingest, args=(f,))
+        live.start()
+        assert started.wait(2)
+        done = threading.Event()
+
+        def teardown():
+            sw.stop_session_watcher(handle)
+            engine.shutdown()
+            done.set()
+
+        td = threading.Thread(target=teardown)
+        td.start()
+        assert not done.wait(0.5)                          # teardown blocks on the in-flight ingest
+        release.set()
+        assert done.wait(5)
+        live.join()
+    assert order == ["ingest_done", "db_close"]            # drain completed before db.close()
+
+
 def test_cancelled_debounce_timer_tail_recovered_by_catchup(engine, tmp_path):
     """A debounce timer cancelled at shutdown leaves its tail un-ingested; the next start's catch-up
     recovers it (final two-peer round #2: pending timers are cancelled, not drained)."""
