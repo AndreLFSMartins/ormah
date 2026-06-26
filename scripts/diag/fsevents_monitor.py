@@ -79,6 +79,10 @@ def poll_disk_truth(root: Path, seen: set[str], lock: threading.Lock,
             advanced = key not in last_mtimes or m > last_mtimes[key]
             last_mtimes[key] = m
             if advanced and key not in events_this_window:
+                # A write landing between the swap-and-clear above and this rglob can show a
+                # one-off spurious LEAK (its event arrives next window). A *real* leak (e.g. an
+                # on_moved/atomic-replace the production handler ignores) repeats EVERY window —
+                # so trust a path that leaks repeatedly, not a lone hit.
                 leaks.append(key)
         if leaks:
             log.warning("LEAK %d file(s) advanced on disk with NO fsevent this window:", len(leaks))
