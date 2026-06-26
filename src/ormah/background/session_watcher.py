@@ -704,6 +704,7 @@ def _ingest_session(
     min_turns: int,
     idle_threshold: float = 30.0,
     on_defer_active=None,
+    state_lock=None,
 ) -> bool:
     """Ingest a single JSONL session transcript if changed. Returns True if ingested."""
     rel = str(path.relative_to(watch_dir))
@@ -807,7 +808,7 @@ def _ingest_session(
     prev_node_ids = existing.get("node_ids", []) if carry else []
     prev_turns = existing.get("user_turns", 0) if carry else 0
 
-    state[rel] = {
+    entry = {
         "hash": h,
         "end_offset": payload_offset,
         "last_ingested": datetime.now(timezone.utc).isoformat(),
@@ -818,7 +819,13 @@ def _ingest_session(
         "node_ids": prev_node_ids + new_node_ids,
         "signals_recorded": signals_recorded,
     }
-    _save_state(watch_dir, state)
+    if state_lock is not None:
+        with state_lock:
+            state[rel] = entry
+            _save_state(watch_dir, state)
+    else:
+        state[rel] = entry
+        _save_state(watch_dir, state)
 
     logger.info(
         "Session watcher ingested %s (%d new turns, %d memories extracted, %d signals recorded)",
