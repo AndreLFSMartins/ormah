@@ -1408,3 +1408,147 @@ def test_do_ingest_returns_true_when_it_ingests(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert handler._do_ingest(jsonl) is True
         assert handler._do_ingest(jsonl) is False  # nothing new the second time
+
+
+def test_reconcile_ingests_file_the_live_path_missed(engine, tmp_path):
+    """A changed, idle transcript whose fsevent never reached the handler is recovered."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    assert rel not in handler._state  # simulate the dropped event: handler never saw it
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        recovered = handler.reconcile()
+
+    assert recovered == 1
+    assert rel in handler._state
+    assert handler._state[rel]["user_turns"] == 6
+
+
+def test_reconcile_skips_fully_consumed_file_on_second_pass(engine, tmp_path):
+    """A second reconcile does not re-ingest a file already consumed to EOF (cheap skip)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1
+        assert handler.reconcile() == 0
+
+
+def test_reconcile_does_not_reingest_what_live_path_already_took(engine, tmp_path):
+    """reconcile shares handler state, so a file ingested live is not re-ingested."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._do_ingest(jsonl)                      # live path ingests it
+        rel = str(jsonl.relative_to(watch_dir))
+        node_count = len(handler._state[rel]["node_ids"])
+        recovered = handler.reconcile()
+
+    assert recovered == 0
+    assert len(handler._state[rel]["node_ids"]) == node_count
+
+
+def test_reconcile_logs_recovery_heartbeat(engine, tmp_path, caplog):
+    """reconcile emits the functional heartbeat when it recovers >0 transcripts."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        with caplog.at_level("INFO", logger="ormah.background.session_watcher"):
+            handler.reconcile()
+    assert any("reconcile recovered" in r.message for r in caplog.records)
+
+
+# --- Adversarial regressions for the two HIGH council findings ---
+
+def test_reconcile_retries_seen_file_when_first_do_ingest_fails(engine, tmp_path):
+    """A transient ingest failure must NOT strand a seen file: the next tick retries it."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    # Seed state as a seen file with a pending tail (cursor behind EOF).
+    rel = str(jsonl.relative_to(watch_dir))
+    handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    calls = {"n": 0}
+    real = _ingest_session
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False                      # transient failure on the first reconcile
+        return real(*a, **k)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+            patch("ormah.background.session_watcher._ingest_session", side_effect=flaky):
+        assert handler.reconcile() == 0       # first tick: ingest "fails"
+        assert handler.reconcile() == 1       # second tick retries (not skipped) and recovers
+
+
+def test_reconcile_recovers_partial_tail_without_mtime_change(engine, tmp_path):
+    """A grown tail with an UNCHANGED mtime is still recovered (cursor != size, not mtime)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1               # consumes the first 6 turns
+        old_mtime = jsonl.stat().st_mtime
+        _make_jsonl(jsonl, user_turns=12)             # append 6 more (size grows)
+        os.utime(jsonl, (old_mtime, old_mtime))       # mtime unchanged on purpose
+        recovered = handler.reconcile()
+
+    assert recovered == 1                             # picked up via end_offset != size
+
+
+def test_reconcile_while_live_ingesting_defers_then_retries(engine, tmp_path):
+    """If the live path owns the path mid-ingest, reconcile defers, then retries next tick."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler._ingesting.add(str(jsonl))                # simulate live path mid-ingest
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 0               # deferred: live path owns it
+
+    handler._ingesting.discard(str(jsonl))            # live path finished without ingesting
+    handler._pending.discard(str(jsonl))
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1               # not poisoned -> retried and recovered

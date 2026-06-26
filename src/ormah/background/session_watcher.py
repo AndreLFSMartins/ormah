@@ -979,6 +979,48 @@ class SessionHandler(FileSystemEventHandler):
             self._schedule_ingest(path)
         return bool(ingested)
 
+    def reconcile(self) -> int:
+        """Disk-truth safety net: ingest transcripts the live FSEvents path dropped.
+
+        Mechanism-agnostic and cheap: a stat-only scan finds files that still need work —
+        never-seen (within lookback) or a state cursor not at EOF — then routes up to
+        ``session_watcher_reconcile_max_per_tick`` of them through ``self._do_ingest`` (the
+        single state owner, so no clobber / no double-ingest). A file with a pending or failed
+        tail (``end_offset != size``) is re-checked every tick until fully consumed, so a
+        transient ingest failure never strands it. Returns transcripts recovered.
+        """
+        cutoff = time.time() - (self.lookback_hours * 3600) if self.lookback_hours > 0 else 0
+        cap = self.engine.settings.session_watcher_reconcile_max_per_tick
+        candidates: list[Path] = []
+        for jsonl_file in sorted(self.watch_dir.rglob("*.jsonl")):
+            if _is_subagent_transcript(jsonl_file):
+                continue
+            try:
+                st = jsonl_file.stat()
+            except OSError:
+                continue
+            rel = str(jsonl_file.relative_to(self.watch_dir))
+            entry = self._state.get(rel)
+            if entry is None:
+                # Never-seen: lookback cutoff applies (mirrors _scan_sessions).
+                if cutoff > 0 and st.st_mtime < cutoff:
+                    continue
+                candidates.append(jsonl_file)
+            elif entry.get("end_offset", 0) != st.st_size:
+                # Seen but the cursor is not at EOF: pending/failed tail (or a rewrite).
+                candidates.append(jsonl_file)
+            # else: fully consumed -> skip cheaply (no hash, no _do_ingest).
+        recovered = 0
+        for jsonl_file in candidates[:cap]:
+            if self._do_ingest(jsonl_file):
+                recovered += 1
+        if recovered:
+            logger.info(
+                "Session watcher reconcile recovered %d transcript(s) the live path missed",
+                recovered,
+            )
+        return recovered
+
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".jsonl"):
             path = Path(event.src_path)
