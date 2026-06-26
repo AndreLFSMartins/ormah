@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event, Lock, Semaphore, Timer
@@ -877,6 +878,77 @@ def _scan_sessions(
         _save_state(watch_dir, state)
 
     return ingested
+
+
+@dataclass
+class SessionWatcherHandle:
+    observers: list
+    handlers: list
+    catchup_thread: "Thread | None"
+    stop_event: "Event"
+
+
+def _iter_catchup_candidates(watch_dir, known, lookback_hours, stop_event=None):
+    """Yield JSONL files due for (re)ingest, honoring the lookback cutoff for never-seen files.
+    Single owner of the selection logic (replaces the inline scan in the removed _scan_sessions).
+    Bails on stop_event so a shutdown mid-scan does not pay a full O(files) directory walk."""
+    if stop_event is not None and stop_event.is_set():
+        return
+    now = time.time()
+    cutoff = now - (lookback_hours * 3600) if lookback_hours > 0 else 0
+    for jsonl_file in sorted(watch_dir.rglob("*.jsonl")):
+        if stop_event is not None and stop_event.is_set():
+            return
+        rel = str(jsonl_file.relative_to(watch_dir))
+        if rel not in known and lookback_hours >= 0 and cutoff > 0:
+            try:
+                if jsonl_file.stat().st_mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+        if rel not in known and lookback_hours < 0:
+            continue
+        yield jsonl_file
+
+
+def _run_catchup(watches, stop_event, lookback_hours) -> None:
+    """Drain the backlog off the bind path, routing each file through its handler's catchup_ingest."""
+    for watch_dir, handler in watches:
+        if stop_event.is_set():
+            return
+        with handler._state_lock:
+            known = set(handler._state.keys())
+        ingested = 0
+        deferred: list[Path] = []
+        for jsonl_file in _iter_catchup_candidates(watch_dir, known, lookback_hours, stop_event):
+            if stop_event.is_set():
+                return
+            try:
+                status = handler.catchup_ingest(jsonl_file)
+            except Exception as e:  # one bad file must not kill the drain
+                logger.warning("Catch-up ingest error for %s: %s", jsonl_file, e)
+                continue
+            if status == "ok":
+                ingested += 1
+            elif status == "in_flight":
+                deferred.append(jsonl_file)
+        # one retry pass: a live ingest was holding these; pick up anything it left undrained
+        for jsonl_file in deferred:
+            if stop_event.is_set():
+                return
+            try:
+                if handler.catchup_ingest(jsonl_file) == "ok":
+                    ingested += 1
+            except Exception as e:
+                logger.warning("Catch-up retry error for %s: %s", jsonl_file, e)
+        with handler._state_lock:
+            stale = [r for r in list(handler._state.keys()) if not (watch_dir / r).exists()]
+            for r in stale:
+                del handler._state[r]
+            if stale:
+                _save_state(watch_dir, handler._state)
+        if ingested:
+            logger.info("Session watcher catch-up: ingested %d sessions from %s", ingested, watch_dir)
 
 
 class SessionHandler(FileSystemEventHandler):
