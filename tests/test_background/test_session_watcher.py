@@ -1355,3 +1355,10 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     # so the stored provenance carries no duplicates.
     nodes = state[rel]["node_ids"]
     assert len(nodes) == len(set(nodes))
+
+
+def test_catchup_concurrency_must_be_positive():
+    from ormah.config import Settings
+    assert Settings().session_watcher_catchup_concurrency == 1
+    with pytest.raises(ValueError):
+        Settings(session_watcher_catchup_concurrency=0)
