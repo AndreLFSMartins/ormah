@@ -1056,17 +1056,29 @@ def start_session_watcher(engine: MemoryEngine) -> SessionWatcherHandle:
     semaphore = Semaphore(s.session_watcher_catchup_concurrency)
     observers: list[Observer] = []
     watches: list[tuple[Path, SessionHandler]] = []
-    for watch_dir in watch_dirs:
-        handler = SessionHandler(
-            engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
-            s.session_watcher_idle_threshold, extraction_semaphore=semaphore, stop_event=stop_event,
-        )
-        observer = Observer()
-        observer.schedule(handler, str(watch_dir), recursive=True)
-        observer.start()
-        observers.append(observer)
-        watches.append((watch_dir, handler))
-        logger.info("Session watcher started on %s", watch_dir)
+    try:
+        for watch_dir in watch_dirs:
+            handler = SessionHandler(
+                engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
+                s.session_watcher_idle_threshold, extraction_semaphore=semaphore, stop_event=stop_event,
+            )
+            observer = Observer()
+            observer.schedule(handler, str(watch_dir), recursive=True)
+            observer.start()
+            observers.append(observer)
+            watches.append((watch_dir, handler))
+            logger.info("Session watcher started on %s", watch_dir)
+    except Exception:
+        # transactional startup: tear down observers already started so a leaked, never-drained
+        # handler cannot write to the DB after engine.shutdown() (council-pr codex #2)
+        stop_event.set()
+        for _, started_handler in watches:
+            started_handler.cancel_pending_timers()
+        for started_observer in observers:
+            started_observer.stop()
+        for started_observer in observers:
+            started_observer.join(timeout=5)
+        raise
 
     catchup_thread = Thread(
         target=_run_catchup, args=(watches, stop_event, s.session_watcher_lookback_hours),
