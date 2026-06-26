@@ -678,9 +678,9 @@ def test_min_turns_filter(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
-    # A fresh (active) file below min_turns fires a defer → TRANSIENT (will retry).
-    # An idle file below min_turns with no closed boundary → NO_PROGRESS (frozen content).
-    assert result != IngestResult.OK
+    # A fresh (active, not idle) file below min_turns hits the short-tail branch and
+    # defers → TRANSIENT (retry until it grows past min_turns or the session idles).
+    assert result == IngestResult.TRANSIENT
     assert str(jsonl.relative_to(watch_dir)) not in state
 
 
@@ -1726,10 +1726,13 @@ def test_reconcile_respects_per_tick_time_budget(engine, tmp_path):
 
     handler._do_ingest = counting_ingest
 
-    # time.time() calls inside reconcile(): cutoff calc, start=, loop check×N.
-    # Sequence: 0.0 (cutoff), 0.0 (start), 0.0 (loop check 1 → no break), 9999.0 (loop check 2 → break).
-    time_seq = iter([0.0, 0.0, 0.0, 9999.0])
-    with patch("ormah.background.session_watcher.time.time", side_effect=lambda: next(time_seq)):
+    # Tie the clock to real progress instead of an exact call count: time stays at 0.0
+    # until the first file is ingested, then jumps past the 30s budget so the next
+    # loop-check breaks. Robust to any extra time.time() calls reconcile() may add.
+    def fake_time():
+        return 9999.0 if ingest_calls else 0.0
+
+    with patch("ormah.background.session_watcher.time.time", side_effect=fake_time):
         handler.reconcile()
 
     # Budget broke after 1 — fewer than all 3 candidates were processed.
