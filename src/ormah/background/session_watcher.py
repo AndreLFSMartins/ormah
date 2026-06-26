@@ -1056,6 +1056,7 @@ def start_session_watcher(engine: MemoryEngine) -> SessionWatcherHandle:
     semaphore = Semaphore(s.session_watcher_catchup_concurrency)
     observers: list[Observer] = []
     watches: list[tuple[Path, SessionHandler]] = []
+    catchup_thread: "Thread | None" = None
     try:
         for watch_dir in watch_dirs:
             handler = SessionHandler(
@@ -1068,24 +1069,41 @@ def start_session_watcher(engine: MemoryEngine) -> SessionWatcherHandle:
             observers.append(observer)
             watches.append((watch_dir, handler))
             logger.info("Session watcher started on %s", watch_dir)
+        catchup_thread = Thread(
+            target=_run_catchup, args=(watches, stop_event, s.session_watcher_lookback_hours),
+            name="ormah-session-catchup", daemon=False,
+        )
+        catchup_thread.start()
     except Exception:
-        # transactional startup: tear down observers already started so a leaked, never-drained
-        # handler cannot write to the DB after engine.shutdown() (council-pr codex #2)
+        # transactional startup: any failure after the first observer starts tears down everything
+        # already running — observers AND any in-flight ingest — so a leaked, never-drained handler
+        # cannot write to the DB after engine.shutdown() (council-pr: observer-loop + thread-start windows)
         stop_event.set()
-        for _, started_handler in watches:
-            started_handler.cancel_pending_timers()
-        for started_observer in observers:
-            started_observer.stop()
-        for started_observer in observers:
-            started_observer.join(timeout=5)
+        for _, handler in watches:
+            handler.cancel_pending_timers()
+        for observer in observers:
+            observer.stop()
+        if catchup_thread is not None and catchup_thread.is_alive():
+            catchup_thread.join()
+        _drain_handlers([h for _, h in watches])
+        for observer in observers:
+            observer.join(timeout=5)
         raise
-
-    catchup_thread = Thread(
-        target=_run_catchup, args=(watches, stop_event, s.session_watcher_lookback_hours),
-        name="ormah-session-catchup", daemon=False,
-    )
-    catchup_thread.start()
     return SessionWatcherHandle(observers, [h for _, h in watches], catchup_thread, stop_event)
+
+
+def _drain_handlers(handlers: list["SessionHandler"]) -> None:
+    """Poll until no handler has an in-flight ingest, so nothing touches the DB after db.close().
+    Uncapped: a deadline cap would abandon a running ingest and re-open the use-after-close window
+    (council round 4 #1). A watchdog log every ~5s surfaces a stuck drain instead of a silent hang."""
+    waited = 0.0
+    while any(h.in_flight_count() > 0 for h in handlers):
+        time.sleep(0.05)
+        waited += 0.05
+        if waited >= 5.0:
+            n = sum(h.in_flight_count() for h in handlers)
+            logger.warning("Session watcher shutdown still draining %d in-flight ingest(s)", n)
+            waited = 0.0
 
 
 def stop_session_watcher(handle: SessionWatcherHandle) -> None:
@@ -1102,14 +1120,7 @@ def stop_session_watcher(handle: SessionWatcherHandle) -> None:
         handler.cancel_pending_timers()
     if handle.catchup_thread is not None:
         handle.catchup_thread.join()
-    waited = 0.0
-    while any(h.in_flight_count() > 0 for h in handle.handlers):
-        time.sleep(0.05)  # ponytail: poll on shutdown; a Condition only if shutdown latency matters
-        waited += 0.05
-        if waited >= 5.0:  # watchdog: a wedged non-LLM section (encoder/DB lock) would hang here
-            n = sum(h.in_flight_count() for h in handle.handlers)
-            logger.warning("Session watcher shutdown still draining %d in-flight ingest(s)", n)
-            waited = 0.0
+    _drain_handlers(handle.handlers)  # ponytail: poll on shutdown; a Condition only if shutdown latency matters
     for observer in handle.observers:
         observer.join(timeout=5)
     if handle.observers:

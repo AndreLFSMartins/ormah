@@ -1721,6 +1721,58 @@ def test_cancelled_debounce_timer_tail_recovered_by_catchup(engine, tmp_path):
     assert "p/s.jsonl" in _load_state(wd)                 # tail recovered
 
 
+def test_start_session_watcher_thread_start_failure_drains_and_cleans_up(engine, tmp_path):
+    """If the catch-up Thread fails to start after observers are running, startup teardown stops the
+    observers AND drains any in-flight ingest before re-raising — so a leaked handler can't write to
+    the DB after engine.shutdown() (council-pr: thread-start window + in-flight drain)."""
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "d1"
+    wd.mkdir()
+    engine.settings.session_watcher_enabled = True
+    release = threading.Event()
+    observers_seen = []
+
+    class DrainingHandler(sw.SessionHandler):
+        def in_flight_count(self):
+            return 0 if release.is_set() else 1
+
+    real_observer = sw.Observer
+
+    class TrackObserver(real_observer):
+        def start(self):
+            observers_seen.append(self)
+            return super().start()
+
+    class FailingThread(sw.Thread):
+        def start(self):
+            raise RuntimeError("no threads")
+
+    done = threading.Event()
+    err = {}
+
+    def run():
+        try:
+            sw.start_session_watcher(engine)
+        except RuntimeError as e:
+            err["e"] = e
+        done.set()
+
+    with patch.object(sw, "_session_watch_dirs", return_value=[wd]), \
+         patch.object(sw, "SessionHandler", DrainingHandler), \
+         patch.object(sw, "Observer", TrackObserver), \
+         patch.object(sw, "Thread", FailingThread):
+        t = threading.Thread(target=run)
+        t.start()
+        assert not done.wait(0.5)            # teardown blocked draining the in-flight ingest
+        release.set()
+        assert done.wait(3)                   # drained -> start_session_watcher re-raised
+        t.join()
+    assert isinstance(err.get("e"), RuntimeError)
+    assert observers_seen
+    assert not observers_seen[0].is_alive()   # the started observer was torn down
+
+
 def test_start_session_watcher_cleans_up_on_partial_failure(engine, tmp_path):
     """If an observer fails to start mid-loop, the already-started observers are torn down
     (stop_event set, timers cancelled, stopped + joined) so no leaked handler can write to the DB
