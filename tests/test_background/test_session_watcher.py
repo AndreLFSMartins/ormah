@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ormah.background.session_watcher import (
+    IngestResult,
     SessionHandler,
     _ingest_session,
     _load_state,
@@ -152,7 +153,7 @@ def test_ingest_session_basic(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
-    assert result is True
+    assert result == IngestResult.OK
     rel = str(jsonl.relative_to(watch_dir))
     assert rel in state
     entry = state[rel]
@@ -179,7 +180,7 @@ def test_subagent_transcript_is_not_ingested(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
-    assert result is False
+    assert result == IngestResult.NO_PROGRESS
     assert state == {}
 
 
@@ -231,7 +232,7 @@ def test_ingest_codex_session_resolves_rollout_session_id_and_space(engine, tmp_
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     rel = str(jsonl.relative_to(watch_dir))
     entry = state[rel]
@@ -260,7 +261,7 @@ def test_ingest_codex_session_without_whisper_log_does_not_infer_date_space(engi
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     entry = state[str(jsonl.relative_to(watch_dir))]
     assert entry["source"] == "codex"
@@ -677,7 +678,9 @@ def test_min_turns_filter(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
-    assert result is False
+    # A fresh (active) file below min_turns fires a defer → TRANSIENT (will retry).
+    # An idle file below min_turns with no closed boundary → NO_PROGRESS (frozen content).
+    assert result != IngestResult.OK
     assert str(jsonl.relative_to(watch_dir)) not in state
 
 
@@ -693,8 +696,8 @@ def test_unchanged_session_skipped(engine, tmp_path):
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is False
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.NO_PROGRESS
 
 
 # --- Test 5: Scan respects lookback ---
@@ -869,12 +872,12 @@ def test_incremental_only_new_turns(engine, tmp_path):
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=capture):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
         first_offset = state[str(jsonl.relative_to(watch_dir))]["end_offset"]
         assert first_offset > 0
 
         _make_jsonl(jsonl, user_turns=12)  # identical first 6 turns + 6 appended
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " not in captured[1]
     assert "User message 6 " in captured[1]
@@ -902,11 +905,11 @@ def test_incremental_defers_small_append(engine, tmp_path):
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=counting):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
         saved = dict(state[str(jsonl.relative_to(watch_dir))])
 
-        _make_jsonl(jsonl, user_turns=8)  # only 2 new turns < min_turns
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is False
+        _make_jsonl(jsonl, user_turns=8)  # only 2 new turns < min_turns, file still active → TRANSIENT defer
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
 
     assert calls == 1
     assert state[str(jsonl.relative_to(watch_dir))] == saved
@@ -932,10 +935,10 @@ def test_shrink_resets_cursor(engine, tmp_path):
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=capture):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
         _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " in captured[1]
 
@@ -1015,7 +1018,7 @@ def test_inflight_multirecord_response_not_split(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=capture):
         # Every pair is terminal -> all committed; the cursor sits after the last one.
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
         cursor1 = state[rel]["end_offset"]
 
         # New turn: prompt + a FIRST assistant record still in flight (tool_use). The
@@ -1023,13 +1026,13 @@ def test_inflight_multirecord_response_not_split(engine, tmp_path):
         # into the middle of the response.
         _append_user(jsonl, 6)
         _append_assistant(jsonl, 6, stop_reason="tool_use")
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is False
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) != IngestResult.OK
         assert state[rel]["end_offset"] == cursor1
 
         # The response completes with a terminal record: prompt + BOTH assistant records
         # commit together — never split.
         _append_assistant(jsonl, 6, stop_reason="end_turn")
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     committed = captured[-1]
     assert "User message 6 " in committed
@@ -1061,7 +1064,7 @@ def test_codex_multirecord_turn_committed_whole_via_task_complete(engine, tmp_pa
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=capture):
         # Fresh/active: the two task_complete turns commit whole; the in-flight one waits.
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     committed = captured[-1]
     assert committed.count("Assistant response 0 part ") == 3  # turn 0 not split
@@ -1105,7 +1108,7 @@ def test_legacy_mid_response_cursor_recovered(engine, tmp_path):
 
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=capture):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     committed = captured[-1]
     assert "Prompt with the memory detail" in committed   # prompt recovered
@@ -1117,7 +1120,7 @@ def test_legacy_mid_response_cursor_recovered(engine, tmp_path):
     # second pass on the unchanged file skips without re-recovering.
     assert state[rel]["end_offset"] == jsonl.stat().st_size
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is False
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.NO_PROGRESS
 
 
 def test_codex_inflight_turn_not_split_on_idle(engine, tmp_path):
@@ -1132,7 +1135,7 @@ def test_codex_inflight_turn_not_split_on_idle(engine, tmp_path):
     _append_codex_turn(jsonl, 0, records=2, complete=True)
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
     cursor = state[rel]["end_offset"]
 
     # In-flight multi-record turn, file now idle. The turn has no closure signal, so it is
@@ -1142,7 +1145,7 @@ def test_codex_inflight_turn_not_split_on_idle(engine, tmp_path):
     os.utime(jsonl, (now, now - 120))
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1,
-                               idle_threshold=30) is False
+                               idle_threshold=30) == IngestResult.NO_PROGRESS
     assert state[rel]["end_offset"] == cursor
 
 
@@ -1174,7 +1177,7 @@ def test_idle_tail_with_dangling_user_no_duplicate(engine, tmp_path):
          patch.object(engine, "ingest_conversation", side_effect=capture):
         assert _ingest_session(
             engine, jsonl, state, watch_dir, min_turns=5, idle_threshold=30
-        ) is True
+        ) == IngestResult.OK
         assert "User message 8 " not in captured[-1]
 
         _append_assistant(jsonl, 8)
@@ -1182,7 +1185,7 @@ def test_idle_tail_with_dangling_user_no_duplicate(engine, tmp_path):
         os.utime(jsonl, (now2, now2 - 120))
         assert _ingest_session(
             engine, jsonl, state, watch_dir, min_turns=1, idle_threshold=30
-        ) is True
+        ) == IngestResult.OK
 
     joined = "\n".join(captured)
     assert joined.count("User message 8 ") == 1
@@ -1216,7 +1219,7 @@ def test_session_tail_idle_ingested(engine, tmp_path):
          patch.object(engine, "ingest_conversation", side_effect=counting):
         assert _ingest_session(
             engine, jsonl, state, watch_dir, min_turns=5, idle_threshold=30
-        ) is True
+        ) == IngestResult.OK
     assert calls == 1
 
 
@@ -1381,13 +1384,13 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     _make_jsonl(jsonl, user_turns=10)
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
     first_nodes = list(state[rel]["node_ids"])
     assert first_nodes  # first ingest produced at least one node
 
     _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset → full re-ingest
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     # Full re-ingest (prev_offset reset to 0): stale node_ids must not be concatenated,
     # so the stored provenance carries no duplicates.
@@ -1395,8 +1398,8 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     assert len(nodes) == len(set(nodes))
 
 
-def test_do_ingest_returns_true_when_it_ingests(engine, tmp_path):
-    """_do_ingest reports whether it ingested, so reconcile can count recoveries."""
+def test_do_ingest_returns_ok_when_it_ingests(engine, tmp_path):
+    """_do_ingest reports IngestResult so reconcile can count recoveries and triage failures."""
     watch_dir = tmp_path / "projects"
     project_dir = watch_dir / "-Users-alice-Code-myproject"
     project_dir.mkdir(parents=True)
@@ -1406,8 +1409,8 @@ def test_do_ingest_returns_true_when_it_ingests(engine, tmp_path):
 
     handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert handler._do_ingest(jsonl) is True
-        assert handler._do_ingest(jsonl) is False  # nothing new the second time
+        assert handler._do_ingest(jsonl) == IngestResult.OK
+        assert handler._do_ingest(jsonl) == IngestResult.NO_PROGRESS  # nothing new the second time
 
 
 def test_reconcile_ingests_file_the_live_path_missed(engine, tmp_path):
@@ -1504,7 +1507,7 @@ def test_reconcile_retries_seen_file_when_first_do_ingest_fails(engine, tmp_path
     def flaky(*a, **k):
         calls["n"] += 1
         if calls["n"] == 1:
-            return False                      # transient failure on the first reconcile
+            return IngestResult.TRANSIENT     # transient failure on the first reconcile
         return real(*a, **k)
 
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
@@ -1575,7 +1578,7 @@ def test_reconcile_bounds_retries_for_abandoned_inflight_tail(engine, tmp_path):
 
     def noop(path):
         calls["n"] += 1
-        return False  # never makes progress (size + safe boundary frozen)
+        return IngestResult.NO_PROGRESS  # never makes progress (size + safe boundary frozen)
 
     handler._do_ingest = noop
     for _ in range(8):
@@ -1656,3 +1659,35 @@ def test_reconcile_does_not_starve_valid_file_behind_stuck_never_seen_files(engi
                 break
 
     assert rel_valid in handler._state                # reached, not starved
+
+
+def test_reconcile_never_parks_transient_failures(engine, tmp_path):
+    """A TRANSIENT _do_ingest result must never increment _reconcile_attempts — the file
+    is retried every tick indefinitely, never parked (unlike NO_PROGRESS which parks after
+    MAX_RECONCILE_RETRIES attempts at the same file size)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    # Seed state: seen file with a pending tail (cursor behind EOF).
+    handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    ingest_calls = {"n": 0}
+
+    def always_transient(path):
+        ingest_calls["n"] += 1
+        return IngestResult.TRANSIENT
+
+    handler._do_ingest = always_transient
+    for _ in range(6):
+        handler.reconcile()
+
+    # Must have been attempted every single tick — never parked.
+    assert ingest_calls["n"] == 6
+    # And _reconcile_attempts must not have accumulated a count for this file.
+    assert handler._reconcile_attempts.get(rel) is None
