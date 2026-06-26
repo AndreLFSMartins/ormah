@@ -3,7 +3,6 @@
 use serde_json::Value;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
-use tauri_plugin_shell::ShellExt;
 
 use crate::stats::{self, Stats};
 
@@ -60,19 +59,10 @@ pub async fn detect_agents() -> Result<Value, String> {
 
 // ---- agent setup -----------------------------------------------------------
 
-/// Run `ormah setup --json` and return its parsed result. Prefers the bundled
-/// sidecar; falls back to a system `ormah` on PATH (dev / pre-bundle).
+/// Run `ormah setup --json` and return its parsed result.
+/// uv has already installed `ormah` on PATH by the time this is called.
 #[tauri::command]
-pub async fn setup_agents<R: Runtime>(app: AppHandle<R>) -> Result<Value, String> {
-    // Bundled sidecar first.
-    if let Ok(cmd) = app.shell().sidecar("ormah-server") {
-        if let Ok(out) = cmd.args(["setup", "--json"]).output().await {
-            if let Ok(v) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&out.stdout)) {
-                return Ok(v);
-            }
-        }
-    }
-    // Fallback: system `ormah`.
+pub async fn setup_agents<R: Runtime>(_app: AppHandle<R>) -> Result<Value, String> {
     let out = std::process::Command::new("ormah")
         .args(["setup", "--json"])
         .output()

@@ -12,11 +12,11 @@
     "shell:allow-open",
     {
       "identifier": "shell:allow-spawn",
-      "allow": [{ "name": "binaries/ormah-server", "sidecar": true }]
+      "allow": [{ "name": "binaries/uv", "sidecar": true }]
     },
     {
       "identifier": "shell:allow-execute",
-      "allow": [{ "name": "binaries/ormah-server", "sidecar": true }]
+      "allow": [{ "name": "binaries/uv", "sidecar": true }]
     },
     "autostart:default",
     "updater:default",

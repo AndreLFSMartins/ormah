@@ -1,87 +1,116 @@
-name: Desktop release (macOS)
-
-# NOT YET ACTIVE — Stage 2 (PyInstaller sidecar bundling) is required before
-# this workflow can produce a working .dmg. Re-enable the triggers below once
-# build-sidecar.sh produces a valid binary and tauri.conf.json has externalBin.
-# See desktop/README.md "Stage 2: bundled runtime" for what's needed.
+name: Desktop release
 
 on:
-  # push:
-  #   tags:
-  #     - "desktop-v*"
+  push:
+    tags:
+      - "desktop-v*"
   workflow_dispatch:
-    # Manually triggerable for testing the build steps before Stage 2 ships.
-    # Will fail at "Build, sign, and bundle" without a real sidecar binary.
 
 jobs:
-  build-dmg:
-    # Build per-arch so each .dmg ships a matching frozen sidecar.
+  build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: aarch64-apple-darwin
-            runner: macos-14
-          - arch: x86_64-apple-darwin
-            runner: macos-13
-    runs-on: ${{ matrix.runner }}
+          - os: macos-14
+            target: aarch64-apple-darwin
+            uv_asset: uv-aarch64-apple-darwin.tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            uv_asset: uv-x86_64-apple-darwin.tar.gz
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            uv_asset: uv-x86_64-unknown-linux-gnu.tar.gz
+
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.arch }}
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
-      - name: Build the frozen server sidecar
-        run: bash desktop/scripts/build-sidecar.sh
+      - name: Download uv sidecar
+        shell: bash
+        run: |
+          URL="https://github.com/astral-sh/uv/releases/latest/download/${{ matrix.uv_asset }}"
+          curl -fsSL "$URL" | tar -xz -C /tmp
+          TRIPLE=$(rustc -Vv | sed -n 's/host: //p')
+          mkdir -p desktop/src-tauri/binaries
+          cp /tmp/uv "desktop/src-tauri/binaries/uv-${TRIPLE}"
+          chmod +x "desktop/src-tauri/binaries/uv-${TRIPLE}"
+
+      - name: Build desktop UI
+        working-directory: desktop/ui
+        run: npm ci && npm run build
 
       - name: Generate app icons
         working-directory: desktop/src-tauri
         run: cargo tauri icon icons/icon.png
 
-      - name: Build, sign, and bundle the app
+      - name: Build and bundle (macOS)
+        if: runner.os == 'macOS'
         working-directory: desktop
         env:
-          # Code signing (Developer ID Application cert, base64 .p12)
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          # Notarization (notarytool)
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Tauri updater signing (Sparkle-style appcast signatures)
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cargo tauri build --target ${{ matrix.arch }}
+        run: cargo tauri build --target ${{ matrix.target }}
 
-      - name: Upload artifacts
+      - name: Build and bundle (Linux)
+        if: runner.os == 'Linux'
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --target ${{ matrix.target }}
+
+      - name: Upload artifacts (macOS)
+        if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: ormah-${{ matrix.arch }}
+          name: ormah-${{ matrix.target }}
           path: |
-            desktop/src-tauri/target/${{ matrix.arch }}/release/bundle/dmg/*.dmg
-            desktop/src-tauri/target/${{ matrix.arch }}/release/bundle/macos/*.app.tar.gz*
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz*
+
+      - name: Upload artifacts (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ormah-${{ matrix.target }}
+          path: |
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage*
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
 
   publish:
-    needs: build-dmg
+    needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-      - name: Attach .dmg + updater artifacts to the GitHub release
+      - name: Attach artifacts to GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/**/*
-      # TODO: regenerate + publish the updater appcast (latest.json) to the
-      # endpoint configured in tauri.conf.json so existing installs auto-update.
+      # TODO: regenerate + publish the updater appcast (latest.json)

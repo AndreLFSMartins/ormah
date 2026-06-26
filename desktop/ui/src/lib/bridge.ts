@@ -27,6 +27,23 @@ export async function waitForServer(onSlow?: () => void): Promise<boolean> {
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Listen for server lifecycle events emitted by sidecar.rs.
+export type ServerStatus =
+  | { phase: "installing"; version: string }
+  | { phase: "starting" }
+  | { phase: "failed"; reason: string };
+
+type ListenFn = (event: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
+
+export function onServerStatus(cb: (s: ServerStatus) => void): () => void {
+  const t = (window as unknown as { __TAURI__?: { event?: { listen?: ListenFn } } }).__TAURI__;
+  const listen = t?.event?.listen;
+  if (!listen) return () => {};
+  let unlisten: (() => void) | null = null;
+  listen("ormah://status", (e) => cb(e.payload as ServerStatus)).then((fn) => { unlisten = fn; });
+  return () => { unlisten?.(); };
+}
+
 // Window controls for the custom (decorationless) title bar.
 function currentWindow(): { minimize?: () => Promise<void>; close?: () => Promise<void>; toggleMaximize?: () => Promise<void>; startDragging?: () => Promise<void> } | null {
   const w = window as unknown as { __TAURI__?: { window?: { getCurrentWindow?: () => unknown } } };
