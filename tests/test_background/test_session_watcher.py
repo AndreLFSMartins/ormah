@@ -15,8 +15,8 @@ from ormah.background.session_watcher import (
     _ingest_session,
     _load_state,
     _record_whisper_usage_signals,
+    _run_catchup,
     _save_state,
-    _scan_sessions,
     _space_from_encoded_dir,
     start_session_watcher,
     stop_session_watcher,
@@ -677,10 +677,10 @@ def test_scan_respects_lookback(engine, tmp_path):
     old_time = time.time() - (200 * 3600)
     os.utime(old, (old_time, old_time))
 
+    import threading
+    handler = SessionHandler(engine, watch_dir, 0.1, 5)
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        count = _scan_sessions(engine, watch_dir, min_turns=5, lookback_hours=72)
-
-    assert count == 1  # only recent
+        _run_catchup([(watch_dir, handler)], threading.Event(), 72)
     state = _load_state(watch_dir)
     assert str(recent.relative_to(watch_dir)) in state
     assert str(old.relative_to(watch_dir)) not in state
@@ -1564,3 +1564,44 @@ def test_stop_drains_ingest_blocked_on_semaphore(engine, tmp_path):
         ta.join(); tb.join()
     assert count["done"] == 2                                   # both completed, none abandoned
     assert h.in_flight_count() == 0
+
+
+# --- Lookback edge tests for _run_catchup ---
+
+def test_run_catchup_lookback_minus_one_skips_new_files(engine, tmp_path):
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    handler = sw.SessionHandler(engine, wd, 0.1, 5)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        sw._run_catchup([(wd, handler)], threading.Event(), -1)
+    assert _load_state(wd) == {}
+
+
+def test_run_catchup_lookback_zero_ingests_all(engine, tmp_path):
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    handler = sw.SessionHandler(engine, wd, 0.1, 5)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        sw._run_catchup([(wd, handler)], threading.Event(), 0)
+    assert "p/s.jsonl" in _load_state(wd)
+
+
+def test_cancelled_debounce_timer_tail_recovered_by_catchup(engine, tmp_path):
+    """A debounce timer cancelled at shutdown leaves its tail un-ingested; the next start's catch-up
+    recovers it (final two-peer round #2: pending timers are cancelled, not drained)."""
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    handler = sw.SessionHandler(engine, wd, 10.0, 5)   # long debounce: timer won't fire during the test
+    handler._schedule_ingest(f)                          # a live append schedules a debounce timer
+    assert handler._timers                               # timer pending, tail not yet ingested
+    handler.cancel_pending_timers()                      # shutdown cancels it
+    assert _load_state(wd) == {}                          # nothing ingested at shutdown
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):   # "next start" catch-up
+        sw._run_catchup([(wd, handler)], threading.Event(), 72)
+    assert "p/s.jsonl" in _load_state(wd)                 # tail recovered
