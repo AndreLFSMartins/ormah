@@ -1444,3 +1444,123 @@ def test_catchup_ingest_reports_in_flight(engine, tmp_path):
     handler = sw.SessionHandler(engine, wd, 0.1, 5)
     handler._ingesting.add(str(f))               # pretend a live ingest owns it
     assert handler.catchup_ingest(f) == "in_flight"
+
+
+# --- Task 5: off-bind-path catch-up + drain-before-close ---
+
+def test_start_returns_without_blocking_on_catchup(engine, tmp_path):
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = wd
+    engine.settings.session_watcher_debounce_seconds = 10.0
+    started = threading.Event(); release = threading.Event(); real = sw._ingest_session
+    def blocking(*a, **k):
+        started.set(); release.wait(5); return real(*a, **k)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(sw, "_ingest_session", blocking):
+        t0 = time.monotonic()
+        handle = sw.start_session_watcher(engine)
+        elapsed = time.monotonic() - t0
+        try:
+            assert elapsed < 1.0
+            assert started.wait(2)
+        finally:
+            release.set(); sw.stop_session_watcher(handle)
+
+
+def test_live_append_during_catchup_ingests_tail_once(engine, tmp_path):
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"; _make_jsonl(f, user_turns=6); _mark_idle(f)
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = wd
+    engine.settings.session_watcher_debounce_seconds = 10.0
+    real = sw._ingest_session
+    in_ingest = threading.Event(); release = threading.Event()
+    true_returns = {"n": 0}; lk = threading.Lock()
+    def gated(*a, **k):
+        in_ingest.set(); release.wait(5)
+        r = real(*a, **k)
+        if r:
+            with lk:
+                true_returns["n"] += 1
+        return r
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(sw, "_ingest_session", gated):
+        handle = sw.start_session_watcher(engine)
+        assert in_ingest.wait(2)
+        for h in handle.handlers:
+            h._do_ingest(f)                      # live ingest of the SAME file mid-catch-up
+        release.set()
+        time.sleep(0.5)
+        sw.stop_session_watcher(handle)
+    assert true_returns["n"] == 1
+
+
+def test_stop_drains_live_inflight_ingest(engine, tmp_path):
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = wd
+    engine.settings.session_watcher_lookback_hours = -1   # catch-up skips never-seen -> only live
+    started = threading.Event(); release = threading.Event()
+    def blocking(*a, **k):
+        started.set(); release.wait(5); return False
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(sw, "_ingest_session", blocking):
+        handle = sw.start_session_watcher(engine)
+        live = threading.Thread(target=handle.handlers[0]._do_ingest, args=(f,))
+        live.start()
+        assert started.wait(2)
+        done = threading.Event()
+        stopper = threading.Thread(target=lambda: (sw.stop_session_watcher(handle), done.set()))
+        stopper.start()
+        assert not done.wait(0.5)                # stop BLOCKS on the live in-flight ingest
+        release.set()
+        assert done.wait(3)                       # stop returns after it finishes
+        live.join()
+    assert all(h.in_flight_count() == 0 for h in handle.handlers)
+
+
+def test_stop_drains_ingest_blocked_on_semaphore(engine, tmp_path):
+    """An ingest that claimed _ingesting but is waiting on the K=1 semaphore when stop fires is
+    counted in_flight and drained — not abandoned (council round 4 #1/#5)."""
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    a = wd / "p" / "a.jsonl"; b = wd / "p" / "b.jsonl"
+    for f in (a, b):
+        _make_jsonl(f); _mark_idle(f)
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = wd
+    engine.settings.session_watcher_lookback_hours = -1       # only the two live ingests below
+    started = threading.Event(); release = threading.Event(); count = {"done": 0}; lk = threading.Lock()
+    def blocking(*ar, **kw):
+        started.set(); release.wait(5)
+        with lk:
+            count["done"] += 1
+        return False
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(sw, "_ingest_session", blocking):
+        handle = sw.start_session_watcher(engine)
+        h = handle.handlers[0]
+        ta = threading.Thread(target=h._do_ingest, args=(a,))  # acquires the K=1 semaphore, blocks
+        ta.start(); assert started.wait(2)
+        tb = threading.Thread(target=h._do_ingest, args=(b,))  # claims _ingesting[b], waits on semaphore
+        tb.start(); time.sleep(0.2)
+        assert h.in_flight_count() == 2                         # both claimed before stop
+        done = threading.Event()
+        stopper = threading.Thread(target=lambda: (sw.stop_session_watcher(handle), done.set()))
+        stopper.start()
+        assert not done.wait(0.5)                               # stop waits for BOTH to drain
+        release.set()
+        assert done.wait(5)
+        ta.join(); tb.join()
+    assert count["done"] == 2                                   # both completed, none abandoned
+    assert h.in_flight_count() == 0

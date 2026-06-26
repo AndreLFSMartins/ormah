@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Event, Lock, Semaphore, Timer
+from threading import Event, Lock, Semaphore, Thread, Timer
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -1085,49 +1085,64 @@ class SessionHandler(FileSystemEventHandler):
             self._schedule_ingest(Path(event.src_path))
 
 
-def start_session_watcher(engine: MemoryEngine) -> list[Observer]:
-    """Start the session watcher for agent transcript files.
-
-    Performs an initial catch-up scan, then starts a real-time watcher.
-    Returns list of Observer instances for shutdown.
-    """
+def start_session_watcher(engine: MemoryEngine) -> SessionWatcherHandle:
+    """Start observers immediately and drain the catch-up backlog off the bind path."""
     s = engine.settings
+    stop_event = Event()
     if not s.session_watcher_enabled:
-        return []
+        return SessionWatcherHandle([], [], None, stop_event)
 
     watch_dirs = _session_watch_dirs(s)
     if not watch_dirs:
         logger.warning("Session watcher dir does not exist: %s", _expand_watch_dir(s.session_watcher_dir))
-        return []
+        return SessionWatcherHandle([], [], None, stop_event)
 
+    semaphore = Semaphore(s.session_watcher_catchup_concurrency)
     observers: list[Observer] = []
+    watches: list[tuple[Path, SessionHandler]] = []
     for watch_dir in watch_dirs:
-        # Catch-up scan
-        ingested = _scan_sessions(
-            engine, watch_dir, s.session_watcher_min_turns, s.session_watcher_lookback_hours,
-        )
-        if ingested:
-            logger.info("Session watcher catch-up: ingested %d sessions from %s", ingested, watch_dir)
-
-        # Start real-time watcher
         handler = SessionHandler(
             engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
-            s.session_watcher_idle_threshold,
+            s.session_watcher_idle_threshold, extraction_semaphore=semaphore, stop_event=stop_event,
         )
         observer = Observer()
         observer.schedule(handler, str(watch_dir), recursive=True)
         observer.start()
         observers.append(observer)
+        watches.append((watch_dir, handler))
         logger.info("Session watcher started on %s", watch_dir)
 
-    return observers
+    catchup_thread = Thread(
+        target=_run_catchup, args=(watches, stop_event, s.session_watcher_lookback_hours),
+        name="ormah-session-catchup", daemon=False,
+    )
+    catchup_thread.start()
+    return SessionWatcherHandle(observers, [h for _, h in watches], catchup_thread, stop_event)
 
 
-def stop_session_watcher(observers: list[Observer]) -> None:
-    """Stop and join all session watcher observers."""
-    for observer in observers:
+def stop_session_watcher(handle: SessionWatcherHandle) -> None:
+    """Fully drain both ingest sources before returning (lifespan calls engine.shutdown() right after).
+    Under-_lock stop checks reject NEW ingests; we then wait for every in-flight ingest (live or
+    catch-up) to finish, so nothing touches the DB after db.close(). The wait is NOT capped: a deadline
+    cap would re-open the use-after-close window by abandoning a still-running ingest (council round 4
+    #1). Non-LLM ingest work is not bounded by llm_timeout_seconds, so a watchdog log surfaces a stuck
+    drain rather than a silent hang (final two-peer round #1)."""
+    handle.stop_event.set()
+    for observer in handle.observers:
         observer.stop()
-    for observer in observers:
+    for handler in handle.handlers:
+        handler.cancel_pending_timers()
+    if handle.catchup_thread is not None:
+        handle.catchup_thread.join()
+    waited = 0.0
+    while any(h.in_flight_count() > 0 for h in handle.handlers):
+        time.sleep(0.05)  # ponytail: poll on shutdown; a Condition only if shutdown latency matters
+        waited += 0.05
+        if waited >= 5.0:  # watchdog: a wedged non-LLM section (encoder/DB lock) would hang here
+            n = sum(h.in_flight_count() for h in handle.handlers)
+            logger.warning("Session watcher shutdown still draining %d in-flight ingest(s)", n)
+            waited = 0.0
+    for observer in handle.observers:
         observer.join(timeout=5)
-    if observers:
+    if handle.observers:
         logger.info("Session watcher stopped")
