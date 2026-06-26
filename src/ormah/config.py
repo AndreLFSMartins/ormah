@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     session_watcher_idle_threshold: float = 30.0
     session_watcher_reconcile_interval_minutes: int = 5
     session_watcher_reconcile_max_per_tick: int = 50
+    session_watcher_reconcile_max_seconds: float = 30.0
 
     # Tier limits
     core_memory_cap: int = 50
@@ -357,6 +358,15 @@ class Settings(BaseSettings):
         if v < 1:
             raise ValueError(
                 f"session_watcher_reconcile_max_per_tick must be >= 1, got {v}"
+            )
+        return v
+
+    @field_validator("session_watcher_reconcile_max_seconds")
+    @classmethod
+    def _session_watcher_reconcile_max_seconds_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(
+                f"session_watcher_reconcile_max_seconds must be > 0, got {v}"
             )
         return v
 

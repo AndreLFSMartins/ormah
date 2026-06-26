@@ -1691,3 +1691,75 @@ def test_reconcile_never_parks_transient_failures(engine, tmp_path):
     assert ingest_calls["n"] == 6
     # And _reconcile_attempts must not have accumulated a count for this file.
     assert handler._reconcile_attempts.get(rel) is None
+
+
+# --- Council-PR F2/F3: per-tick time budget + lookback<0 never-seen guard ---
+
+def test_reconcile_respects_per_tick_time_budget(engine, tmp_path):
+    """The per-tick wall-clock budget causes an early break, so not all candidates are processed
+    in one reconcile() call even when count < max_per_tick."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+
+    # Three seen files with a pending tail (end_offset=0, size>0) — all are reconcile candidates.
+    files = []
+    for i in range(3):
+        p = project_dir / f"session-{i:02d}.jsonl"
+        _make_jsonl(p, user_turns=6)
+        _mark_idle(p)
+        files.append(p)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler.engine.settings.session_watcher_reconcile_max_seconds = 30.0
+
+    # Seed all files as seen-but-pending (cursor at 0, size > 0).
+    for p in files:
+        rel = str(p.relative_to(watch_dir))
+        handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    ingest_calls = []
+
+    def counting_ingest(path):
+        ingest_calls.append(path)
+        return IngestResult.OK
+
+    handler._do_ingest = counting_ingest
+
+    # time.time() calls inside reconcile(): cutoff calc, start=, loop check×N.
+    # Sequence: 0.0 (cutoff), 0.0 (start), 0.0 (loop check 1 → no break), 9999.0 (loop check 2 → break).
+    time_seq = iter([0.0, 0.0, 0.0, 9999.0])
+    with patch("ormah.background.session_watcher.time.time", side_effect=lambda: next(time_seq)):
+        handler.reconcile()
+
+    # Budget broke after 1 — fewer than all 3 candidates were processed.
+    assert len(ingest_calls) == 1
+
+
+def test_reconcile_skips_never_seen_when_lookback_negative(engine, tmp_path):
+    """When lookback_hours < 0 (catch-up disabled), never-seen files must be skipped in
+    reconcile() — mirroring the _scan_sessions rule."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    # lookback_hours=-1 means no catch-up: never-seen files must be skipped.
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, lookback_hours=-1)
+    rel = str(jsonl.relative_to(watch_dir))
+    assert rel not in handler._state  # never seen
+
+    ingest_calls = []
+
+    def counting_ingest(path):
+        ingest_calls.append(path)
+        return IngestResult.OK
+
+    handler._do_ingest = counting_ingest
+    recovered = handler.reconcile()
+
+    assert recovered == 0
+    assert ingest_calls == []
+    assert rel not in handler._state
