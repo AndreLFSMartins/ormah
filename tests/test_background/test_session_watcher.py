@@ -1368,8 +1368,11 @@ def test_catchup_concurrency_must_be_positive():
 def test_ingest_session_accepts_state_lock(engine, tmp_path):
     import threading
     from ormah.background.session_watcher import _ingest_session
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f)
+    _mark_idle(f)
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         ok = _ingest_session(engine, f, state, wd, 5, state_lock=threading.Lock())
@@ -1380,14 +1383,20 @@ def test_ingest_session_accepts_state_lock(engine, tmp_path):
 def test_semaphore_bounds_catchup_and_live(engine, tmp_path):
     import threading
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    a = wd / "p" / "a.jsonl"; b = wd / "p" / "b.jsonl"
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    a = wd / "p" / "a.jsonl"
+    b = wd / "p" / "b.jsonl"
     for f in (a, b):
-        _make_jsonl(f); _mark_idle(f)
-    cur = {"n": 0, "max": 0}; lk = threading.Lock(); real = sw._ingest_session
+        _make_jsonl(f)
+        _mark_idle(f)
+    cur = {"n": 0, "max": 0}
+    lk = threading.Lock()
+    real = sw._ingest_session
     def instrumented(*args, **kw):
         with lk:
-            cur["n"] += 1; cur["max"] = max(cur["max"], cur["n"])
+            cur["n"] += 1
+            cur["max"] = max(cur["max"], cur["n"])
         time.sleep(0.05)
         with lk:
             cur["n"] -= 1
@@ -1398,21 +1407,29 @@ def test_semaphore_bounds_catchup_and_live(engine, tmp_path):
          patch.object(sw, "_ingest_session", instrumented):
         t1 = threading.Thread(target=handler._do_ingest, args=(a,))
         t2 = threading.Thread(target=handler.catchup_ingest, args=(b,))
-        t1.start(); t2.start(); t1.join(); t2.join()
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
     assert cur["max"] == 1
 
 
 def test_ingest_after_stop_is_rejected(engine, tmp_path):
     import threading
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f)
+    _mark_idle(f)
     stop = threading.Event()
     handler = sw.SessionHandler(engine, wd, 0.1, 5, stop_event=stop)
     stop.set()                                   # shutdown already in progress
-    calls = {"n": 0}; real = sw._ingest_session
+    calls = {"n": 0}
+    real = sw._ingest_session
     def counting(*a, **k):
-        calls["n"] += 1; return real(*a, **k)
+        calls["n"] += 1
+        return real(*a, **k)
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(sw, "_ingest_session", counting):
         result = handler._do_ingest(f)           # a timer that fired during shutdown
@@ -1426,8 +1443,11 @@ def test_ingest_after_stop_is_rejected(engine, tmp_path):
 def test_catchup_ingests_each_tail_exactly_once(engine, tmp_path):
     import threading
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f)
+    _mark_idle(f)
     handler = sw.SessionHandler(engine, wd, 0.1, 5)
     stop = threading.Event()
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
@@ -1440,8 +1460,11 @@ def test_catchup_ingests_each_tail_exactly_once(engine, tmp_path):
 
 def test_catchup_ingest_reports_in_flight(engine, tmp_path):
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f)
+    _mark_idle(f)
     handler = sw.SessionHandler(engine, wd, 0.1, 5)
     handler._ingesting.add(str(f))               # pretend a live ingest owns it
     assert handler.catchup_ingest(f) == "in_flight"
@@ -1452,14 +1475,21 @@ def test_catchup_ingest_reports_in_flight(engine, tmp_path):
 def test_start_returns_without_blocking_on_catchup(engine, tmp_path):
     import threading
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f)
+    _mark_idle(f)
     engine.settings.session_watcher_enabled = True
     engine.settings.session_watcher_dir = wd
     engine.settings.session_watcher_debounce_seconds = 10.0
-    started = threading.Event(); release = threading.Event(); real = sw._ingest_session
+    started = threading.Event()
+    release = threading.Event()
+    real = sw._ingest_session
     def blocking(*a, **k):
-        started.set(); release.wait(5); return real(*a, **k)
+        started.set()
+        release.wait(5)
+        return real(*a, **k)
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(sw, "_ingest_session", blocking):
         t0 = time.monotonic()
@@ -1469,22 +1499,29 @@ def test_start_returns_without_blocking_on_catchup(engine, tmp_path):
             assert elapsed < 1.0
             assert started.wait(2)
         finally:
-            release.set(); sw.stop_session_watcher(handle)
+            release.set()
+            sw.stop_session_watcher(handle)
 
 
 def test_live_append_during_catchup_ingests_tail_once(engine, tmp_path):
     import threading
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    f = wd / "p" / "s.jsonl"; _make_jsonl(f, user_turns=6); _mark_idle(f)
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f, user_turns=6)
+    _mark_idle(f)
     engine.settings.session_watcher_enabled = True
     engine.settings.session_watcher_dir = wd
     engine.settings.session_watcher_debounce_seconds = 10.0
     real = sw._ingest_session
-    in_ingest = threading.Event(); release = threading.Event()
-    true_returns = {"n": 0}; lk = threading.Lock()
+    in_ingest = threading.Event()
+    release = threading.Event()
+    true_returns = {"n": 0}
+    lk = threading.Lock()
     def gated(*a, **k):
-        in_ingest.set(); release.wait(5)
+        in_ingest.set()
+        release.wait(5)
         r = real(*a, **k)
         if r:
             with lk:
@@ -1505,14 +1542,20 @@ def test_live_append_during_catchup_ingests_tail_once(engine, tmp_path):
 def test_stop_drains_live_inflight_ingest(engine, tmp_path):
     import threading
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f)
+    _mark_idle(f)
     engine.settings.session_watcher_enabled = True
     engine.settings.session_watcher_dir = wd
     engine.settings.session_watcher_lookback_hours = -1   # catch-up skips never-seen -> only live
-    started = threading.Event(); release = threading.Event()
+    started = threading.Event()
+    release = threading.Event()
     def blocking(*a, **k):
-        started.set(); release.wait(5); return False
+        started.set()
+        release.wait(5)
+        return False
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(sw, "_ingest_session", blocking):
         handle = sw.start_session_watcher(engine)
@@ -1534,16 +1577,23 @@ def test_stop_drains_ingest_blocked_on_semaphore(engine, tmp_path):
     counted in_flight and drained — not abandoned (council round 4 #1/#5)."""
     import threading
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    a = wd / "p" / "a.jsonl"; b = wd / "p" / "b.jsonl"
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    a = wd / "p" / "a.jsonl"
+    b = wd / "p" / "b.jsonl"
     for f in (a, b):
-        _make_jsonl(f); _mark_idle(f)
+        _make_jsonl(f)
+        _mark_idle(f)
     engine.settings.session_watcher_enabled = True
     engine.settings.session_watcher_dir = wd
     engine.settings.session_watcher_lookback_hours = -1       # only the two live ingests below
-    started = threading.Event(); release = threading.Event(); count = {"done": 0}; lk = threading.Lock()
+    started = threading.Event()
+    release = threading.Event()
+    count = {"done": 0}
+    lk = threading.Lock()
     def blocking(*ar, **kw):
-        started.set(); release.wait(5)
+        started.set()
+        release.wait(5)
         with lk:
             count["done"] += 1
         return False
@@ -1552,9 +1602,11 @@ def test_stop_drains_ingest_blocked_on_semaphore(engine, tmp_path):
         handle = sw.start_session_watcher(engine)
         h = handle.handlers[0]
         ta = threading.Thread(target=h._do_ingest, args=(a,))  # acquires the K=1 semaphore, blocks
-        ta.start(); assert started.wait(2)
+        ta.start()
+        assert started.wait(2)
         tb = threading.Thread(target=h._do_ingest, args=(b,))  # claims _ingesting[b], waits on semaphore
-        tb.start(); time.sleep(0.2)
+        tb.start()
+        time.sleep(0.2)
         assert h.in_flight_count() == 2                         # both claimed before stop
         done = threading.Event()
         stopper = threading.Thread(target=lambda: (sw.stop_session_watcher(handle), done.set()))
@@ -1562,7 +1614,8 @@ def test_stop_drains_ingest_blocked_on_semaphore(engine, tmp_path):
         assert not done.wait(0.5)                               # stop waits for BOTH to drain
         release.set()
         assert done.wait(5)
-        ta.join(); tb.join()
+        ta.join()
+        tb.join()
     assert count["done"] == 2                                   # both completed, none abandoned
     assert h.in_flight_count() == 0
 
@@ -1572,8 +1625,11 @@ def test_stop_drains_ingest_blocked_on_semaphore(engine, tmp_path):
 def test_run_catchup_lookback_minus_one_skips_new_files(engine, tmp_path):
     import threading
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f)
+    _mark_idle(f)
     handler = sw.SessionHandler(engine, wd, 0.1, 5)
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         sw._run_catchup([(wd, handler)], threading.Event(), -1)
@@ -1583,8 +1639,11 @@ def test_run_catchup_lookback_minus_one_skips_new_files(engine, tmp_path):
 def test_run_catchup_lookback_zero_ingests_all(engine, tmp_path):
     import threading
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f)
+    _mark_idle(f)
     handler = sw.SessionHandler(engine, wd, 0.1, 5)
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         sw._run_catchup([(wd, handler)], threading.Event(), 0)
@@ -1596,8 +1655,11 @@ def test_cancelled_debounce_timer_tail_recovered_by_catchup(engine, tmp_path):
     recovers it (final two-peer round #2: pending timers are cancelled, not drained)."""
     import threading
     import ormah.background.session_watcher as sw
-    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
-    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    wd = tmp_path / "projects"
+    (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"
+    _make_jsonl(f)
+    _mark_idle(f)
     handler = sw.SessionHandler(engine, wd, 10.0, 5)   # long debounce: timer won't fire during the test
     handler._schedule_ingest(f)                          # a live append schedules a debounce timer
     assert handler._timers                               # timer pending, tail not yet ingested
