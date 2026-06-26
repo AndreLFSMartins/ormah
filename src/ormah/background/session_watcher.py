@@ -1040,6 +1040,12 @@ class SessionHandler(FileSystemEventHandler):
                     continue
             elif entry.get("end_offset", 0) == st.st_size:
                 # Fully consumed -> skip cheaply (no hash, no _do_ingest).
+                # ponytail: known limitation (council-pr H1') — a same-size rewrite that PRESERVES
+                # mtime_ns (utime / cp --preserve, or an in-place repair restoring the timestamp)
+                # is invisible here and in the park check below. Closing it means hashing every
+                # consumed file each tick, reintroducing the O(n) scan cost flagged earlier; the
+                # Claude/Codex transcript workload is append-only (rewrites grow the file), so this
+                # pattern does not occur in practice. Upgrade path: content-hash token if it ever does.
                 continue
             # else: seen with cursor not at EOF -> pending/failed tail (or a rewrite).
             token = (st.st_size, st.st_mtime_ns)
@@ -1056,8 +1062,10 @@ class SessionHandler(FileSystemEventHandler):
                 tr is not None and (tr[0], tr[1]) == token and tr[2] >= MAX_RECONCILE_RETRIES
             )
             candidates.append((deprioritized, st.st_mtime, jsonl_file))
-        # Non-deprioritized first, then most-recently-modified first within each group.
-        candidates.sort(key=lambda t: (t[0], -t[1]))
+        # Non-deprioritized first (newest-first, so freshly dropped transcripts recover soonest),
+        # then deprioritized (oldest-first FIFO, so a long-failing transient that just became
+        # recoverable is retried before newer deprioritized peers — no intra-group starvation).
+        candidates.sort(key=lambda t: (t[0], t[1] if t[0] else -t[1]))
         recovered = 0
         budget = self.engine.settings.session_watcher_reconcile_max_seconds
         start = time.time()
