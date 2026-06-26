@@ -1777,7 +1777,6 @@ def test_reconcile_deprioritizes_persistent_transient_behind_valid(engine, tmp_p
     _make_jsonl(valid, user_turns=6)
     old_mtime = now - 1000  # clearly older
     os.utime(valid, (old_mtime, old_mtime))
-    rel_valid = str(valid.relative_to(watch_dir))
 
     # Seed all as seen with a pending tail.
     handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
