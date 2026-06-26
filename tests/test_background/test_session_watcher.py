@@ -1374,3 +1374,49 @@ def test_ingest_session_accepts_state_lock(engine, tmp_path):
         ok = _ingest_session(engine, f, state, wd, 5, state_lock=threading.Lock())
     assert ok is True
     assert "p/s.jsonl" in state
+
+
+def test_semaphore_bounds_catchup_and_live(engine, tmp_path):
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    a = wd / "p" / "a.jsonl"; b = wd / "p" / "b.jsonl"
+    for f in (a, b):
+        _make_jsonl(f); _mark_idle(f)
+    cur = {"n": 0, "max": 0}; lk = threading.Lock(); real = sw._ingest_session
+    def instrumented(*args, **kw):
+        with lk:
+            cur["n"] += 1; cur["max"] = max(cur["max"], cur["n"])
+        time.sleep(0.05)
+        with lk:
+            cur["n"] -= 1
+        return real(*args, **kw)
+    sem = threading.Semaphore(1)
+    handler = sw.SessionHandler(engine, wd, 0.1, 5, extraction_semaphore=sem)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(sw, "_ingest_session", instrumented):
+        t1 = threading.Thread(target=handler._do_ingest, args=(a,))
+        t2 = threading.Thread(target=handler.catchup_ingest, args=(b,))
+        t1.start(); t2.start(); t1.join(); t2.join()
+    assert cur["max"] == 1
+
+
+def test_ingest_after_stop_is_rejected(engine, tmp_path):
+    import threading
+    import ormah.background.session_watcher as sw
+    wd = tmp_path / "projects"; (wd / "p").mkdir(parents=True)
+    f = wd / "p" / "s.jsonl"; _make_jsonl(f); _mark_idle(f)
+    stop = threading.Event()
+    handler = sw.SessionHandler(engine, wd, 0.1, 5, stop_event=stop)
+    stop.set()                                   # shutdown already in progress
+    calls = {"n": 0}; real = sw._ingest_session
+    def counting(*a, **k):
+        calls["n"] += 1; return real(*a, **k)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         patch.object(sw, "_ingest_session", counting):
+        result = handler._do_ingest(f)           # a timer that fired during shutdown
+        status = handler.catchup_ingest(f)
+    assert result is False
+    assert status == "stopped"
+    assert calls["n"] == 0                        # neither path touched _ingest_session / the DB
+    assert handler.in_flight_count() == 0
