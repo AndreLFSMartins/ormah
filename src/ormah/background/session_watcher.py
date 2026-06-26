@@ -936,7 +936,8 @@ class SessionHandler(FileSystemEventHandler):
         self._pending: set[str] = set()
         self._lock = Lock()
         self._state_lock = Lock()
-        self._reconcile_attempts: dict[str, tuple[int, int]] = {}  # rel -> (size_at_attempt, no_progress_count)
+        self._reconcile_attempts: dict[str, tuple[int, int, int]] = {}  # rel -> (size, mtime_ns, no_progress_count)
+        self._reconcile_transient: dict[str, tuple[int, int, int]] = {}  # rel -> (size, mtime_ns, count)
 
     def _schedule_ingest(self, path: Path) -> None:
         """Schedule a debounced ingestion for the given file."""
@@ -1011,6 +1012,13 @@ class SessionHandler(FileSystemEventHandler):
         recovered soonest. A per-tick wall-clock budget
         (``session_watcher_reconcile_max_seconds``) caps scheduler-thread occupancy: remaining
         candidates are picked up on the next tick.
+
+        The park key for NO_PROGRESS is ``(size, mtime_ns)``: a same-size content rewrite
+        (e.g. a repaired JSONL line) changes the mtime_ns, producing a new token that un-parks
+        the file immediately without waiting for a process restart.  Persistently-TRANSIENT files
+        (external failures that repeat at the same token) are deprioritized — sorted behind
+        fresh candidates — rather than parked, so they keep being retried but cannot monopolize
+        the per-tick cap and starve valid candidates.
         """
         cutoff = time.time() - (self.lookback_hours * 3600) if self.lookback_hours > 0 else 0
         cap = self.engine.settings.session_watcher_reconcile_max_per_tick
@@ -1034,38 +1042,49 @@ class SessionHandler(FileSystemEventHandler):
                 # Fully consumed -> skip cheaply (no hash, no _do_ingest).
                 continue
             # else: seen with cursor not at EOF -> pending/failed tail (or a rewrite).
-            # Bounded retry applies to BOTH never-seen and seen-pending files: a file attempted
-            # MAX_RECONCILE_RETRIES times at the same size without progress (a corrupt transcript,
-            # a session that died before any turn closed, or a persistent ingest failure) is parked
-            # until its size changes, so a cluster of stuck files cannot consume the per-tick budget
-            # every tick and starve a genuinely-ingestible transcript.
-            attempt = self._reconcile_attempts.get(rel)
-            if attempt is not None and attempt[0] == st.st_size \
-                    and attempt[1] >= MAX_RECONCILE_RETRIES:
-                continue
-            candidates.append((st.st_mtime, jsonl_file))
-        # Most-recently-modified first: freshly dropped transcripts recovered soonest.
-        candidates.sort(key=lambda t: t[0], reverse=True)
+            token = (st.st_size, st.st_mtime_ns)
+            # H1: park NO_PROGRESS by (size, mtime_ns) — a same-size content rewrite (new mtime)
+            # changes the token and un-parks the file, so a recoverable tail is never stranded.
+            park = self._reconcile_attempts.get(rel)
+            if park is not None and (park[0], park[1]) == token and park[2] >= MAX_RECONCILE_RETRIES:
+                continue  # parked at this exact content; skip until the content (token) changes
+            # H2: deprioritize (never park) a file that keeps failing TRANSIENT at this token, so a
+            # cluster of deterministically-failing files can't monopolize the per-tick cap and
+            # starve valid candidates. Deprioritized files still get retried — just behind fresh ones.
+            tr = self._reconcile_transient.get(rel)
+            deprioritized = (
+                tr is not None and (tr[0], tr[1]) == token and tr[2] >= MAX_RECONCILE_RETRIES
+            )
+            candidates.append((deprioritized, st.st_mtime, jsonl_file))
+        # Non-deprioritized first, then most-recently-modified first within each group.
+        candidates.sort(key=lambda t: (t[0], -t[1]))
         recovered = 0
         budget = self.engine.settings.session_watcher_reconcile_max_seconds
         start = time.time()
-        for _mtime, jsonl_file in candidates[:cap]:
+        for _dep, _mtime, jsonl_file in candidates[:cap]:
             if time.time() - start >= budget:
                 break  # yield scheduler thread; remaining picked up next tick
             rel = str(jsonl_file.relative_to(self.watch_dir))
             try:
-                size = jsonl_file.stat().st_size
+                st2 = jsonl_file.stat()
             except OSError:
                 continue
+            size, mtime_ns = st2.st_size, st2.st_mtime_ns
             result = self._do_ingest(jsonl_file)
             if result == IngestResult.OK:
                 recovered += 1
                 self._reconcile_attempts.pop(rel, None)
+                self._reconcile_transient.pop(rel, None)
             elif result == IngestResult.NO_PROGRESS:
                 prev = self._reconcile_attempts.get(rel)
-                count = prev[1] + 1 if (prev is not None and prev[0] == size) else 1
-                self._reconcile_attempts[rel] = (size, count)
-            # TRANSIENT: leave _reconcile_attempts untouched -> retried next tick, never parked
+                count = prev[2] + 1 if (prev is not None and (prev[0], prev[1]) == (size, mtime_ns)) else 1
+                self._reconcile_attempts[rel] = (size, mtime_ns, count)
+                self._reconcile_transient.pop(rel, None)
+            else:  # TRANSIENT — never park; count toward deprioritization at this token
+                prev = self._reconcile_transient.get(rel)
+                count = prev[2] + 1 if (prev is not None and (prev[0], prev[1]) == (size, mtime_ns)) else 1
+                self._reconcile_transient[rel] = (size, mtime_ns, count)
+                self._reconcile_attempts.pop(rel, None)
         if recovered:
             logger.info(
                 "Session watcher reconcile recovered %d transcript(s) the live path missed",
