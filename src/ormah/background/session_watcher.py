@@ -9,7 +9,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock, Timer
+from threading import Event, Lock, Semaphore, Timer
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -889,6 +889,8 @@ class SessionHandler(FileSystemEventHandler):
         debounce_seconds: float,
         min_turns: int,
         idle_threshold: float = 30.0,
+        extraction_semaphore: Semaphore | None = None,
+        stop_event: Event | None = None,
     ) -> None:
         self.engine = engine
         self.watch_dir = watch_dir
@@ -900,9 +902,14 @@ class SessionHandler(FileSystemEventHandler):
         self._ingesting: set[str] = set()
         self._pending: set[str] = set()
         self._lock = Lock()
+        self._state_lock = Lock()
+        self._extraction_semaphore = extraction_semaphore or Semaphore(1)
+        self._stop_event = stop_event or Event()
 
     def _schedule_ingest(self, path: Path) -> None:
         """Schedule a debounced ingestion for the given file."""
+        if self._stop_event.is_set():
+            return
         key = str(path)
         with self._lock:
             if key in self._timers:
@@ -918,6 +925,8 @@ class SessionHandler(FileSystemEventHandler):
 
     def _schedule_retry(self, path: Path) -> None:
         """Re-attempt ingestion after idle_threshold so an active short tail is not lost."""
+        if self._stop_event.is_set():
+            return
         key = str(path)
         with self._lock:
             if key in self._timers:
@@ -927,31 +936,73 @@ class SessionHandler(FileSystemEventHandler):
             self._timers[key] = timer
             timer.start()
 
-    def _do_ingest(self, path: Path) -> None:
-        """Actually ingest the session (called after debounce or retry)."""
+    def _run_guarded(self, path: Path) -> bool:
+        """Semaphore-bounded ingest with the state lock."""
+        with self._extraction_semaphore:
+            return _ingest_session(
+                self.engine, path, self._state, self.watch_dir, self.min_turns,
+                idle_threshold=self.idle_threshold,
+                on_defer_active=lambda: self._schedule_retry(path),
+                state_lock=self._state_lock,
+            )
+
+    def _do_ingest(self, path: Path) -> bool:
+        """Live path (after debounce/retry). Cancels its own timer."""
         key = str(path)
         with self._lock:
             self._timers.pop(key, None)
+            if self._stop_event.is_set():        # shutting down -> reject before claiming / touching DB
+                return False
             if key in self._ingesting:
                 # An ingest for this path is already running and has already parsed
                 # its slice; mark the path so the new content is re-ingested once it
                 # finishes, instead of dropping this event.
                 self._pending.add(key)
-                return
+                return False
             self._ingesting.add(key)
         try:
-            _ingest_session(
-                self.engine, path, self._state, self.watch_dir, self.min_turns,
-                idle_threshold=self.idle_threshold,
-                on_defer_active=lambda: self._schedule_retry(path),
-            )
+            result = self._run_guarded(path)
         finally:
             with self._lock:
                 self._ingesting.discard(key)
                 rerun = key in self._pending
                 self._pending.discard(key)
-        if rerun:
+        if rerun and not self._stop_event.is_set():
             self._schedule_ingest(path)  # re-process content that arrived mid-ingest
+        return result
+
+    def catchup_ingest(self, path: Path) -> str:
+        """Catch-up path. Shares the in-flight guard but never touches live debounce timers.
+        Returns 'ok' | 'skipped' | 'in_flight' | 'stopped'."""
+        key = str(path)
+        with self._lock:
+            if self._stop_event.is_set():
+                return "stopped"
+            if key in self._ingesting:
+                return "in_flight"
+            self._ingesting.add(key)
+        try:
+            ingested = self._run_guarded(path)
+        finally:
+            with self._lock:
+                self._ingesting.discard(key)
+                rerun = key in self._pending
+                self._pending.discard(key)
+        if rerun and not self._stop_event.is_set():
+            self._schedule_ingest(path)
+        return "ok" if ingested else "skipped"
+
+    def cancel_pending_timers(self) -> None:
+        """Cancel debounce/retry timers that have not fired yet (shutdown)."""
+        with self._lock:
+            for timer in self._timers.values():
+                timer.cancel()
+            self._timers.clear()
+
+    def in_flight_count(self) -> int:
+        """Number of ingests that have claimed a file and not yet released it."""
+        with self._lock:
+            return len(self._ingesting)
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".jsonl"):
