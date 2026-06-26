@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, Timer
@@ -1058,11 +1059,19 @@ class SessionHandler(FileSystemEventHandler):
                 self._schedule_ingest(path)
 
 
-def start_session_watcher(engine: MemoryEngine) -> list[Observer]:
+@dataclass
+class SessionWatch:
+    """A live watcher: its directory, handler, and (swappable) Observer."""
+    watch_dir: Path
+    handler: SessionHandler
+    observer: Observer
+
+
+def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
     """Start the session watcher for agent transcript files.
 
     Performs an initial catch-up scan, then starts a real-time watcher.
-    Returns list of Observer instances for shutdown.
+    Returns list of SessionWatch for shutdown and reconcile.
     """
     s = engine.settings
     if not s.session_watcher_enabled:
@@ -1073,34 +1082,62 @@ def start_session_watcher(engine: MemoryEngine) -> list[Observer]:
         logger.warning("Session watcher dir does not exist: %s", _expand_watch_dir(s.session_watcher_dir))
         return []
 
-    observers: list[Observer] = []
+    watches: list[SessionWatch] = []
     for watch_dir in watch_dirs:
-        # Catch-up scan
         ingested = _scan_sessions(
             engine, watch_dir, s.session_watcher_min_turns, s.session_watcher_lookback_hours,
         )
         if ingested:
             logger.info("Session watcher catch-up: ingested %d sessions from %s", ingested, watch_dir)
 
-        # Start real-time watcher
         handler = SessionHandler(
             engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
-            s.session_watcher_idle_threshold,
+            s.session_watcher_idle_threshold, s.session_watcher_lookback_hours,
         )
         observer = Observer()
         observer.schedule(handler, str(watch_dir), recursive=True)
         observer.start()
-        observers.append(observer)
+        watches.append(SessionWatch(watch_dir=watch_dir, handler=handler, observer=observer))
         logger.info("Session watcher started on %s", watch_dir)
 
-    return observers
+    return watches
 
 
-def stop_session_watcher(observers: list[Observer]) -> None:
+def stop_session_watcher(watches: list[SessionWatch]) -> None:
     """Stop and join all session watcher observers."""
-    for observer in observers:
-        observer.stop()
-    for observer in observers:
-        observer.join(timeout=5)
-    if observers:
+    for w in watches:
+        w.observer.stop()
+    for w in watches:
+        w.observer.join(timeout=5)
+    if watches:
         logger.info("Session watcher stopped")
+
+
+def run_session_reconcile(watches: list[SessionWatch]) -> int:
+    """Periodic safety net: recreate any dead Observer, then reconcile each watcher.
+
+    Recreating the Observer keeps the fast path alive going forward; the reconcile scan recovers
+    anything the live path dropped (Observer death OR FSEvents coalescing). Returns total recovered.
+    """
+    total = 0
+    for w in watches:
+        try:
+            alive = w.observer.is_alive()
+        except Exception:
+            alive = False
+        if not alive:
+            logger.warning("Session watcher Observer not alive for %s; recreating", w.watch_dir)
+            try:
+                w.observer.stop()
+                w.observer.join(timeout=5)
+            except Exception:
+                pass
+            try:
+                observer = Observer()
+                observer.schedule(w.handler, str(w.watch_dir), recursive=True)
+                observer.start()
+                w.observer = observer
+            except Exception as e:
+                logger.warning("Failed to recreate Observer for %s: %s", w.watch_dir, e)
+        total += w.handler.reconcile()
+    return total
