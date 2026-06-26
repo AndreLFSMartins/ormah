@@ -835,50 +835,6 @@ def _ingest_session(
     return True
 
 
-def _scan_sessions(
-    engine: MemoryEngine,
-    watch_dir: Path,
-    min_turns: int,
-    lookback_hours: int,
-) -> int:
-    """Scan for new/changed JSONL transcripts. Returns count ingested."""
-    state = _load_state(watch_dir)
-    ingested = 0
-
-    now = time.time()
-    cutoff = now - (lookback_hours * 3600) if lookback_hours > 0 else 0
-
-    for jsonl_file in sorted(watch_dir.rglob("*.jsonl")):
-        rel = str(jsonl_file.relative_to(watch_dir))
-
-        # Lookback cutoff applies only to never-ingested files
-        if rel not in state and lookback_hours >= 0 and cutoff > 0:
-            try:
-                mtime = jsonl_file.stat().st_mtime
-            except OSError:
-                continue
-            if mtime < cutoff:
-                continue
-
-        # lookback_hours == -1 means skip all never-ingested files (no catch-up)
-        if rel not in state and lookback_hours < 0:
-            continue
-
-        if _ingest_session(engine, jsonl_file, state, watch_dir, min_turns):
-            ingested += 1
-
-    # Clean stale state entries for deleted files
-    stale_keys = [
-        rel for rel in list(state.keys())
-        if not (watch_dir / rel).exists()
-    ]
-    for key in stale_keys:
-        del state[key]
-    if stale_keys:
-        _save_state(watch_dir, state)
-
-    return ingested
-
 
 @dataclass
 class SessionWatcherHandle:
