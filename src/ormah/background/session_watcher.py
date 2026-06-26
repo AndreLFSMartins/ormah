@@ -1012,10 +1012,15 @@ class SessionHandler(FileSystemEventHandler):
         ``MAX_RECONCILE_RETRIES`` attempts per size so an abandoned in-flight tail is not
         re-hashed forever — so a transient ingest failure never strands it. Returns
         transcripts recovered.
+
+        Candidates are sorted most-recently-modified first so freshly dropped transcripts are
+        recovered soonest. A per-tick wall-clock budget
+        (``session_watcher_reconcile_max_seconds``) caps scheduler-thread occupancy: remaining
+        candidates are picked up on the next tick.
         """
         cutoff = time.time() - (self.lookback_hours * 3600) if self.lookback_hours > 0 else 0
         cap = self.engine.settings.session_watcher_reconcile_max_per_tick
-        candidates: list[Path] = []
+        candidates: list[tuple[float, Path]] = []
         for jsonl_file in sorted(self.watch_dir.rglob("*.jsonl")):
             if _is_subagent_transcript(jsonl_file):
                 continue
@@ -1026,7 +1031,9 @@ class SessionHandler(FileSystemEventHandler):
             rel = str(jsonl_file.relative_to(self.watch_dir))
             entry = self._state.get(rel)
             if entry is None:
-                # Never-seen: lookback cutoff applies (mirrors _scan_sessions).
+                # Never-seen: mirror _scan_sessions catch-up rules.
+                if self.lookback_hours < 0:
+                    continue  # catch-up disabled -> skip never-seen files
                 if cutoff > 0 and st.st_mtime < cutoff:
                     continue
             elif entry.get("end_offset", 0) == st.st_size:
@@ -1042,9 +1049,15 @@ class SessionHandler(FileSystemEventHandler):
             if attempt is not None and attempt[0] == st.st_size \
                     and attempt[1] >= MAX_RECONCILE_RETRIES:
                 continue
-            candidates.append(jsonl_file)
+            candidates.append((st.st_mtime, jsonl_file))
+        # Most-recently-modified first: freshly dropped transcripts recovered soonest.
+        candidates.sort(key=lambda t: t[0], reverse=True)
         recovered = 0
-        for jsonl_file in candidates[:cap]:
+        budget = self.engine.settings.session_watcher_reconcile_max_seconds
+        start = time.time()
+        for _mtime, jsonl_file in candidates[:cap]:
+            if time.time() - start >= budget:
+                break  # yield scheduler thread; remaining picked up next tick
             rel = str(jsonl_file.relative_to(self.watch_dir))
             try:
                 size = jsonl_file.stat().st_size
