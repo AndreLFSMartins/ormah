@@ -1606,3 +1606,24 @@ def test_run_session_reconcile_recreates_dead_observer(engine, tmp_path):
     new_obs.start.assert_called_once()
     assert watch.observer is new_obs
     assert total == 0  # empty dir, nothing to recover
+
+
+def test_run_session_reconcile_runs_reconcile_even_when_recreate_fails(engine, tmp_path):
+    """If recreating a dead Observer raises, the reconcile scan still runs (safety-net guarantee)."""
+    from ormah.background.session_watcher import SessionWatch, run_session_reconcile
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler.reconcile = MagicMock(return_value=0)
+
+    dead = MagicMock()
+    dead.is_alive.return_value = False
+    watch = SessionWatch(watch_dir=watch_dir, handler=handler, observer=dead)
+
+    with patch("ormah.background.session_watcher.Observer", side_effect=RuntimeError("boom")):
+        total = run_session_reconcile([watch])
+
+    handler.reconcile.assert_called_once()  # safety net ran despite recreate failure
+    assert total == 0
+    assert watch.observer is dead            # failed recreate leaves the (dead) ref; next tick retries

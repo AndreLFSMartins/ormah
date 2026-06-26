@@ -1124,8 +1124,8 @@ def run_session_reconcile(watches: list[SessionWatch]) -> int:
             try:
                 w.observer.stop()
                 w.observer.join(timeout=5)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Stopping dead Observer for %s failed: %s", w.watch_dir, e)
             try:
                 observer = Observer()
                 observer.schedule(w.handler, str(w.watch_dir), recursive=True)
