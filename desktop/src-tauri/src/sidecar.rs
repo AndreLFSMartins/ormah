@@ -32,6 +32,7 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
 
 async fn ensure_running<R: Runtime>(app: AppHandle<R>) {
     if !ormah_on_path() {
+        // First launch: install ormah via the bundled uv sidecar.
         let _ = app.emit("ormah://status", Phase::Installing { version: ORMAH_VERSION });
         if !install_via_uv(&app).await {
             let _ = app.emit(
@@ -42,9 +43,27 @@ async fn ensure_running<R: Runtime>(app: AppHandle<R>) {
             );
             return;
         }
+    } else if needs_upgrade() {
+        // App was updated: upgrade the Python package to the matching version.
+        let _ = app.emit("ormah://status", Phase::Installing { version: ORMAH_VERSION });
+        // Best-effort — if upgrade fails we still start with the old version.
+        let _ = install_via_uv(&app).await;
     }
     let _ = app.emit("ormah://status", Phase::Starting);
     spawn_server();
+}
+
+/// Returns true when the installed ormah version doesn't match ORMAH_VERSION.
+fn needs_upgrade() -> bool {
+    let Ok(out) = std::process::Command::new("ormah")
+        .arg("--version")
+        .output()
+    else {
+        return false;
+    };
+    let installed = String::from_utf8_lossy(&out.stdout);
+    // `ormah --version` outputs e.g. "ormah 0.12.4"
+    !installed.contains(ORMAH_VERSION)
 }
 
 async fn install_via_uv<R: Runtime>(app: &AppHandle<R>) -> bool {

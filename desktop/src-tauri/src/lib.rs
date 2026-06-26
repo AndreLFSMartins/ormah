@@ -9,6 +9,7 @@ mod commands;
 mod sidecar;
 mod stats;
 mod tray;
+mod updater;
 
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
@@ -58,6 +59,10 @@ pub fn run() {
         .setup(|app| {
             // Start the bundled server the moment the app launches.
             sidecar::start(app.handle().clone());
+
+            // Check for a desktop app update in the background — user is
+            // notified and must explicitly click to install.
+            updater::check(app.handle().clone());
 
             // Main window: shows the install/boot flow, then navigates to the
             // graph. Built in Rust so we can attach the scrollbar-hiding init

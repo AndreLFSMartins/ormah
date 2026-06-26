@@ -3,11 +3,11 @@
 use tauri::{
     menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    App,
+    App, Listener,
 };
 use tauri_plugin_autostart::ManagerExt;
 
-use crate::{commands, stats};
+use crate::{commands, stats, updater};
 
 pub fn build(app: &App) -> tauri::Result<()> {
     let handle = app.handle();
@@ -17,6 +17,10 @@ pub fn build(app: &App) -> tauri::Result<()> {
         .enabled(false)
         .build(app)?;
     let stats_total = MenuItemBuilder::with_id("stats_total", " ")
+        .enabled(false)
+        .build(app)?;
+
+    let update_item = MenuItemBuilder::with_id("install_update", "Update available…")
         .enabled(false)
         .build(app)?;
 
@@ -34,12 +38,23 @@ pub fn build(app: &App) -> tauri::Result<()> {
         .item(&stats_week)
         .item(&stats_total)
         .separator()
+        .item(&update_item)
         .item(&open_graph)
         .item(&setup)
         .item(&start_login)
         .separator()
         .item(&quit)
         .build()?;
+
+    // Enable the update item and relabel it with the version when notified.
+    let update_item_for_event = update_item.clone();
+    handle.listen("ormah://update-available", move |event| {
+        if let Ok(payload) = serde_json::from_str::<updater::UpdateAvailable>(event.payload()) {
+            let label = format!("Install update {}…", payload.version);
+            let _ = update_item_for_event.set_text(label);
+            let _ = update_item_for_event.set_enabled(true);
+        }
+    });
 
     // Clone the check item so the event handler can flip its checkmark.
     let start_login_for_event = start_login.clone();
@@ -51,6 +66,7 @@ pub fn build(app: &App) -> tauri::Result<()> {
         .tooltip("Ormah")
         .menu(&menu)
         .on_menu_event(move |app, event| match event.id().as_ref() {
+            "install_update" => updater::install(app.clone()),
             "open_graph" => commands::open_graph(app),
             "setup" => commands::run_setup_notify(app.clone()),
             "start_login" => {
