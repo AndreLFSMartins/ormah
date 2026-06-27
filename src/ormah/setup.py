@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import json
 import os
 import shutil
 import socket
 import subprocess
+import sys
 import webbrowser
+from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
+from typing import Callable
 import re
 
 import httpx
-
-from importlib import resources
 
 from ormah.config import settings
 from ormah.console import info, ok, play_finale, step, warn
@@ -40,18 +43,23 @@ def _find_binary(name: str) -> str | None:
     found = shutil.which(name)
     if found:
         return found
+    # High-priority: version-manager shims (newest nvm version first, then mise)
+    nvm_paths = [
+        Path(p)
+        for p in sorted(
+            glob.glob(str(Path.home() / ".nvm" / "versions" / "node" / "*" / "bin" / name)),
+            reverse=True,  # lexicographic desc → newest node version first
+        )
+    ]
     candidates: list[Path] = [
+        Path.home() / ".local" / "share" / "mise" / "shims" / name,
+        *nvm_paths,
         Path.home() / ".local" / "bin" / name,
         Path("/usr/local/bin") / name,
         Path("/opt/homebrew/bin") / name,   # macOS Homebrew (Apple Silicon)
         Path("/usr/local/homebrew/bin") / name,  # macOS Homebrew (Intel)
         Path("/usr/bin") / name,
     ]
-    # nvm installs: ~/.nvm/versions/node/*/bin/<name>
-    for p in sorted(glob.glob(str(Path.home() / ".nvm" / "versions" / "node" / "*" / "bin" / name)), reverse=True):
-        candidates.insert(0, Path(p))
-    # mise / asdf: ~/.local/share/mise/shims/<name>
-    candidates.insert(0, Path.home() / ".local" / "share" / "mise" / "shims" / name)
     for candidate in candidates:
         if candidate.exists() and os.access(candidate, os.X_OK):
             return str(candidate)
@@ -1611,9 +1619,6 @@ def run_uninstall(yes: bool = False) -> None:
 # Adding a new integration = one entry here, zero changes to callers or UI.
 # ---------------------------------------------------------------------------
 
-from dataclasses import dataclass, field
-from typing import Callable
-
 
 @dataclass
 class AgentDescriptor:
@@ -1632,10 +1637,24 @@ def _claude_code_detected() -> bool:
 
 
 def _claude_code_is_wired() -> bool:
+    # Check for ormah whisper hooks in settings.json and ormah MCP in .claude.json
     settings_path = Path.home() / ".claude" / "settings.json"
     try:
-        return "ormah" in settings_path.read_text()
-    except OSError:
+        data = json.loads(settings_path.read_text())
+        hooks = data.get("hooks") or {}
+        for matchers in hooks.values():
+            if isinstance(matchers, list):
+                for entry in matchers:
+                    cmd = entry.get("command", "") if isinstance(entry, dict) else str(entry)
+                    if "ormah whisper" in cmd:
+                        return True
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    claude_json = Path.home() / ".claude.json"
+    try:
+        data = json.loads(claude_json.read_text())
+        return "ormah" in (data.get("mcpServers") or {})
+    except (OSError, json.JSONDecodeError):
         return False
 
 
@@ -1644,16 +1663,25 @@ def _codex_detected() -> bool:
 
 
 def _codex_is_wired() -> bool:
+    # Check for ormah whisper hooks in hooks.json or ormah MCP in config.toml
     hooks_path = Path.home() / ".codex" / "hooks.json"
+    try:
+        data = json.loads(hooks_path.read_text())
+        hooks = data.get("hooks") or {}
+        for matchers in hooks.values():
+            if isinstance(matchers, list):
+                for entry in matchers:
+                    cmd = entry.get("command", "") if isinstance(entry, dict) else str(entry)
+                    if "ormah whisper" in cmd:
+                        return True
+    except (OSError, json.JSONDecodeError):
+        pass
     config_path = Path.home() / ".codex" / "config.toml"
     try:
-        if hooks_path.exists() and "ormah" in hooks_path.read_text():
-            return True
-        if config_path.exists() and "ormah" in config_path.read_text():
-            return True
+        text = config_path.read_text()
+        return "[mcp_servers.ormah]" in text
     except OSError:
-        pass
-    return False
+        return False
 
 
 def _claude_desktop_detected() -> bool:
@@ -1668,8 +1696,9 @@ def _claude_desktop_detected() -> bool:
 def _claude_desktop_is_wired() -> bool:
     config_path = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
     try:
-        return "ormah" in config_path.read_text()
-    except OSError:
+        data = json.loads(config_path.read_text())
+        return "ormah" in (data.get("mcpServers") or {})
+    except (OSError, json.JSONDecodeError):
         return False
 
 
@@ -1755,8 +1784,11 @@ def _get_agent(agent_id: str) -> AgentDescriptor:
 
 def wire_agent(agent_id: str) -> dict:
     """Wire ormah into a single agent by id. Returns {wired, errors}."""
-    import contextlib, sys
+    import platform as _platform
     agent = _get_agent(agent_id)
+    current_os = _platform.system().lower()
+    if agent.platform is not None and current_os not in agent.platform:
+        return {"wired": [], "errors": {agent_id: f"Not available on {_platform.system()}"}}
     errors: dict[str, str] = {}
     with contextlib.redirect_stdout(sys.stderr):
         try:
@@ -1768,7 +1800,6 @@ def wire_agent(agent_id: str) -> dict:
 
 def unwire_agent(agent_id: str) -> dict:
     """Remove ormah hooks/MCP/instructions for a single agent. Returns {unwired, errors}."""
-    import contextlib, sys
     agent = _get_agent(agent_id)
     errors: dict[str, str] = {}
     with contextlib.redirect_stdout(sys.stderr):
@@ -1820,46 +1851,28 @@ def run_setup_json() -> dict:
     Human-readable progress from the underlying configure_* helpers is sent to
     stderr so stdout stays clean JSON for the caller to parse.
     """
-    import contextlib
-    import sys
-
+    import platform as _platform
+    current_os = _platform.system().lower()
     ormah_bin = get_ormah_bin_path()
-    detected = detect_clients()
+    detected_ids: list[str] = []
     wired: list[str] = []
     errors: dict[str, str] = {}
 
-    def _wire(name: str, *steps) -> None:
-        try:
-            for fn in steps:
-                fn()
-            wired.append(name)
-        except Exception as exc:  # noqa: BLE001 — report, don't crash the app
-            errors[name] = f"{type(exc).__name__}: {exc}"
-
     with contextlib.redirect_stdout(sys.stderr):
-        if detected["claude_code"]:
-            _wire(
-                "claude_code",
-                lambda: configure_claude_hooks(ormah_bin),
-                lambda: configure_claude_code_mcp(ormah_bin),
-                install_claude_md,
-                install_claude_agents,
-                install_claude_commands,
-            )
-        if detected["codex"]:
-            _wire(
-                "codex",
-                lambda: configure_codex_hooks(ormah_bin),
-                lambda: configure_codex_mcp(ormah_bin),
-                install_codex_md,
-                install_codex_agents,
-            )
-        if detected["claude_desktop"]:
-            _wire("claude_desktop", lambda: configure_claude_desktop(ormah_bin))
+        for agent in AGENT_REGISTRY:
+            available = agent.platform is None or current_os in agent.platform
+            if not available or not agent.detect_fn():
+                continue
+            detected_ids.append(agent.id)
+            try:
+                agent.wire_fn()
+                wired.append(agent.id)
+            except Exception as exc:  # noqa: BLE001
+                errors[agent.id] = f"{type(exc).__name__}: {exc}"
 
     return {
         "ormah_bin": ormah_bin,
-        "detected": [k for k, v in detected.items() if v],
+        "detected": detected_ids,
         "wired": wired,
         "errors": errors,
     }

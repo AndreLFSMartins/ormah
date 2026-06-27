@@ -40,7 +40,7 @@ const ALL_EDGE_TYPES: EdgeType[] = [
 ];
 const DEFAULT_EDGE_TYPES = new Set<EdgeType>(ALL_EDGE_TYPES);
 
-type PanelId = "settings" | "insights" | "admin" | "agents" | "agents" | null;
+type PanelId = "settings" | "insights" | "admin" | "agents" | null;
 type ThemeTransitionState = {
   theme: GraphTheme;
   id: number;
