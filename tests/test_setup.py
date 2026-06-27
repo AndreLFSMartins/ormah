@@ -114,7 +114,12 @@ class TestPlistTemplate:
         assert "<string>com.ormah.server</string>" in rendered
         assert "<string>/home/user/.config/ormah/ormah-server</string>" in rendered
         assert "<key>RunAtLoad</key><true/>" in rendered
-        assert "<key>KeepAlive</key><true/>" in rendered
+        # KeepAlive must only respawn on failure — a clean exit (e.g. the port
+        # is already owned by another server) must not trigger a respawn loop.
+        compact = rendered.replace(" ", "").replace("\n", "")
+        assert "<key>KeepAlive</key><true/>" not in compact
+        assert "<key>SuccessfulExit</key><false/>" in compact
+        assert "<key>ThrottleInterval</key>" in compact
         assert "StandardOutPath" not in rendered
         assert "StandardErrorPath" not in rendered
 
