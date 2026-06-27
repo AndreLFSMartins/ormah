@@ -146,6 +146,50 @@ body {
   z-index: 100;
 }
 
+/* Window controls — only shown when the top bar acts as the desktop app's
+   title bar. Stretched full height; pulled to the window's right edge. */
+.win-controls {
+  display: flex;
+  align-self: stretch;
+  margin-left: 2px;
+  margin-right: -16px;
+}
+.win-btn {
+  width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+.win-btn:hover { background: var(--bg-surface); color: var(--text-bright); }
+.win-close:hover { background: #c0392b; color: #fff; }
+
+/* Desktop app: settings/insights/admin sit just below the window controls,
+   right-aligned, floating over the graph. */
+.app-actions {
+  position: fixed;
+  top: 48px;
+  right: 10px;
+  z-index: 95;
+  display: flex;
+  gap: 6px;
+}
+
+/* In-app overrides: WebKitGTK doesn't render backdrop-filter, so panels look
+   transparent. Use fully opaque backgrounds instead (incl. the tier-core tint,
+   which is otherwise a translucent rgba). */
+body.in-app .node-detail,
+body.in-app .side-panel,
+body.in-app .node-detail.tier-core {
+  background: #141414;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .search-wrapper {
   position: relative;
   flex: 1;

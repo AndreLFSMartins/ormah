@@ -1928,3 +1928,108 @@ def test_reconcile_skips_never_seen_when_lookback_negative(engine, tmp_path):
     assert recovered == 0
     assert ingest_calls == []
     assert rel not in handler._state
+
+
+# --- Merge of #52 (catch-up off bind path) onto the reconcile rework -------------------
+# These cover the behavior the merge introduced that NEITHER prior suite tested:
+# the off-bind startup catch-up and the shutdown drain that closes the use-after-close
+# window (issue #52), now expressed on the reconcile API (list[SessionWatch] + _stop_event).
+
+
+def test_do_ingest_rejected_after_stop_event(engine, tmp_path):
+    """Once _stop_event is set, _do_ingest rejects under the lock before touching the engine —
+    the guard that closes the use-after-close window at shutdown (issue #52)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler._stop_event.set()
+
+    with patch("ormah.background.session_watcher._ingest_session") as mock_ingest:
+        result = handler._do_ingest(jsonl)
+
+    assert result == IngestResult.TRANSIENT
+    mock_ingest.assert_not_called()          # rejected before the heavy work
+    assert handler.in_flight_count() == 0     # never claimed the path
+
+
+def test_stop_session_watcher_drains_inflight_ingest(engine, tmp_path):
+    """stop_session_watcher blocks until an in-flight ingest finishes, so nothing writes to the
+    DB after the lifespan calls engine.shutdown() right after (use-after-close guard, issue #52)."""
+    import threading
+
+    from ormah.background.session_watcher import SessionWatch
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_ingest(*a, **k):
+        entered.set()
+        release.wait(5)
+        return IngestResult.OK
+
+    def worker():
+        with patch("ormah.background.session_watcher._ingest_session", side_effect=blocking_ingest):
+            handler._do_ingest(watch_dir / "x.jsonl")
+
+    t = threading.Thread(target=worker)
+    t.start()
+    assert entered.wait(5)                     # an ingest is now in-flight
+    assert handler.in_flight_count() == 1
+
+    watch = SessionWatch(
+        watch_dir=watch_dir, handler=handler, observer=MagicMock(), startup_thread=None,
+    )
+    stop_returned = threading.Event()
+
+    def stopper():
+        stop_session_watcher([watch])
+        stop_returned.set()
+
+    s = threading.Thread(target=stopper)
+    s.start()
+
+    assert not stop_returned.wait(0.5)         # stop must NOT return while ingest is in-flight
+    release.set()                              # let the ingest finish
+    assert stop_returned.wait(5)               # now the drain completes and stop returns
+    t.join(5)
+    s.join(5)
+    assert handler.in_flight_count() == 0
+
+
+def test_start_session_watcher_runs_catchup_off_bind(engine, tmp_path):
+    """start_session_watcher ingests a pre-existing backlog via the off-bind startup thread:
+    the observer is live immediately (not blocked on a synchronous scan) and the backlog is
+    recovered once the startup thread joins (issue #52)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl)
+    _mark_idle(jsonl)
+
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = watch_dir
+    engine.settings.session_watcher_debounce_seconds = 10.0
+    engine.settings.session_watcher_lookback_hours = 9999
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        watches = start_session_watcher(engine)
+        try:
+            assert len(watches) == 1
+            assert watches[0].observer.is_alive()        # live from t0, scan did not block the bind
+            assert watches[0].startup_thread is not None
+            watches[0].startup_thread.join(10)           # deterministic wait for the off-bind drain
+            assert not watches[0].startup_thread.is_alive()
+            rel = str(jsonl.relative_to(watch_dir))
+            assert rel in watches[0].handler._state      # backlog ingested off the bind path
+        finally:
+            stop_session_watcher(watches)

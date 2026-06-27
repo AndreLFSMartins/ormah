@@ -105,6 +105,15 @@ def _cmd_server_status(args):
 
 
 def _cmd_setup(args):
+    if getattr(args, "json", False):
+        from ormah.setup import run_setup_json
+
+        result = run_setup_json()
+        print(json.dumps(result, indent=2))
+        if result["errors"]:
+            sys.exit(1)
+        return
+
     from ormah.setup import run_setup
 
     run_setup(
@@ -339,6 +348,11 @@ def main():
         "--skip-client-setup",
         action="store_true",
         help="Skip Claude/Codex/Desktop integration wiring; useful when a plugin manages the client side",
+    )
+    setup_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Non-interactive agent wiring; print a JSON result (used by the Mac app one-click setup)",
     )
     setup_p.set_defaults(func=_cmd_setup)
 

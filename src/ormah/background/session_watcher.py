@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from threading import Lock, Timer
+from threading import Event, Lock, Thread, Timer
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -923,6 +923,7 @@ class SessionHandler(FileSystemEventHandler):
         min_turns: int,
         idle_threshold: float = 30.0,
         lookback_hours: int = 72,
+        stop_event: Event | None = None,
     ) -> None:
         self.engine = engine
         self.watch_dir = watch_dir
@@ -938,9 +939,12 @@ class SessionHandler(FileSystemEventHandler):
         self._state_lock = Lock()
         self._reconcile_attempts: dict[str, tuple[int, int, int]] = {}  # rel -> (size, mtime_ns, no_progress_count)
         self._reconcile_transient: dict[str, tuple[int, int, int]] = {}  # rel -> (size, mtime_ns, count)
+        self._stop_event = stop_event or Event()
 
     def _schedule_ingest(self, path: Path) -> None:
         """Schedule a debounced ingestion for the given file."""
+        if self._stop_event.is_set():
+            return
         key = str(path)
         with self._lock:
             if key in self._timers:
@@ -956,6 +960,8 @@ class SessionHandler(FileSystemEventHandler):
 
     def _schedule_retry(self, path: Path) -> None:
         """Re-attempt ingestion after idle_threshold so an active short tail is not lost."""
+        if self._stop_event.is_set():
+            return
         key = str(path)
         with self._lock:
             if key in self._timers:
@@ -975,6 +981,8 @@ class SessionHandler(FileSystemEventHandler):
         key = str(path)
         with self._lock:
             self._timers.pop(key, None)
+            if self._stop_event.is_set():     # shutting down -> reject before claiming / touching DB
+                return IngestResult.TRANSIENT
             if key in self._ingesting:
                 self._pending.add(key)
                 return IngestResult.TRANSIENT
@@ -995,6 +1003,18 @@ class SessionHandler(FileSystemEventHandler):
         if rerun:
             self._schedule_ingest(path)
         return result
+
+    def cancel_pending_timers(self) -> None:
+        """Cancel debounce/retry timers that have not fired yet (shutdown)."""
+        with self._lock:
+            for timer in self._timers.values():
+                timer.cancel()
+            self._timers.clear()
+
+    def in_flight_count(self) -> int:
+        """Number of ingests that have claimed a file and not yet released it."""
+        with self._lock:
+            return len(self._ingesting)
 
     def reconcile(self) -> int:
         """Disk-truth safety net: ingest transcripts the live FSEvents path dropped.
@@ -1115,17 +1135,32 @@ class SessionHandler(FileSystemEventHandler):
 
 @dataclass
 class SessionWatch:
-    """A live watcher: its directory, handler, and (swappable) Observer."""
+    """A live watcher: its directory, handler, (swappable) Observer, and startup-drain thread."""
     watch_dir: Path
     handler: SessionHandler
     observer: Observer
+    startup_thread: "Thread | None" = None
+
+
+def _run_startup_reconcile(handler: SessionHandler) -> None:
+    """Drain the startup backlog off the bind path (replaces the on-bind _scan_sessions call).
+
+    One reconcile pass — bounded by the per-tick cap/budget; whatever is left is picked up by the
+    periodic reconcile job. Runs in a non-daemon thread so a mid-ingest is drained at shutdown.
+    """
+    try:
+        handler.reconcile()
+    except Exception as e:  # a bad backlog file must not crash the startup thread
+        logger.warning("Session watcher startup reconcile error for %s: %s", handler.watch_dir, e)
 
 
 def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
-    """Start the session watcher for agent transcript files.
+    """Start real-time watchers immediately, then drain the startup backlog off the bind path.
 
-    Performs an initial catch-up scan, then starts a real-time watcher.
-    Returns list of SessionWatch for shutdown and reconcile.
+    The catch-up scan that used to run synchronously here (blocking the HTTP bind for minutes on
+    restart, issue #52) now runs in a non-daemon thread per watch dir via the reconcile path.
+    Observers are live from t0, so nothing is missed while the backlog drains. Returns list of
+    SessionWatch for shutdown and reconcile.
     """
     s = engine.settings
     if not s.session_watcher_enabled:
@@ -1136,31 +1171,80 @@ def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
         logger.warning("Session watcher dir does not exist: %s", _expand_watch_dir(s.session_watcher_dir))
         return []
 
+    stop_event = Event()
     watches: list[SessionWatch] = []
-    for watch_dir in watch_dirs:
-        ingested = _scan_sessions(
-            engine, watch_dir, s.session_watcher_min_turns, s.session_watcher_lookback_hours,
-        )
-        if ingested:
-            logger.info("Session watcher catch-up: ingested %d sessions from %s", ingested, watch_dir)
-
-        handler = SessionHandler(
-            engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
-            s.session_watcher_idle_threshold, s.session_watcher_lookback_hours,
-        )
-        observer = Observer()
-        observer.schedule(handler, str(watch_dir), recursive=True)
-        observer.start()
-        watches.append(SessionWatch(watch_dir=watch_dir, handler=handler, observer=observer))
-        logger.info("Session watcher started on %s", watch_dir)
-
+    try:
+        for watch_dir in watch_dirs:
+            handler = SessionHandler(
+                engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
+                s.session_watcher_idle_threshold, s.session_watcher_lookback_hours,
+                stop_event=stop_event,
+            )
+            observer = Observer()
+            observer.schedule(handler, str(watch_dir), recursive=True)
+            observer.start()
+            startup_thread = Thread(
+                target=_run_startup_reconcile, args=(handler,),
+                name="ormah-session-startup-reconcile", daemon=False,
+            )
+            startup_thread.start()
+            watches.append(SessionWatch(
+                watch_dir=watch_dir, handler=handler, observer=observer, startup_thread=startup_thread,
+            ))
+            logger.info("Session watcher started on %s", watch_dir)
+    except Exception:
+        # transactional startup: tear down everything already running — observers, timers, and any
+        # in-flight ingest — so a leaked, never-drained handler cannot write to the DB after
+        # engine.shutdown() closes it.
+        stop_event.set()
+        for w in watches:
+            w.handler.cancel_pending_timers()
+        for w in watches:
+            w.observer.stop()
+        for w in watches:
+            if w.startup_thread is not None:
+                w.startup_thread.join()
+        _drain_handlers([w.handler for w in watches])
+        for w in watches:
+            w.observer.join(timeout=5)
+        raise
     return watches
 
 
+def _drain_handlers(handlers: list["SessionHandler"]) -> None:
+    """Poll until no handler has an in-flight ingest, so nothing touches the DB after db.close().
+
+    Uncapped: a deadline cap would abandon a running ingest and re-open the use-after-close window.
+    A watchdog log every ~5s surfaces a stuck drain instead of a silent hang.
+    """
+    waited = 0.0
+    while any(h.in_flight_count() > 0 for h in handlers):
+        time.sleep(0.05)
+        waited += 0.05
+        if waited >= 5.0:
+            n = sum(h.in_flight_count() for h in handlers)
+            logger.warning("Session watcher shutdown still draining %d in-flight ingest(s)", n)
+            waited = 0.0
+
+
 def stop_session_watcher(watches: list[SessionWatch]) -> None:
-    """Stop and join all session watcher observers."""
+    """Stop observers and fully drain in-flight ingests before returning.
+
+    The lifespan calls engine.shutdown() (db.close()) right after this. Under-_lock stop checks
+    reject NEW ingests; we then wait for every in-flight ingest (live, startup, or reconcile) to
+    finish, so nothing touches the DB after db.close(). The wait is NOT capped — a deadline cap
+    would re-open the use-after-close window by abandoning a still-running ingest (issue #52).
+    """
+    for w in watches:
+        w.handler._stop_event.set()
     for w in watches:
         w.observer.stop()
+    for w in watches:
+        w.handler.cancel_pending_timers()
+    for w in watches:
+        if w.startup_thread is not None:
+            w.startup_thread.join()
+    _drain_handlers([w.handler for w in watches])
     for w in watches:
         w.observer.join(timeout=5)
     if watches:

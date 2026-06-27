@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     session_watcher_reconcile_interval_minutes: int = 5
     session_watcher_reconcile_max_per_tick: int = 50
     session_watcher_reconcile_max_seconds: float = 30.0
+    session_watcher_catchup_concurrency: int = 1
 
     # Tier limits
     core_memory_cap: int = 50
@@ -368,6 +369,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"session_watcher_reconcile_max_seconds must be > 0, got {v}"
             )
+        return v
+
+    @field_validator("session_watcher_catchup_concurrency")
+    @classmethod
+    def _catchup_concurrency_min(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"session_watcher_catchup_concurrency must be >= 1, got {v}")
         return v
 
     @field_validator("decay_interval_hours")

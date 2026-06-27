@@ -32,6 +32,50 @@ export default function TopBar({
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const wrapperRef = useRef<HTMLDivElement>(null);
 
+  // When running inside the Ormah desktop app, this bar doubles as the window
+  // title bar: dragging it moves the window and it carries the window controls.
+  const tauriWin = () =>
+    (window as unknown as { __TAURI__?: { window?: { getCurrentWindow?: () => { minimize?: () => void; toggleMaximize?: () => void; close?: () => void; startDragging?: () => void } } } })
+      .__TAURI__?.window?.getCurrentWindow?.();
+  const inApp = typeof window !== "undefined" && (
+    !!(window as unknown as { __TAURI__?: unknown }).__TAURI__ ||
+    !!(window as unknown as { __ORMAH_DESKTOP__?: unknown }).__ORMAH_DESKTOP__
+  );
+  // Mark <body> so CSS can apply in-app overrides (e.g. opaque panels).
+  if (inApp) document.body.classList.add("in-app");
+  // Manual drag: data-tauri-drag-region isn't honored on the navigated remote
+  // graph page, so call startDragging() on a left-button press anywhere on the
+  // bar except interactive elements (search, buttons, the controls).
+  const startDrag = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const el = e.target as HTMLElement;
+    if (el.closest("input, button, a, .search-wrapper, .win-controls, .app-actions, .top-bar-actions")) return;
+    tauriWin()?.startDragging?.();
+  };
+
+  const actionButtons = (
+    <>
+      <button
+        className={`top-bar-btn ${activePanel === "settings" ? "active" : ""}`}
+        onClick={() => onTogglePanel("settings")}
+      >
+        settings <kbd>1</kbd>
+      </button>
+      <button
+        className={`top-bar-btn ${activePanel === "insights" ? "active" : ""}`}
+        onClick={() => onTogglePanel("insights")}
+      >
+        insights <kbd>2</kbd>
+      </button>
+      <button
+        className={`top-bar-btn ${activePanel === "admin" ? "active" : ""}`}
+        onClick={() => onTogglePanel("admin")}
+      >
+        admin <kbd>3</kbd>
+      </button>
+    </>
+  );
+
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const val = e.target.value;
@@ -113,7 +157,7 @@ export default function TopBar({
   );
 
   return (
-    <div className="top-bar">
+    <div className="top-bar" onPointerDown={startDrag}>
       <div className="top-bar-logo">
         <span>o</span>
         <span className="top-bar-logo-r">
@@ -168,26 +212,20 @@ export default function TopBar({
       </div>
       <span className="top-bar-stats">{nodeCount} nodes</span>
       <div className="top-bar-spacer" />
-      <div className="top-bar-actions">
-        <button
-          className={`top-bar-btn ${activePanel === "settings" ? "active" : ""}`}
-          onClick={() => onTogglePanel("settings")}
-        >
-          settings <kbd>1</kbd>
-        </button>
-        <button
-          className={`top-bar-btn ${activePanel === "insights" ? "active" : ""}`}
-          onClick={() => onTogglePanel("insights")}
-        >
-          insights <kbd>2</kbd>
-        </button>
-        <button
-          className={`top-bar-btn ${activePanel === "admin" ? "active" : ""}`}
-          onClick={() => onTogglePanel("admin")}
-        >
-          admin <kbd>3</kbd>
-        </button>
-      </div>
+      <div className="top-bar-actions">{actionButtons}</div>
+      {inApp && (
+        <div className="win-controls">
+          <button className="win-btn" aria-label="Minimize" onClick={() => tauriWin()?.minimize?.()}>
+            <svg width="11" height="11" viewBox="0 0 11 11"><rect x="1" y="5" width="9" height="1" fill="currentColor" /></svg>
+          </button>
+          <button className="win-btn" aria-label="Maximize" onClick={() => tauriWin()?.toggleMaximize?.()}>
+            <svg width="11" height="11" viewBox="0 0 11 11"><rect x="1.5" y="1.5" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+          </button>
+          <button className="win-btn win-close" aria-label="Close" onClick={() => tauriWin()?.close?.()}>
+            <svg width="11" height="11" viewBox="0 0 11 11"><path d="M1 1l9 9M10 1l-9 9" stroke="currentColor" strokeWidth="1.1" /></svg>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -7,6 +7,7 @@
   <a href="https://pypi.org/project/ormah/"><img src="https://img.shields.io/pypi/pyversions/ormah.svg" alt="Python versions"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://www.ormah.me/docs/getting-started/quickstart"><img src="https://img.shields.io/badge/docs-ormah.me-orange.svg" alt="Docs"></a>
+  <a href="https://discord.gg/guBU6XweBu"><img src="https://img.shields.io/discord/1487837267719356416?label=discord&logo=discord&color=5865F2" alt="Discord"></a>
 </p>
 
 **The collective, self-maintaining memory layer all your agents can tap into.**
@@ -164,6 +165,10 @@ Main integration surfaces:
 
 Read more: [Installation](https://www.ormah.me/docs/getting-started/installation), [Setup](https://www.ormah.me/docs/getting-started/setup), [MCP and Adapters](https://www.ormah.me/docs/integrations/mcp-and-adapters), [API Surface](https://www.ormah.me/docs/reference/api-surface), [Configuration Reference](https://www.ormah.me/docs/operations/configuration-reference)
 
+## Community
+
+Join the [Ormah Discord](https://discord.gg/guBU6XweBu) for help, feature discussion, and updates.
+
 ## Development
 
 ```bash
@@ -172,6 +177,35 @@ cd ormah
 make install
 uv run pytest
 ```
+
+## Release Process
+
+Releases are published through the manual GitHub Actions `Release` workflow. The workflow
+is guarded so only the GitHub login listed in `RELEASE_ALLOWED_ACTOR` can run the release
+path.
+
+Before running the workflow:
+
+1. Bump `pyproject.toml`.
+2. Bump `integrations/claude-plugin/.claude-plugin/plugin.json` to the same version.
+3. Merge the release PR to `main`.
+
+Then open GitHub Actions, run `Release` from `main`, and enter the version without the
+leading `v`, for example `0.12.0`.
+
+The workflow verifies that the requested version matches `pyproject.toml`, verifies that
+the Claude plugin manifest has the same version, runs the Python test suite with
+`ORMAH_LLM_PROVIDER=none`, builds the UI, builds one wheel, publishes that wheel to PyPI,
+creates `v<version>`, and creates the GitHub Release with generated notes.
+
+PyPI publishing uses Trusted Publishing. No long-lived PyPI token is stored in the repo,
+local `.env`, or developer machines. The PyPI project should trust this repository,
+`.github/workflows/release.yml`, and the `pypi` GitHub environment.
+
+Protect the `pypi` GitHub environment with the release manager as the required reviewer.
+Do not enable prevent-self-review unless a second reviewer is intentionally required for
+every release. If Trusted Publishing is not configured yet, use a project-scoped PyPI API
+token only as a temporary environment-scoped GitHub Actions secret.
 
 ## License
 

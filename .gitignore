@@ -73,7 +73,17 @@ CLAUDE.md
 .omx/
 .codex
 .codex/
-# Local tool artifacts — never versioned (global rule)
+# Agent/session tooling artifacts (local-only; never versioned).
+# Also keeps Codex headless review payloads under its 1 MiB input limit —
+# these dirs (docs/superpowers alone is >1 MiB) were being inlined into the
+# council adversarial-review prompt and tripping "Input exceeds maximum length".
 .council/
+.cursor/
+.firecrawl/
+.superpowers/
+.understand-anything/
+.vite/
 docs/superpowers/
+docs/handoffs/
 graphify-out/
+Music/

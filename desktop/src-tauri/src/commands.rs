@@ -1,0 +1,142 @@
+//! Tauri commands + small helpers shared by the tray and the onboarding webview.
+
+use serde_json::Value;
+use tauri::{AppHandle, Manager, Runtime};
+use tauri_plugin_notification::NotificationExt;
+
+use crate::stats::{self, Stats};
+
+/// Base URL of the bundled server. Honors `ORMAH_PORT`, defaults to 8787.
+pub fn base_url() -> String {
+    let port = std::env::var("ORMAH_PORT").unwrap_or_else(|_| "8787".to_string());
+    format!("http://127.0.0.1:{port}")
+}
+
+// ---- graph -----------------------------------------------------------------
+
+/// The URL the main window navigates to once the server is up — the existing
+/// web UI, served by the local server. No reimplementation.
+#[tauri::command]
+pub fn graph_url() -> String {
+    base_url()
+}
+
+/// Bring the main window forward (the graph lives inside it).
+pub fn open_graph<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
+#[tauri::command]
+pub fn open_graph_cmd<R: Runtime>(app: AppHandle<R>) {
+    open_graph(&app);
+}
+
+// ---- stats -----------------------------------------------------------------
+
+#[tauri::command]
+pub async fn fetch_stats() -> Result<Stats, String> {
+    stats::fetch().await.map_err(|e| e.to_string())
+}
+
+/// Which supported AI tools are installed (for the detection list).
+#[tauri::command]
+pub async fn detect_agents() -> Result<Value, String> {
+    let url = format!("{}/agent/clients", base_url());
+    reqwest::Client::new()
+        .get(url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json::<Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---- agent setup -----------------------------------------------------------
+
+/// Run `ormah setup --json` and return its parsed result.
+/// uv has already installed `ormah` on PATH by the time this is called.
+#[tauri::command]
+pub async fn setup_agents<R: Runtime>(_app: AppHandle<R>) -> Result<Value, String> {
+    let out = std::process::Command::new("ormah")
+        .args(["setup", "--json"])
+        .output()
+        .map_err(|e| format!("ormah setup failed: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str::<Value>(&stdout).map_err(|e| {
+        format!(
+            "could not parse setup output: {e}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
+/// Tray-triggered variant: run setup off-thread and surface a notification.
+pub fn run_setup_notify<R: Runtime>(app: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        let (title, body) = match setup_agents(app.clone()).await {
+            Ok(v) => {
+                let wired = v
+                    .get("wired")
+                    .and_then(|w| w.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                if wired.is_empty() {
+                    (
+                        "No agents found",
+                        "Install Claude Code, Claude Desktop, or Codex, then try again."
+                            .to_string(),
+                    )
+                } else {
+                    ("Agents wired up", format!("Connected: {wired}"))
+                }
+            }
+            Err(e) => ("Setup failed", e),
+        };
+        let _ = app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show();
+    });
+}
+
+// ---- onboarding marker -----------------------------------------------------
+
+fn marker_path<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("onboarded"))
+}
+
+pub fn onboarded<R: Runtime>(app: &AppHandle<R>) -> bool {
+    marker_path(app).map(|p| p.exists()).unwrap_or(false)
+}
+
+#[tauri::command]
+pub fn is_onboarded<R: Runtime>(app: AppHandle<R>) -> bool {
+    onboarded(&app)
+}
+
+#[tauri::command]
+pub fn mark_onboarded<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    if let Some(p) = marker_path(&app) {
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&p, b"1").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
