@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import shutil
@@ -27,6 +28,34 @@ from ormah.server_manager import (
 )
 
 ENV_DIR = Path.home() / ".config" / "ormah"
+
+
+def _find_binary(name: str) -> str | None:
+    """Find a binary by name, checking PATH and common install locations.
+
+    GUI apps launched from the system tray don't inherit the user's full shell
+    PATH (e.g. nvm, mise, homebrew shims), so shutil.which alone misses
+    binaries the user can run fine from a terminal. This checks the extra spots.
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+    candidates: list[Path] = [
+        Path.home() / ".local" / "bin" / name,
+        Path("/usr/local/bin") / name,
+        Path("/opt/homebrew/bin") / name,   # macOS Homebrew (Apple Silicon)
+        Path("/usr/local/homebrew/bin") / name,  # macOS Homebrew (Intel)
+        Path("/usr/bin") / name,
+    ]
+    # nvm installs: ~/.nvm/versions/node/*/bin/<name>
+    for p in sorted(glob.glob(str(Path.home() / ".nvm" / "versions" / "node" / "*" / "bin" / name)), reverse=True):
+        candidates.insert(0, Path(p))
+    # mise / asdf: ~/.local/share/mise/shims/<name>
+    candidates.insert(0, Path.home() / ".local" / "share" / "mise" / "shims" / name)
+    for candidate in candidates:
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 ENV_PATH = ENV_DIR / ".env"
 WRAPPER_PATH = ENV_DIR / "ormah-server"
 
@@ -167,7 +196,7 @@ def configure_claude_code_mcp(ormah_bin: str) -> None:
     Falls back to direct JSON editing if the claude CLI is not on PATH.
     """
     # Prefer the official CLI — it writes the correct format
-    claude_bin = shutil.which("claude")
+    claude_bin = _find_binary("claude")
     if claude_bin:
         try:
             result = subprocess.run(
@@ -409,7 +438,7 @@ def _upsert_codex_mcp_config(ormah_bin: str) -> None:
 
 def configure_codex_mcp(ormah_bin: str) -> None:
     """Register Ormah MCP server in Codex config."""
-    codex_bin = shutil.which("codex")
+    codex_bin = _find_binary("codex")
     if codex_bin:
         try:
             result = subprocess.run(
@@ -1251,7 +1280,7 @@ def _remove_mcp_registration() -> None:
     import platform as _platform
 
     # Claude Code
-    claude_bin = shutil.which("claude")
+    claude_bin = _find_binary("claude")
     if claude_bin:
         try:
             result = subprocess.run(
@@ -1275,7 +1304,7 @@ def _remove_mcp_registration() -> None:
             _remove_mcp_from_json(desktop_config)
 
     # Codex
-    codex_bin = shutil.which("codex")
+    codex_bin = _find_binary("codex")
     if codex_bin:
         try:
             result = subprocess.run(
@@ -1591,8 +1620,8 @@ def detect_clients() -> dict[str, bool]:
             os.path.expanduser("~/Library/Application Support/Claude")
         )
     return {
-        "claude_code": shutil.which("claude") is not None,
-        "codex": shutil.which("codex") is not None or (Path.home() / ".codex").exists(),
+        "claude_code": _find_binary("claude") is not None,
+        "codex": _find_binary("codex") is not None or (Path.home() / ".codex").exists(),
         "claude_desktop": desktop,
     }
 
@@ -1672,8 +1701,8 @@ def run_setup(
     ormah_bin = get_ormah_bin_path()
 
     # 2. Detect supported coding agents and offer maintenance upfront — no API key needed
-    has_claude_code = shutil.which("claude") is not None
-    has_codex = shutil.which("codex") is not None or (Path.home() / ".codex").exists()
+    has_claude_code = _find_binary("claude") is not None
+    has_codex = _find_binary("codex") is not None or (Path.home() / ".codex").exists()
     agent_maintenance = False
     if (has_claude_code or has_codex) and not ci and not update and not skip_client_setup:
         if has_claude_code and has_codex:
