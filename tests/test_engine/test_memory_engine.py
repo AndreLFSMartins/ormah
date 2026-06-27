@@ -330,3 +330,49 @@ def test_whisper_onboarding_works_when_reranker_unavailable(engine):
     assert "onboarding" in result.lower()
     assert "maintenance_due" not in result
     build.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _get_hybrid_search concurrency (#27)
+# ---------------------------------------------------------------------------
+
+
+def test_get_hybrid_search_constructs_once_under_concurrency(engine):
+    """Concurrent recalls must not each construct a HybridSearch (#27).
+
+    Without locking, N threads all see ``_hybrid_search is None`` and each build
+    their own instance (last-write-wins). The double-checked lock must serialize
+    init so exactly one instance is constructed and every caller gets it.
+    """
+    import threading
+    import time
+
+    engine._hybrid_search = None
+    n = 8
+    construct_count = 0
+    count_lock = threading.Lock()
+
+    class FakeHybridSearch:
+        def __init__(self, db, settings):
+            nonlocal construct_count
+            with count_lock:
+                construct_count += 1
+            time.sleep(0.05)  # widen the race window deterministically
+
+    barrier = threading.Barrier(n)
+    results: list = [None] * n
+
+    def worker(i):
+        barrier.wait()  # release all threads at once
+        results[i] = engine._get_hybrid_search()
+
+    with patch("ormah.embeddings.hybrid_search.HybridSearch", FakeHybridSearch):
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert construct_count == 1
+    assert all(r is results[0] for r in results)
+    assert results[0] is engine._hybrid_search
