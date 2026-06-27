@@ -29,7 +29,7 @@
 
   --control-accent: var(--accent);
   --top-bar-bg: rgba(10, 10, 10, 0.85);
-  --panel-bg: rgba(20, 20, 20, 0.75);
+  --panel-bg: #111111;
   --toast-bg: rgba(20, 20, 20, 0.85);
   --tooltip-bg: rgba(10, 10, 10, 0.9);
   --success-bg: rgba(74, 122, 74, 0.15);
@@ -536,14 +536,16 @@ body.in-app .node-detail.tier-core {
   right: 0;
   bottom: 0;
   background: var(--panel-bg);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   border-left: 1px solid var(--border);
   transform: translateX(100%);
   transition: transform 200ms ease;
   overflow-y: auto;
 }
 .side-panel.open { transform: translateX(0); }
+
+/* In the desktop app the action buttons float below the title bar at top:48px
+   (~22px tall), so panels must clear them. */
+.ormah-desktop .side-panel { top: 80px; }
 
 .side-panel-header {
   display: flex;
@@ -1474,3 +1476,55 @@ body.in-app .node-detail.tier-core {
   font-family: var(--font-mono);
   font-size: 12px;
 }
+
+/* ---- Agents panel ---- */
+.agent-status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  margin-left: 8px;
+}
+.agent-status--wired    { color: var(--edge-supports); }
+.agent-status--detected { color: var(--text-muted); }
+.agent-status--absent   { color: var(--text-muted); }
+.agent-status--na       { color: var(--text-muted); font-style: italic; }
+
+/* legacy classes — kept so old cached bundles don't break */
+.agents-panel-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.agents-loading { color: var(--text-muted); font-size: 13px; }
+.agents-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.agent-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 6px; padding: 10px 12px; border-radius: 8px; background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06); }
+.agent-row-info { display: flex; align-items: center; gap: 10px; flex: 1; }
+.agent-row-actions { display: flex; gap: 6px; }
+.agent-row-error { width: 100%; font-size: 11px; color: #e07070; margin: 0; }
+.agent-btn { font-size: 11px; padding: 4px 10px; border-radius: 5px; border: 0;
+  cursor: pointer; font-weight: 500; transition: filter .15s; }
+.agent-btn:disabled { opacity: .4; cursor: default; }
+.agent-btn--connect { background: rgba(116,179,165,0.15); color: #74b3a5; }
+.agent-btn--connect:not(:disabled):hover { filter: brightness(1.2); }
+.agent-btn--disconnect { background: rgba(255,255,255,0.06); color: #888; }
+.agent-btn--disconnect:not(:disabled):hover { background: rgba(224,112,112,0.15); color: #e07070; }
+.agent-name { font-size: 13px; color: var(--text-primary, #ccc); }
+.agent-pill { font-size: 11px; padding: 2px 8px; border-radius: 10px; letter-spacing: 0.02em; }
+.agent-pill--wired { background: rgba(116,179,165,0.15); color: #74b3a5; }
+.agent-pill--detected { background: rgba(212,165,116,0.15); color: #d4a574; }
+.agent-pill--undetected { background: rgba(255,255,255,0.05); color: var(--text-muted); }
+.agent-pill--unavailable { background: rgba(255,255,255,0.03); color: var(--text-muted); font-style: italic; }
+.agents-wire-btn {
+  margin-top: 4px; padding: 9px 16px; border-radius: 7px; border: 0; cursor: pointer;
+  background: #d4a574; color: #1b1305; font-size: 13px; font-weight: 600;
+  transition: filter .15s; align-self: flex-start;
+}
+.agents-wire-btn:hover { filter: brightness(1.08); }
+.agents-wire-btn:disabled { opacity: .5; cursor: default; filter: none; }
+.agents-all-wired { font-size: 13px; color: #74b3a5; }
+.agents-result { display: flex; flex-direction: column; gap: 4px; }
+.agents-result--ok { font-size: 12px; color: #74b3a5; }
+.agents-result--err { font-size: 12px; color: #e07070; }
+.agents-error { font-size: 12px; color: #e07070; }

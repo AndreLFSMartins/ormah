@@ -206,11 +206,48 @@ def mark_outdated(node_id: str, request: Request, body: MarkOutdatedBody | None 
 
 @router.get("/clients")
 def get_clients():
-    """Which supported AI tools are installed on this machine (for the app's
-    detection list). Pure local detection — no wiring, no side effects."""
-    from ormah.setup import detect_clients
+    """List all supported agents with detection and wired status.
 
-    return detect_clients()
+    Returns a list of {id, name, detected, wired, platform, available_on_current_os}.
+    Pure filesystem checks — no wiring, no side effects.
+    """
+    from ormah.setup import list_agents
+
+    return list_agents()
+
+
+@router.post("/setup")
+def run_setup():
+    """Wire ormah hooks/MCP for every detected agent on this machine.
+
+    Runs non-interactively and returns {wired, errors} so the UI can
+    show which agents were connected and surface any failures.
+    """
+    from ormah.setup import run_setup_json
+
+    return run_setup_json()
+
+
+@router.post("/setup/{agent_id}")
+def wire_one(agent_id: str):
+    """Wire ormah into a single agent by id."""
+    from ormah.setup import wire_agent
+
+    try:
+        return wire_agent(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.delete("/setup/{agent_id}")
+def unwire_one(agent_id: str):
+    """Remove ormah hooks/MCP/instructions for a single agent."""
+    from ormah.setup import unwire_agent
+
+    try:
+        return unwire_agent(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @router.get("/stats")

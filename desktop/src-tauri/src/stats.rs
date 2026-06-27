@@ -17,6 +17,16 @@ pub struct Stats {
     pub memories_total: i64,
 }
 
+fn fmt_num(n: i64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 { out.push(','); }
+        out.push(c);
+    }
+    out.chars().rev().collect()
+}
+
 pub async fn fetch() -> Result<Stats, reqwest::Error> {
     let url = format!("{}/agent/stats", base_url());
     reqwest::Client::new()
@@ -40,11 +50,14 @@ pub fn spawn_poller<R: Runtime>(
         loop {
             if let Ok(s) = fetch().await {
                 let _ = tray.set_title(Some(s.whispers_used_this_week.to_string()));
-                let _ = week_item
-                    .set_text(format!("Whispers used: {} this week", s.whispers_used_this_week));
+                let _ = week_item.set_text(format!(
+                    "{} whispers this week",
+                    s.whispers_used_this_week
+                ));
                 let _ = total_item.set_text(format!(
-                    "{} total · {} memories",
-                    s.whispers_used_total, s.memories_total
+                    "{}  all-time  ·  {}  memories",
+                    fmt_num(s.whispers_used_total),
+                    fmt_num(s.memories_total)
                 ));
             }
             tokio::time::sleep(Duration::from_secs(60)).await;

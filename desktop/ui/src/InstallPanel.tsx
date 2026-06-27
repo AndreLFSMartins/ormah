@@ -1,32 +1,32 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./lib/bridge";
 
-const TOOLS = [
-  { key: "claude_code", name: "Claude Code" },
-  { key: "claude_desktop", name: "Claude Desktop" },
-  { key: "codex", name: "Codex" },
-];
-
-type Detected = Record<string, boolean>;
+interface AgentInfo {
+  id: string;
+  name: string;
+  detected: boolean;
+  wired: boolean;
+  available_on_current_os: boolean;
+}
 
 export default function InstallPanel({ onDone }: { onDone: () => void }) {
   const [show, setShow] = useState(false);
-  const [detected, setDetected] = useState<Detected | null>(null);
+  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
 
   useEffect(() => {
     requestAnimationFrame(() => setShow(true));
     (async () => {
-      try { setDetected(await invoke<Detected>("detect_agents")); }
-      catch { setDetected({}); }
+      try { setAgents(await invoke<AgentInfo[]>("detect_agents")); }
+      catch { setAgents([]); }
     })();
   }, []);
 
-  const found = detected ? TOOLS.filter((t) => detected[t.key]) : [];
-  const title = !detected ? "Looking around your machine"
+  const found = agents ? agents.filter((a) => a.available_on_current_os && a.detected) : [];
+  const title = !agents ? "Looking around your machine"
     : found.length ? "Found your AI tools" : "No AI tools found yet";
-  const lead = !detected ? "Finding the AI tools Ormah can connect to."
+  const lead = !agents ? "Finding the AI tools Ormah can connect to."
     : found.length ? "One click wires hooks and MCP into each."
     : "Install Claude Code, Claude Desktop, or Codex, then reopen Ormah.";
 
@@ -38,7 +38,9 @@ export default function InstallPanel({ onDone }: { onDone: () => void }) {
       const res = await invoke<{ wired?: string[]; errors?: Record<string, string> }>("setup_agents");
       const errors = res.errors ?? {};
       const errorEntries = Object.entries(errors);
-      const names = (res.wired ?? []).map((k) => TOOLS.find((t) => t.key === k)?.name ?? k);
+      const names = (res.wired ?? []).map(
+        (id) => agents?.find((a) => a.id === id)?.name ?? id
+      );
       if (errorEntries.length > 0) {
         setStatus(`Setup incomplete: ${errorEntries.map(([k, v]) => `${k}: ${v}`).join("; ")}`);
       } else {
@@ -68,16 +70,13 @@ export default function InstallPanel({ onDone }: { onDone: () => void }) {
         <h2>{title}</h2>
         <p className="lead">{lead}</p>
         <div className="ledger">
-          {detected && TOOLS.map((t, i) => {
-            const ok = !!detected[t.key];
-            return (
-              <div key={t.key} className={"tool" + (ok ? " found" : "")} style={{ animationDelay: `${i * 0.08}s` }}>
-                <span className="tdot" />
-                <span className="tname">{t.name}</span>
-                <span className="tstate">{ok ? "ready to connect" : "not found"}</span>
-              </div>
-            );
-          })}
+          {agents && agents.filter((a) => a.available_on_current_os).map((a, i) => (
+            <div key={a.id} className={"tool" + (a.detected ? " found" : "")} style={{ animationDelay: `${i * 0.08}s` }}>
+              <span className="tdot" />
+              <span className="tname">{a.name}</span>
+              <span className="tstate">{a.detected ? "ready to connect" : "not found"}</span>
+            </div>
+          ))}
         </div>
         <div className="actions">
           {found.length > 0 && (

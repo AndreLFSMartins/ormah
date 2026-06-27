@@ -3,7 +3,7 @@ import { searchNodes } from "../api";
 import SearchResults from "./SearchResults";
 import type { MemoryNode } from "../types";
 
-type PanelId = "settings" | "insights" | "admin";
+type PanelId = "settings" | "insights" | "admin" | "agents";
 
 interface Props {
   nodeCount: number;
@@ -41,8 +41,10 @@ export default function TopBar({
     !!(window as unknown as { __TAURI__?: unknown }).__TAURI__ ||
     !!(window as unknown as { __ORMAH_DESKTOP__?: unknown }).__ORMAH_DESKTOP__
   );
-  // Mark <body> so CSS can apply in-app overrides (e.g. opaque panels).
-  if (inApp) document.body.classList.add("in-app");
+  if (typeof document !== "undefined") {
+    if (inApp) document.body.classList.add("in-app");
+    document.documentElement.classList.toggle("ormah-desktop", inApp);
+  }
   // Manual drag: data-tauri-drag-region isn't honored on the navigated remote
   // graph page, so call startDragging() on a left-button press anywhere on the
   // bar except interactive elements (search, buttons, the controls).
@@ -59,19 +61,25 @@ export default function TopBar({
         className={`top-bar-btn ${activePanel === "settings" ? "active" : ""}`}
         onClick={() => onTogglePanel("settings")}
       >
-        settings <kbd>1</kbd>
+        settings
       </button>
       <button
         className={`top-bar-btn ${activePanel === "insights" ? "active" : ""}`}
         onClick={() => onTogglePanel("insights")}
       >
-        insights <kbd>2</kbd>
+        insights
       </button>
       <button
         className={`top-bar-btn ${activePanel === "admin" ? "active" : ""}`}
         onClick={() => onTogglePanel("admin")}
       >
-        admin <kbd>3</kbd>
+        admin
+      </button>
+      <button
+        className={`top-bar-btn ${activePanel === "agents" ? "active" : ""}`}
+        onClick={() => onTogglePanel("agents")}
+      >
+        agents
       </button>
     </>
   );

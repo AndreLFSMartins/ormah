@@ -9,7 +9,7 @@ import ormah.setup as setup
 
 def test_detect_clients_none(tmp_path):
     with (
-        patch("shutil.which", return_value=None),
+        patch("ormah.setup._find_binary", return_value=None),
         patch("ormah.setup.Path.home", return_value=tmp_path),
         patch("platform.system", return_value="Darwin"),
     ):
@@ -19,7 +19,7 @@ def test_detect_clients_none(tmp_path):
 
 def test_detect_clients_claude_code(tmp_path):
     with (
-        patch("shutil.which", side_effect=lambda n: "/bin/claude" if n == "claude" else None),
+        patch("ormah.setup._find_binary", side_effect=lambda n: "/bin/claude" if n == "claude" else None),
         patch("ormah.setup.Path.home", return_value=tmp_path),
         patch("platform.system", return_value="Linux"),
     ):
@@ -31,7 +31,7 @@ def test_detect_clients_claude_code(tmp_path):
 def test_detect_clients_codex_via_dir(tmp_path):
     (tmp_path / ".codex").mkdir()
     with (
-        patch("shutil.which", return_value=None),
+        patch("ormah.setup._find_binary", return_value=None),
         patch("ormah.setup.Path.home", return_value=tmp_path),
         patch("platform.system", return_value="Linux"),
     ):
@@ -42,10 +42,10 @@ def test_detect_clients_codex_via_dir(tmp_path):
 def test_run_setup_json_wires_detected(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
-    monkeypatch.setattr(
-        setup, "detect_clients",
-        lambda: {"claude_code": True, "codex": False, "claude_desktop": False},
-    )
+    # Drive detection via the registry's detect_fn (not detect_clients)
+    monkeypatch.setattr(setup.AGENT_REGISTRY[0], "detect_fn", lambda: True)   # claude_code
+    monkeypatch.setattr(setup.AGENT_REGISTRY[1], "detect_fn", lambda: False)  # codex
+    monkeypatch.setattr(setup.AGENT_REGISTRY[2], "detect_fn", lambda: False)  # claude_desktop
     for name in (
         "configure_claude_hooks", "configure_claude_code_mcp",
         "install_claude_md", "install_claude_agents", "install_claude_commands",
@@ -62,16 +62,14 @@ def test_run_setup_json_wires_detected(monkeypatch):
 
 def test_run_setup_json_captures_errors(monkeypatch):
     monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
-    monkeypatch.setattr(
-        setup, "detect_clients",
-        lambda: {"claude_code": True, "codex": False, "claude_desktop": False},
-    )
+    monkeypatch.setattr(setup.AGENT_REGISTRY[0], "detect_fn", lambda: True)   # claude_code
+    monkeypatch.setattr(setup.AGENT_REGISTRY[1], "detect_fn", lambda: False)  # codex
+    monkeypatch.setattr(setup.AGENT_REGISTRY[2], "detect_fn", lambda: False)  # claude_desktop
 
     def boom(*a, **k):
         raise RuntimeError("nope")
 
     monkeypatch.setattr(setup, "configure_claude_hooks", boom)
-    # later steps shouldn't matter; error short-circuits this client
     for name in (
         "configure_claude_code_mcp", "install_claude_md",
         "install_claude_agents", "install_claude_commands",

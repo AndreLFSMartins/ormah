@@ -8,6 +8,7 @@ import NodeDetailPanel from "./components/NodeDetail";
 import FilterDrawer from "./components/FilterDrawer";
 import InsightsPanel from "./components/InsightsPanel";
 import AdminPanel from "./components/AdminPanel";
+import AgentsPanel from "./components/AgentsPanel";
 import ToastContainer from "./components/Toast";
 import type { ToastData } from "./components/Toast";
 import {
@@ -33,7 +34,7 @@ export interface Filters {
 const ALL_TYPES = ALL_NODE_TYPES;
 const DEFAULT_EDGE_TYPES = new Set<EdgeType>(ALL_EDGE_TYPES);
 
-type PanelId = "settings" | "insights" | "admin" | null;
+type PanelId = "settings" | "insights" | "admin" | "agents" | null;
 type ThemeTransitionState = {
   theme: GraphTheme;
   id: number;
@@ -81,11 +82,11 @@ export default function App() {
   }, []);
 
   useKeyboardShortcuts({
-    onTogglePanel: togglePanel as (id: "settings" | "insights" | "admin") => void,
+    onTogglePanel: togglePanel as (id: "settings" | "insights" | "admin" | "agents") => void,
     onClosePanel: useCallback(() => setActivePanel(null), []),
     onCloseDetail: useCallback(() => setSelectedDetail(null), []),
     onFocusSearch: useCallback(() => searchInputRef.current?.focus(), []),
-    activePanel: activePanel as "settings" | "insights" | "admin" | null,
+    activePanel: activePanel as "settings" | "insights" | "admin" | "agents" | null,
     hasDetail: selectedDetail !== null,
   });
 
@@ -233,8 +234,8 @@ export default function App() {
     <>
       <TopBar
         nodeCount={filteredNodes.length}
-        activePanel={activePanel as "settings" | "insights" | "admin" | null}
-        onTogglePanel={togglePanel as (id: "settings" | "insights" | "admin") => void}
+        activePanel={activePanel as "settings" | "insights" | "admin" | "agents" | null}
+        onTogglePanel={togglePanel as (id: "settings" | "insights" | "admin" | "agents") => void}
         onSearchSelect={handleSearchSelect}
         onSearchHover={(id) => graphViewRef.current?.highlightNode(id)}
         onSearchHoverEnd={() => graphViewRef.current?.clearHighlight()}
@@ -265,6 +266,7 @@ export default function App() {
       />
       <FilterDrawer
         open={activePanel === "settings"}
+        onClose={() => setActivePanel(null)}
         filters={filters}
         allSpaces={allSpaces}
         nodes={graph.nodes}
@@ -286,6 +288,10 @@ export default function App() {
         open={activePanel === "admin"}
         onClose={() => setActivePanel(null)}
         onToast={addToast}
+      />
+      <AgentsPanel
+        open={activePanel === "agents"}
+        onClose={() => setActivePanel(null)}
       />
       {themeTransition && (
         <div
