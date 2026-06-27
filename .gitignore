@@ -86,4 +86,6 @@ CLAUDE.md
 docs/superpowers/
 docs/handoffs/
 graphify-out/
+# Local-only: codebase-memory-mcp team graph artifact (regenerable by re-indexing)
+.codebase-memory/
 Music/
