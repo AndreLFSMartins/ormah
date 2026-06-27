@@ -32,7 +32,14 @@ def test_extract_json_strips_bare_fence():
 
 def test_extract_json_passthrough_for_clean_json():
     raw = '{"a": 1}'
+    assert extract_json(raw) == raw
     assert json.loads(extract_json(raw)) == {"a": 1}
+
+
+def test_extract_json_passthrough_for_clean_array():
+    raw = '[{"a": 1}, {"a": 2}]'
+    assert extract_json(raw) == raw
+    assert json.loads(extract_json(raw)) == [{"a": 1}, {"a": 2}]
 
 
 def test_extract_json_extracts_from_surrounding_prose():
@@ -40,9 +47,36 @@ def test_extract_json_extracts_from_surrounding_prose():
     assert json.loads(extract_json(raw)) == {"a": 1}
 
 
-def test_auto_linker_recovers_fenced_response_instead_of_poisoning():
-    """A fenced-but-valid classification must yield the real relationship,
-    not an 'error' result that advances the watermark and strands the node."""
+def test_extract_json_extracts_before_trailing_prose():
+    raw = '{"a": 1}\nHope that helps.'
+    assert extract_json(raw) == '{"a": 1}'
+    assert json.loads(extract_json(raw)) == {"a": 1}
+
+
+def test_extract_json_preserves_prose_wrapped_array():
+    raw = 'Here is the result:\n[{"a": 1}]\nHope that helps.'
+    parsed = json.loads(extract_json(raw))
+    assert isinstance(parsed, list)
+    assert parsed == [{"a": 1}]
+
+
+def test_extract_json_accepts_uppercase_fence_language():
+    raw = '```JSON\n{"a": 1}\n```'
+    assert json.loads(extract_json(raw)) == {"a": 1}
+
+
+def test_extract_json_skips_invalid_fence_before_valid_json():
+    raw = '```json\nnot json\n```\nActual result: {"a": 1}'
+    assert json.loads(extract_json(raw)) == {"a": 1}
+
+
+def test_extract_json_returns_stripped_invalid_output():
+    raw = "  totally not json  "
+    assert extract_json(raw) == "totally not json"
+
+
+def test_auto_linker_recovers_fenced_response_instead_of_dropping_it():
+    """A valid fenced classification must not be treated as invalid JSON."""
     from ormah.background import auto_linker
 
     node = {"title": "A", "type": "fact", "space": "x", "content": "content a"}
@@ -56,7 +90,6 @@ def test_auto_linker_recovers_fenced_response_instead_of_poisoning():
 
     assert result is not None
     assert result["relationship"] == "supports"
-    assert result["relationship"] != "error"
 
 
 def test_auto_linker_returns_none_on_unparseable_output():
