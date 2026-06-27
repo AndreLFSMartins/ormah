@@ -268,6 +268,7 @@ export default function App() {
       />
       <FilterDrawer
         open={activePanel === "settings"}
+        onClose={() => setActivePanel(null)}
         filters={filters}
         allSpaces={allSpaces}
         nodes={graph.nodes}

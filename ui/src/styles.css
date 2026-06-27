@@ -29,7 +29,7 @@
 
   --control-accent: var(--accent);
   --top-bar-bg: rgba(10, 10, 10, 0.85);
-  --panel-bg: rgba(20, 20, 20, 0.75);
+  --panel-bg: #111111;
   --toast-bg: rgba(20, 20, 20, 0.85);
   --tooltip-bg: rgba(10, 10, 10, 0.9);
   --success-bg: rgba(74, 122, 74, 0.15);
@@ -536,14 +536,16 @@ body.in-app .node-detail.tier-core {
   right: 0;
   bottom: 0;
   background: var(--panel-bg);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   border-left: 1px solid var(--border);
   transform: translateX(100%);
   transition: transform 200ms ease;
   overflow-y: auto;
 }
 .side-panel.open { transform: translateX(0); }
+
+/* In the desktop app the action buttons float below the title bar at top:48px
+   (~22px tall), so panels must clear them. */
+.ormah-desktop .side-panel { top: 80px; }
 
 .side-panel-header {
   display: flex;
@@ -1476,6 +1478,17 @@ body.in-app .node-detail.tier-core {
 }
 
 /* ---- Agents panel ---- */
+.agent-status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  margin-left: 8px;
+}
+.agent-status--wired    { color: var(--edge-supports); }
+.agent-status--detected { color: var(--text-muted); }
+.agent-status--absent   { color: var(--text-muted); }
+.agent-status--na       { color: var(--text-muted); font-style: italic; }
+
+/* legacy classes — kept so old cached bundles don't break */
 .agents-panel-body {
   padding: 16px;
   display: flex;
