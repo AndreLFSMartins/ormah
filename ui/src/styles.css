@@ -1484,10 +1484,19 @@ body.in-app .node-detail.tier-core {
 }
 .agents-loading { color: var(--text-muted); font-size: 13px; }
 .agents-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.agent-row { display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 12px; border-radius: 8px; background: rgba(255,255,255,0.03);
+.agent-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 6px; padding: 10px 12px; border-radius: 8px; background: rgba(255,255,255,0.03);
   border: 1px solid rgba(255,255,255,0.06); }
-.agent-row-info { display: flex; align-items: center; gap: 10px; }
+.agent-row-info { display: flex; align-items: center; gap: 10px; flex: 1; }
+.agent-row-actions { display: flex; gap: 6px; }
+.agent-row-error { width: 100%; font-size: 11px; color: #e07070; margin: 0; }
+.agent-btn { font-size: 11px; padding: 4px 10px; border-radius: 5px; border: 0;
+  cursor: pointer; font-weight: 500; transition: filter .15s; }
+.agent-btn:disabled { opacity: .4; cursor: default; }
+.agent-btn--connect { background: rgba(116,179,165,0.15); color: #74b3a5; }
+.agent-btn--connect:not(:disabled):hover { filter: brightness(1.2); }
+.agent-btn--disconnect { background: rgba(255,255,255,0.06); color: #888; }
+.agent-btn--disconnect:not(:disabled):hover { background: rgba(224,112,112,0.15); color: #e07070; }
 .agent-name { font-size: 13px; color: var(--text-primary, #ccc); }
 .agent-pill { font-size: 11px; padding: 2px 8px; border-radius: 10px; letter-spacing: 0.02em; }
 .agent-pill--wired { background: rgba(116,179,165,0.15); color: #74b3a5; }

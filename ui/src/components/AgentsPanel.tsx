@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { fetchAgentClients, runAgentSetup } from "../api";
-import type { AgentInfo, SetupResult } from "../api";
+import { fetchAgentClients, runAgentSetup, wireAgent, unwireAgent } from "../api";
+import type { AgentInfo } from "../api";
 
 interface Props {
   open: boolean;
@@ -23,37 +23,62 @@ function StatusPill({ agent }: { agent: AgentInfo }) {
 export default function AgentsPanel({ open, onClose }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [loading, setLoading] = useState(false);
-  const [wiring, setWiring] = useState(false);
-  const [result, setResult] = useState<SetupResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null); // agent id currently being wired/unwired
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
-    setError(null);
+    setFetchError(null);
     fetchAgentClients()
       .then(setAgents)
-      .catch(() => setError("Could not reach server"))
+      .catch(() => setFetchError("Could not reach server."))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
-    if (open) {
-      load();
-      setResult(null);
-    }
+    if (open) { load(); setErrors({}); }
   }, [open]);
 
-  const wireAll = async () => {
-    setWiring(true);
-    setError(null);
+  const handleWire = async (agentId: string) => {
+    setBusy(agentId);
+    setErrors(e => { const n = { ...e }; delete n[agentId]; return n; });
+    try {
+      const res = await wireAgent(agentId);
+      if (res.errors[agentId]) setErrors(e => ({ ...e, [agentId]: res.errors[agentId] }));
+    } catch {
+      setErrors(e => ({ ...e, [agentId]: "Request failed." }));
+    } finally {
+      setBusy(null);
+      load();
+    }
+  };
+
+  const handleUnwire = async (agentId: string) => {
+    setBusy(agentId);
+    setErrors(e => { const n = { ...e }; delete n[agentId]; return n; });
+    try {
+      const res = await unwireAgent(agentId);
+      if (res.errors[agentId]) setErrors(e => ({ ...e, [agentId]: res.errors[agentId] }));
+    } catch {
+      setErrors(e => ({ ...e, [agentId]: "Request failed." }));
+    } finally {
+      setBusy(null);
+      load();
+    }
+  };
+
+  const handleWireAll = async () => {
+    setBusy("__all__");
+    setErrors({});
     try {
       const res = await runAgentSetup();
-      setResult(res);
-      load(); // refresh status
+      if (Object.keys(res.errors).length) setErrors(res.errors);
     } catch {
-      setError("Setup failed — check that ormah is running.");
+      setFetchError("Setup failed — check that ormah is running.");
     } finally {
-      setWiring(false);
+      setBusy(null);
+      load();
     }
   };
 
@@ -70,48 +95,58 @@ export default function AgentsPanel({ open, onClose }: Props) {
         {loading && <p className="agents-loading">Loading…</p>}
 
         {!loading && agents.length > 0 && (
-          <ul className="agents-list">
-            {agents.map(agent => (
-              <li key={agent.id} className="agent-row">
-                <div className="agent-row-info">
-                  <span className="agent-name">{agent.name}</span>
-                  <StatusPill agent={agent} />
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
+          <>
+            <ul className="agents-list">
+              {agents.map(agent => (
+                <li key={agent.id} className="agent-row">
+                  <div className="agent-row-info">
+                    <span className="agent-name">{agent.name}</span>
+                    <StatusPill agent={agent} />
+                  </div>
+                  <div className="agent-row-actions">
+                    {agent.available_on_current_os && agent.detected && !agent.wired && (
+                      <button
+                        className="agent-btn agent-btn--connect"
+                        onClick={() => handleWire(agent.id)}
+                        disabled={busy !== null}
+                      >
+                        {busy === agent.id ? "Connecting…" : "Connect"}
+                      </button>
+                    )}
+                    {agent.wired && (
+                      <button
+                        className="agent-btn agent-btn--disconnect"
+                        onClick={() => handleUnwire(agent.id)}
+                        disabled={busy !== null}
+                      >
+                        {busy === agent.id ? "Disconnecting…" : "Disconnect"}
+                      </button>
+                    )}
+                  </div>
+                  {errors[agent.id] && (
+                    <p className="agent-row-error">{errors[agent.id]}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
 
-        {result && (
-          <div className="agents-result">
-            {result.wired.length > 0 && (
-              <p className="agents-result--ok">
-                Connected: {result.wired.map(id => agents.find(a => a.id === id)?.name ?? id).join(", ")}
-              </p>
+            {hasUnwired && (
+              <button
+                className="agents-wire-btn"
+                onClick={handleWireAll}
+                disabled={busy !== null}
+              >
+                {busy === "__all__" ? "Wiring…" : "Connect all"}
+              </button>
             )}
-            {Object.entries(result.errors).map(([id, msg]) => (
-              <p key={id} className="agents-result--err">
-                {agents.find(a => a.id === id)?.name ?? id}: {msg}
-              </p>
-            ))}
-          </div>
+
+            {!hasUnwired && !fetchError && (
+              <p className="agents-all-wired">All detected agents are connected.</p>
+            )}
+          </>
         )}
 
-        {error && <p className="agents-error">{error}</p>}
-
-        {!loading && hasUnwired && (
-          <button
-            className="agents-wire-btn"
-            onClick={wireAll}
-            disabled={wiring}
-          >
-            {wiring ? "Wiring…" : "Wire all detected agents"}
-          </button>
-        )}
-
-        {!loading && !hasUnwired && agents.length > 0 && !error && (
-          <p className="agents-all-wired">All detected agents are connected.</p>
-        )}
+        {fetchError && <p className="agents-error">{fetchError}</p>}
       </div>
     </div>
   );

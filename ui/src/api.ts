@@ -18,6 +18,12 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return res.json();
 }
 
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`DELETE ${path}: ${res.status}`);
+  return res.json();
+}
+
 export function fetchGraph(): Promise<GraphData> {
   return get("/ui/graph");
 }
@@ -148,4 +154,12 @@ export function fetchAgentClients(): Promise<AgentInfo[]> {
 
 export function runAgentSetup(): Promise<SetupResult> {
   return post("/agent/setup");
+}
+
+export function wireAgent(agentId: string): Promise<SetupResult> {
+  return post(`/agent/setup/${agentId}`);
+}
+
+export function unwireAgent(agentId: string): Promise<{ unwired: string[]; errors: Record<string, string> }> {
+  return del(`/agent/setup/${agentId}`);
 }

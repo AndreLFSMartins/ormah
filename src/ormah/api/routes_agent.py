@@ -228,6 +228,28 @@ def run_setup():
     return run_setup_json()
 
 
+@router.post("/setup/{agent_id}")
+def wire_one(agent_id: str):
+    """Wire ormah into a single agent by id."""
+    from ormah.setup import wire_agent
+
+    try:
+        return wire_agent(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.delete("/setup/{agent_id}")
+def unwire_one(agent_id: str):
+    """Remove ormah hooks/MCP/instructions for a single agent."""
+    from ormah.setup import unwire_agent
+
+    try:
+        return unwire_agent(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @router.get("/stats")
 def get_stats(
     request: Request,

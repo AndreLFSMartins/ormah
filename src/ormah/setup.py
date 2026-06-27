@@ -1621,6 +1621,8 @@ class AgentDescriptor:
     name: str
     detect_fn: Callable[[], bool]
     is_wired_fn: Callable[[], bool]
+    wire_fn: Callable[[], None]
+    unwire_fn: Callable[[], None]
     # None = available on all platforms; ["darwin"] = macOS only, etc.
     platform: list[str] | None = field(default=None)
 
@@ -1671,27 +1673,110 @@ def _claude_desktop_is_wired() -> bool:
         return False
 
 
+def _claude_code_wire() -> None:
+    ormah_bin = get_ormah_bin_path()
+    configure_claude_hooks(ormah_bin)
+    configure_claude_code_mcp(ormah_bin)
+    install_claude_md()
+    install_claude_agents()
+    install_claude_commands()
+
+
+def _claude_code_unwire() -> None:
+    _remove_claude_hooks()
+    _remove_mcp_from_json(Path.home() / ".claude.json")
+    _remove_claude_md_block()
+    _remove_claude_agents()
+    _remove_claude_commands()
+
+
+def _codex_wire() -> None:
+    ormah_bin = get_ormah_bin_path()
+    configure_codex_hooks(ormah_bin)
+    configure_codex_mcp(ormah_bin)
+    install_codex_md()
+    install_codex_agents()
+
+
+def _codex_unwire() -> None:
+    _remove_codex_hooks()
+    _remove_codex_mcp_config()
+    _remove_codex_md_block()
+    _remove_codex_agents()
+
+
+def _claude_desktop_wire() -> None:
+    ormah_bin = get_ormah_bin_path()
+    configure_claude_desktop(ormah_bin)
+
+
+def _claude_desktop_unwire() -> None:
+    desktop_config = (
+        Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    )
+    _remove_mcp_from_json(desktop_config)
+
+
 AGENT_REGISTRY: list[AgentDescriptor] = [
     AgentDescriptor(
         id="claude_code",
         name="Claude Code",
         detect_fn=_claude_code_detected,
         is_wired_fn=_claude_code_is_wired,
+        wire_fn=_claude_code_wire,
+        unwire_fn=_claude_code_unwire,
     ),
     AgentDescriptor(
         id="codex",
         name="Codex CLI",
         detect_fn=_codex_detected,
         is_wired_fn=_codex_is_wired,
+        wire_fn=_codex_wire,
+        unwire_fn=_codex_unwire,
     ),
     AgentDescriptor(
         id="claude_desktop",
         name="Claude Desktop",
         detect_fn=_claude_desktop_detected,
         is_wired_fn=_claude_desktop_is_wired,
+        wire_fn=_claude_desktop_wire,
+        unwire_fn=_claude_desktop_unwire,
         platform=["darwin"],
     ),
 ]
+
+
+def _get_agent(agent_id: str) -> AgentDescriptor:
+    for agent in AGENT_REGISTRY:
+        if agent.id == agent_id:
+            return agent
+    raise ValueError(f"Unknown agent: {agent_id!r}")
+
+
+def wire_agent(agent_id: str) -> dict:
+    """Wire ormah into a single agent by id. Returns {wired, errors}."""
+    import contextlib, sys
+    agent = _get_agent(agent_id)
+    errors: dict[str, str] = {}
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            agent.wire_fn()
+        except Exception as exc:
+            errors[agent_id] = f"{type(exc).__name__}: {exc}"
+    return {"wired": [agent_id] if not errors else [], "errors": errors}
+
+
+def unwire_agent(agent_id: str) -> dict:
+    """Remove ormah hooks/MCP/instructions for a single agent. Returns {unwired, errors}."""
+    import contextlib, sys
+    agent = _get_agent(agent_id)
+    errors: dict[str, str] = {}
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            agent.unwire_fn()
+        except Exception as exc:
+            errors[agent_id] = f"{type(exc).__name__}: {exc}"
+    return {"unwired": [agent_id] if not errors else [], "errors": errors}
 
 
 def list_agents() -> list[dict]:
