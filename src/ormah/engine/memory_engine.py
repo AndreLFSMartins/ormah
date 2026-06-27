@@ -7,6 +7,7 @@ import hashlib
 import logging
 import math
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,6 +98,7 @@ class MemoryEngine:
 
         # Lazy-loaded components
         self._hybrid_search = None
+        self._hybrid_search_lock = threading.Lock()
         self._whisper_reranker_available = False
 
     def startup(self) -> None:
@@ -1762,15 +1764,21 @@ class MemoryEngine:
         return merged[:limit]
 
     def _get_hybrid_search(self):
+        # Double-checked locking: recall now runs in the Starlette threadpool (#19),
+        # so a lock-free check-then-set let concurrent first-hits each construct a
+        # HybridSearch (#27). The fast path stays lock-free once warmed.
         if self._hybrid_search is not None:
             return self._hybrid_search
-        try:
-            from ormah.embeddings.hybrid_search import HybridSearch
+        with self._hybrid_search_lock:
+            if self._hybrid_search is not None:
+                return self._hybrid_search
+            try:
+                from ormah.embeddings.hybrid_search import HybridSearch
 
-            self._hybrid_search = HybridSearch(self.db, self.settings)
-            return self._hybrid_search
-        except ImportError:
-            return None
+                self._hybrid_search = HybridSearch(self.db, self.settings)
+                return self._hybrid_search
+            except ImportError:
+                return None
 
     def _index_embedding(self, node: MemoryNode) -> None:
         try:
