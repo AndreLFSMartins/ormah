@@ -104,16 +104,22 @@ def test_weekly_window_excludes_old(stats_setup):
 
 
 def test_clients_endpoint(stats_setup, monkeypatch):
-    """GET /agent/clients returns the local AI-tool detection for the app list."""
+    """GET /agent/clients returns the agent list with detection and wired status."""
     client, _ = stats_setup
     import ormah.setup as setup
     monkeypatch.setattr(
-        setup, "detect_clients",
-        lambda: {"claude_code": True, "codex": False, "claude_desktop": True},
+        setup, "list_agents",
+        lambda: [
+            {"id": "claude_code", "name": "Claude Code", "detected": True, "wired": False, "platform": None, "available_on_current_os": True},
+            {"id": "codex", "name": "Codex CLI", "detected": False, "wired": False, "platform": None, "available_on_current_os": True},
+        ],
     )
     resp = client.get("/agent/clients")
     assert resp.status_code == 200
-    assert resp.json() == {"claude_code": True, "codex": False, "claude_desktop": True}
+    data = resp.json()
+    assert isinstance(data, list)
+    assert any(a["id"] == "claude_code" and a["detected"] is True for a in data)
+    assert any(a["id"] == "codex" and a["detected"] is False for a in data)
 
 
 def test_custom_window(stats_setup):

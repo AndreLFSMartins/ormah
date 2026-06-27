@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-type PanelId = "settings" | "insights" | "admin";
+type PanelId = "settings" | "insights" | "admin" | "agents";
 
 interface Options {
   onTogglePanel: (id: PanelId) => void;

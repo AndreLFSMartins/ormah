@@ -3,7 +3,7 @@ import { searchNodes } from "../api";
 import SearchResults from "./SearchResults";
 import type { MemoryNode } from "../types";
 
-type PanelId = "settings" | "insights" | "admin";
+type PanelId = "settings" | "insights" | "admin" | "agents";
 
 interface Props {
   nodeCount: number;
@@ -72,6 +72,12 @@ export default function TopBar({
         onClick={() => onTogglePanel("admin")}
       >
         admin <kbd>3</kbd>
+      </button>
+      <button
+        className={`top-bar-btn ${activePanel === "agents" ? "active" : ""}`}
+        onClick={() => onTogglePanel("agents")}
+      >
+        agents
       </button>
     </>
   );

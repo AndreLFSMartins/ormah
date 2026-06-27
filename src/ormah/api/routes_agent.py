@@ -206,11 +206,26 @@ def mark_outdated(node_id: str, request: Request, body: MarkOutdatedBody | None 
 
 @router.get("/clients")
 def get_clients():
-    """Which supported AI tools are installed on this machine (for the app's
-    detection list). Pure local detection — no wiring, no side effects."""
-    from ormah.setup import detect_clients
+    """List all supported agents with detection and wired status.
 
-    return detect_clients()
+    Returns a list of {id, name, detected, wired, platform, available_on_current_os}.
+    Pure filesystem checks — no wiring, no side effects.
+    """
+    from ormah.setup import list_agents
+
+    return list_agents()
+
+
+@router.post("/setup")
+def run_setup():
+    """Wire ormah hooks/MCP for every detected agent on this machine.
+
+    Runs non-interactively and returns {wired, errors} so the UI can
+    show which agents were connected and surface any failures.
+    """
+    from ormah.setup import run_setup_json
+
+    return run_setup_json()
 
 
 @router.get("/stats")

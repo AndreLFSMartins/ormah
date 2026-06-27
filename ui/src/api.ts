@@ -125,3 +125,27 @@ export function pauseAllTasks(): Promise<{ status: string }> {
 export function resumeAllTasks(): Promise<{ status: string }> {
   return post("/admin/tasks/resume-all");
 }
+
+// ---- Agents -----------------------------------------------------------------
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  detected: boolean;
+  wired: boolean;
+  platform: string[] | null;
+  available_on_current_os: boolean;
+}
+
+export interface SetupResult {
+  wired: string[];
+  errors: Record<string, string>;
+}
+
+export function fetchAgentClients(): Promise<AgentInfo[]> {
+  return get("/agent/clients");
+}
+
+export function runAgentSetup(): Promise<SetupResult> {
+  return post("/agent/setup");
+}

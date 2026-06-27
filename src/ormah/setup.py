@@ -1606,24 +1606,122 @@ def run_uninstall(yes: bool = False) -> None:
     ok("Ormah has been uninstalled")
 
 
-def detect_clients() -> dict[str, bool]:
-    """Detect which supported agent clients are installed on this machine.
+# ---------------------------------------------------------------------------
+# Agent registry — extensible, data-driven detection + wired-check per agent.
+# Adding a new integration = one entry here, zero changes to callers or UI.
+# ---------------------------------------------------------------------------
 
-    Pure detection, no side effects — safe for the Mac app to call before
-    showing the one-click "Set up agent" button.
+from dataclasses import dataclass, field
+from typing import Callable
+
+
+@dataclass
+class AgentDescriptor:
+    id: str
+    name: str
+    detect_fn: Callable[[], bool]
+    is_wired_fn: Callable[[], bool]
+    # None = available on all platforms; ["darwin"] = macOS only, etc.
+    platform: list[str] | None = field(default=None)
+
+
+def _claude_code_detected() -> bool:
+    return _find_binary("claude") is not None
+
+
+def _claude_code_is_wired() -> bool:
+    settings_path = Path.home() / ".claude" / "settings.json"
+    try:
+        return "ormah" in settings_path.read_text()
+    except OSError:
+        return False
+
+
+def _codex_detected() -> bool:
+    return _find_binary("codex") is not None or (Path.home() / ".codex").exists()
+
+
+def _codex_is_wired() -> bool:
+    hooks_path = Path.home() / ".codex" / "hooks.json"
+    config_path = Path.home() / ".codex" / "config.toml"
+    try:
+        if hooks_path.exists() and "ormah" in hooks_path.read_text():
+            return True
+        if config_path.exists() and "ormah" in config_path.read_text():
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _claude_desktop_detected() -> bool:
+    import platform as _platform
+    if _platform.system() != "Darwin":
+        return False
+    return os.path.exists(
+        os.path.expanduser("~/Library/Application Support/Claude")
+    )
+
+
+def _claude_desktop_is_wired() -> bool:
+    config_path = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    try:
+        return "ormah" in config_path.read_text()
+    except OSError:
+        return False
+
+
+AGENT_REGISTRY: list[AgentDescriptor] = [
+    AgentDescriptor(
+        id="claude_code",
+        name="Claude Code",
+        detect_fn=_claude_code_detected,
+        is_wired_fn=_claude_code_is_wired,
+    ),
+    AgentDescriptor(
+        id="codex",
+        name="Codex CLI",
+        detect_fn=_codex_detected,
+        is_wired_fn=_codex_is_wired,
+    ),
+    AgentDescriptor(
+        id="claude_desktop",
+        name="Claude Desktop",
+        detect_fn=_claude_desktop_detected,
+        is_wired_fn=_claude_desktop_is_wired,
+        platform=["darwin"],
+    ),
+]
+
+
+def list_agents() -> list[dict]:
+    """Return all agents with detection and wired status — for the UI agent panel.
+
+    Each entry: {id, name, detected, wired, platform}.
+    Safe to call from any context: pure filesystem checks, no side effects.
     """
     import platform as _platform
+    current_os = _platform.system().lower()
+    result = []
+    for agent in AGENT_REGISTRY:
+        # Include platform-specific agents but mark them so the UI can annotate.
+        detected = agent.detect_fn()
+        wired = agent.is_wired_fn() if detected else False
+        result.append({
+            "id": agent.id,
+            "name": agent.name,
+            "detected": detected,
+            "wired": wired,
+            "platform": agent.platform,
+            "available_on_current_os": agent.platform is None or current_os in agent.platform,
+        })
+    return result
 
-    desktop = False
-    if _platform.system() == "Darwin":
-        desktop = os.path.exists(
-            os.path.expanduser("~/Library/Application Support/Claude")
-        )
-    return {
-        "claude_code": _find_binary("claude") is not None,
-        "codex": _find_binary("codex") is not None or (Path.home() / ".codex").exists(),
-        "claude_desktop": desktop,
-    }
+
+def detect_clients() -> dict[str, bool]:
+    """Legacy flat detection dict — kept for backwards compatibility."""
+    agents = list_agents()
+    return {a["id"]: a["detected"] for a in agents}
 
 
 def run_setup_json() -> dict:
