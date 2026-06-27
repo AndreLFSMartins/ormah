@@ -30,7 +30,6 @@ pub fn build(app: &App) -> tauri::Result<()> {
         .build(app)?;
 
     let open_graph = MenuItemBuilder::with_id("open_graph", "Open Ormah").build(app)?;
-    let setup = MenuItemBuilder::with_id("setup", "Wire agents…").build(app)?;
 
     let autostart_on = handle.autolaunch().is_enabled().unwrap_or(false);
     let start_login =
@@ -44,7 +43,6 @@ pub fn build(app: &App) -> tauri::Result<()> {
         .separator()
         .item(&update_item)
         .item(&open_graph)
-        .item(&setup)
         .item(&start_login)
         .separator()
         .item(&quit)
@@ -71,7 +69,6 @@ pub fn build(app: &App) -> tauri::Result<()> {
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "install_update" => updater::install(app.clone()),
             "open_graph" => commands::open_graph(app),
-            "setup" => commands::run_setup_notify(app.clone()),
             "start_login" => {
                 let am = app.autolaunch();
                 let now_on = am.is_enabled().unwrap_or(false);
