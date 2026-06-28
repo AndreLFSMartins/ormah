@@ -114,6 +114,28 @@ pub fn run_setup_notify<R: Runtime>(app: AppHandle<R>) {
     });
 }
 
+// ---- server control --------------------------------------------------------
+
+/// Start the ormah daemon. No-op if already running.
+#[tauri::command]
+pub async fn start_server() -> Result<(), String> {
+    crate::sidecar::start_daemon();
+    Ok(())
+}
+
+/// Stop the ormah daemon.
+#[tauri::command]
+pub async fn stop_server() -> Result<(), String> {
+    crate::sidecar::stop_daemon();
+    Ok(())
+}
+
+/// Returns true if the ormah server is currently reachable.
+#[tauri::command]
+pub async fn server_status() -> bool {
+    crate::sidecar::is_running().await
+}
+
 // ---- onboarding marker -----------------------------------------------------
 
 fn marker_path<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {

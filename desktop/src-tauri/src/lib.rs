@@ -55,9 +55,12 @@ pub fn run() {
             commands::graph_url,
             commands::mark_onboarded,
             commands::is_onboarded,
+            commands::start_server,
+            commands::stop_server,
+            commands::server_status,
         ])
         .setup(|app| {
-            // Start the bundled server the moment the app launches.
+            // Start the bundled server as a daemon (survives app closing).
             sidecar::start(app.handle().clone());
 
             // Check for a desktop app update in the background — user is
@@ -67,27 +70,35 @@ pub fn run() {
             // Main window: shows the install/boot flow, then navigates to the
             // graph. Built in Rust so we can attach the scrollbar-hiding init
             // script that also applies after navigating to the graph.
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("Ormah")
-                .inner_size(1180.0, 820.0)
-                .min_inner_size(860.0, 600.0)
-                .center()
-                .decorations(false) // custom dark title bar drawn in the UI
-                .initialization_script(HIDE_SCROLLBARS)
-                .initialization_script(MARK_IN_APP)
-                .build()?;
+            let window =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("Ormah")
+                    .inner_size(1180.0, 820.0)
+                    .min_inner_size(860.0, 600.0)
+                    .center()
+                    .decorations(false) // custom dark title bar drawn in the UI
+                    .initialization_script(HIDE_SCROLLBARS)
+                    .initialization_script(MARK_IN_APP)
+                    .build()?;
 
-            // Build the tray; it owns the stats poller and a quick "Open graph".
+            // Hide the window on close instead of destroying it — the tray and
+            // daemon keep running. User reopens via the tray icon.
+            let win = window.clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = win.hide();
+                }
+            });
+
+            // Build the tray; it owns the stats poller and server controls.
             tray::build(app)?;
 
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building the Ormah desktop app")
-        .run(|_app_handle, event| {
-            // Make sure the bundled server dies with the app.
-            if let tauri::RunEvent::Exit = event {
-                sidecar::stop();
-            }
+        .run(|_app_handle, _event| {
+            // Server is a daemon — it outlives the app process intentionally.
         });
 }
