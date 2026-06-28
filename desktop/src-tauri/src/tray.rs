@@ -111,7 +111,7 @@ pub fn build(app: &App) -> tauri::Result<()> {
                 let _ = toggle.set_text(server_toggle_label(now_running));
             }
             "quit" => {
-                // Server is a daemon — it survives the app exiting intentionally.
+                sidecar::stop_daemon();
                 app.exit(0);
             }
             _ => {}
