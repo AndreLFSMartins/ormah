@@ -52,7 +52,9 @@ ormah.db
 memory/deleted/
 
 # Local scripts (not part of the repo)
-scripts/
+/scripts/
+# Desktop build scripts are part of the repo
+!desktop/scripts/
 
 # Whisper eval scratch DB (created by `ormah eval whisper run`)
 eval/whisper/eval_db/

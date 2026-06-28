@@ -6,12 +6,13 @@
 //! sidecar is absent (dev builds).
 
 use once_cell::sync::Lazy;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_shell::ShellExt;
 
 // Must stay in sync with the Python package version — update on each release.
-const ORMAH_VERSION: &str = "0.12.4";
+const ORMAH_VERSION: &str = "0.13.0";
 
 /// Phase emitted on the "ormah://status" event so the UI can show progress.
 #[derive(Clone, serde::Serialize)]
@@ -31,7 +32,7 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
 }
 
 async fn ensure_running<R: Runtime>(app: AppHandle<R>) {
-    if !ormah_on_path() {
+    if find_ormah().is_none() {
         // First launch: install ormah via the bundled uv sidecar.
         let _ = app.emit("ormah://status", Phase::Installing { version: ORMAH_VERSION });
         if !install_via_uv(&app).await {
@@ -53,16 +54,54 @@ async fn ensure_running<R: Runtime>(app: AppHandle<R>) {
     spawn_server();
 }
 
+/// Find the ormah binary. Checks uv tool install locations first (GUI apps
+/// don't inherit the user's shell PATH, so ~/.local/bin is often missing),
+/// then falls back to a PATH search.
+pub fn find_ormah() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+
+    let candidates = [
+        // uv tool shim — primary location after `uv tool install ormah`
+        format!("{home}/.local/bin/ormah"),
+        // uv tool venv direct binary (fallback if shim dir not on PATH)
+        format!("{home}/.local/share/uv/tools/ormah/bin/ormah"),
+        // mise shim
+        format!("{home}/.local/share/mise/shims/ormah"),
+        // Homebrew (macOS Intel + Apple Silicon)
+        "/usr/local/bin/ormah".to_string(),
+        "/opt/homebrew/bin/ormah".to_string(),
+    ];
+
+    for path in &candidates {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // Last resort: ask the shell
+    std::process::Command::new("which")
+        .arg("ormah")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+            } else {
+                None
+            }
+        })
+}
+
 /// Returns true when the installed ormah version doesn't match ORMAH_VERSION.
 fn needs_upgrade() -> bool {
-    let Ok(out) = std::process::Command::new("ormah")
-        .arg("--version")
-        .output()
-    else {
+    let Some(bin) = find_ormah() else { return false };
+    let Ok(out) = std::process::Command::new(bin).arg("--version").output() else {
         return false;
     };
     let installed = String::from_utf8_lossy(&out.stdout);
-    // `ormah --version` outputs e.g. "ormah 0.12.4"
+    // `ormah --version` outputs e.g. "ormah 0.13.0"
     !installed.contains(ORMAH_VERSION)
 }
 
@@ -75,7 +114,7 @@ async fn install_via_uv<R: Runtime>(app: &AppHandle<R>) -> bool {
         }
     };
     let spec = format!("ormah=={}", ORMAH_VERSION);
-    match uv.args(["tool", "install", &spec]).output().await {
+    match uv.args(["tool", "install", "--reinstall", &spec]).output().await {
         Ok(out) if out.status.success() => {
             eprintln!("uv: installed {}", spec);
             true
@@ -94,18 +133,15 @@ async fn install_via_uv<R: Runtime>(app: &AppHandle<R>) -> bool {
     }
 }
 
-fn ormah_on_path() -> bool {
-    std::process::Command::new("ormah")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 fn spawn_server() {
-    match std::process::Command::new("ormah")
+    let bin = match find_ormah() {
+        Some(p) => p,
+        None => {
+            eprintln!("ormah binary not found after install");
+            return;
+        }
+    };
+    match std::process::Command::new(&bin)
         .args(["server", "start"])
         .spawn()
     {
@@ -113,7 +149,7 @@ fn spawn_server() {
             eprintln!("ormah server started (pid {})", child.id());
             *SERVER.lock().unwrap() = Some(child);
         }
-        Err(e) => eprintln!("failed to start ormah server: {e}"),
+        Err(e) => eprintln!("failed to start ormah server ({bin:?}): {e}"),
     }
 }
 

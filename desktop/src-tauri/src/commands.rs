@@ -4,6 +4,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
+use crate::sidecar::find_ormah;
 use crate::stats::{self, Stats};
 
 /// Base URL of the bundled server. Honors `ORMAH_PORT`, defaults to 8787.
@@ -60,10 +61,11 @@ pub async fn detect_agents() -> Result<Value, String> {
 // ---- agent setup -----------------------------------------------------------
 
 /// Run `ormah setup --json` and return its parsed result.
-/// uv has already installed `ormah` on PATH by the time this is called.
+/// Uses find_ormah() so it works even when ~/.local/bin is not on PATH.
 #[tauri::command]
 pub async fn setup_agents<R: Runtime>(_app: AppHandle<R>) -> Result<Value, String> {
-    let out = std::process::Command::new("ormah")
+    let bin = find_ormah().ok_or_else(|| "ormah not found — install may have failed".to_string())?;
+    let out = std::process::Command::new(bin)
         .args(["setup", "--json"])
         .output()
         .map_err(|e| format!("ormah setup failed: {e}"))?;
