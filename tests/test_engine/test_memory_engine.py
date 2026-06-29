@@ -139,6 +139,33 @@ def test_remember_normalizes_placeholder_space(engine):
     assert engine.file_store.load(node_id).space is None
 
 
+def test_remember_about_self_locks_space(engine):
+    """Identity nodes are global by definition — about_self locks the space (#22)."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(content="André is a triathlete.", type=NodeType.fact, about_self=True)
+    )
+    assert engine.file_store.load(node_id).space_locked is True
+
+
+def test_remember_explicit_space_locked(engine):
+    """A caller can pin a non-identity global (e.g. a cross-project preference)."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(
+            content="Always open previews in Brave.",
+            type=NodeType.preference,
+            space_locked=True,
+        )
+    )
+    assert engine.file_store.load(node_id).space_locked is True
+
+
+def test_update_node_can_lock_space(engine):
+    """update_node can flip space_locked on an existing node."""
+    node_id, _ = engine.remember(CreateNodeRequest(content="x", type=NodeType.fact))
+    engine.update_node(node_id, UpdateNodeRequest(space_locked=True))
+    assert engine.file_store.load(node_id).space_locked is True
+
+
 def test_update_node_normalizes_placeholder_space(engine):
     """Updating space to the placeholder string 'null' persists as None (#22)."""
     node_id, _ = engine.remember(

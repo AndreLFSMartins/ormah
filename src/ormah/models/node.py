@@ -75,6 +75,7 @@ class MemoryNode(BaseModel):
     archived_at: datetime | None = None  # when the node entered the archival tier (#28)
     valid_until: datetime | None = None
     space: str | None = None
+    space_locked: bool = False  # user-curated space: auto_cluster must not reassign (#22)
     tags: list[str] = Field(default_factory=list)
     connections: list[Connection] = Field(default_factory=list)
     title: str | None = None
@@ -95,6 +96,7 @@ class CreateNodeRequest(BaseModel):
     tier: Tier = Tier.working
     source: str | None = None
     space: str | None = None
+    space_locked: bool = False  # mark this memory's space as user-curated (global-safe)
     tags: list[str] = Field(default_factory=list)
     connections: list[Connection] = Field(default_factory=list)
     title: str | None = None
@@ -107,6 +109,7 @@ class UpdateNodeRequest(BaseModel):
     type: NodeType | None = None
     tier: Tier | None = None
     space: str | None = None
+    space_locked: bool | None = None
     tags: list[str] | None = None
     add_connections: list[Connection] | None = None
     title: str | None = None

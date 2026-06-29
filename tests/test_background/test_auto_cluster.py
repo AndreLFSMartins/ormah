@@ -51,3 +51,55 @@ def test_auto_cluster_does_not_propagate_placeholder_space(engine):
         "SELECT COUNT(*) FROM nodes WHERE space = 'null'"
     ).fetchone()[0]
     assert nulls == 1
+
+
+def test_auto_cluster_skips_space_locked_node(engine):
+    """A user-curated global (space_locked) keeps its None space despite project neighbors."""
+    a, _ = engine.remember(
+        CreateNodeRequest(content="global pref", type=NodeType.preference, space_locked=True)
+    )
+    b, _ = engine.remember(
+        CreateNodeRequest(content="neighbor", type=NodeType.fact, space="work")
+    )
+    _connect(engine, a, b)
+
+    run_auto_cluster(engine)
+
+    assert engine.file_store.load(a).space is None
+
+
+def test_auto_cluster_skips_self_node(engine):
+    """The self/identity node is never swept into a project space."""
+    uid = engine.user_node_id
+    b, _ = engine.remember(
+        CreateNodeRequest(content="neighbor", type=NodeType.fact, space="work")
+    )
+    _connect(engine, uid, b)
+
+    run_auto_cluster(engine)
+
+    assert engine.file_store.load(uid).space is None
+
+
+def test_repair_global_identity_relocks_swept_cluster(engine):
+    """The repair resets a swept identity cluster back to global + locked."""
+    from ormah.store.migrations import repair_global_identity
+
+    uid = engine.user_node_id
+    sid, _ = engine.remember(
+        CreateNodeRequest(content="André runs triathlons.", type=NodeType.fact, about_self=True)
+    )
+    # Simulate the pre-fix damage: both pulled into a project space, unlocked.
+    for nid in (uid, sid):
+        n = engine.file_store.load(nid)
+        n.space = "ormah"
+        n.space_locked = False
+        engine.file_store.save(n)
+
+    fixed, _ = repair_global_identity(engine.settings.nodes_dir, engine.settings.db_path)
+
+    assert fixed >= 2
+    for nid in (uid, sid):
+        n = engine.file_store.load(nid)
+        assert n.space is None
+        assert n.space_locked is True

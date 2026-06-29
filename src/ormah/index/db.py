@@ -111,6 +111,7 @@ class Database:
                 ("stability", "ALTER TABLE nodes ADD COLUMN stability REAL DEFAULT 1.0"),
                 ("last_review", "ALTER TABLE nodes ADD COLUMN last_review TEXT"),
                 ("archived_at", "ALTER TABLE nodes ADD COLUMN archived_at TEXT"),
+                ("space_locked", "ALTER TABLE nodes ADD COLUMN space_locked INTEGER NOT NULL DEFAULT 0"),
             ]
             for col_name, ddl in enrichment_migrations:
                 if col_name not in node_cols:

@@ -13,8 +13,12 @@ logger = logging.getLogger(__name__)
 def run_auto_cluster(engine) -> None:
     """Assign unassigned nodes to spaces based on their connections."""
     try:
+        # Skip user-curated globals (space_locked) and the self node — a None space on
+        # those means "deliberately global", not "needs a space" (#22 council follow-up).
         unassigned = engine.db.conn.execute(
-            "SELECT id FROM nodes WHERE space IS NULL OR space = ''"
+            "SELECT id FROM nodes "
+            "WHERE (space IS NULL OR space = '') AND space_locked = 0 AND id != ?",
+            (engine.user_node_id or "",),
         ).fetchall()
 
         if not unassigned:
