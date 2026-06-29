@@ -5,13 +5,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     App, Listener,
 };
-use tauri_plugin_autostart::ManagerExt;
-
 use crate::{commands, sidecar, stats, updater};
-
-fn login_label(enabled: bool) -> &'static str {
-    if enabled { "Start at login  ✓" } else { "Start at login" }
-}
 
 fn server_status_label(running: bool) -> &'static str {
     if running { "Server: running  ●" } else { "Server: stopped  ○" }
@@ -46,10 +40,6 @@ pub fn build(app: &App) -> tauri::Result<()> {
 
     let open_graph = MenuItemBuilder::with_id("open_graph", "Open Ormah").build(app)?;
 
-    let autostart_on = handle.autolaunch().is_enabled().unwrap_or(false);
-    let start_login =
-        MenuItemBuilder::with_id("start_login", login_label(autostart_on)).build(app)?;
-
     let quit = MenuItemBuilder::with_id("quit", "Quit Ormah").build(app)?;
 
     let menu = MenuBuilder::new(app)
@@ -61,7 +51,6 @@ pub fn build(app: &App) -> tauri::Result<()> {
         .separator()
         .item(&update_item)
         .item(&open_graph)
-        .item(&start_login)
         .separator()
         .item(&quit)
         .build()?;
@@ -76,7 +65,6 @@ pub fn build(app: &App) -> tauri::Result<()> {
         }
     });
 
-    let start_login_for_event = start_login.clone();
     let server_toggle_for_event = server_toggle.clone();
     let server_status_for_event = server_status.clone();
 
@@ -89,12 +77,6 @@ pub fn build(app: &App) -> tauri::Result<()> {
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "install_update" => updater::install(app.clone()),
             "open_graph" => commands::open_graph(app),
-            "start_login" => {
-                let am = app.autolaunch();
-                let now_on = am.is_enabled().unwrap_or(false);
-                let _ = if now_on { am.disable() } else { am.enable() };
-                let _ = start_login_for_event.set_text(login_label(!now_on));
-            }
             "server_toggle" => {
                 let toggle = server_toggle_for_event.clone();
                 let status = server_status_for_event.clone();

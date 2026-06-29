@@ -12,7 +12,7 @@ mod tray;
 mod updater;
 
 use tauri::{WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 // Hide scrollbar chrome across every page the webview loads (the install shell
 // *and* the graph it navigates to). Scrolling still works; only the visual bar
@@ -62,6 +62,9 @@ pub fn run() {
         .setup(|app| {
             // Start the bundled server as a daemon (survives app closing).
             sidecar::start(app.handle().clone());
+
+            // Always enable autostart — ormah should run at login by default.
+            let _ = app.handle().autolaunch().enable();
 
             // Check for a desktop app update in the background — user is
             // notified and must explicitly click to install.
