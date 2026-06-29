@@ -116,7 +116,27 @@ export default function App() {
       })
       .catch(() => {
         if (!reqGuard.current.isLatest(token)) return;
-        addToast("Falha ao carregar o grafo", "error"); // keep current view on error
+        addToast("Failed to load the graph", "error"); // keep current view on error
+      });
+  }, [addToast]);
+
+  // Explicit "show all" — loads every node (all tiers + spaces). Opt-in only;
+  // dimming treats kind:"all" like a drill, so a stale tier/space filter can't
+  // hide what the user asked to see. Shares the request guard with loadGraph.
+  const loadAll = useCallback(() => {
+    const token = reqGuard.current.begin();
+    fetchGraph({ all: true })
+      .then((data) => {
+        if (!reqGuard.current.isLatest(token)) return; // drop stale response
+        setGraph(data);
+        setUserNodeId(data.user_node_id);
+        setHasNoSpace(data.has_no_space ?? false);
+        setAllSpaces(data.all_spaces ?? []);
+        setViewScope({ kind: "all" });
+      })
+      .catch(() => {
+        if (!reqGuard.current.isLatest(token)) return;
+        addToast("Failed to load the graph", "error");
       });
   }, [addToast]);
 
@@ -281,6 +301,7 @@ export default function App() {
             hasNoSpace={hasNoSpace}
             onDrillSpace={(s) => loadGraph(s)}
             onExitDrill={() => loadGraph()}
+            onShowAll={loadAll}
           />
         )}
       </div>

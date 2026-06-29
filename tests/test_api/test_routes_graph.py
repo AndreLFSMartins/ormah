@@ -119,6 +119,30 @@ def test_space_drill_includes_archival_of_that_space(ui_app):
     assert {n["id"] for n in body["nodes"]} == {"core1", "arch1"}
 
 
+def test_scope_all_returns_every_node_including_archival(ui_app):
+    app, engine = ui_app
+    user_id = engine.user_node_id
+    _insert_node(engine, "core1", tier="core", space="work")
+    _insert_node(engine, "work1", tier="working", space="personal")
+    _insert_node(engine, "arch1", tier="archival", space="work")
+    _insert_node(engine, "arch_ns", tier="archival", space=None)
+    with TestClient(app) as c:
+        body = c.get("/ui/graph?scope=all").json()
+    returned = {n["id"] for n in body["nodes"]}
+    assert {"core1", "work1", "arch1", "arch_ns"} <= returned
+    assert user_id in returned
+
+
+def test_scope_all_takes_precedence_over_space(ui_app):
+    app, engine = ui_app
+    _insert_node(engine, "core1", tier="core", space="work")
+    _insert_node(engine, "arch_other", tier="archival", space="personal")
+    with TestClient(app) as c:
+        body = c.get("/ui/graph?scope=all&space=work").json()
+    # scope=all wins: nodes outside 'work' are still present
+    assert "arch_other" in {n["id"] for n in body["nodes"]}
+
+
 def test_space_empty_selects_no_space_group(ui_app):
     app, engine = ui_app
     user_id = engine.user_node_id  # startup user node also has space=None

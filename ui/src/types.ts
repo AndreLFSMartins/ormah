@@ -69,7 +69,10 @@ export interface GraphData {
   has_no_space?: boolean; // F1: a no-space group exists over ALL nodes (incl. archival)
 }
 
-export type ViewScope = { kind: "active" } | { kind: "space"; space: string };
+export type ViewScope =
+  | { kind: "active" }
+  | { kind: "space"; space: string }
+  | { kind: "all" };
 
 export interface NodeDetail {
   node: MemoryNode;

@@ -11,17 +11,17 @@ export interface DimmedSets {
 }
 
 export function buildDimmed(filters: Filters, nodes: MemoryNode[], viewScope: ViewScope): DimmedSets {
-  // C1/C2: in a focused space drill the payload IS exactly the scope (one space,
-  // active + archival). Dimming by space/tier here would hide the very nodes the
-  // drill loaded — so skip both. Type/edge dimming still applies.
-  const inDrill = viewScope.kind === "space";
+  // C1/C2: in a focused space drill — or "show all" — the payload IS exactly the
+  // scope (the drilled space, or everything). Dimming by space/tier would hide the
+  // very nodes that scope loaded, so skip both. Type/edge dimming still applies.
+  const showsEverythingInScope = viewScope.kind === "space" || viewScope.kind === "all";
 
-  const dimmedTier = inDrill
+  const dimmedTier = showsEverythingInScope
     ? new Set<string>()
     : new Set<string>(ALL_TIERS.filter((t) => !filters.tiers.has(t)));
 
   const dimmedSpace = new Set<string>();
-  if (!inDrill && filters.spaces.size > 0) {
+  if (!showsEverythingInScope && filters.spaces.size > 0) {
     for (const n of nodes) {
       const space = n.space || "";
       if (!filters.spaces.has(space)) dimmedSpace.add(space);

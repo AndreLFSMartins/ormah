@@ -8,19 +8,23 @@ router = APIRouter(prefix="/ui", tags=["ui"])
 
 
 @router.get("/graph")
-def get_graph(request: Request, space: str | None = None):
+def get_graph(request: Request, space: str | None = None, scope: str | None = None):
     """Graph data for the explorer.
 
     Default (no ``space``): the *active graph* — non-archival nodes plus the
     self/user node — so the overview never loads the whole archival history.
     ``?space=<S>``: the full set for one space (active + archival) for
     drill-down. ``?space=`` (empty) selects the no-space group.
+    ``?scope=all``: every node across all tiers and spaces (explicit
+    opt-in "show all"); takes precedence over ``space``.
     """
     engine = request.app.state.engine
     conn = engine.db.conn
     user_node_id = getattr(engine, "user_node_id", None)
 
-    if space is None:
+    if scope == "all":
+        rows = conn.execute("SELECT * FROM nodes").fetchall()
+    elif space is None:
         rows = conn.execute(
             "SELECT * FROM nodes WHERE tier != 'archival' OR id = ?",
             (user_node_id,),

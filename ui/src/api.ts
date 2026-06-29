@@ -24,7 +24,8 @@ async function del<T>(path: string): Promise<T> {
   return res.json();
 }
 
-export function fetchGraph(opts?: { space?: string }): Promise<GraphData> {
+export function fetchGraph(opts?: { space?: string; all?: boolean }): Promise<GraphData> {
+  if (opts?.all) return get("/ui/graph?scope=all");
   if (opts && opts.space !== undefined) {
     return get(`/ui/graph?space=${encodeURIComponent(opts.space)}`);
   }

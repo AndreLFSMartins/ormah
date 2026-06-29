@@ -42,4 +42,11 @@ describe("buildDimmed", () => {
     const d = buildDimmed(filters({ tiers: new Set(["core", "working"]) }), [node("work")], scope);
     expect(d.tier.has("archival")).toBe(true);
   });
+  it("show-all scope: never dims by space or tier (parity with drill)", () => {
+    const scope: ViewScope = { kind: "all" };
+    const f = filters({ spaces: new Set(["work"]), tiers: new Set(["core", "working"]) });
+    const d = buildDimmed(f, [node(null), node("dead")], scope);
+    expect(d.space.size).toBe(0);
+    expect(d.tier.size).toBe(0);
+  });
 });

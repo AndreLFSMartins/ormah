@@ -204,6 +204,7 @@ interface Props {
   hasNoSpace: boolean;
   onDrillSpace: (space: string) => void;
   onExitDrill: () => void;
+  onShowAll: () => void;
 }
 
 // ─── GraphView ────────────────────────────────────────────────────────────────
@@ -217,7 +218,7 @@ const GraphView = forwardRef<
   Props
 >(
   (
-    { nodes, edges, onNodeSelect, focusNodeId, userNodeId, clusterBySpace, appearance, filters, viewScope, allSpaces, hasNoSpace, onDrillSpace, onExitDrill },
+    { nodes, edges, onNodeSelect, focusNodeId, userNodeId, clusterBySpace, appearance, filters, viewScope, allSpaces, hasNoSpace, onDrillSpace, onExitDrill, onShowAll },
     ref,
   ) => {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -606,9 +607,14 @@ const GraphView = forwardRef<
           return (
             <div style={BANNER_STYLE} data-testid="graph-scope-banner">
               <span>{label.text}</span>
+              {label.showAll && (
+                <button type="button" data-testid="show-all" onClick={onShowAll} style={BANNER_BTN_STYLE}>
+                  Show all (incl. archival)
+                </button>
+              )}
               {label.showBack && (
                 <button type="button" data-testid="exit-drill" onClick={onExitDrill} style={BANNER_BTN_STYLE}>
-                  ← voltar ao active graph
+                  ← back to active graph
                 </button>
               )}
             </div>
@@ -768,7 +774,7 @@ const GraphView = forwardRef<
                           <button
                             type="button"
                             data-testid={`drill-space-${sp.name}`}
-                            title="Entrar no espaço (carrega archival)"
+                            title="Enter space (loads archival)"
                             onClick={(e) => { e.stopPropagation(); onDrillSpace(sp.val); }}
                             style={DRILL_BTN_STYLE}
                           >↳</button>

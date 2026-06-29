@@ -30,4 +30,10 @@ describe("fetchGraph", () => {
     await fetchGraph({ space: "" });
     expect(fn).toHaveBeenCalledWith("/ui/graph?space=");
   });
+
+  it("requests ?scope=all when all is set", async () => {
+    const fn = mockFetch();
+    await fetchGraph({ all: true });
+    expect(fn).toHaveBeenCalledWith("/ui/graph?scope=all");
+  });
 });
