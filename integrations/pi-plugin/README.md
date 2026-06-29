@@ -13,7 +13,7 @@ Local. Private. Portable. Yours to keep.
   - `ormah_remember`, `ormah_recall`, `ormah_recall_node`, `ormah_mark_outdated`, `ormah_submit_feedback`, `ormah_run_maintenance`
 - **Transcript capture** — on compaction (`session_before_compact`) and session end (`session_shutdown`), normalizes the Pi session into `User:`/`Assistant:` text and `POST /ingest/conversation` for server-side extraction. Ports Claude's `PreCompact` + `SessionEnd` hooks.
 - **Commands** — `/ormah:setup`, `/ormah:status`, `/ormah:maintenance`, `/ormah:upgrade`, `/ormah:reload`.
-- **Self-maintenance** — when enabled, whisper appends a `maintenance_due` signal at most once per 24h; `/ormah:maintenance` loads the maintenance agent prompt so the session runs the two-step `ormah_run_maintenance` flow.
+- **Self-maintenance** — relays the server's `maintenance_due` whisper signal; `/ormah:maintenance` loads the maintenance prompt so the session can run the two-step `ormah_run_maintenance` flow.
 
 ## Requirements
 
@@ -25,14 +25,12 @@ Local. Private. Portable. Yours to keep.
 Full end-user flow (Ormah runtime + Pi extension + wiring) is in [SETUP.md](./SETUP.md). Short version:
 
 ```bash
-# 1. Ormah runtime (detects Pi and wires it automatically)
+# Installs Ormah, detects Pi, installs ormah-pi, and writes Pi guidance
 bash <(curl -fsSL https://ormah.me/install.sh)
-# 2. Pi extension from the package gallery
-pi install npm:ormah-pi
-# 3. In Pi: /reload, then /ormah:status
+# In Pi: /reload, then /ormah:status
 ```
 
-Other sources:
+Manual extension sources:
 
 ```bash
 pi install git:github.com/r-spade/ormah@main      # from git (tag/commit pinned)
@@ -44,7 +42,7 @@ pi -e ./integrations/pi-plugin/ormah-pi.ts         # try without installing (dev
 
 ## First-run setup
 
-If `ormah setup` (step 1) already detected Pi, you're done — `/ormah:status` should show `connected`. If you used `--skip-client-setup`, run `/ormah:setup` inside Pi: it runs `ormah setup --skip-client-setup` (server + local models + autostart) and writes the Ormah guidance block into `~/.pi/agent/AGENTS.md`. Then `/reload`.
+If `ormah setup` detected Pi, you're done — `/ormah:status` should show `connected`. If you installed the extension manually or used `--skip-client-setup`, run `/ormah:setup` inside Pi: it runs `ormah setup --skip-client-setup` (server + local models + autostart) and asks the Ormah CLI to install the canonical guidance block into `~/.pi/agent/AGENTS.md`. Then `/reload`.
 
 ## Configuration
 
@@ -56,11 +54,11 @@ All settings are env vars (read from the environment and `~/.config/ormah/.env`)
 | `ORMAH_BASE_URL` | `http://$HOST:$PORT` | Override base URL entirely |
 | `ORMAH_WHISPER_NUDGE_INTERVAL` | `10` | Nudge the agent to `remember` every N prompts (0 = off) |
 | `ORMAH_WHISPER_OUT_MIN_TURNS` | `3` | Minimum user turns before a session is stored |
-| `ORMAH_PI_MAINTENANCE_ENABLED` | `false` | Enable the `maintenance_due` whisper signal (falls back to `ORMAH_CLAUDE_MAINTENANCE_ENABLED`) |
-| `ORMAH_MAINTENANCE_SIGNAL_INTERVAL_HOURS` | `24` | Max once per N hours the signal is appended |
 | `ORMAH_PI_*_TIMEOUT_MS` | various | Per-call HTTP timeouts |
 
-> **Note:** whisper store (transcript extraction) and LLM-backed maintenance need an Ormah LLM provider (`ORMAH_LLM_PROVIDER=ollama|litellm` + key). Local recall, whisper retrieval, and the tools work without one.
+The Ormah server is the sole source of `maintenance_due` signals. `ormah setup` can enable agent-backed maintenance, or it can be enabled with `ORMAH_CLAUDE_MAINTENANCE_ENABLED=true` (the legacy shared server setting used for all supported agents).
+
+> **Note:** whisper store (transcript extraction) and server-executed LLM maintenance need an Ormah LLM provider (`ORMAH_LLM_PROVIDER=ollama|litellm` + key). Agent-backed maintenance uses Pi's active model. Local recall, whisper retrieval, and the memory tools work without a server-side LLM.
 
 ## Publishing (maintainers)
 
@@ -91,7 +89,7 @@ integrations/pi-plugin/
     config.ts            # ORMAH_* env config
     client.ts            # HTTP client → /agent/* and /ingest/*
     space.ts             # space detection (mirrors space_detect.py)
-    whisper.ts           # before_agent_start inject + nudge + maintenance_due
+    whisper.ts           # before_agent_start server whisper inject + nudge
     tools.ts             # 6 registerTool calls
     store.ts             # session_before_compact / session_shutdown → /ingest
     session.ts           # Pi entries → normalized conversation text
@@ -103,3 +101,7 @@ integrations/pi-plugin/
 ## License
 
 MIT, same as Ormah.
+
+## Credits
+
+The initial Pi integration was contributed by [YagizEfeGokce](https://github.com/YagizEfeGokce) in [PR #46](https://github.com/r-spade/ormah/pull/46).

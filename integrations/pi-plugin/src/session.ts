@@ -17,12 +17,15 @@ interface TextBlock {
 
 function isTextBlock(b: unknown): b is TextBlock {
 	return (
-		(typeof b === "object" && b !== null && (b as TextBlock).type === "text") ||
-		(b as TextBlock).type === "output_text"
+		typeof b === "object" &&
+		b !== null &&
+		((b as TextBlock).type === "text" ||
+			(b as TextBlock).type === "output_text") &&
+		typeof (b as TextBlock).text === "string"
 	);
 }
 
-function extractText(content: unknown): string | null {
+export function extractText(content: unknown): string | null {
 	if (typeof content === "string") return content.trim() || null;
 	if (!Array.isArray(content)) return null;
 	const texts: string[] = [];
@@ -35,6 +38,7 @@ function extractText(content: unknown): string | null {
 export interface NormalizedTranscript {
 	conversation: string;
 	userTurnCount: number;
+	turns: string[];
 }
 
 /**
@@ -64,5 +68,5 @@ export function normalizeSession(ctx: ExtensionContext): NormalizedTranscript {
 		}
 	}
 
-	return { conversation: turns.join("\n\n"), userTurnCount };
+	return { conversation: turns.join("\n\n"), userTurnCount, turns };
 }

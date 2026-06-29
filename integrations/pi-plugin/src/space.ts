@@ -42,7 +42,7 @@ export function resolveSpace(
 	explicit?: string | null,
 	cwd?: string,
 ): string | null {
-	if (explicit) return explicit;
+	if (explicit !== undefined) return explicit;
 	const envSpace = process.env.ORMAH_SPACE;
 	if (envSpace) return envSpace;
 	return cwd ? detectSpaceFromDir(cwd) : null;

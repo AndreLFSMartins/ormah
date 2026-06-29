@@ -82,7 +82,7 @@ Ormah is agent-agnostic by design. It can be wired into any agent that exposes t
 1. Start the Ormah server and install auto-start
 2. Preload the local models used for search and whisper retrieval
 3. Detect supported clients and wire them up automatically
-4. Offer agent-backed maintenance when Claude Code or Codex are available
+4. Offer agent-backed maintenance when Claude Code, Codex, or Pi are available
 5. Offer transcript backfill to help bootstrap memory from earlier sessions
 
 Today, setup can wire up:

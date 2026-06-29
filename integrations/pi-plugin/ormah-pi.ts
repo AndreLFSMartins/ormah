@@ -16,7 +16,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
 import { OrmahClient } from "./src/client.js";
-import { resolveSpace } from "./src/space.js";
+import { beginSession } from "./src/session-id.js";
 import { WhisperManager } from "./src/whisper.js";
 import { StoreManager } from "./src/store.js";
 import { registerTools } from "./src/tools.js";
@@ -26,28 +26,12 @@ export default function ormahPi(pi: ExtensionAPI) {
 	const cfg = loadConfig();
 	const client = new OrmahClient(cfg);
 
-	const getSessionId = (): string =>
-		// Resolved lazily inside handlers where a session is active.
-		(globalThis as { __ormahPiSession?: string }).__ormahPiSession ??
-		"pi-default";
-	const getDefaultSpace = (): string | null => {
-		const cwd = (globalThis as { __ormahPiCwd?: string }).__ormahPiCwd;
-		return cwd ? resolveSpace(undefined, cwd) : null;
-	};
-
-	const whisper = new WhisperManager(
-		client,
-		cfg.whisperNudgeInterval,
-		cfg.maintenanceEnabled,
-		cfg.maintenanceSignalIntervalHours,
-	);
+	const whisper = new WhisperManager(client, cfg.whisperNudgeInterval);
 	const store = new StoreManager(client, cfg.whisperOutMinTurns);
 
 	// ── session lifecycle ─────────────────────────────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
-		(globalThis as { __ormahPiCwd?: string }).__ormahPiCwd = ctx.cwd;
-		(globalThis as { __ormahPiSession?: string }).__ormahPiSession =
-			ctx.sessionManager.getSessionFile() ?? "pi-default";
+		beginSession(ctx);
 		try {
 			const stats = await client.health();
 			ctx.ui.setStatus("ormah", `connected · ${stats.total_nodes} mem`);
@@ -67,9 +51,6 @@ export default function ormahPi(pi: ExtensionAPI) {
 
 	// ── whisper: involuntary recall before each prompt ─────────────────────────
 	pi.on("before_agent_start", async (event, ctx) => {
-		(globalThis as { __ormahPiCwd?: string }).__ormahPiCwd = ctx.cwd;
-		(globalThis as { __ormahPiSession?: string }).__ormahPiSession =
-			ctx.sessionManager.getSessionFile() ?? "pi-default";
 		return whisper.onBeforeAgentStart(
 			event as { prompt: string; images?: unknown[]; systemPrompt: string },
 			ctx,
@@ -86,6 +67,6 @@ export default function ormahPi(pi: ExtensionAPI) {
 	});
 
 	// ── tools + commands ──────────────────────────────────────────────────────
-	registerTools(pi, { client, getSessionId, getDefaultSpace });
+	registerTools(pi, { client });
 	registerCommands(pi, client);
 }

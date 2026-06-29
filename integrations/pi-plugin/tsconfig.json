@@ -11,5 +11,5 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["ormah-pi.ts", "src/**/*.ts"]
+  "include": ["ormah-pi.ts", "src/**/*.ts", "tests/**/*.ts"]
 }

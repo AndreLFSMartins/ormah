@@ -7,11 +7,16 @@
  * configuration in one place and lets whisper + tools share one client.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { OrmahClient, MaintenanceResults } from "./client.js";
 import { truncateHead, formatSize } from "@earendil-works/pi-coding-agent";
+import { getSessionId } from "./session-id.js";
+import { resolveSpace } from "./space.js";
 
 const NODE_TYPES = [
 	"fact",
@@ -38,10 +43,6 @@ const EDGE_TYPES = [
 
 export interface ToolCtx {
 	client: OrmahClient;
-	/** Active session id, for feedback logging / dedup. */
-	getSessionId: () => string;
-	/** Resolved default space for the current cwd. */
-	getDefaultSpace: () => string | null;
 }
 
 function textResult(text: string) {
@@ -59,7 +60,8 @@ function safeText(raw: string): string {
 }
 
 export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
-	const { client, getSessionId, getDefaultSpace } = tctx;
+	const { client } = tctx;
+	const maintenanceJobs = new Map<string, string>();
 
 	// ── remember ──────────────────────────────────────────────────────────────
 	pi.registerTool({
@@ -97,7 +99,7 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 				}),
 			),
 			space: Type.Optional(
-				Type.String({
+				Type.Union([Type.String(), Type.Null()], {
 					description:
 						"Project/space this memory belongs to. Omit to auto-detect; set to null for personal/global memories.",
 				}),
@@ -124,9 +126,12 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 				}),
 			),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, _signal, _onUpdate, ctx) {
 			try {
-				const resp = await client.remember(params, getDefaultSpace());
+				const resp = await client.remember(
+					params,
+					resolveSpace(undefined, ctx.cwd),
+				);
 				return textResult(resp.text);
 			} catch (e) {
 				throw new Error(`ormah_remember failed: ${(e as Error).message}`);
@@ -166,11 +171,11 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 				}),
 			),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, _signal, _onUpdate, ctx) {
 			try {
 				const resp = await client.recall(
-					{ ...params, session_id: getSessionId() },
-					getDefaultSpace(),
+					{ ...params, session_id: getSessionId(ctx) },
+					resolveSpace(undefined, ctx.cwd),
 				);
 				return textResult(safeText(resp.text));
 			} catch (e) {
@@ -191,9 +196,12 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 				description: "The UUID of the memory to retrieve.",
 			}),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, _signal, _onUpdate, ctx) {
 			try {
-				const resp = await client.recallNode(params.node_id, getSessionId());
+				const resp = await client.recallNode(
+					params.node_id,
+					getSessionId(ctx),
+				);
 				return textResult(safeText(resp.text));
 			} catch (e) {
 				throw new Error(`ormah_recall_node failed: ${(e as Error).message}`);
@@ -311,12 +319,23 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 				}),
 			),
 		}),
-		async execute(_id, params, signal) {
+		async execute(_id, params, signal, _onUpdate, ctx: ExtensionContext) {
 			try {
+				const sessionId = getSessionId(ctx);
 				const resp = await client.runMaintenance(
-					{ results: params.results as MaintenanceResults | undefined },
+					{
+						jobId: params.results
+							? maintenanceJobs.get(sessionId)
+							: undefined,
+						results: params.results as MaintenanceResults | undefined,
+					},
 					signal,
 				);
+				if (!params.results && typeof resp.job_id === "string") {
+					maintenanceJobs.set(sessionId, resp.job_id);
+				} else if (params.results && resp.status === "completed") {
+					maintenanceJobs.delete(sessionId);
+				}
 				return textResult(safeText(JSON.stringify(resp, null, 2)));
 			} catch (e) {
 				throw new Error(

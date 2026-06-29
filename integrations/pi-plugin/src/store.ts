@@ -10,12 +10,13 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { OrmahClient } from "./client.js";
+import { getSessionId } from "./session-id.js";
 import { resolveSpace } from "./space.js";
 import { normalizeSession } from "./session.js";
 
 export class StoreManager {
-	/** Prevents double-ingest when both compact and shutdown fire in one run. */
-	private storedForSession: string | null = null;
+	/** Last successfully stored transcript state per session. */
+	private readonly storedTurns = new Map<string, string[]>();
 
 	constructor(
 		private readonly client: OrmahClient,
@@ -26,12 +27,19 @@ export class StoreManager {
 		ctx: ExtensionContext,
 		reason: "compact" | "shutdown",
 	): Promise<void> {
-		const sessionFile =
-			ctx.sessionManager.getSessionFile() ?? `pi-${Date.now()}`;
-		if (this.storedForSession === sessionFile) return;
+		const sessionFile = getSessionId(ctx);
 
-		const { conversation, userTurnCount } = normalizeSession(ctx);
-		if (userTurnCount < this.minTurns) return;
+		const { turns, userTurnCount } = normalizeSession(ctx);
+		const previouslyStored = this.storedTurns.get(sessionFile);
+		if (!previouslyStored && userTurnCount < this.minTurns) return;
+
+		const extendsStoredTranscript =
+			previouslyStored !== undefined &&
+			previouslyStored.every((turn, index) => turns[index] === turn);
+		const pendingTurns = extendsStoredTranscript
+			? turns.slice(previouslyStored.length)
+			: turns;
+		const conversation = pendingTurns.join("\n\n");
 		if (!conversation.trim()) return;
 
 		const space = resolveSpace(undefined, ctx.cwd);
@@ -42,7 +50,9 @@ export class StoreManager {
 				space,
 				extra_tags: ["pi-session"],
 			});
-			if (result.status !== "error") this.storedForSession = sessionFile;
+			if (result.status !== "error") {
+				this.storedTurns.set(sessionFile, [...turns]);
+			}
 			ctx.ui.notify?.(
 				`Ormah: stored ${result.extracted ?? 0} memor${(result.extracted ?? 0) === 1 ? "y" : "ies"} from session (${reason})`,
 				"info",

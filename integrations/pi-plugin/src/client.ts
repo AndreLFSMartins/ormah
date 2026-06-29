@@ -82,9 +82,12 @@ export class OrmahClient {
 			timeoutMs ?? this.cfg.toolTimeoutMs,
 		);
 		try {
+			const signal = rest.signal
+				? AbortSignal.any([controller.signal, rest.signal])
+				: controller.signal;
 			const resp = await fetch(`${this.cfg.baseUrl}${path}`, {
 				...rest,
-				signal: rest.signal ?? controller.signal,
+				signal,
 				headers: {
 					"Content-Type": "application/json",
 					...(rest.headers ?? {}),
@@ -141,7 +144,7 @@ export class OrmahClient {
 		if (body.confidence !== undefined) payload.confidence = body.confidence;
 		if (body.links?.length)
 			payload.connections = body.links.map((id) => ({ target: id }));
-		const params = defaultSpace
+		const params = body.space === undefined && defaultSpace
 			? `?default_space=${encodeURIComponent(defaultSpace)}`
 			: "";
 		return this.req(`/agent/remember${params}`, {

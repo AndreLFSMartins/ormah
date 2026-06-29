@@ -8,52 +8,12 @@
  *   /ormah:reload      Reload Pi extensions/skills/prompts/themes
  */
 
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { homedir } from "node:os";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import type { OrmahClient } from "./client.js";
 import { loadMaintenancePrompt } from "./maintenance.js";
-
-const PI_AGENTS_MD = join(homedir(), ".pi", "agent", "AGENTS.md");
-const SENTINEL_START = "<!-- ormah:start -->";
-const SENTINEL_END = "<!-- ormah:end -->";
-
-const GUIDANCE = `# Ormah — persistent memory
-
-You have durable, local memory via Ormah. Memory should be involuntary: you do not need to remember to remember.
-
-- **recall**: before answering, relevant memories may already have been whispered to you. Use ormah_recall to search when you need prior context, decisions, or preferences.
-- **remember**: use ormah_remember to store decisions, preferences, facts, corrections, and noteworthy observations. Write self-contained content + a one-line title.
-- **outdated**: use ormah_mark_outdated when you learn a stored memory no longer holds.
-- **feedback**: use ormah_submit_feedback (implicit) to tune which memories whisper surfaces.
-- **maintenance**: when a whisper includes a \`maintenance_due\` signal, run the two-step ormah_run_maintenance flow (or /ormah:maintenance). Submit ALL evaluated pairs in \`edges\`, using \`none\` for non-relationships, so they don't reappear.
-- Silence beats noise: do not call tools just to call them.`;
-
-async function upsertGuidance(): Promise<void> {
-	let existing = "";
-	try {
-		existing = await readFile(PI_AGENTS_MD, "utf8");
-	} catch {
-		existing = "";
-	}
-	const block = `${SENTINEL_START}\n${GUIDANCE}\n${SENTINEL_END}`;
-	if (existing.includes(SENTINEL_START)) {
-		const next = existing.replace(
-			new RegExp(`${SENTINEL_START}[\\s\\S]*?${SENTINEL_END}`, "m"),
-			block,
-		);
-		await writeFile(PI_AGENTS_MD, next, "utf8");
-		return;
-	}
-	await mkdir(dirname(PI_AGENTS_MD), { recursive: true });
-	const sep =
-		existing && !existing.endsWith("\n") ? "\n\n" : existing ? "\n" : "";
-	await writeFile(PI_AGENTS_MD, existing + sep + block + "\n", "utf8");
-}
 
 export function registerCommands(pi: ExtensionAPI, client: OrmahClient): void {
 	pi.registerCommand("ormah:setup", {
@@ -69,7 +29,19 @@ export function registerCommands(pi: ExtensionAPI, client: OrmahClient): void {
 			const result = await pi.exec("ormah", ["setup", "--skip-client-setup"], {
 				timeout: 300_000,
 			});
-			await upsertGuidance();
+			if (result.code !== 0) {
+				ctx.ui.setStatus("ormah", undefined);
+				const detail = (result.stderr || result.stdout || "unknown error")
+					.trim()
+					.slice(-240);
+				ctx.ui.notify(`Ormah setup failed: ${detail}`, "warning");
+				return;
+			}
+			const guidance = await pi.exec(
+				"ormah",
+				["pi-md", "install", "--scope", "user"],
+				{ timeout: 30_000 },
+			);
 			ctx.ui.setStatus("ormah", undefined);
 			const tail = (result.stdout || result.stderr || "")
 				.split("\n")
@@ -77,13 +49,20 @@ export function registerCommands(pi: ExtensionAPI, client: OrmahClient): void {
 				.slice(-3)
 				.join(" | ");
 			ctx.ui.notify(
-				`Ormah setup done (rc=${result.code}). ${tail}`,
-				result.code === 0 ? "info" : "warning",
-			);
-			ctx.ui.notify(
-				"Guidance block written to ~/.pi/agent/AGENTS.md. Run /reload to activate.",
+				`Ormah setup done. ${tail}`,
 				"info",
 			);
+			if (guidance.code === 0) {
+				ctx.ui.notify(
+					"Guidance installed in ~/.pi/agent/AGENTS.md. Run /reload to activate.",
+					"info",
+				);
+			} else {
+				ctx.ui.notify(
+					`Ormah setup succeeded, but guidance installation failed: ${(guidance.stderr || guidance.stdout || "unknown error").trim().slice(-160)}`,
+					"warning",
+				);
+			}
 		},
 	});
 
@@ -133,12 +112,20 @@ export function registerCommands(pi: ExtensionAPI, client: OrmahClient): void {
 			const up = await pi.exec("uv", ["tool", "upgrade", "ormah"], {
 				timeout: 300_000,
 			});
+			if (up.code !== 0) {
+				ctx.ui.setStatus("ormah", undefined);
+				ctx.ui.notify(
+					`Ormah upgrade failed: ${(up.stderr || up.stdout || "unknown error").trim().slice(-200)}`,
+					"warning",
+				);
+				return;
+			}
 			await pi.exec("ormah", ["server", "stop"], { timeout: 15_000 });
 			await pi.exec("ormah", ["server", "start", "-d"], { timeout: 30_000 });
 			ctx.ui.setStatus("ormah", undefined);
 			ctx.ui.notify(
-				`Ormah upgrade done (rc=${up.code}).`,
-				up.code === 0 ? "info" : "warning",
+				"Ormah upgrade done.",
+				"info",
 			);
 		},
 	});

@@ -7,15 +7,54 @@
  * consumes are modeled here — everything else lives server-side.
  */
 
-function envInt(name: string, fallback: number): number {
-	const raw = process.env[name];
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+type Environment = Record<string, string | undefined>;
+
+function readEnvFile(path: string): Environment {
+	let content: string;
+	try {
+		content = readFileSync(path, "utf8");
+	} catch {
+		return {};
+	}
+
+	const values: Environment = {};
+	for (const line of content.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		const assignment = trimmed.startsWith("export ")
+			? trimmed.slice("export ".length)
+			: trimmed;
+		const separator = assignment.indexOf("=");
+		if (separator <= 0) continue;
+		const key = assignment.slice(0, separator).trim();
+		let value = assignment.slice(separator + 1).trim();
+		if (
+			value.length >= 2 &&
+			((value.startsWith('"') && value.endsWith('"')) ||
+				(value.startsWith("'") && value.endsWith("'")))
+		) {
+			value = value.slice(1, -1);
+		} else {
+			value = value.replace(/\s+#.*$/, "").trimEnd();
+		}
+		values[key] = value;
+	}
+	return values;
+}
+
+function envInt(env: Environment, name: string, fallback: number): number {
+	const raw = env[name];
 	if (!raw) return fallback;
 	const n = Number(raw);
 	return Number.isFinite(n) ? n : fallback;
 }
 
-function envStr(name: string, fallback: string): string {
-	const raw = process.env[name];
+function envStr(env: Environment, name: string, fallback: string): string {
+	const raw = env[name];
 	return raw && raw.length ? raw : fallback;
 }
 
@@ -34,34 +73,31 @@ export interface OrmahConfig {
 	whisperNudgeInterval: number;
 	/** Minimum user turns before a session is worth storing. Mirrors ORMAH_WHISPER_OUT_MIN_TURNS. */
 	whisperOutMinTurns: number;
-	/** Enable agent-driven auto-maintenance (mirrors ORMAH_CLAUDE_MAINTENANCE_ENABLED for Pi). */
-	maintenanceEnabled: boolean;
-	/** Max once per N hours the whisper inject appends a maintenance_due signal. */
-	maintenanceSignalIntervalHours: number;
 }
 
-export function loadConfig(): OrmahConfig {
-	const host = envStr("ORMAH_HOST", "127.0.0.1");
-	const port = envInt("ORMAH_PORT", 8787);
+export function loadConfig(
+	processEnv: Environment = process.env,
+	envPath = join(homedir(), ".config", "ormah", ".env"),
+): OrmahConfig {
+	const env = readEnvFile(envPath);
+	for (const [key, value] of Object.entries(processEnv)) {
+		if (value !== undefined) env[key] = value;
+	}
+	const host = envStr(env, "ORMAH_HOST", "127.0.0.1");
+	const port = envInt(env, "ORMAH_PORT", 8787);
 	// ORMAH_BASE_URL wins if explicitly set.
-	const baseUrl = envStr("ORMAH_BASE_URL", `http://${host}:${port}`);
-	const piMaintenance = process.env.ORMAH_PI_MAINTENANCE_ENABLED;
-	const claudeMaintenance = process.env.ORMAH_CLAUDE_MAINTENANCE_ENABLED;
+	const baseUrl = envStr(env, "ORMAH_BASE_URL", `http://${host}:${port}`);
 	return {
 		baseUrl,
-		whisperTimeoutMs: envInt("ORMAH_PI_WHISPER_TIMEOUT_MS", 12_000),
-		toolTimeoutMs: envInt("ORMAH_PI_TOOL_TIMEOUT_MS", 30_000),
-		maintenanceTimeoutMs: envInt("ORMAH_PI_MAINTENANCE_TIMEOUT_MS", 300_000),
-		storeTimeoutMs: envInt("ORMAH_PI_STORE_TIMEOUT_MS", 120_000),
-		whisperNudgeInterval: envInt("ORMAH_WHISPER_NUDGE_INTERVAL", 10),
-		whisperOutMinTurns: envInt("ORMAH_WHISPER_OUT_MIN_TURNS", 3),
-		maintenanceEnabled:
-			piMaintenance !== undefined
-				? piMaintenance === "true"
-				: claudeMaintenance === "true",
-		maintenanceSignalIntervalHours: envInt(
-			"ORMAH_MAINTENANCE_SIGNAL_INTERVAL_HOURS",
-			24,
+		whisperTimeoutMs: envInt(env, "ORMAH_PI_WHISPER_TIMEOUT_MS", 12_000),
+		toolTimeoutMs: envInt(env, "ORMAH_PI_TOOL_TIMEOUT_MS", 30_000),
+		maintenanceTimeoutMs: envInt(
+			env,
+			"ORMAH_PI_MAINTENANCE_TIMEOUT_MS",
+			300_000,
 		),
+		storeTimeoutMs: envInt(env, "ORMAH_PI_STORE_TIMEOUT_MS", 120_000),
+		whisperNudgeInterval: envInt(env, "ORMAH_WHISPER_NUDGE_INTERVAL", 10),
+		whisperOutMinTurns: envInt(env, "ORMAH_WHISPER_OUT_MIN_TURNS", 3),
 	};
 }

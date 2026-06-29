@@ -11,11 +11,11 @@ bash <(curl -fsSL https://ormah.me/install.sh)          # installs ormah + runs 
 # ormah setup --skip-client-setup
 ```
 
-`ormah setup` detects Pi on your PATH and wires it automatically (writes the Ormah guidance block into `~/.pi/agent/AGENTS.md` and installs the `ormah-maintenance` subagent into `~/.pi/agent/agents/`). If you used `--skip-client-setup`, run step 2's `/ormah:setup` inside Pi instead.
+`ormah setup` detects Pi on your PATH and wires it automatically: it installs `npm:ormah-pi`, writes the Ormah guidance block into `~/.pi/agent/AGENTS.md`, and installs the `ormah-maintenance` prompt into `~/.pi/agent/agents/`. If you used `--skip-client-setup`, install the extension manually and run step 3's `/ormah:setup` inside Pi instead.
 
 Verify: `ormah server status` → running; graph UI at `http://localhost:8787`.
 
-## 2. Install the Pi extension
+## 2. Install the Pi extension manually (only if setup skipped client wiring)
 
 **From the package gallery (pi.dev/packages):**
 
@@ -54,7 +54,7 @@ Then `/reload` in Pi (or restart). Confirm with `/ormah:status` — it should re
 /ormah:setup
 ```
 
-Runs `ormah setup --skip-client-setup` (server + models + autostart) and writes the Ormah guidance block into `~/.pi/agent/AGENTS.md`. Then `/reload`. (If step 1's `ormah setup` already wired Pi, skip this.)
+Runs `ormah setup --skip-client-setup` (server + models + autostart), then asks `ormah pi-md install --scope user` to write the canonical guidance block into `~/.pi/agent/AGENTS.md`. Then `/reload`. (If step 1's `ormah setup` already wired Pi, skip this.)
 
 ## 4. (Optional) Enable an LLM provider
 
@@ -73,10 +73,10 @@ Then `ormah server stop && ormah server start -d`.
 ## 5. (Optional) Enable agent-driven maintenance
 
 ```bash
-ORMAH_PI_MAINTENANCE_ENABLED=true      # in ~/.config/ormah/.env, then restart the server
+ORMAH_CLAUDE_MAINTENANCE_ENABLED=true  # shared server setting for supported agents
 ```
 
-Whisper appends a `maintenance_due` signal at most once per 24h; run `/ormah:maintenance` (or let the agent run it when signaled) to perform the two-step `ormah_run_maintenance` flow.
+The Ormah server appends `maintenance_due` when maintenance is due; the Pi extension relays that whisper without maintaining a second schedule. Run `/ormah:maintenance` (or let the agent run the tool when signaled) to perform the two-step `ormah_run_maintenance` flow. `ormah setup` can enable this setting interactively.
 
 ## Commands once installed
 
