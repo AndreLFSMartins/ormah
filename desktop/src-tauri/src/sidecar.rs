@@ -93,7 +93,7 @@ pub fn start_daemon() {
         eprintln!("ormah binary not found — cannot start server");
         return;
     };
-    match std::process::Command::new(&bin)
+    match clean_python_env(std::process::Command::new(&bin))
         .args(["server", "start", "-d"])
         .status()
     {
@@ -105,7 +105,7 @@ pub fn start_daemon() {
 /// Stop the ormah daemon. No-op if not running.
 pub fn stop_daemon() {
     let Some(bin) = find_ormah() else { return };
-    let _ = std::process::Command::new(&bin)
+    let _ = clean_python_env(std::process::Command::new(&bin))
         .args(["server", "stop"])
         .status();
 }
@@ -124,10 +124,24 @@ pub async fn is_running() -> bool {
 
 fn needs_upgrade() -> bool {
     let Some(bin) = find_ormah() else { return false };
-    let Ok(out) = std::process::Command::new(bin).arg("--version").output() else {
+    let Ok(out) = clean_python_env(std::process::Command::new(bin))
+        .arg("--version")
+        .output()
+    else {
         return false;
     };
     !String::from_utf8_lossy(&out.stdout).contains(ORMAH_VERSION)
+}
+
+/// Remove Python env vars that AppImage sets and that corrupt child Python runtimes.
+/// AppImage mounts itself and sets PYTHONHOME/PYTHONPATH to paths inside the
+/// mount — any subprocess that spawns Python inherits them and fails to find
+/// the stdlib with "No module named 'encodings'".
+fn clean_python_env(mut cmd: std::process::Command) -> std::process::Command {
+    for var in &["PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONEXECUTABLE"] {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 async fn install_via_uv<R: Runtime>(app: &AppHandle<R>) -> bool {
