@@ -17,9 +17,11 @@ import { focusFitIds } from "./legendFit";
 import { fitToNodes } from "./fit";
 import { GRAPH_THEME_TOKENS } from "../graph/visual";
 import { type GraphAppearance, type GraphTheme } from "../graphAppearance";
-import type { Edge, MemoryNode } from "../types";
-import { ALL_TIERS, ALL_NODE_TYPES, ALL_EDGE_TYPES } from "../types";
+import type { Edge, MemoryNode, ViewScope } from "../types";
 import type { Filters } from "../App";
+import { buildSpaceLegend } from "../graph/spaceLegend";
+import { scopeLabel } from "../graph/scopeLabel";
+import { buildDimmed } from "../graph/dimming";
 
 // ─── Zoom slider helpers (unchanged from cytoscape era) ───────────────────────
 const ZOOM_MIN = 0.03;
@@ -140,6 +142,23 @@ const ZOOM_RANGE_STYLE: CSSProperties = {
   cursor: "pointer",
 };
 
+const BANNER_STYLE: CSSProperties = {
+  position: "absolute", top: 12, left: 12, zIndex: 15,
+  display: "flex", alignItems: "center", gap: 8,
+  padding: "4px 10px", borderRadius: 6, fontSize: 12,
+  background: "rgba(12,14,18,0.7)", color: "#cdd6e0",
+  border: "1px solid rgba(255,255,255,0.12)",
+};
+const BANNER_BTN_STYLE: CSSProperties = {
+  cursor: "pointer", border: "none", borderRadius: 4,
+  padding: "2px 8px", fontSize: 11,
+  background: "rgba(255,255,255,0.12)", color: "inherit",
+};
+const DRILL_BTN_STYLE: CSSProperties = {
+  cursor: "pointer", border: "none", background: "transparent",
+  color: "inherit", opacity: 0.6, padding: "0 4px", fontSize: 13,
+};
+
 // ─── LegendRow component ─────────────────────────────────────────────────────
 // One clickable legend row: swatch + content as children, dimmed when another
 // row is active (focus system A1). Forwards data-testid to the root element.
@@ -180,6 +199,11 @@ interface Props {
   appearance: GraphAppearance;
   /** Council C2: App.tsx filter state. Drives dimmed.* in the reducer (HIDE); does NOT remount. */
   filters: Filters;
+  viewScope: ViewScope;
+  allSpaces: string[];
+  hasNoSpace: boolean;
+  onDrillSpace: (space: string) => void;
+  onExitDrill: () => void;
 }
 
 // ─── GraphView ────────────────────────────────────────────────────────────────
@@ -193,7 +217,7 @@ const GraphView = forwardRef<
   Props
 >(
   (
-    { nodes, edges, onNodeSelect, focusNodeId, userNodeId, clusterBySpace, appearance, filters },
+    { nodes, edges, onNodeSelect, focusNodeId, userNodeId, clusterBySpace, appearance, filters, viewScope, allSpaces, hasNoSpace, onDrillSpace, onExitDrill },
     ref,
   ) => {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -258,16 +282,10 @@ const GraphView = forwardRef<
       return rows;
     }, [appearance.theme, visibleLegendTargets]);
 
-    const spaceLegend = useMemo(() => {
-      const spaceCounts = new Map<string, number>();
-      for (const n of nodes) {
-        const k = n.space || "";
-        spaceCounts.set(k, (spaceCounts.get(k) ?? 0) + 1);
-      }
-      return Array.from(spaceCounts.entries())
-        .sort((a, b) => b[1] - a[1])
-        .map(([name, count]) => ({ name: name || "(no space)", count }));
-    }, [nodes]);
+    const spaceLegend = useMemo(
+      () => buildSpaceLegend(nodes, allSpaces, hasNoSpace),
+      [nodes, allSpaces, hasNoSpace],
+    );
 
     const tierLegend = useMemo(() => {
       const counts: Record<string, number> = { core: 0, working: 0, archival: 0 };
@@ -322,7 +340,7 @@ const GraphView = forwardRef<
       viewStateRef.current.edgeTypeById = edgeTypeById;
 
       // Seed dimmed from current filters (so initial render is consistent)
-      viewStateRef.current.dimmed = buildDimmed(filters, graph);
+      viewStateRef.current.dimmed = buildDimmed(filters, nodes, viewScope);
       viewStateRef.current.dimColor = appearance.theme === "dark" ? "#2a2a2a" : "#cfd6de";
       viewStateRef.current.focusKind = null;
       viewStateRef.current.hoveredNode = null;
@@ -472,11 +490,11 @@ const GraphView = forwardRef<
     // The reducer then dims/hides anything matching a dim set. A filter toggle costs
     // one refresh(), not a graph rebuild.
     useEffect(() => {
-      const r = sigmaRef.current, g = graphRef.current;
-      if (!r || !g) return;
-      viewStateRef.current.dimmed = buildDimmed(filters, g);
+      const r = sigmaRef.current;
+      if (!r) return;
+      viewStateRef.current.dimmed = buildDimmed(filters, nodes, viewScope);
       r.refresh();
-    }, [filters]);
+    }, [filters, nodes, viewScope]);
 
     // ─── Legend FOCUS handler (Council A1) ────────────────────────────────────
     // Two distinct dimming systems (do NOT conflate):
@@ -583,6 +601,19 @@ const GraphView = forwardRef<
             transition: "opacity 0.4s ease-in",
           }}
         />
+        {(() => {
+          const label = scopeLabel(viewScope);
+          return (
+            <div style={BANNER_STYLE} data-testid="graph-scope-banner">
+              <span>{label.text}</span>
+              {label.showBack && (
+                <button type="button" data-testid="exit-drill" onClick={onExitDrill} style={BANNER_BTN_STYLE}>
+                  ← voltar ao active graph
+                </button>
+              )}
+            </div>
+          );
+        })()}
         {/* Node hover tooltip */}
         <div
           ref={tooltipRef}
@@ -723,22 +754,26 @@ const GraphView = forwardRef<
                       SPACES
                     </div>
                     <div style={SPACE_LEGEND_LIST_STYLE}>
-                      {spaceLegend.map((sp) => {
-                        const val = sp.name === "(no space)" ? "" : sp.name;
-                        return (
-                          <LegendRow
-                            key={sp.name}
-                            data-testid={`legend-space-${sp.name}`}
-                            active={!legendFocus || (legendFocus.kind === "space" && legendFocus.val === val)}
-                            onClick={() => focusLegend("space", val)}
-                          >
-                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
-                              {sp.name}
-                            </span>
-                            <span style={{ opacity: 0.4 }}>{sp.count}</span>
-                          </LegendRow>
-                        );
-                      })}
+                      {spaceLegend.map((sp) => (
+                        <LegendRow
+                          key={sp.name}
+                          data-testid={`legend-space-${sp.name}`}
+                          active={!legendFocus || (legendFocus.kind === "space" && legendFocus.val === sp.val)}
+                          onClick={() => focusLegend("space", sp.val)}
+                        >
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                            {sp.name}
+                          </span>
+                          <span style={{ opacity: 0.4 }}>{sp.count}</span>
+                          <button
+                            type="button"
+                            data-testid={`drill-space-${sp.name}`}
+                            title="Entrar no espaço (carrega archival)"
+                            onClick={(e) => { e.stopPropagation(); onDrillSpace(sp.val); }}
+                            style={DRILL_BTN_STYLE}
+                          >↳</button>
+                        </LegendRow>
+                      ))}
                     </div>
                   </>
                 )}
@@ -754,49 +789,3 @@ const GraphView = forwardRef<
 GraphView.displayName = "GraphView";
 export default GraphView;
 
-// ─── buildDimmed helper ───────────────────────────────────────────────────────
-// Council C2: converts App.tsx Filters into the ViewState dimmed sets.
-// Filters contain sets of ACTIVE (visible) items; dimmed = the complement.
-//
-// Mapping:
-//   filters.tiers     → dimmed.tier  = tiers NOT in filters.tiers
-//   filters.spaces    → dimmed.space = spaces NOT in filters.spaces
-//                       (empty filters.spaces = all spaces shown = no dim)
-//   filters.edgeTypes → dimmed.edge  = edge types NOT in filters.edgeTypes
-//   filters.types     → dimmed.type  = node types NOT in filters.types
-//                       (parity: the FilterDrawer node-type control must still
-//                       hide nodes; the reducer dims by node `type` attribute).
-function buildDimmed(
-  filters: Filters,
-  graph: Graph,
-): ViewState["dimmed"] {
-  // tiers: dim tiers not in the active set
-  // Derive the dim sets from the canonical enum lists in types.ts (NOT inline
-  // literals) so a new NodeType/EdgeType can't silently escape type/edge dimming.
-  const dimmedTier = new Set(ALL_TIERS.filter((t) => !filters.tiers.has(t)));
-
-  // spaces: dim spaces not in the active set (if the active set is non-empty)
-  const dimmedSpace = new Set<string>();
-  if (filters.spaces.size > 0) {
-    graph.forEachNode((_id, attr) => {
-      const space = (attr.space as string) ?? "";
-      if (!filters.spaces.has(space)) {
-        dimmedSpace.add(space);
-      }
-    });
-  }
-
-  // node types: dim types not in the active set (complement, mirrors tiers).
-  const dimmedType = new Set<string>(ALL_NODE_TYPES.filter((t) => !filters.types.has(t)));
-
-  // edgeTypes: dim edge types not in the active set
-  const dimmedEdge = new Set<string>(ALL_EDGE_TYPES.filter((et) => !filters.edgeTypes.has(et)));
-
-  return {
-    space: dimmedSpace,
-    tier: dimmedTier,
-    role: new Set(), // role (selfRole) has no filter dimension in App.tsx Filters
-    type: dimmedType,
-    edge: dimmedEdge,
-  };
-}

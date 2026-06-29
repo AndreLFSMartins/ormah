@@ -65,7 +65,11 @@ export interface GraphData {
   nodes: MemoryNode[];
   edges: Edge[];
   user_node_id: string | null;
+  all_spaces?: string[];
+  has_no_space?: boolean; // F1: a no-space group exists over ALL nodes (incl. archival)
 }
+
+export type ViewScope = { kind: "active" } | { kind: "space"; space: string };
 
 export interface NodeDetail {
   node: MemoryNode;
