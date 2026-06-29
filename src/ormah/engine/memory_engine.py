@@ -479,6 +479,7 @@ class MemoryEngine:
             tier=req.tier,
             source=req.source or f"agent:{agent_id or 'unknown'}",
             space=req.space,
+            space_locked=req.space_locked,
             tags=req.tags,
             connections=req.connections,
             title=title,
@@ -492,6 +493,8 @@ class MemoryEngine:
                 node.tags.append("about_self")
             if node.type == NodeType.person:
                 node.tier = Tier.core
+            # Identity is always global — lock its space so auto_cluster never reassigns it.
+            node.space_locked = True
 
         # Enforce core cap
         if node.tier == Tier.core:
@@ -951,6 +954,8 @@ class MemoryEngine:
         if req.space is not None:
             # Plain assignment bypasses the MemoryNode field validator, so normalize here.
             node.space = normalize_space(req.space)
+        if req.space_locked is not None:
+            node.space_locked = req.space_locked
         if req.tags is not None:
             node.tags = req.tags
         if req.title is not None:
