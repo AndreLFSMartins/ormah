@@ -8,16 +8,63 @@ router = APIRouter(prefix="/ui", tags=["ui"])
 
 
 @router.get("/graph")
-def get_graph(request: Request):
-    """Get full graph data for visualization."""
+def get_graph(request: Request, space: str | None = None):
+    """Graph data for the explorer.
+
+    Default (no ``space``): the *active graph* — non-archival nodes plus the
+    self/user node — so the overview never loads the whole archival history.
+    ``?space=<S>``: the full set for one space (active + archival) for
+    drill-down. ``?space=`` (empty) selects the no-space group.
+    """
     engine = request.app.state.engine
-    nodes = engine.db.conn.execute("SELECT * FROM nodes").fetchall()
-    edges = engine.graph.get_all_edges()
+    conn = engine.db.conn
+    user_node_id = getattr(engine, "user_node_id", None)
+
+    if space is None:
+        rows = conn.execute(
+            "SELECT * FROM nodes WHERE tier != 'archival' OR id = ?",
+            (user_node_id,),
+        ).fetchall()
+    elif space == "":
+        rows = conn.execute(
+            "SELECT * FROM nodes WHERE space IS NULL OR space = ''"
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM nodes WHERE space = ?", (space,)).fetchall()
+
+    nodes = [dict(r) for r in rows]
+    node_ids = {n["id"] for n in nodes}
+    # ponytail: load-all-edges then filter in Python. At ~14k edges this is µs and
+    # the issue states the backend is not the bottleneck. Upgrade path if edge
+    # volume grows: constrain in SQL via a temp table of node_ids (a 1.6k-id IN
+    # list would blow SQLite's ~999 bind-param limit).
+    edges = [
+        e
+        for e in engine.graph.get_all_edges()
+        if e["source_id"] in node_ids and e["target_id"] in node_ids
+    ]
+    all_spaces = [
+        r["space"]
+        for r in conn.execute(
+            "SELECT DISTINCT space FROM nodes "
+            "WHERE space IS NOT NULL AND space != '' ORDER BY space"
+        ).fetchall()
+    ]
+    # Signal the no-space group's existence over ALL nodes so the
+    # "(no space)" chip stays drillable even when no active no-space node loaded.
+    has_no_space = (
+        conn.execute(
+            "SELECT 1 FROM nodes WHERE space IS NULL OR space = '' LIMIT 1"
+        ).fetchone()
+        is not None
+    )
 
     return {
-        "nodes": [dict(n) for n in nodes],
+        "nodes": nodes,
         "edges": edges,
-        "user_node_id": getattr(engine, "user_node_id", None),
+        "user_node_id": user_node_id,
+        "all_spaces": all_spaces,
+        "has_no_space": has_no_space,
     }
 
 
