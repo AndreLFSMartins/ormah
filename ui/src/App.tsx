@@ -107,6 +107,10 @@ export default function App() {
           const spaceList = data.all_spaces ?? [];
           setAllSpaces(spaceList);
           // C1: include "" so no-space nodes are not space-dimmed in the overview.
+          // NOTE: this "" injection is the ONLY thing keeping no-space nodes
+          // un-dimmed on the canvas (buildDimmed keys on n.space || ""). The
+          // TopBar count badge uses a separate `!n.space`-always-visible rule
+          // (filteredNodes), so don't drop this line thinking the badge covers it.
           setFilters((f) => ({ ...f, spaces: new Set([...spaceList, ""]) }));
         }
       })
