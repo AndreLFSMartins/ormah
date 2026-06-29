@@ -62,6 +62,19 @@ def _cmd_server_start(args):
     else:
         import uvicorn
         from ormah.config import settings
+        from ormah.console import info
+        from ormah.server_manager import is_port_in_use
+
+        # Pre-flight: if the port is already taken (typically by an existing
+        # ormah server), exit cleanly instead of letting uvicorn crash on bind.
+        # Under launchd/systemd KeepAlive this prevents a respawn loop that would
+        # re-run expensive startup work on every restart.
+        if is_port_in_use(settings.host, settings.port):
+            info(
+                f"A process is already listening on {settings.host}:{settings.port}; "
+                "assuming an ormah server is already running. Exiting."
+            )
+            return
 
         uvicorn.run(
             "ormah.main:app",
@@ -93,6 +106,15 @@ def _cmd_server_status(args):
 
 
 def _cmd_setup(args):
+    if getattr(args, "json", False):
+        from ormah.setup import run_setup_json
+
+        result = run_setup_json()
+        print(json.dumps(result, indent=2))
+        if result["errors"]:
+            sys.exit(1)
+        return
+
     from ormah.setup import run_setup
 
     run_setup(
@@ -333,6 +355,11 @@ def main():
         "--skip-client-setup",
         action="store_true",
         help="Skip Claude/Codex/Desktop integration wiring; useful when a plugin manages the client side",
+    )
+    setup_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Non-interactive agent wiring; print a JSON result (used by the Mac app one-click setup)",
     )
     setup_p.set_defaults(func=_cmd_setup)
 

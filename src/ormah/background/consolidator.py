@@ -198,7 +198,7 @@ def run_consolidation(engine) -> None:
 
 def _consolidate_cluster(engine, cluster: list[dict]) -> None:
     """Consolidate a single cluster using LLM summarization."""
-    from ormah.background.llm_client import llm_generate
+    from ormah.background.llm_client import extract_json, llm_generate
 
     # Build prompt
     items = []
@@ -243,7 +243,7 @@ Return a JSON object:
     if raw is None:
         return
 
-    result = json.loads(raw)
+    result = json.loads(extract_json(raw))
     title = result.get("title", "Consolidated memory")
     summary = result.get("summary", "")
     node_type = result.get("type", "fact")

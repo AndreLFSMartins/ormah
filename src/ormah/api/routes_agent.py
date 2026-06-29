@@ -204,6 +204,62 @@ def mark_outdated(node_id: str, request: Request, body: MarkOutdatedBody | None 
     return TextResponse(text=text, node_id=node_id)
 
 
+@router.get("/clients")
+def get_clients():
+    """List all supported agents with detection and wired status.
+
+    Returns a list of {id, name, detected, wired, platform, available_on_current_os}.
+    Pure filesystem checks — no wiring, no side effects.
+    """
+    from ormah.setup import list_agents
+
+    return list_agents()
+
+
+@router.post("/setup")
+def run_setup():
+    """Wire ormah hooks/MCP for every detected agent on this machine.
+
+    Runs non-interactively and returns {wired, errors} so the UI can
+    show which agents were connected and surface any failures.
+    """
+    from ormah.setup import run_setup_json
+
+    return run_setup_json()
+
+
+@router.post("/setup/{agent_id}")
+def wire_one(agent_id: str):
+    """Wire ormah into a single agent by id."""
+    from ormah.setup import wire_agent
+
+    try:
+        return wire_agent(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.delete("/setup/{agent_id}")
+def unwire_one(agent_id: str):
+    """Remove ormah hooks/MCP/instructions for a single agent."""
+    from ormah.setup import unwire_agent
+
+    try:
+        return unwire_agent(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/stats")
+def get_stats(
+    request: Request,
+    days: int = Query(7, ge=1, le=365, description="Rolling window in days for the *_this_week counts"),
+):
+    """Ambient usage counts for the menubar/CLI surface (F09 counter)."""
+    engine = request.app.state.engine
+    return engine.get_stats(days=days)
+
+
 @router.get("/insights")
 def get_insights(request: Request):
     """Get belief evolutions and conflicting ideas detected by the system."""

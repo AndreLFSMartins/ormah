@@ -211,12 +211,18 @@ def cmd_stats(args):
             r = c.get("/admin/stats")
             r.raise_for_status()
             data = r.json()
+            u = c.get("/agent/stats")
+            u.raise_for_status()
+            usage = u.json()
             if args.json:
-                print(json.dumps(data, indent=2))
+                print(json.dumps({**data, "usage": usage}, indent=2))
             else:
                 total = data.get("total_nodes", 0)
                 edges = data.get("total_edges", 0)
                 by_tier = data.get("by_tier", {})
+                week = usage.get("whispers_used_this_week", 0)
+                used_total = usage.get("whispers_used_total", 0)
+                print(f"Whispers used: {week} this week  ({used_total} total)")
                 print(f"Memories: {total}  Edges: {edges}")
                 for tier, count in sorted(by_tier.items()):
                     print(f"  {tier}: {count}")
@@ -439,19 +445,28 @@ def cmd_whisper_store(args):
 
     try:
         result = parse_transcript(path, start_offset=start_offset)
+        if result.leading_orphan:
+            # Cursor left mid-response by an older version: re-parse from the start to
+            # recover the dropped tail with its prompt (one-time full re-extract).
+            start_offset = 0
+            result = parse_transcript(path, start_offset=0)
     except Exception:
         sys.exit(0)
 
+    # Commit only the closed ("safe") payload — content proven complete by a terminal
+    # stop_reason or a following user turn — and advance the cursor to its boundary. Like
+    # the session watcher, this never splits a multi-record response from its prompt if
+    # the hook fires while a response is still being written.
     min_turns = settings.whisper_out_min_turns
-    if result.user_turn_count < min_turns:
+    if result.safe_user_turn_count < min_turns:
         sys.exit(0)
 
-    if not result.conversation.strip():
+    if not result.safe_conversation.strip():
         sys.exit(0)
 
     space = detect_space_from_dir(cwd) if cwd else None
 
-    body: dict = {"content": result.conversation}
+    body: dict = {"content": result.safe_conversation}
     params: dict = {"extra_tags": "whisper-out"}
     if space:
         params["default_space"] = space
@@ -464,8 +479,9 @@ def cmd_whisper_store(args):
         # Server down, timeout, or any error — exit silently, never block compaction
         sys.exit(0)
 
-    # Update cursor only after successful extraction
-    cursors[cursor_key] = result.end_offset
+    # Update cursor only after successful extraction, to the closed boundary so a
+    # still-in-flight trailing response is re-read (with its prompt) on the next run.
+    cursors[cursor_key] = result.safe_end_offset
     _save_cursors(cursors)
 
     sys.exit(0)

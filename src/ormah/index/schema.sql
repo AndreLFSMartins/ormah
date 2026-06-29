@@ -119,9 +119,40 @@ CREATE TABLE IF NOT EXISTS affinity (
     confirmed_at TEXT NOT NULL,
     space        TEXT,
     session_id   TEXT NOT NULL,
-    UNIQUE (node_id, session_id)
+    whisper_log_id INTEGER REFERENCES whisper_log(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_affinity_node ON affinity(node_id);
+-- Indexes on affinity.whisper_log_id are created by the migration code
+-- (_ensure_affinity_indexes), NOT here. On a pre-feedback DB the affinity table
+-- already exists without whisper_log_id, so "CREATE TABLE IF NOT EXISTS affinity"
+-- above is a no-op and the column is missing. executescript() runs this file
+-- before _migrate() adds the column, so creating these indexes here would crash
+-- with "no such column: whisper_log_id". _migrate_affinity_schema() rebuilds the
+-- legacy table and then creates these indexes, which is the correct ordering.
+
+CREATE TABLE IF NOT EXISTS signals (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    whisper_log_id INTEGER REFERENCES whisper_log(id) ON DELETE SET NULL,
+    node_id        TEXT NOT NULL,
+    signal_type    TEXT NOT NULL,
+    polarity       INTEGER NOT NULL,
+    strength       REAL NOT NULL DEFAULT 1.0,
+    source         TEXT NOT NULL,
+    session_id     TEXT,
+    agent_id       TEXT,
+    surface        TEXT,
+    space          TEXT,
+    prompt_hash    TEXT,
+    evidence       TEXT,
+    created        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_signals_node ON signals(node_id);
+CREATE INDEX IF NOT EXISTS idx_signals_session ON signals(session_id);
+CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created);
+CREATE INDEX IF NOT EXISTS idx_signals_whisper_log ON signals(whisper_log_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_whisper_type_source_unique
+    ON signals(whisper_log_id, signal_type, source)
+    WHERE whisper_log_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS review_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

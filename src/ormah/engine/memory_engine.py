@@ -37,6 +37,7 @@ from ormah.models.node import (
     UpdateNodeRequest,
 )
 from ormah.store.file_store import FileStore
+from ormah.text.tokens import STOP_WORDS
 
 logger = logging.getLogger(__name__)
 
@@ -549,21 +550,12 @@ class MemoryEngine:
         )
         return format_node_with_neighbors(node, edges, neighbors)
 
-    # Stop words for detecting "pure temporal" queries (no topical signal).
-    _STOP_WORDS = frozenset({
-        "what", "did", "we", "do", "i", "you", "the", "a", "is", "are",
-        "was", "were", "have", "has", "had", "been", "be", "will", "would",
-        "could", "should", "can", "may", "might", "shall", "on", "in", "at",
-        "to", "for", "of", "with", "by", "from", "up", "about", "into",
-        "through", "during", "before", "after", "above", "below", "between",
-        "out", "off", "over", "under", "again", "further", "then", "once",
-        "here", "there", "when", "where", "why", "how", "all", "each",
-        "every", "both", "few", "more", "most", "other", "some", "such",
-        "no", "not", "only", "own", "same", "so", "than", "too", "very",
-        "just", "because", "as", "until", "while", "and", "but", "or",
-        "nor", "if", "that", "which", "who", "whom", "this", "these",
-        "those", "am", "an", "any", "work", "worked", "working",
-        "me", "my", "our", "us", "show", "tell", "give", "get",
+    # Additional command-like words for detecting "pure temporal" queries.
+    _STOP_WORDS = STOP_WORDS | frozenset({
+        "after", "again", "above", "below", "between", "during", "further",
+        "get", "give", "here", "me", "once", "only", "out", "own", "same",
+        "show", "tell", "then", "through", "under", "until", "up", "us",
+        "while", "work", "worked", "working",
     })
 
     def recall_search_structured(
@@ -2022,7 +2014,7 @@ class MemoryEngine:
             SELECT node_id
             FROM whisper_log
             WHERE node_id = ?
-            ORDER BY logged_at DESC
+            ORDER BY logged_at DESC, id DESC
             LIMIT 1
             """,
             (node_id,),
@@ -2064,10 +2056,10 @@ class MemoryEngine:
 
         row = self.db.conn.execute(
             """
-            SELECT prompt_vec, prompt_text, session_id, space
+            SELECT id, prompt_vec, prompt_text, prompt_hash, session_id, space
             FROM whisper_log
             WHERE node_id = ?
-            ORDER BY logged_at DESC
+            ORDER BY logged_at DESC, id DESC
             LIMIT 1
             """,
             (resolved_node_id,),
@@ -2078,18 +2070,65 @@ class MemoryEngine:
 
         prompt_vec = row["prompt_vec"]
         prompt_text = row["prompt_text"]
+        prompt_hash = row["prompt_hash"]
         session_id = row["session_id"]
         space = row["space"]
+        whisper_log_id = row["id"]
 
         with self.db.transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO affinity
-                    (prompt_vec, prompt_text, node_id, signal, source, confirmed_at, space, session_id)
-                VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?)
-                ON CONFLICT (node_id, session_id) DO NOTHING
+                    (
+                        prompt_vec, prompt_text, node_id, signal, source,
+                        confirmed_at, space, session_id, whisper_log_id
+                    )
+                VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+                ON CONFLICT DO NOTHING
                 """,
-                (prompt_vec, prompt_text, resolved_node_id, signal, source, space, session_id),
+                (
+                    prompt_vec,
+                    prompt_text,
+                    resolved_node_id,
+                    signal,
+                    source,
+                    space,
+                    session_id,
+                    whisper_log_id,
+                ),
+            )
+            if source == "explicit":
+                conn.execute(
+                    """
+                    UPDATE affinity
+                    SET signal = ?, source = ?, confirmed_at = datetime('now')
+                    WHERE node_id = ? AND whisper_log_id = ?
+                    """,
+                    (signal, source, resolved_node_id, whisper_log_id),
+                )
+            conn.execute(
+                """
+                INSERT INTO signals
+                    (
+                        whisper_log_id, node_id, signal_type, polarity, strength,
+                        source, session_id, surface, space, prompt_hash, evidence, created
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    whisper_log_id,
+                    resolved_node_id,
+                    "feedback_submitted",
+                    signal,
+                    1.0,
+                    source,
+                    session_id,
+                    "submit_feedback",
+                    space,
+                    prompt_hash,
+                    json.dumps({"source": source}),
+                ),
             )
             if source != "implicit":
                 conn.execute(
@@ -2105,6 +2144,53 @@ class MemoryEngine:
                 )
 
         return f"Feedback recorded for node {resolved_node_id[:8]}..."
+
+    def get_stats(self, days: int = 7) -> dict[str, Any]:
+        """Return ambient usage counts for the menubar/CLI surface (F09/F10).
+
+        A "whisper used" is a single whisper call that actually injected at
+        least one memory. ``whisper_log`` writes one row per candidate sharing
+        the same ``logged_at`` per call, so distinct used calls are counted by
+        the ``(session_id, prompt_hash, logged_at)`` triple where
+        ``was_injected = 1``. Memory counts come straight from ``nodes``.
+
+        ISO-8601 UTC timestamps compare correctly lexicographically, so the
+        rolling window is a simple string ``>=`` against a Python-computed
+        cutoff — no SQLite date math, no timezone surprises.
+        """
+        from datetime import timedelta
+
+        conn = self.db.conn
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        used_key = "session_id || '|' || prompt_hash || '|' || logged_at"
+        whispers_total = conn.execute(
+            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log WHERE was_injected = 1"
+        ).fetchone()[0]
+        whispers_week = conn.execute(
+            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log "
+            "WHERE was_injected = 1 AND logged_at >= ?",
+            (cutoff,),
+        ).fetchone()[0]
+
+        # Exclude system-seeded bootstrap nodes (e.g. the "Self" node) so a
+        # fresh install honestly reads zero memories.
+        not_system = "source NOT LIKE 'system:%'"
+        memories_total = conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {not_system}"
+        ).fetchone()[0]
+        memories_week = conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {not_system} AND created >= ?", (cutoff,)
+        ).fetchone()[0]
+
+        return {
+            "whispers_used_this_week": whispers_week,
+            "whispers_used_total": whispers_total,
+            "memories_this_week": memories_week,
+            "memories_total": memories_total,
+            "window_days": days,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""

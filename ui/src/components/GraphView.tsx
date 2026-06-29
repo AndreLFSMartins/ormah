@@ -388,14 +388,82 @@ const ZOOM_BUTTON_STYLE: CSSProperties = {
   cursor: "pointer",
 };
 
-const ZOOM_RANGE_STYLE: CSSProperties = {
-  width: 22,
-  height: 122,
-  writingMode: "vertical-lr",
-  direction: "rtl",
-  accentColor: "#d4a574",
-  cursor: "pointer",
-};
+// Custom vertical zoom slider. Native `<input type=range>` can't be made
+// reliably vertical in WebKitGTK (Tauri's webview ignores both `writing-mode`
+// and `slider-vertical`), so we draw the track + thumb ourselves and drive it
+// with pointer events — identical behavior in every engine. Top = max zoom.
+function VerticalZoomSlider({
+  value,
+  max,
+  onChange,
+}: {
+  value: number;
+  max: number;
+  onChange: (v: number) => void;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+
+  const setFromY = (clientY: number) => {
+    const el = trackRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const t = 1 - (clientY - r.top) / r.height; // top = 1 (max), bottom = 0
+    onChange(Math.max(0, Math.min(max, Math.round(t * max))));
+  };
+  const onDown = (e: React.PointerEvent) => {
+    dragging.current = true;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    setFromY(e.clientY);
+  };
+  const onMove = (e: React.PointerEvent) => {
+    if (dragging.current) setFromY(e.clientY);
+  };
+  const stop = () => {
+    dragging.current = false;
+  };
+
+  const filled = max ? value / max : 0; // 0..1 from the bottom
+  return (
+    <div
+      ref={trackRef}
+      onPointerDown={onDown}
+      onPointerMove={onMove}
+      onPointerUp={stop}
+      onPointerCancel={stop}
+      role="slider"
+      aria-label="Graph zoom"
+      aria-valuemin={0}
+      aria-valuemax={max}
+      aria-valuenow={value}
+      style={{ position: "relative", width: 22, height: 122, cursor: "pointer", touchAction: "none" }}
+    >
+      {/* rail */}
+      <div
+        style={{
+          position: "absolute", left: "50%", top: 0, transform: "translateX(-50%)",
+          width: 4, height: "100%", borderRadius: 3, background: "#3a3a3a",
+        }}
+      />
+      {/* filled portion (from bottom up to the thumb) */}
+      <div
+        style={{
+          position: "absolute", left: "50%", bottom: 0, transform: "translateX(-50%)",
+          width: 4, height: `${filled * 100}%`, borderRadius: 3, background: "#d4a574",
+        }}
+      />
+      {/* thumb */}
+      <div
+        style={{
+          position: "absolute", left: "50%", top: `${(1 - filled) * 100}%`,
+          transform: "translate(-50%, -50%)", width: 16, height: 16, borderRadius: "50%",
+          background: "#d4a574", border: "2px solid #0a0a0a",
+          boxShadow: "0 1px 4px rgba(0,0,0,0.6)",
+        }}
+      />
+    </div>
+  );
+}
 
 // One clickable legend row: swatch + content as children, dimmed when another
 // row holds the focus. Shared by both the link-type and space sections.
@@ -1057,14 +1125,10 @@ const GraphView = forwardRef<{ focusNode: (id: string) => void }, Props>(
               >
                 +
               </button>
-              <input
-                type="range"
-                min={0}
-                max={ZOOM_SLIDER_MAX}
+              <VerticalZoomSlider
                 value={zoomSliderValue}
-                onChange={(e) => applyZoomSliderValue(Number(e.target.value))}
-                aria-label="Graph zoom"
-                style={ZOOM_RANGE_STYLE}
+                max={ZOOM_SLIDER_MAX}
+                onChange={applyZoomSliderValue}
               />
               <button
                 type="button"

@@ -107,7 +107,7 @@ def _llm_check_duplicate(settings, node_row, other_row) -> dict | None:
     Returns parsed dict with keys is_duplicate, merged_title, merged_content,
     reason — or None if the LLM is unavailable or returns invalid output.
     """
-    from ormah.background.llm_client import llm_generate
+    from ormah.background.llm_client import extract_json, llm_generate
 
     prompt = _LLM_DUPLICATE_PROMPT.format(
         title_a=node_row["title"] or "(untitled)",
@@ -123,7 +123,7 @@ def _llm_check_duplicate(settings, node_row, other_row) -> dict | None:
         return None
 
     try:
-        result = json.loads(raw)
+        result = json.loads(extract_json(raw))
         if "is_duplicate" not in result:
             return None
         return result

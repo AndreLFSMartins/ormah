@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import contextlib
+import glob
 import json
 import os
 import shutil
 import socket
 import subprocess
+import sys
 import webbrowser
+from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
+from typing import Callable
 import re
 
 import httpx
-
-from importlib import resources
 
 from ormah.config import settings
 from ormah.console import info, ok, play_finale, step, warn
@@ -27,6 +31,39 @@ from ormah.server_manager import (
 )
 
 ENV_DIR = Path.home() / ".config" / "ormah"
+
+
+def _find_binary(name: str) -> str | None:
+    """Find a binary by name, checking PATH and common install locations.
+
+    GUI apps launched from the system tray don't inherit the user's full shell
+    PATH (e.g. nvm, mise, homebrew shims), so shutil.which alone misses
+    binaries the user can run fine from a terminal. This checks the extra spots.
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+    # High-priority: version-manager shims (newest nvm version first, then mise)
+    nvm_paths = [
+        Path(p)
+        for p in sorted(
+            glob.glob(str(Path.home() / ".nvm" / "versions" / "node" / "*" / "bin" / name)),
+            reverse=True,  # lexicographic desc → newest node version first
+        )
+    ]
+    candidates: list[Path] = [
+        Path.home() / ".local" / "share" / "mise" / "shims" / name,
+        *nvm_paths,
+        Path.home() / ".local" / "bin" / name,
+        Path("/usr/local/bin") / name,
+        Path("/opt/homebrew/bin") / name,   # macOS Homebrew (Apple Silicon)
+        Path("/usr/local/homebrew/bin") / name,  # macOS Homebrew (Intel)
+        Path("/usr/bin") / name,
+    ]
+    for candidate in candidates:
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 ENV_PATH = ENV_DIR / ".env"
 WRAPPER_PATH = ENV_DIR / "ormah-server"
 
@@ -169,7 +206,7 @@ def configure_claude_code_mcp(ormah_bin: str) -> None:
     Falls back to direct JSON editing if the claude CLI is not on PATH.
     """
     # Prefer the official CLI — it writes the correct format
-    claude_bin = shutil.which("claude")
+    claude_bin = _find_binary("claude")
     if claude_bin:
         try:
             result = subprocess.run(
@@ -411,7 +448,7 @@ def _upsert_codex_mcp_config(ormah_bin: str) -> None:
 
 def configure_codex_mcp(ormah_bin: str) -> None:
     """Register Ormah MCP server in Codex config."""
-    codex_bin = shutil.which("codex")
+    codex_bin = _find_binary("codex")
     if codex_bin:
         try:
             result = subprocess.run(
@@ -1317,7 +1354,7 @@ def _remove_mcp_registration() -> None:
     import platform as _platform
 
     # Claude Code
-    claude_bin = shutil.which("claude")
+    claude_bin = _find_binary("claude")
     if claude_bin:
         try:
             result = subprocess.run(
@@ -1341,7 +1378,7 @@ def _remove_mcp_registration() -> None:
             _remove_mcp_from_json(desktop_config)
 
     # Codex
-    codex_bin = shutil.which("codex")
+    codex_bin = _find_binary("codex")
     if codex_bin:
         try:
             result = subprocess.run(
@@ -1662,6 +1699,270 @@ def run_uninstall(yes: bool = False) -> None:
     ok("Ormah has been uninstalled")
 
 
+# ---------------------------------------------------------------------------
+# Agent registry — extensible, data-driven detection + wired-check per agent.
+# Adding a new integration = one entry here, zero changes to callers or UI.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AgentDescriptor:
+    id: str
+    name: str
+    detect_fn: Callable[[], bool]
+    is_wired_fn: Callable[[], bool]
+    wire_fn: Callable[[], None]
+    unwire_fn: Callable[[], None]
+    # None = available on all platforms; ["darwin"] = macOS only, etc.
+    platform: list[str] | None = field(default=None)
+
+
+def _claude_code_detected() -> bool:
+    return _find_binary("claude") is not None
+
+
+def _claude_code_is_wired() -> bool:
+    # Check for ormah whisper hooks in settings.json and ormah MCP in .claude.json
+    settings_path = Path.home() / ".claude" / "settings.json"
+    try:
+        data = json.loads(settings_path.read_text())
+        hooks = data.get("hooks") or {}
+        for matchers in hooks.values():
+            if isinstance(matchers, list):
+                for entry in matchers:
+                    cmd = entry.get("command", "") if isinstance(entry, dict) else str(entry)
+                    if "ormah whisper" in cmd:
+                        return True
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    claude_json = Path.home() / ".claude.json"
+    try:
+        data = json.loads(claude_json.read_text())
+        return "ormah" in (data.get("mcpServers") or {})
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def _codex_detected() -> bool:
+    return _find_binary("codex") is not None or (Path.home() / ".codex").exists()
+
+
+def _codex_is_wired() -> bool:
+    # Check for ormah whisper hooks in hooks.json or ormah MCP in config.toml
+    hooks_path = Path.home() / ".codex" / "hooks.json"
+    try:
+        data = json.loads(hooks_path.read_text())
+        hooks = data.get("hooks") or {}
+        for matchers in hooks.values():
+            if isinstance(matchers, list):
+                for entry in matchers:
+                    cmd = entry.get("command", "") if isinstance(entry, dict) else str(entry)
+                    if "ormah whisper" in cmd:
+                        return True
+    except (OSError, json.JSONDecodeError):
+        pass
+    config_path = Path.home() / ".codex" / "config.toml"
+    try:
+        text = config_path.read_text()
+        return "[mcp_servers.ormah]" in text
+    except OSError:
+        return False
+
+
+def _claude_desktop_detected() -> bool:
+    import platform as _platform
+    if _platform.system() != "Darwin":
+        return False
+    return os.path.exists(
+        os.path.expanduser("~/Library/Application Support/Claude")
+    )
+
+
+def _claude_desktop_is_wired() -> bool:
+    config_path = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    try:
+        data = json.loads(config_path.read_text())
+        return "ormah" in (data.get("mcpServers") or {})
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def _claude_code_wire() -> None:
+    ormah_bin = get_ormah_bin_path()
+    configure_claude_hooks(ormah_bin)
+    configure_claude_code_mcp(ormah_bin)
+    install_claude_md()
+    install_claude_agents()
+    install_claude_commands()
+
+
+def _claude_code_unwire() -> None:
+    _remove_claude_hooks()
+    _remove_mcp_from_json(Path.home() / ".claude.json")
+    _remove_claude_md_block()
+    _remove_claude_agents()
+    _remove_claude_commands()
+
+
+def _codex_wire() -> None:
+    ormah_bin = get_ormah_bin_path()
+    configure_codex_hooks(ormah_bin)
+    configure_codex_mcp(ormah_bin)
+    install_codex_md()
+    install_codex_agents()
+
+
+def _codex_unwire() -> None:
+    _remove_codex_hooks()
+    _remove_codex_mcp_config()
+    _remove_codex_md_block()
+    _remove_codex_agents()
+
+
+def _claude_desktop_wire() -> None:
+    ormah_bin = get_ormah_bin_path()
+    configure_claude_desktop(ormah_bin)
+
+
+def _claude_desktop_unwire() -> None:
+    desktop_config = (
+        Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    )
+    _remove_mcp_from_json(desktop_config)
+
+
+AGENT_REGISTRY: list[AgentDescriptor] = [
+    AgentDescriptor(
+        id="claude_code",
+        name="Claude Code",
+        detect_fn=_claude_code_detected,
+        is_wired_fn=_claude_code_is_wired,
+        wire_fn=_claude_code_wire,
+        unwire_fn=_claude_code_unwire,
+    ),
+    AgentDescriptor(
+        id="codex",
+        name="Codex CLI",
+        detect_fn=_codex_detected,
+        is_wired_fn=_codex_is_wired,
+        wire_fn=_codex_wire,
+        unwire_fn=_codex_unwire,
+    ),
+    AgentDescriptor(
+        id="claude_desktop",
+        name="Claude Desktop",
+        detect_fn=_claude_desktop_detected,
+        is_wired_fn=_claude_desktop_is_wired,
+        wire_fn=_claude_desktop_wire,
+        unwire_fn=_claude_desktop_unwire,
+        platform=["darwin"],
+    ),
+]
+
+
+def _get_agent(agent_id: str) -> AgentDescriptor:
+    for agent in AGENT_REGISTRY:
+        if agent.id == agent_id:
+            return agent
+    raise ValueError(f"Unknown agent: {agent_id!r}")
+
+
+def wire_agent(agent_id: str) -> dict:
+    """Wire ormah into a single agent by id. Returns {wired, errors}."""
+    import platform as _platform
+    agent = _get_agent(agent_id)
+    current_os = _platform.system().lower()
+    if agent.platform is not None and current_os not in agent.platform:
+        return {"wired": [], "errors": {agent_id: f"Not available on {_platform.system()}"}}
+    errors: dict[str, str] = {}
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            agent.wire_fn()
+        except Exception as exc:
+            errors[agent_id] = f"{type(exc).__name__}: {exc}"
+    return {"wired": [agent_id] if not errors else [], "errors": errors}
+
+
+def unwire_agent(agent_id: str) -> dict:
+    """Remove ormah hooks/MCP/instructions for a single agent. Returns {unwired, errors}."""
+    agent = _get_agent(agent_id)
+    errors: dict[str, str] = {}
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            agent.unwire_fn()
+        except Exception as exc:
+            errors[agent_id] = f"{type(exc).__name__}: {exc}"
+    return {"unwired": [agent_id] if not errors else [], "errors": errors}
+
+
+def list_agents() -> list[dict]:
+    """Return all agents with detection and wired status — for the UI agent panel.
+
+    Each entry: {id, name, detected, wired, platform}.
+    Safe to call from any context: pure filesystem checks, no side effects.
+    """
+    import platform as _platform
+    current_os = _platform.system().lower()
+    result = []
+    for agent in AGENT_REGISTRY:
+        # Include platform-specific agents but mark them so the UI can annotate.
+        detected = agent.detect_fn()
+        wired = agent.is_wired_fn() if detected else False
+        result.append({
+            "id": agent.id,
+            "name": agent.name,
+            "detected": detected,
+            "wired": wired,
+            "platform": agent.platform,
+            "available_on_current_os": agent.platform is None or current_os in agent.platform,
+        })
+    return result
+
+
+def detect_clients() -> dict[str, bool]:
+    """Legacy flat detection dict — kept for backwards compatibility."""
+    agents = list_agents()
+    return {a["id"]: a["detected"] for a in agents}
+
+
+def run_setup_json() -> dict:
+    """Non-interactive agent wiring for the Mac app's one-click setup button.
+
+    Wires hooks/MCP/guidance for every detected client and returns a structured
+    result the app can render. Deliberately narrow vs. run_setup(): no LLM
+    prompts, no server start (the app owns the bundled server sidecar), no
+    browser launch, no animations.
+
+    Human-readable progress from the underlying configure_* helpers is sent to
+    stderr so stdout stays clean JSON for the caller to parse.
+    """
+    import platform as _platform
+    current_os = _platform.system().lower()
+    ormah_bin = get_ormah_bin_path()
+    detected_ids: list[str] = []
+    wired: list[str] = []
+    errors: dict[str, str] = {}
+
+    with contextlib.redirect_stdout(sys.stderr):
+        for agent in AGENT_REGISTRY:
+            available = agent.platform is None or current_os in agent.platform
+            if not available or not agent.detect_fn():
+                continue
+            detected_ids.append(agent.id)
+            try:
+                agent.wire_fn()
+                wired.append(agent.id)
+            except Exception as exc:  # noqa: BLE001
+                errors[agent.id] = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "ormah_bin": ormah_bin,
+        "detected": detected_ids,
+        "wired": wired,
+        "errors": errors,
+    }
+
+
 def run_setup(
     ci: bool = False,
     update: bool = False,
@@ -1681,9 +1982,9 @@ def run_setup(
     ormah_bin = get_ormah_bin_path()
 
     # 2. Detect supported coding agents and offer maintenance upfront — no API key needed
-    has_claude_code = shutil.which("claude") is not None
-    has_codex = shutil.which("codex") is not None or (Path.home() / ".codex").exists()
-    has_pi = shutil.which("pi") is not None or (Path.home() / ".pi").exists()
+    has_claude_code = _find_binary("claude") is not None
+    has_codex = _find_binary("codex") is not None or (Path.home() / ".codex").exists()
+    has_pi = _find_binary("pi") is not None or (Path.home() / ".pi").exists()
     agent_maintenance = False
     if (has_claude_code or has_codex or has_pi) and not ci and not update and not skip_client_setup:
         detected = []
