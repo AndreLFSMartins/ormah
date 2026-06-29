@@ -6,7 +6,21 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Placeholder strings that mean "no space" but get persisted as a literal space
+# when None is JSON/string-serialized upstream (e.g. an agent passing the string
+# "null"). Coerced to None at the persistence boundary so they never form a
+# phantom space group. See tests/test_store/test_space_normalization.py (#22).
+_SPACE_PLACEHOLDERS = {"null", "none", ""}
+
+
+def normalize_space(space: str | None) -> str | None:
+    """Map placeholder space strings ('null', 'none', '', whitespace) to None."""
+    if space is None:
+        return None
+    stripped = space.strip()
+    return None if stripped.lower() in _SPACE_PLACEHOLDERS else stripped
 
 
 class NodeType(str, Enum):
@@ -65,6 +79,10 @@ class MemoryNode(BaseModel):
     connections: list[Connection] = Field(default_factory=list)
     title: str | None = None
     content: str = ""
+
+    _normalize_space = field_validator("space", mode="before")(
+        lambda cls, v: normalize_space(v)
+    )
 
     @property
     def short_id(self) -> str:
