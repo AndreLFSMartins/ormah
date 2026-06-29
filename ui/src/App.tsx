@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchGraph, fetchNodeDetail } from "./api";
-import type { Edge, GraphData, MemoryNode, NodeDetail, Tier, NodeType, EdgeType } from "./types";
+import type { Edge, GraphData, MemoryNode, NodeDetail, Tier, NodeType, EdgeType, ViewScope } from "./types";
 import { ALL_TIERS, ALL_NODE_TYPES, ALL_EDGE_TYPES } from "./types";
+import { createRequestGuard } from "./graph/requestGuard";
 import GraphView from "./components/GraphView";
 import TopBar from "./components/TopBar";
 import NodeDetailPanel from "./components/NodeDetail";
@@ -58,6 +59,9 @@ export default function App() {
   });
   const [allSpaces, setAllSpaces] = useState<string[]>([]);
   const [userNodeId, setUserNodeId] = useState<string | null>(null);
+  const [viewScope, setViewScope] = useState<ViewScope>({ kind: "active" });
+  const [hasNoSpace, setHasNoSpace] = useState(false);
+  const reqGuard = useRef(createRequestGuard());
   const [toasts, setToasts] = useState<ToastData[]>([]);
   const [graphAppearance, setGraphAppearance] =
     useState<GraphAppearance>(loadGraphAppearance);
@@ -90,19 +94,31 @@ export default function App() {
     hasDetail: selectedDetail !== null,
   });
 
-  useEffect(() => {
-    fetchGraph().then((data) => {
-      setGraph(data);
-      setUserNodeId(data.user_node_id);
-      const spaces = new Set<string>();
-      data.nodes.forEach((n) => {
-        if (n.space) spaces.add(n.space);
+  const loadGraph = useCallback((space?: string) => {
+    const token = reqGuard.current.begin();
+    fetchGraph(space === undefined ? undefined : { space })
+      .then((data) => {
+        if (!reqGuard.current.isLatest(token)) return; // drop stale response
+        setGraph(data);
+        setUserNodeId(data.user_node_id);
+        setHasNoSpace(data.has_no_space ?? false);
+        setViewScope(space === undefined ? { kind: "active" } : { kind: "space", space });
+        if (space === undefined) {
+          const spaceList = data.all_spaces ?? [];
+          setAllSpaces(spaceList);
+          // C1: include "" so no-space nodes are not space-dimmed in the overview.
+          setFilters((f) => ({ ...f, spaces: new Set([...spaceList, ""]) }));
+        }
+      })
+      .catch(() => {
+        if (!reqGuard.current.isLatest(token)) return;
+        addToast("Falha ao carregar o grafo", "error"); // keep current view on error
       });
-      const spaceList = Array.from(spaces).sort();
-      setAllSpaces(spaceList);
-      setFilters((f) => ({ ...f, spaces: new Set(spaceList) }));
-    });
-  }, []);
+  }, [addToast]);
+
+  useEffect(() => {
+    loadGraph();
+  }, [loadGraph]);
 
   useEffect(() => {
     applyGraphAppearance(graphAppearance);
@@ -256,6 +272,11 @@ export default function App() {
             clusterBySpace={filters.clusterBySpace}
             appearance={graphAppearance}
             filters={filters}
+            viewScope={viewScope}
+            allSpaces={allSpaces}
+            hasNoSpace={hasNoSpace}
+            onDrillSpace={(s) => loadGraph(s)}
+            onExitDrill={() => loadGraph()}
           />
         )}
       </div>
