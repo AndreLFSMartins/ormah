@@ -310,7 +310,9 @@ const GraphView = forwardRef<
       ].filter((row) => row.count > 0);
     }, [identityNodeIds, nodes, userNodeId]);
 
-    const showLegend = clusterBySpace || edgeLegend.length > 0;
+    // Keep the legend (and its SPACES drill rows) reachable even when space
+    // clustering is off — the per-space ↳ drill is the granular path to archival.
+    const showLegend = clusterBySpace || edgeLegend.length > 0 || spaceLegend.length > 0;
 
     // ─── Mount effect: build graph + start sigma + layout ─────────────────────
     // Deps: [nodes, edges, userNodeId] — does NOT include filters or appearance.
@@ -612,6 +614,11 @@ const GraphView = forwardRef<
                   Show all (incl. archival)
                 </button>
               )}
+              {label.showActiveOnly && (
+                <button type="button" data-testid="active-only" onClick={onExitDrill} style={BANNER_BTN_STYLE}>
+                  Active only
+                </button>
+              )}
               {label.showBack && (
                 <button type="button" data-testid="exit-drill" onClick={onExitDrill} style={BANNER_BTN_STYLE}>
                   ← back to active graph
@@ -754,7 +761,7 @@ const GraphView = forwardRef<
                     ))}
                   </>
                 )}
-                {clusterBySpace && (
+                {spaceLegend.length > 0 && (
                   <>
                     <div style={{ ...LEGEND_SECTION_TITLE_STYLE, margin: "9px 0 4px" }}>
                       SPACES

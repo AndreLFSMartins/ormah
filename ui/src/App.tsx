@@ -59,7 +59,7 @@ export default function App() {
   });
   const [allSpaces, setAllSpaces] = useState<string[]>([]);
   const [userNodeId, setUserNodeId] = useState<string | null>(null);
-  const [viewScope, setViewScope] = useState<ViewScope>({ kind: "active" });
+  const [viewScope, setViewScope] = useState<ViewScope>({ kind: "all" });
   const [hasNoSpace, setHasNoSpace] = useState(false);
   const reqGuard = useRef(createRequestGuard());
   const [toasts, setToasts] = useState<ToastData[]>([]);
@@ -140,9 +140,11 @@ export default function App() {
       });
   }, [addToast]);
 
+  // Default view shows everything (incl. archival). Active-only is opt-in via the
+  // banner. Fits a curated/lean graph where the whole graph is worth seeing on load.
   useEffect(() => {
-    loadGraph();
-  }, [loadGraph]);
+    loadAll();
+  }, [loadAll]);
 
   useEffect(() => {
     applyGraphAppearance(graphAppearance);
