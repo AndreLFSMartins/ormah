@@ -40,6 +40,10 @@ const MARK_IN_APP: &str = "window.__ORMAH_DESKTOP__ = true;";
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Second launch: focus the existing window instead of spawning a new one.
+            commands::open_graph(app);
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
