@@ -135,6 +135,7 @@ class MemoryEngine:
 
         self._ensure_self_node()
         self._migrate_identity_tiers()
+        self._migrate_lock_identity_spaces()
         self._seed_initial_maintenance_grace_period()
         self._warmup_embedder()
         self._warmup_reranker()
@@ -218,6 +219,7 @@ class MemoryEngine:
             tier=Tier.core,
             source="system:self",
             space=None,
+            space_locked=True,
             tags=["self", "identity"],
             title="Self",
             content="The user's identity and personal information.",
@@ -347,6 +349,38 @@ class MemoryEngine:
                     "INSERT OR REPLACE INTO meta (key, value) VALUES ('identity_edges_repaired', '1')"
                 )
 
+    def _migrate_lock_identity_spaces(self) -> None:
+        """One-time: lock the identity cluster's space as global so auto_cluster never
+        reassigns it (#22). On an upgraded store, legacy identity memories carry
+        space_locked=0; without this they could be re-swept into a project space in the
+        window before `migrations repair-identity` is run by hand.
+        """
+        migrated = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'identity_space_locked_migrated'"
+        ).fetchone()
+        if migrated and migrated["value"] == "1":
+            return
+
+        if self.user_node_id:
+            uid = self.user_node_id
+            edged = self.db.conn.execute(
+                "SELECT DISTINCT CASE WHEN source_id = ? THEN target_id ELSE source_id END "
+                "FROM edges WHERE source_id = ? OR target_id = ?",
+                (uid, uid, uid),
+            ).fetchall()
+            for nid in {uid} | {r[0] for r in edged}:
+                node = self.file_store.load(nid)
+                if node and (node.space is not None or not node.space_locked):
+                    node.space = None
+                    node.space_locked = True
+                    self.builder.index_single(self.file_store.save(node))
+
+        with self.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) "
+                "VALUES ('identity_space_locked_migrated', '1')"
+            )
+
     def _warmup_embedder(self) -> None:
         """Load the embedding model now so the first request doesn't stall.
 
@@ -430,7 +464,9 @@ class MemoryEngine:
                 node.tags.append("about_self")
             if node.type == NodeType.person:
                 node.tier = Tier.core
-            # Identity is always global — lock its space so auto_cluster never reassigns it.
+            # Identity is always global — force None (a default_space may have leaked into
+            # req.space upstream) and lock it so auto_cluster never reassigns it.
+            node.space = None
             node.space_locked = True
 
         # Enforce core cap

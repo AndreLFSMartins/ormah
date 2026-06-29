@@ -81,6 +81,53 @@ def test_auto_cluster_skips_self_node(engine):
     assert engine.file_store.load(uid).space is None
 
 
+def test_auto_cluster_rechecks_stale_index_lock(engine):
+    """Markdown is source of truth: a node locked in the file but stale-unlocked in the
+    index must not be reassigned (#22 council B)."""
+    a, _ = engine.remember(
+        CreateNodeRequest(content="global pref", type=NodeType.preference, space_locked=True)
+    )
+    b, _ = engine.remember(
+        CreateNodeRequest(content="neighbor", type=NodeType.fact, space="work")
+    )
+    _connect(engine, a, b)
+    # Simulate a stale index row: file says locked, index says unlocked + no space.
+    with engine.db.transaction() as conn:
+        conn.execute("UPDATE nodes SET space_locked = 0, space = NULL WHERE id = ?", (a,))
+
+    run_auto_cluster(engine)
+
+    node = engine.file_store.load(a)
+    assert node.space is None
+    assert node.space_locked is True
+
+
+def test_migrate_lock_identity_spaces_relocks_legacy(engine):
+    """Startup migration re-locks legacy identity memories once (#22 council C)."""
+    sid, _ = engine.remember(
+        CreateNodeRequest(content="André is stoic.", type=NodeType.preference, about_self=True)
+    )
+    # Simulate a legacy/upgraded node: swept into a project space, unlocked, in file + index.
+    n = engine.file_store.load(sid)
+    n.space = "ormah"
+    n.space_locked = False
+    engine.file_store.save(n)
+    with engine.db.transaction() as conn:
+        conn.execute("UPDATE nodes SET space = 'ormah', space_locked = 0 WHERE id = ?", (sid,))
+        conn.execute("DELETE FROM meta WHERE key = 'identity_space_locked_migrated'")
+
+    engine._migrate_lock_identity_spaces()
+
+    node = engine.file_store.load(sid)
+    assert node.space is None
+    assert node.space_locked is True
+    # Idempotent: the guard meta key is set, a second run is a no-op.
+    row = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'identity_space_locked_migrated'"
+    ).fetchone()
+    assert row["value"] == "1"
+
+
 def test_repair_global_identity_relocks_swept_cluster(engine):
     """The repair resets a swept identity cluster back to global + locked."""
     from ormah.store.migrations import repair_global_identity

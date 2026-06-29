@@ -147,6 +147,26 @@ def test_remember_about_self_locks_space(engine):
     assert engine.file_store.load(node_id).space_locked is True
 
 
+def test_remember_about_self_forces_global_space(engine):
+    """about_self is global even if a default_space leaked into req.space (#22 council A)."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(
+            content="André runs triathlons.",
+            type=NodeType.fact,
+            about_self=True,
+            space="ormah",  # simulates default_space applied at the API boundary
+        )
+    )
+    node = engine.file_store.load(node_id)
+    assert node.space is None
+    assert node.space_locked is True
+
+
+def test_self_node_is_space_locked(engine):
+    """The self node is created locked, not relying solely on the id != user_node_id guard."""
+    assert engine.file_store.load(engine.user_node_id).space_locked is True
+
+
 def test_remember_explicit_space_locked(engine):
     """A caller can pin a non-identity global (e.g. a cross-project preference)."""
     node_id, _ = engine.remember(
