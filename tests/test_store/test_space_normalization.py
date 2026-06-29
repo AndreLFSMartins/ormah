@@ -25,6 +25,12 @@ def test_real_space_is_preserved(raw):
     assert MemoryNode(type="fact", space=raw).space == raw
 
 
+@pytest.mark.parametrize("raw", ["NullProject", "nonetheless", "null-ish", "Nones"])
+def test_near_miss_names_are_preserved(raw):
+    """Only the exact placeholder tokens collapse — names containing them survive."""
+    assert MemoryNode(type="fact", space=raw).space == raw
+
+
 def test_none_space_stays_none():
     assert MemoryNode(type="fact", space=None).space is None
 

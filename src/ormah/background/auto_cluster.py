@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
+from ormah.models.node import normalize_space
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,9 +38,13 @@ def run_auto_cluster(engine) -> None:
             if not neighbors:
                 continue
 
-            # Majority vote
+            # Majority vote. Normalize at the source so both writes below (the raw
+            # index UPDATE and the markdown node.space assignment) stay clean — a stale
+            # neighbor with the literal 'null' string must not propagate a phantom space.
             spaces = [n["space"] for n in neighbors]
-            most_common = Counter(spaces).most_common(1)[0][0]
+            most_common = normalize_space(Counter(spaces).most_common(1)[0][0])
+            if most_common is None:
+                continue
 
             updates.append((most_common, node_id))
 
