@@ -131,6 +131,15 @@ def test_update_node(engine):
     assert "Updated" in text
 
 
+def test_update_node_normalizes_placeholder_space(engine):
+    """Updating space to the placeholder string 'null' persists as None (#22)."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(content="x", type=NodeType.fact, space="work")
+    )
+    engine.update_node(node_id, UpdateNodeRequest(space="null"))
+    assert engine.file_store.load(node_id).space is None
+
+
 def test_connect(engine):
     req1 = CreateNodeRequest(content="Node A.", type=NodeType.fact)
     req2 = CreateNodeRequest(content="Node B.", type=NodeType.fact)

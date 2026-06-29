@@ -38,6 +38,7 @@ from ormah.models.node import (
     NodeType,
     Tier,
     UpdateNodeRequest,
+    normalize_space,
 )
 from ormah.store.file_store import FileStore
 from ormah.text.tokens import STOP_WORDS
@@ -769,7 +770,8 @@ class MemoryEngine:
             elif req.tier != Tier.archival and old_tier == Tier.archival:
                 node.archived_at = None  # left archival → reset the graveyard clock
         if req.space is not None:
-            node.space = req.space
+            # Plain assignment bypasses the MemoryNode field validator, so normalize here.
+            node.space = normalize_space(req.space)
         if req.tags is not None:
             node.tags = req.tags
         if req.title is not None:
