@@ -32,12 +32,47 @@ def test_extract_json_strips_bare_fence():
 
 def test_extract_json_passthrough_for_clean_json():
     raw = '{"a": 1}'
+    assert extract_json(raw) == raw
     assert json.loads(extract_json(raw)) == {"a": 1}
+
+
+def test_extract_json_passthrough_for_clean_array():
+    raw = '[{"a": 1}, {"a": 2}]'
+    assert extract_json(raw) == raw
+    assert json.loads(extract_json(raw)) == [{"a": 1}, {"a": 2}]
 
 
 def test_extract_json_extracts_from_surrounding_prose():
     raw = 'Here is the result:\n{"a": 1}\nHope that helps.'
     assert json.loads(extract_json(raw)) == {"a": 1}
+
+
+def test_extract_json_extracts_before_trailing_prose():
+    raw = '{"a": 1}\nHope that helps.'
+    assert extract_json(raw) == '{"a": 1}'
+    assert json.loads(extract_json(raw)) == {"a": 1}
+
+
+def test_extract_json_preserves_prose_wrapped_array():
+    raw = 'Here is the result:\n[{"a": 1}]\nHope that helps.'
+    parsed = json.loads(extract_json(raw))
+    assert isinstance(parsed, list)
+    assert parsed == [{"a": 1}]
+
+
+def test_extract_json_accepts_uppercase_fence_language():
+    raw = '```JSON\n{"a": 1}\n```'
+    assert json.loads(extract_json(raw)) == {"a": 1}
+
+
+def test_extract_json_skips_invalid_fence_before_valid_json():
+    raw = '```json\nnot json\n```\nActual result: {"a": 1}'
+    assert json.loads(extract_json(raw)) == {"a": 1}
+
+
+def test_extract_json_returns_stripped_invalid_output():
+    raw = "  totally not json  "
+    assert extract_json(raw) == "totally not json"
 
 
 def test_auto_linker_recovers_fenced_response_instead_of_poisoning():

@@ -5,6 +5,8 @@ from __future__ import annotations
 import socket
 from unittest import mock
 
+import pytest
+
 from ormah import server_manager
 
 
@@ -24,6 +26,24 @@ def test_is_port_in_use_false_when_nothing_listening():
         probe.bind(("127.0.0.1", 0))
         host, port = probe.getsockname()
     assert server_manager.is_port_in_use(host, port) is False
+
+
+def test_is_port_in_use_false_for_unused_ipv6_literal():
+    """An IPv6 host literal must not fail the pre-flight probe."""
+    assert server_manager.is_port_in_use("::1", 0) is False
+
+
+def test_is_port_in_use_true_when_ipv6_socket_listening():
+    """An IPv6 listening socket is reported as in use when IPv6 is available."""
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as srv:
+        try:
+            srv.bind(("::1", 0))
+        except OSError as exc:
+            pytest.skip(f"IPv6 loopback unavailable: {exc}")
+
+        srv.listen(1)
+        _host, port, *_rest = srv.getsockname()
+        assert server_manager.is_port_in_use("::1", port) is True
 
 
 def test_plist_keepalive_only_on_unsuccessful_exit():

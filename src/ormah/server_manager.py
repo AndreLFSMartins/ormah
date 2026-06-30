@@ -100,9 +100,11 @@ def is_port_in_use(host: str, port: int) -> bool:
     already-running ormah server) owns the port, the launcher exits cleanly
     instead of letting uvicorn crash on bind and KeepAlive respawn it in a loop.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
-        return sock.connect_ex((host, port)) == 0
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
 
 
 def install_launchd_agent(ormah_bin: str, wrapper_path: str | None = None) -> None:

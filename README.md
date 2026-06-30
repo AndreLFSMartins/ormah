@@ -44,6 +44,16 @@ Silence is better than noise. Ormah should whisper, not shout.
 
 ## Install
 
+### Desktop App
+
+<p>
+  <a href="https://www.ormah.me/download/mac"><img src="https://img.shields.io/badge/Download-macOS_Apple_Silicon-black?logo=apple&logoColor=white&style=for-the-badge" alt="Download for macOS"></a>
+  &nbsp;
+  <a href="https://www.ormah.me/download/linux"><img src="https://img.shields.io/badge/Download-Linux_x86__64-black?logo=linux&logoColor=white&style=for-the-badge" alt="Download for Linux"></a>
+</p>
+
+No Python or terminal required. Download, open, and Ormah sets itself up.
+
 ### Terminal
 
 ```bash
