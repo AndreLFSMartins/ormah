@@ -10,6 +10,7 @@ interface Props {
   nodes: MemoryNode[];
   edges: Edge[];
   onToggle: <K extends keyof Filters>(key: K, value: string) => void;
+  onToggleClusterBySpace: () => void;
   appearance: GraphAppearance;
   onThemeChange: (theme: GraphTheme) => void;
   onTierColorChange: (tier: Tier, color: string) => void;
@@ -35,6 +36,7 @@ export default function FilterDrawer({
   nodes,
   edges,
   onToggle,
+  onToggleClusterBySpace,
   appearance,
   onThemeChange,
   onTierColorChange,
@@ -97,6 +99,13 @@ export default function FilterDrawer({
         </button>
       </div>
       <div className="drawer-section-heading">filters</div>
+      <div className="filter-section">
+        <div className="filter-section-title">layout</div>
+        <div className="filter-option" onClick={onToggleClusterBySpace}>
+          <div className={`filter-checkbox ${filters.clusterBySpace ? "checked" : ""}`} />
+          <span>cluster by space</span>
+        </div>
+      </div>
       <div className="filter-section">
         <div className="filter-section-title">tier</div>
         {TIERS.map((t) => (

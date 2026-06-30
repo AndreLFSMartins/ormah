@@ -206,6 +206,19 @@ export default function App() {
     []
   );
 
+  const toggleClusterBySpace = useCallback(
+    () => setFilters((f) => ({ ...f, clusterBySpace: !f.clusterBySpace })),
+    [],
+  );
+
+  // DEV-only: lets the Playwright drag E2E force the global-worker path
+  // (cluster mode uses a static layout that never re-heats). See test_graph_drag.py.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    (window as unknown as Record<string, unknown>).__ormahSetClusterBySpace = (v: boolean) =>
+      setFilters((f) => ({ ...f, clusterBySpace: v }));
+  }, []);
+
   const clearThemeTransition = useCallback(() => {
     if (themeTransitionFrameRef.current !== null) {
       cancelAnimationFrame(themeTransitionFrameRef.current);
@@ -323,6 +336,7 @@ export default function App() {
         nodes={graph.nodes}
         edges={graph.edges}
         onToggle={toggleFilter}
+        onToggleClusterBySpace={toggleClusterBySpace}
         appearance={graphAppearance}
         onThemeChange={handleThemeChange}
         onTierColorChange={handleTierColorChange}
