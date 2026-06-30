@@ -11,7 +11,12 @@ import {
 import Graph from "graphology";
 import Sigma from "sigma";
 import { buildGraph, applyAppearance } from "../graph/graphModel";
-import { createForceLayout, type ForceLayout } from "../graph/forceLayout";
+import { createForceLayout, STATIC_LAYOUT, type ForceLayout } from "../graph/forceLayout";
+import {
+  CLUSTER_LAYOUT_MAX_SPACE_NODES,
+  computeClusterLayout,
+  largestSpaceSize,
+} from "../graph/clusterLayout";
 import { makeNodeReducer, makeEdgeReducer, type ViewState } from "../graph/sigmaReducers";
 import { focusFitIds } from "./legendFit";
 import { fitToNodes } from "./fit";
@@ -372,15 +377,34 @@ const GraphView = forwardRef<
         (window as unknown as Record<string, unknown>).__ormahSigma = renderer;
       }
 
-      // ── Force layout ──────────────────────────────────────────────────────
-      const layout = createForceLayout(graph);
+      // ── Layout: per-space clusters (static) for small graphs, else global FA2 ──
+      // Council R1+R2: the default view loads the full incl-archival store, and FA2
+      // cost is per-space, so cluster layout runs only when the LARGEST space is
+      // small enough to lay out synchronously without blocking the main thread.
+      // ponytail: a flat per-space cap; revisit if a mid-size vault still janks.
+      const useCluster = clusterBySpace && largestSpaceSize(nodes) <= CLUSTER_LAYOUT_MAX_SPACE_NODES;
+      if (import.meta.env.DEV) {
+        (window as unknown as Record<string, unknown>).__ormahLayoutMode = useCluster ? "cluster" : "global";
+      }
+      let layout: ForceLayout;
+      let layoutWatchdog: ReturnType<typeof setTimeout> | null = null;
+      if (useCluster) {
+        const pos = computeClusterLayout(nodes, edges);
+        graph.forEachNode((id) => {
+          const p = pos.get(id);
+          if (p) {
+            graph.setNodeAttribute(id, "x", p.x);
+            graph.setNodeAttribute(id, "y", p.y);
+          }
+        });
+        layout = STATIC_LAYOUT;
+        setLayoutReady(true); // positions are final — no settle delay
+      } else {
+        layout = createForceLayout(graph);
+        layout.start();
+        layoutWatchdog = setTimeout(() => setLayoutReady(true), 800);
+      }
       layoutRef.current = layout;
-      layout.start();
-
-      // Mark layout ready after a brief settle (matches old cytoscape watchdog pattern)
-      const layoutWatchdog = setTimeout(() => {
-        setLayoutReady(true);
-      }, 800);
 
       // ── Sync zoom slider from camera ──────────────────────────────────────
       const syncZoomSlider = () => {
@@ -458,7 +482,7 @@ const GraphView = forwardRef<
       });
 
       return () => {
-        clearTimeout(layoutWatchdog);
+        if (layoutWatchdog !== null) clearTimeout(layoutWatchdog);
         layout.kill();
         layoutRef.current = null;
         renderer.kill();
@@ -467,10 +491,11 @@ const GraphView = forwardRef<
         if (import.meta.env.DEV) {
           delete (window as unknown as Record<string, unknown>).__ormahGraph;
           delete (window as unknown as Record<string, unknown>).__ormahSigma;
+          delete (window as unknown as Record<string, unknown>).__ormahLayoutMode;
         }
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [nodes, edges, userNodeId]);
+    }, [nodes, edges, userNodeId, clusterBySpace]);
 
     // ─── Restyle effect: in-place recolor/resize without remounting (Council M4) ─
     // Deps include appearance, nodes, edges, userNodeId — never recreates sigma.

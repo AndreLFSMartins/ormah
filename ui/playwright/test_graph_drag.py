@@ -18,7 +18,10 @@ def first_node_screen_pos(page):
           const s = window.__ormahSigma;          // exposed alongside the graph (DEV only)
           if (!g || !s) return null;
           const id = g.nodes()[0];
-          const p = s.graphToViewport(s.getNodeDisplayData(id));
+          // Use the RAW graph attributes (not getNodeDisplayData, which returns
+          // sigma's internally rescaled/framed coords) — graphToViewport expects
+          // graph coordinates, so framed coords land the mouse off the node.
+          const p = s.graphToViewport({ x: g.getNodeAttribute(id, "x"), y: g.getNodeAttribute(id, "y") });
           const r = s.getContainer().getBoundingClientRect();
           return { id, x: r.x + p.x, y: r.y + p.y };
         }"""
@@ -38,6 +41,9 @@ def main() -> int:
         page = browser.new_page(viewport={"width": 1440, "height": 900})
         page.goto(URL, wait_until="domcontentloaded")
         page.wait_for_selector("canvas", timeout=30000)
+        # Slice B: drag-reheat only happens on the global-FA2 path; cluster mode is
+        # static. Force cluster off (DEV hook from App.tsx) so this asserts the worker.
+        page.evaluate("window.__ormahSetClusterBySpace && window.__ormahSetClusterBySpace(false)")
         page.wait_for_timeout(6000)
 
         start = first_node_screen_pos(page)

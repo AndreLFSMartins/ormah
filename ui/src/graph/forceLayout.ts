@@ -28,7 +28,8 @@ export interface ForceLayoutOptions {
   layoutFactory?: (graph: Graph, settings: Record<string, unknown>) => FA2Worker;
 }
 
-const NOOP_STATIC: ForceLayout = {
+// Exported so cluster mode (static, deterministic positions) can skip the FA2 worker.
+export const STATIC_LAYOUT: ForceLayout = {
   start() {}, stop() {}, kill() {}, reheat() {}, isRunning: () => false, available: false,
 };
 
@@ -49,7 +50,7 @@ export function createForceLayout(graph: Graph, opts: ForceLayoutOptions = {}): 
     worker = factory(graph, settings);
   } catch {
     // Worker unavailable (e.g. SSR/jsdom/blocked): fall back to a static render.
-    return NOOP_STATIC;
+    return STATIC_LAYOUT;
   }
 
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
