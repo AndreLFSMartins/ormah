@@ -2446,6 +2446,17 @@ class TestMergeHooks:
         assert "/bin/other" in cmds
         assert "/x/ormah whisper inject" in cmds
 
+    def test_preserves_malformed_non_dict_hook_entry(self):
+        # a matcher whose hooks list contains a malformed (non-dict) entry must not crash
+        existing = {"UserPromptSubmit": [{"hooks": ["malformed-string-entry"]}]}
+        merged = _merge_hooks(existing, self.ORMAH)  # must NOT raise
+        # the malformed entry is preserved
+        all_hooks = [h for m in merged["UserPromptSubmit"] if isinstance(m, dict) for h in m.get("hooks", [])]
+        assert "malformed-string-entry" in all_hooks
+        # ormah's hook is also appended
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] if isinstance(m, dict) for h in m.get("hooks", []) if isinstance(h, dict)]
+        assert "/x/ormah whisper inject" in cmds
+
     def test_drops_matcher_emptied_of_only_ormah_hooks(self):
         # a matcher that held ONLY ormah hooks should be dropped after stripping,
         # not left as {"hooks": []} — ormah's own fresh matcher is then appended
@@ -2481,6 +2492,12 @@ class TestIsOrmahHook:
         assert not _is_ormah_hook({"command": ""})
         assert not _is_ormah_hook({})
         assert not _is_ormah_hook({"command": "unterminated 'quote"})
+
+    def test_non_dict_entry_returns_false(self):
+        assert _is_ormah_hook("a string") is False
+        assert _is_ormah_hook(123) is False
+        assert _is_ormah_hook(None) is False
+        assert _is_ormah_hook(["list"]) is False
 
 
 class TestRemoveClaudeHooksPluginWrapper:

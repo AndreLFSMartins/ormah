@@ -165,6 +165,8 @@ def _is_ormah_hook(entry: dict) -> bool:
     "whisper store" is never misclassified. Works for install dedup and uninstall
     alike, and is resilient to the ormah binary path changing between runs.
     """
+    if not isinstance(entry, dict):
+        return False
     try:
         parts = shlex.split(entry.get("command", ""))
     except ValueError:
