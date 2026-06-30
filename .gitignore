@@ -73,6 +73,10 @@ CLAUDE.md
 .omx/
 .codex
 .codex/
+
+# Superpowers generated planning artifacts
+/docs/superpowers/
+
 # >>> dev-council ephemerals (managed by /council-init — do not edit) >>>
 .council/project-map.md
 .council/current-plan.md
