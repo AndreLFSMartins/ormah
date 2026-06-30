@@ -25,6 +25,8 @@ from ormah.setup import (
     CODEX_AGENTS_SENTINEL_START,
     CLAUDE_MD_SENTINEL_END,
     CLAUDE_MD_SENTINEL_START,
+    _is_ormah_hook,
+    _merge_hooks,
     _merge_json_file,
     _preload_local_models,
     _print_setup_summary,
@@ -2241,3 +2243,72 @@ class TestStopRunningServer:
             main()
 
         assert exc_info.value.code == 1
+
+
+class TestMergeHooks:
+    ORMAH = {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/x/ormah whisper inject"}]}]}
+
+    def test_preserves_cotenant_under_same_event(self):
+        existing = {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "other-tool"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m["hooks"]]
+        assert "other-tool" in cmds
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_idempotent_no_duplicate_ormah(self):
+        once = _merge_hooks({}, self.ORMAH)
+        twice = _merge_hooks(once, self.ORMAH)
+        cmds = [h["command"] for m in twice["UserPromptSubmit"] for h in m["hooks"]]
+        assert cmds.count("/x/ormah whisper inject") == 1
+
+    def test_leaves_unclaimed_events_untouched(self):
+        existing = {"PreToolUse": [{"hooks": [{"type": "command", "command": "rtk hook claude"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        assert merged["PreToolUse"] == existing["PreToolUse"]
+
+    def test_substring_collision_not_stripped(self):
+        existing = {"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": "/opt/whisper inject-backup run"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m["hooks"]]
+        assert "/opt/whisper inject-backup run" in cmds
+
+
+class TestIsOrmahHook:
+    def test_matches_real_ormah_hook(self):
+        assert _is_ormah_hook({"command": "/usr/bin/ormah whisper inject"})
+        assert _is_ormah_hook({"command": "/abs/path/ormah whisper store"})
+
+    def test_matches_plugin_wrapper_form(self):
+        assert _is_ormah_hook({"command": "/x/plugin/bin/ormah-whisper-inject"})
+        assert _is_ormah_hook({"command": "/x/plugin/bin/ormah-whisper-store"})
+
+    def test_rejects_substring_collision(self):
+        assert not _is_ormah_hook({"command": "/opt/whisper inject-backup run"})
+        assert not _is_ormah_hook({"command": "tools/whisper store-archive"})
+
+    def test_rejects_malformed_command(self):
+        assert not _is_ormah_hook({"command": ""})
+        assert not _is_ormah_hook({})
+        assert not _is_ormah_hook({"command": "unterminated 'quote"})
+
+
+class TestRemoveClaudeHooksPluginWrapper:
+    def test_removes_plugin_wrapper_hook(self, tmp_path):
+        data = {"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": "/x/plugin/bin/ormah-whisper-inject"}]}
+        ]}}
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()
+
+        result = json.loads((claude_dir / "settings.json").read_text())
+        cmds = [
+            h["command"]
+            for m in result.get("hooks", {}).get("UserPromptSubmit", [])
+            for h in m["hooks"]
+        ]
+        assert "/x/plugin/bin/ormah-whisper-inject" not in cmds

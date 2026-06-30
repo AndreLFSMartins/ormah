@@ -6,6 +6,7 @@ import contextlib
 import glob
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -150,6 +151,58 @@ def _merge_json_file(path: str, updates: dict) -> None:
     with open(path, "w") as f:
         json.dump(existing, f, indent=2)
         f.write("\n")
+
+
+def _is_ormah_hook(entry: dict) -> bool:
+    """True when a hook entry is one Ormah installs (argv-aware, not substring).
+
+    Recognizes BOTH install forms:
+      - CLI (ormah setup): `<...>/ormah whisper inject|store`
+      - Plugin wrapper: `<...>/ormah-whisper-inject` | `<...>/ormah-whisper-store`
+        (see integrations/claude-plugin/hooks/hooks.json)
+    A third-party command that merely contains the substring "whisper inject"/
+    "whisper store" is never misclassified. Works for install dedup and uninstall
+    alike, and is resilient to the ormah binary path changing between runs.
+    """
+    try:
+        parts = shlex.split(entry.get("command", ""))
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    name = Path(parts[0]).name
+    if name in ("ormah-whisper-inject", "ormah-whisper-store"):
+        return True  # plugin wrapper form
+    return (
+        len(parts) >= 3
+        and name == "ormah"
+        and parts[1] == "whisper"
+        and parts[2] in ("inject", "store")
+    )  # CLI form
+
+
+def _merge_hooks(existing: dict, ormah_hooks: dict) -> dict:
+    """Merge Ormah hook groups into an existing hooks dict, preserving co-tenants.
+
+    For each event Ormah claims: strip prior Ormah entries (via _is_ormah_hook),
+    keep every third-party hook, then append Ormah's matchers. Events Ormah does
+    not claim are left untouched. Idempotent. Pure (no I/O).
+    """
+    merged = dict(existing)
+    for event, ormah_matchers in ormah_hooks.items():
+        current = merged.get(event)
+        if not isinstance(current, list):
+            current = []
+        cleaned = []
+        for matcher in current:
+            if not isinstance(matcher, dict):
+                cleaned.append(matcher)
+                continue
+            kept = [h for h in matcher.get("hooks", []) if not _is_ormah_hook(h)]
+            if kept:
+                cleaned.append({**matcher, "hooks": kept})
+        merged[event] = cleaned + list(ormah_matchers)
+    return merged
 
 
 def configure_claude_hooks(ormah_bin: str) -> None:
@@ -687,10 +740,6 @@ def _remove_codex_hooks() -> None:
     if not isinstance(hooks_top, dict):
         info("No hooks section — nothing to remove")
         return
-
-    def _is_ormah_hook(entry: dict) -> bool:
-        cmd = entry.get("command", "")
-        return "whisper inject" in cmd or "whisper store" in cmd
 
     changed = False
     to_delete = []
@@ -1241,10 +1290,6 @@ def _remove_claude_hooks() -> None:
     if not isinstance(hooks_top, dict):
         info("No hooks section — nothing to remove")
         return
-
-    def _is_ormah_hook(entry: dict) -> bool:
-        cmd = entry.get("command", "")
-        return "whisper inject" in cmd or "whisper store" in cmd
 
     changed = False
     to_delete = []
