@@ -188,6 +188,10 @@ def _merge_hooks(existing: dict, ormah_hooks: dict) -> dict:
     For each event Ormah claims: strip prior Ormah entries (via _is_ormah_hook),
     keep every third-party hook, then append Ormah's matchers. Events Ormah does
     not claim are left untouched. Idempotent. Pure (no I/O).
+
+    Matcher drop rule: a matcher is dropped only when removing Ormah hooks left it
+    completely empty (i.e. it held *only* Ormah hooks). Matchers with no "hooks" key,
+    an empty hooks list, or hooks that are all third-party are preserved verbatim.
     """
     merged = dict(existing)
     for event, ormah_matchers in ormah_hooks.items():
@@ -199,9 +203,13 @@ def _merge_hooks(existing: dict, ormah_hooks: dict) -> dict:
             if not isinstance(matcher, dict):
                 cleaned.append(matcher)
                 continue
-            kept = [h for h in matcher.get("hooks", []) if not _is_ormah_hook(h)]
-            if kept:
-                cleaned.append({**matcher, "hooks": kept})
+            inner = matcher.get("hooks", [])
+            kept = [h for h in inner if not _is_ormah_hook(h)]
+            if len(kept) == len(inner):
+                cleaned.append(matcher)  # nothing removed -> preserve verbatim
+            elif kept:
+                cleaned.append({**matcher, "hooks": kept})  # removed some, others remain
+            # else: held ONLY Ormah hooks -> drop the now-empty matcher (intentional cleanup)
         merged[event] = cleaned + list(ormah_matchers)
     return merged
 

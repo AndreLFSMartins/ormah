@@ -2423,6 +2423,46 @@ class TestMergeHooks:
         cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m["hooks"]]
         assert "/opt/whisper inject-backup run" in cmds
 
+    def test_preserves_matcher_without_hooks_key(self):
+        # matcher dict with no "hooks" key must survive the merge unchanged
+        existing = {"UserPromptSubmit": [{"matcher": "Write"}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        # user's hooks-less matcher is still present
+        assert {"matcher": "Write"} in merged["UserPromptSubmit"]
+        # ormah's matcher is also appended
+        cmds = [
+            h["command"]
+            for m in merged["UserPromptSubmit"]
+            if isinstance(m, dict)
+            for h in m.get("hooks", [])
+        ]
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_preserves_matcher_with_only_nonormah_hooks(self):
+        # regression guard: a matcher whose hooks are all non-ormah survives unchanged
+        existing = {"UserPromptSubmit": [{"hooks": [{"command": "/bin/other"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m.get("hooks", [])]
+        assert "/bin/other" in cmds
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_drops_matcher_emptied_of_only_ormah_hooks(self):
+        # a matcher that held ONLY ormah hooks should be dropped after stripping,
+        # not left as {"hooks": []} — ormah's own fresh matcher is then appended
+        existing = {
+            "UserPromptSubmit": [{"hooks": [{"command": "/x/ormah whisper inject"}]}]
+        }
+        merged = _merge_hooks(existing, self.ORMAH)
+        # exactly one occurrence of the inject command (from ormah's appended matcher)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m.get("hooks", [])]
+        assert cmds.count("/x/ormah whisper inject") == 1
+        # no matcher left with an empty hooks list
+        empty_hook_matchers = [
+            m for m in merged["UserPromptSubmit"]
+            if isinstance(m, dict) and m.get("hooks") == []
+        ]
+        assert empty_hook_matchers == []
+
 
 class TestIsOrmahHook:
     def test_matches_real_ormah_hook(self):
