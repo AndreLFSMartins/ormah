@@ -543,7 +543,9 @@ class TestConfigureCodexHooks:
 
         hooks_data = json.loads(hooks_path.read_text())
         assert "UserPromptSubmit" in hooks_data["hooks"]
-        assert hooks_data["hooks"]["Stop"][0]["hooks"][0]["command"] == "/abs/path/ormah whisper store"
+        stop_cmds = [h["command"] for m in hooks_data["hooks"]["Stop"] for h in m["hooks"]]
+        assert "/abs/path/ormah whisper store" in stop_cmds
+        assert "/bin/other" in stop_cmds  # co-tenant preserved
 
 
 class TestRunSetup:
@@ -2393,3 +2395,57 @@ class TestConfigureClaudeHooksMerge:
         with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
             configure_claude_hooks("/abs/ormah")
         assert sp.read_text() == before
+
+
+class TestConfigureCodexHooksMerge:
+    def test_preserves_existing_stop_hook(self, tmp_path):
+        import json
+
+        from ormah.setup import configure_codex_hooks
+
+        codex = tmp_path / ".codex"
+        codex.mkdir()
+        hp = codex / "hooks.json"
+        hp.write_text(
+            json.dumps(
+                {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other-stop"}]}]}}
+            )
+        )
+        with patch("ormah.setup.Path.home", return_value=tmp_path), patch(
+            "ormah.setup._enable_codex_feature"
+        ):
+            configure_codex_hooks("/abs/ormah")
+        data = json.loads(hp.read_text())
+        cmds = [h["command"] for m in data["hooks"]["Stop"] for h in m["hooks"]]
+        assert "other-stop" in cmds
+        assert "/abs/ormah whisper store" in cmds
+
+    def test_rerun_does_not_duplicate(self, tmp_path):
+        import json
+
+        from ormah.setup import configure_codex_hooks
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path), patch(
+            "ormah.setup._enable_codex_feature"
+        ):
+            configure_codex_hooks("/abs/ormah")
+            configure_codex_hooks("/abs/ormah")
+        data = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
+        cmds = [h["command"] for m in data["hooks"]["UserPromptSubmit"] for h in m["hooks"]]
+        assert cmds.count("/abs/ormah whisper inject") == 1
+
+    def test_corrupt_hooks_json_no_false_success(self, tmp_path, capsys):
+        from ormah.setup import configure_codex_hooks
+
+        codex = tmp_path / ".codex"
+        codex.mkdir()
+        hp = codex / "hooks.json"
+        hp.write_text("{ BROKEN")
+        before = hp.read_text()
+        with patch("ormah.setup.Path.home", return_value=tmp_path), patch(
+            "ormah.setup._enable_codex_feature"
+        ) as enable:
+            configure_codex_hooks("/abs/ormah")
+        assert hp.read_text() == before  # unchanged
+        enable.assert_not_called()  # feature flag NOT enabled on abort
+        assert "Codex hooks installed" not in capsys.readouterr().out

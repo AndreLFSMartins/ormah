@@ -6,18 +6,18 @@ import contextlib
 import glob
 import json
 import os
+import re
 import shlex
-import tempfile
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import webbrowser
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Callable
-import re
 
 import httpx
 
@@ -407,9 +407,9 @@ def configure_codex_hooks(ormah_bin: str) -> None:
         ],
     }
 
-    _merge_json_file(str(hooks_path), {"hooks": hooks})
-    _enable_codex_feature("hooks", deprecated_feature_names=("codex_hooks",))
-    ok("Codex hooks installed — memories flow before every message")
+    if _install_hooks(str(hooks_path), hooks):
+        _enable_codex_feature("hooks", deprecated_feature_names=("codex_hooks",))
+        ok("Codex hooks installed — memories flow before every message")
 
 
 def _remove_toml_table_block(text: str, table_name: str) -> str:
