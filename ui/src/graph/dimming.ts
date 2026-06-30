@@ -33,3 +33,23 @@ export function buildDimmed(filters: Filters, nodes: MemoryNode[], viewScope: Vi
 
   return { space: dimmedSpace, tier: dimmedTier, role: new Set(), type: dimmedType, edge: dimmedEdge };
 }
+
+/**
+ * The nodes the canvas renders un-dimmed for the given filters + scope. The
+ * TopBar count derives from this so the badge never diverges from what the user
+ * sees: in a space drill or "show all", buildDimmed skips tier/space dimming, so
+ * the count must too (a plain tier/space filter would under-count the canvas).
+ */
+export function selectVisibleNodes(
+  filters: Filters,
+  nodes: MemoryNode[],
+  viewScope: ViewScope,
+): MemoryNode[] {
+  const dimmed = buildDimmed(filters, nodes, viewScope);
+  return nodes.filter(
+    (n) =>
+      !dimmed.tier.has(n.tier) &&
+      !dimmed.space.has(n.space || "") &&
+      !dimmed.type.has(n.type),
+  );
+}

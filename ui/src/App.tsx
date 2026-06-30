@@ -3,6 +3,8 @@ import { fetchGraph, fetchNodeDetail } from "./api";
 import type { Edge, GraphData, MemoryNode, NodeDetail, Tier, NodeType, EdgeType, ViewScope } from "./types";
 import { ALL_TIERS, ALL_NODE_TYPES, ALL_EDGE_TYPES } from "./types";
 import { createRequestGuard } from "./graph/requestGuard";
+import { selectVisibleNodes } from "./graph/dimming";
+import { nextSpaceFilter } from "./graph/spaceFilter";
 import GraphView from "./components/GraphView";
 import TopBar from "./components/TopBar";
 import NodeDetailPanel from "./components/NodeDetail";
@@ -62,6 +64,7 @@ export default function App() {
   const [viewScope, setViewScope] = useState<ViewScope>({ kind: "all" });
   const [hasNoSpace, setHasNoSpace] = useState(false);
   const reqGuard = useRef(createRequestGuard());
+  const spacesSeeded = useRef(false);
   const [toasts, setToasts] = useState<ToastData[]>([]);
   const [graphAppearance, setGraphAppearance] =
     useState<GraphAppearance>(loadGraphAppearance);
@@ -106,12 +109,12 @@ export default function App() {
         if (space === undefined) {
           const spaceList = data.all_spaces ?? [];
           setAllSpaces(spaceList);
-          // C1: include "" so no-space nodes are not space-dimmed in the overview.
-          // NOTE: this "" injection is the ONLY thing keeping no-space nodes
-          // un-dimmed on the canvas (buildDimmed keys on n.space || ""). The
-          // TopBar count badge uses a separate `!n.space`-always-visible rule
-          // (filteredNodes), so don't drop this line thinking the badge covers it.
-          setFilters((f) => ({ ...f, spaces: new Set([...spaceList, ""]) }));
+          // Seed the space filter to "all checked" (incl. "" for no-space nodes)
+          // only on the FIRST active load. Exiting a drill must NOT re-seed, or it
+          // would silently re-check spaces the user deselected before drilling.
+          const seeded = spacesSeeded.current;
+          spacesSeeded.current = true;
+          setFilters((f) => ({ ...f, spaces: nextSpaceFilter(f.spaces, spaceList, seeded) }));
         }
       })
       .catch(() => {
@@ -174,17 +177,13 @@ export default function App() {
     [handleNodeSelect]
   );
 
+  // TopBar count = nodes the canvas renders un-dimmed. Derived from the same
+  // buildDimmed the renderer uses (via selectVisibleNodes) so the badge tracks
+  // viewScope: in a drill / show-all the count stops under-reporting the canvas.
   const filteredNodes = useMemo(() => {
     if (!graph) return [];
-    return graph.nodes.filter(
-      (n) =>
-        filters.tiers.has(n.tier) &&
-        filters.types.has(n.type) &&
-        (filters.spaces.size === 0 ||
-          !n.space ||
-          filters.spaces.has(n.space))
-    );
-  }, [graph, filters]);
+    return selectVisibleNodes(filters, graph.nodes, viewScope);
+  }, [graph, filters, viewScope]);
 
   const filteredEdges = useMemo(() => {
     if (!graph) return [];
