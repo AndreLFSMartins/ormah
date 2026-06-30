@@ -868,13 +868,34 @@ def _read_env_file() -> dict[str, str]:
 
 
 def _write_env_file(env: dict[str, str]) -> None:
-    """Write env dict to the global config file with secure permissions."""
-    ENV_DIR.mkdir(parents=True, exist_ok=True)
-    lines = []
+    """Write env dict to the global config file, preserving comments and ordering.
+
+    Existing KEY= lines are updated in place; keys absent from `env` are dropped;
+    full-line comments, blank lines, and ordering are kept verbatim; new keys
+    append at end.
+
+    CONTRACT: callers MUST pass the FULL env (from `_read_env_file()`) unless they
+    intentionally want absent keys removed — a partial dict deletes the missing
+    user keys. Non-goal: an inline trailing comment on a key whose VALUE this call
+    rewrites is dropped (full-line comments and untouched keys keep theirs).
+    """
+    original = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in original:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.partition("=")[0].strip()
+            if key in env:
+                out.append(f"{key}={env[key]}")
+                seen.add(key)
+            # key removed by caller -> drop the line
+        else:
+            out.append(line)  # comment / blank / other -> verbatim
     for key, value in env.items():
-        lines.append(f"{key}={value}")
-    ENV_PATH.write_text("\n".join(lines) + "\n")
-    os.chmod(ENV_PATH, 0o600)
+        if key not in seen:
+            out.append(f"{key}={value}")
+    _atomic_write(str(ENV_PATH), "\n".join(out) + "\n", mode=0o600)
 
 
 def generate_server_wrapper(ormah_bin: str) -> Path:

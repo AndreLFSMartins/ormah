@@ -892,6 +892,75 @@ class TestEnvFile:
         assert file_mode == 0o600
 
 
+class TestWriteEnvPreservation:
+    def test_preserves_comments_and_manual_key(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# header comment\nMANUAL_KEY=keep\n\nORMAH_X=old\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"MANUAL_KEY": "keep", "ORMAH_X": "new"})
+        text = env_path.read_text()
+        assert "# header comment" in text
+        assert "MANUAL_KEY=keep" in text
+        assert "ORMAH_X=new" in text
+        assert "ORMAH_X=old" not in text
+
+    def test_removed_key_dropped_comments_kept(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# keep me\nDROP=1\nKEEP=2\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"KEEP": "2"})
+        text = env_path.read_text()
+        assert "# keep me" in text
+        assert "KEEP=2" in text
+        assert "DROP" not in text
+
+    def test_new_key_appended(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# c\nA=1\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"A": "1", "B": "2"})
+        lines = [ln for ln in env_path.read_text().splitlines() if ln.strip()]
+        assert lines[-1] == "B=2"
+        assert "# c" in env_path.read_text()
+
+    def test_nonexistent_file_writes_dict_order(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"A": "1", "B": "2"})
+        assert env_path.read_text() == "A=1\nB=2\n"
+
+    def test_untouched_key_with_inline_comment_preserved(self, tmp_path):
+        from ormah.setup import _read_env_file, _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("MANUAL=val  # keep this note\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            env = _read_env_file()
+            _write_env_file(env)
+        assert "# keep this note" in env_path.read_text()
+
+    def test_configure_llm_flow_preserves_block_comment(self, tmp_path):
+        from ormah.setup import _read_env_file, _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# my ormah config\nORMAH_LLM_PROVIDER=none\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            env = _read_env_file()
+            env["ORMAH_LLM_PROVIDER"] = "ollama"
+            _write_env_file(env)
+        text = env_path.read_text()
+        assert "# my ormah config" in text
+        assert "ORMAH_LLM_PROVIDER=ollama" in text
+
+
 # --- Server wrapper tests ---
 
 
