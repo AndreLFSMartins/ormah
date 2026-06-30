@@ -2246,7 +2246,9 @@ class TestStopRunningServer:
 
 
 class TestMergeHooks:
-    ORMAH = {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/x/ormah whisper inject"}]}]}
+    ORMAH = {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/x/ormah whisper inject"}]}]
+    }
 
     def test_preserves_cotenant_under_same_event(self):
         existing = {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "other-tool"}]}]}
@@ -2312,3 +2314,82 @@ class TestRemoveClaudeHooksPluginWrapper:
             for h in m["hooks"]
         ]
         assert "/x/plugin/bin/ormah-whisper-inject" not in cmds
+
+
+class TestConfigureClaudeHooksMerge:
+    def test_preserves_existing_userpromptsubmit_hook(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+        import json
+
+        sp = tmp_path / "settings.json"
+        sp.write_text(
+            json.dumps(
+                {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "other-tool"}]}]}}
+            )
+        )
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        data = json.loads(sp.read_text())
+        cmds = [h["command"] for m in data["hooks"]["UserPromptSubmit"] for h in m["hooks"]]
+        assert "other-tool" in cmds
+        assert "/abs/ormah whisper inject" in cmds
+
+    def test_rerun_does_not_duplicate(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+        import json
+
+        sp = tmp_path / "settings.json"
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+            configure_claude_hooks("/abs/ormah")
+        data = json.loads(sp.read_text())
+        cmds = [h["command"] for m in data["hooks"]["UserPromptSubmit"] for h in m["hooks"]]
+        assert cmds.count("/abs/ormah whisper inject") == 1
+
+    def test_preserves_existing_precompact_and_sessionend(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+        import json
+
+        sp = tmp_path / "settings.json"
+        sp.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreCompact": [
+                            {"hooks": [{"type": "command", "command": "other-precompact"}]}
+                        ],
+                        "SessionEnd": [
+                            {"hooks": [{"type": "command", "command": "other-sessionend"}]}
+                        ],
+                    }
+                }
+            )
+        )
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        data = json.loads(sp.read_text())
+        pre = [h["command"] for m in data["hooks"]["PreCompact"] for h in m["hooks"]]
+        end = [h["command"] for m in data["hooks"]["SessionEnd"] for h in m["hooks"]]
+        assert "other-precompact" in pre and "/abs/ormah whisper store" in pre
+        assert "other-sessionend" in end and "/abs/ormah whisper store" in end
+
+    def test_corrupt_json_left_unchanged_and_no_false_success(self, tmp_path, capsys):
+        from ormah.setup import configure_claude_hooks
+
+        sp = tmp_path / "settings.json"
+        sp.write_text('{ "theme": "dark", BROKEN')
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+    def test_non_object_json_left_unchanged(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+
+        sp = tmp_path / "settings.json"
+        sp.write_text('["not", "an", "object"]')
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before

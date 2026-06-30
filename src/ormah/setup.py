@@ -7,6 +7,7 @@ import glob
 import json
 import os
 import shlex
+import tempfile
 import shutil
 import socket
 import subprocess
@@ -205,6 +206,57 @@ def _merge_hooks(existing: dict, ormah_hooks: dict) -> dict:
     return merged
 
 
+def _atomic_write(path: str, text: str, mode: int | None = None) -> None:
+    """Write text to `path` atomically (temp file in the same dir + os.replace).
+
+    Prevents a crash mid-write from leaving a truncated/corrupt config — the
+    target is either the old bytes or the full new bytes, never a partial file.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _install_hooks(path: str, ormah_hooks: dict) -> bool:
+    """Read a JSON hooks config, merge Ormah hooks preserving co-tenants, write back.
+
+    Returns True if the merged config was written, False if it aborted without
+    writing. Fail-closed: if the file exists but does not parse OR does not hold a
+    JSON object, warn and abort (mirrors the uninstall no-op) so a hand-edited
+    config with a transient syntax error is never replaced by a hooks-only file,
+    losing theme/permissions. The write is atomic (no partial-write corruption).
+    """
+    existing: dict = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            warn(f"Could not parse {path} — leaving it unchanged; hooks not configured")
+            return False
+        if not isinstance(existing, dict):
+            warn(f"{path} is not a JSON object — leaving it unchanged; hooks not configured")
+            return False
+    current = existing.get("hooks")
+    if not isinstance(current, dict):
+        current = {}
+    existing["hooks"] = _merge_hooks(current, ormah_hooks)
+    _atomic_write(path, json.dumps(existing, indent=2) + "\n")
+    return True
+
+
 def configure_claude_hooks(ormah_bin: str) -> None:
     """Write Claude Code hook config to global settings using absolute paths."""
     settings_path = os.path.expanduser("~/.claude/settings.json")
@@ -246,8 +298,8 @@ def configure_claude_hooks(ormah_bin: str) -> None:
         }
     ]
 
-    _merge_json_file(settings_path, {"hooks": hooks})
-    ok("Whisper hooks installed \u2014 memories flow before every message")
+    if _install_hooks(settings_path, hooks):
+        ok("Whisper hooks installed \u2014 memories flow before every message")
 
 
 def configure_claude_code_mcp(ormah_bin: str) -> None:
