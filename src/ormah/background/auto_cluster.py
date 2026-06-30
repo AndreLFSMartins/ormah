@@ -54,9 +54,22 @@ def run_auto_cluster(engine) -> None:
             # stale, or the node may have been locked between selection and now. Never
             # reassign a locked node or the self node.
             node = engine.file_store.load(node_id)
-            if node is None or node.space_locked or node_id == engine.user_node_id:
+            if node is None or node_id == engine.user_node_id:
+                continue
+            if node.space_locked:
+                # The file (source of truth) says locked but the index selected it — heal the
+                # stale index row so this node stops resurfacing in the query every run.
+                with engine.db.transaction() as conn:
+                    conn.execute(
+                        "UPDATE nodes SET space = ?, space_locked = 1 WHERE id = ?",
+                        (node.space, node_id),
+                    )
                 continue
             node.space = most_common
+            # ponytail: a concurrent lock landing between this recheck and save() loses to
+            # last-writer here (the index UPDATE below is still guarded). Bounded: hourly job,
+            # microsecond window, single-user, self-heals next run. A cross-store file<->SQLite
+            # lock would close it but is overkill for this context.
             engine.file_store.save(node)
             updates.append((most_common, node_id))
             assigned += 1

@@ -100,6 +100,11 @@ def test_auto_cluster_rechecks_stale_index_lock(engine):
     node = engine.file_store.load(a)
     assert node.space is None
     assert node.space_locked is True
+    # The stale index row is healed so the node stops resurfacing in the unassigned query.
+    healed = engine.db.conn.execute(
+        "SELECT space_locked FROM nodes WHERE id = ?", (a,)
+    ).fetchone()[0]
+    assert healed == 1
 
 
 def test_migrate_lock_identity_spaces_relocks_legacy(engine):
