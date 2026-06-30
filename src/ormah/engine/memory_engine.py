@@ -82,6 +82,15 @@ _EDGE_TYPE_FACTORS: dict[str, float] = {
 }
 
 
+def apply_identity_space_invariants(node: MemoryNode) -> None:
+    """Identity (about_self) memories are always global: force space=None + lock so no
+    write path (remember, update_node, consolidator) can leave them project-scoped or
+    unlocked for auto_cluster to reassign (#22)."""
+    if "about_self" in node.tags:
+        node.space = None
+        node.space_locked = True
+
+
 class MemoryEngine:
     """Main facade: remember(), recall(), connect(), context()."""
 
@@ -464,10 +473,8 @@ class MemoryEngine:
                 node.tags.append("about_self")
             if node.type == NodeType.person:
                 node.tier = Tier.core
-            # Identity is always global — force None (a default_space may have leaked into
-            # req.space upstream) and lock it so auto_cluster never reassigns it.
-            node.space = None
-            node.space_locked = True
+            # Identity is always global (a default_space may have leaked into req.space).
+            apply_identity_space_invariants(node)
 
         # Enforce core cap
         if node.tier == Tier.core:
@@ -824,6 +831,10 @@ class MemoryEngine:
         if req.add_connections:
             node.connections.extend(req.add_connections)
             changed_fields.append("connections")
+
+        # Re-assert the identity invariant: an about_self node must stay global + locked
+        # regardless of any space/space_locked the request tried to set.
+        apply_identity_space_invariants(node)
 
         node.updated = datetime.now(timezone.utc)
         path = self.file_store.save(node)

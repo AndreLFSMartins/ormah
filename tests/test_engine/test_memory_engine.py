@@ -147,6 +147,33 @@ def test_remember_about_self_locks_space(engine):
     assert engine.file_store.load(node_id).space_locked is True
 
 
+def test_apply_identity_space_invariants_helper():
+    """about_self nodes are forced global+locked; others are untouched (#22 council)."""
+    from ormah.engine.memory_engine import apply_identity_space_invariants
+    from ormah.models.node import MemoryNode
+
+    identity = MemoryNode(type=NodeType.fact, space="work", tags=["about_self"])
+    apply_identity_space_invariants(identity)
+    assert identity.space is None
+    assert identity.space_locked is True
+
+    plain = MemoryNode(type=NodeType.fact, space="work", tags=["misc"])
+    apply_identity_space_invariants(plain)
+    assert plain.space == "work"
+    assert plain.space_locked is False
+
+
+def test_update_node_cannot_unlock_identity(engine):
+    """An about_self memory stays global+locked even if update tries to set a project space."""
+    node_id, _ = engine.remember(
+        CreateNodeRequest(content="André is stoic.", type=NodeType.fact, about_self=True)
+    )
+    engine.update_node(node_id, UpdateNodeRequest(space="work", space_locked=False))
+    node = engine.file_store.load(node_id)
+    assert node.space is None
+    assert node.space_locked is True
+
+
 def test_remember_about_self_forces_global_space(engine):
     """about_self is global even if a default_space leaked into req.space (#22 council A)."""
     node_id, _ = engine.remember(
