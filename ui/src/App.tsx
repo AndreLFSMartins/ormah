@@ -65,6 +65,7 @@ export default function App() {
   const [hasNoSpace, setHasNoSpace] = useState(false);
   const reqGuard = useRef(createRequestGuard());
   const spacesSeeded = useRef(false);
+  const knownSpaces = useRef<Set<string>>(new Set());
   const [toasts, setToasts] = useState<ToastData[]>([]);
   const [graphAppearance, setGraphAppearance] =
     useState<GraphAppearance>(loadGraphAppearance);
@@ -109,12 +110,15 @@ export default function App() {
         if (space === undefined) {
           const spaceList = data.all_spaces ?? [];
           setAllSpaces(spaceList);
-          // Seed the space filter to "all checked" (incl. "" for no-space nodes)
-          // only on the FIRST active load. Exiting a drill must NOT re-seed, or it
-          // would silently re-check spaces the user deselected before drilling.
+          // Seed "all checked" on the FIRST active load; on later loads keep the
+          // user's set (deselections survive a drill round-trip) but auto-add any
+          // space not seen before. Snapshot `known` BEFORE bumping the ref so the
+          // async setFilters updater reads the pre-load set, not the bumped one.
           const seeded = spacesSeeded.current;
+          const known = knownSpaces.current;
           spacesSeeded.current = true;
-          setFilters((f) => ({ ...f, spaces: nextSpaceFilter(f.spaces, spaceList, seeded) }));
+          knownSpaces.current = new Set([...known, ...spaceList, ""]);
+          setFilters((f) => ({ ...f, spaces: nextSpaceFilter(f.spaces, spaceList, seeded, known) }));
         }
       })
       .catch(() => {
