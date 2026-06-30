@@ -332,7 +332,17 @@ def run_auto_linker(engine) -> None:
 
             node_resolved = True
             text = f"{node['title'] or ''} {node['content']}".strip()
-            if text:
+            if text and vec_store.get(node["id"]) is None:
+                # Node has no vector yet (e.g. node_vectors wiped mid full_rebuild,
+                # before _reindex_all_embeddings restores them). search() would return no
+                # candidates and the watermark would advance past a node never actually
+                # checked — so leave it unresolved and let a later run reprocess it.
+                # Same fail-closed contract as the LLM-unavailable path below.
+                # ponytail: a node that never embeds blocks the watermark forever;
+                # acceptable today (embedding failures are already logged), revisit if a
+                # permanently-unembeddable node ever stalls the cursor in practice.
+                node_resolved = False
+            elif text:
                 query_vec = encoder.encode(text)
                 similar = vec_store.search(query_vec, limit=6)
 
