@@ -250,8 +250,11 @@ def _install_hooks(path: str, ormah_hooks: dict) -> bool:
             warn(f"{path} is not a JSON object — leaving it unchanged; hooks not configured")
             return False
     current = existing.get("hooks")
-    if not isinstance(current, dict):
+    if current is None:
         current = {}
+    elif not isinstance(current, dict):
+        warn(f"{path} has a non-object 'hooks' section — leaving it unchanged; hooks not configured")
+        return False
     existing["hooks"] = _merge_hooks(current, ormah_hooks)
     _atomic_write(path, json.dumps(existing, indent=2) + "\n")
     return True
@@ -886,7 +889,7 @@ def _write_env_file(env: dict[str, str]) -> None:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.partition("=")[0].strip()
-            if key in env:
+            if key in env and key not in seen:
                 out.append(f"{key}={env[key]}")
                 seen.add(key)
             # key removed by caller -> drop the line

@@ -255,6 +255,31 @@ class TestConfigureClaudeHooks:
         assert data["allowedTools"] == ["bash"]
         assert "hooks" in data
 
+    def test_non_object_hooks_section_left_unchanged(self, tmp_path, capsys):
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_text(json.dumps({"theme": "dark", "hooks": []}) + "\n")
+        before = settings_path.read_text()
+
+        with patch("ormah.setup.os.path.expanduser", return_value=str(settings_path)):
+            configure_claude_hooks("/abs/ormah")
+
+        assert settings_path.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+    def test_preserves_top_level_keys(self, tmp_path):
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_text(
+            json.dumps({"theme": "dark", "permissions": {"allow": ["x"]}}) + "\n"
+        )
+
+        with patch("ormah.setup.os.path.expanduser", return_value=str(settings_path)):
+            configure_claude_hooks("/abs/ormah")
+
+        data = json.loads(settings_path.read_text())
+        assert data["theme"] == "dark"
+        assert data["permissions"] == {"allow": ["x"]}
+        assert "UserPromptSubmit" in data["hooks"]
+
 
 class TestConfigureClaudeCodeMcp:
     def test_writes_mcp_config_to_claude_json(self, tmp_path):
@@ -546,6 +571,21 @@ class TestConfigureCodexHooks:
         stop_cmds = [h["command"] for m in hooks_data["hooks"]["Stop"] for h in m["hooks"]]
         assert "/abs/path/ormah whisper store" in stop_cmds
         assert "/bin/other" in stop_cmds  # co-tenant preserved
+
+    def test_non_object_hooks_section_no_false_success(self, tmp_path, capsys):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({"hooks": "bad"}) + "\n")
+        before = hooks_path.read_text()
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path), \
+             patch("ormah.setup._enable_codex_feature") as enable:
+            configure_codex_hooks("/abs/ormah")
+
+        assert hooks_path.read_text() == before
+        enable.assert_not_called()
+        assert "Codex hooks installed" not in capsys.readouterr().out
 
 
 class TestRunSetup:
@@ -959,6 +999,27 @@ class TestWriteEnvPreservation:
         text = env_path.read_text()
         assert "# my ormah config" in text
         assert "ORMAH_LLM_PROVIDER=ollama" in text
+
+    def test_duplicate_keys_collapsed(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("DUP=1\nDUP=2\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"DUP": "2"})
+        text = env_path.read_text()
+        assert text.count("DUP=") == 1
+        assert "DUP=2" in text
+
+    def test_existing_file_mode_forced_to_600(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("A=1\n")
+        env_path.chmod(0o644)
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"A": "1"})
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
 
 # --- Server wrapper tests ---
