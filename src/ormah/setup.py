@@ -167,8 +167,11 @@ def _is_ormah_hook(entry: dict) -> bool:
     """
     if not isinstance(entry, dict):
         return False
+    cmd = entry.get("command", "")
+    if not isinstance(cmd, str):
+        return False
     try:
-        parts = shlex.split(entry.get("command", ""))
+        parts = shlex.split(cmd)
     except ValueError:
         return False
     if not parts:
@@ -270,7 +273,11 @@ def _install_hooks(path: str, ormah_hooks: dict) -> bool:
         if value is not None and not isinstance(value, list):
             warn(f"{path} has a non-list '{event}' hooks entry — leaving it unchanged; hooks not configured")
             return False
-    existing["hooks"] = _merge_hooks(current, ormah_hooks)
+    try:
+        existing["hooks"] = _merge_hooks(current, ormah_hooks)
+    except Exception:
+        warn(f"{path} has a malformed hooks structure — leaving it unchanged; hooks not configured")
+        return False
     _atomic_write(path, json.dumps(existing, indent=2) + "\n")
     return True
 

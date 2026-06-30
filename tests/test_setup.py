@@ -2457,6 +2457,19 @@ class TestMergeHooks:
         cmds = [h["command"] for m in merged["UserPromptSubmit"] if isinstance(m, dict) for h in m.get("hooks", []) if isinstance(h, dict)]
         assert "/x/ormah whisper inject" in cmds
 
+    def test_non_string_command_preserved(self):
+        # a hook with a non-string command is neither Ormah nor crash-worthy —
+        # it must be preserved and the merge must succeed
+        existing = {"UserPromptSubmit": [{"hooks": [{"command": 123}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)  # must not raise
+        preserved = [
+            h
+            for m in merged["UserPromptSubmit"]
+            if isinstance(m, dict)
+            for h in m.get("hooks", [])
+        ]
+        assert {"command": 123} in preserved
+
     def test_drops_matcher_emptied_of_only_ormah_hooks(self):
         # a matcher that held ONLY ormah hooks should be dropped after stripping,
         # not left as {"hooks": []} — ormah's own fresh matcher is then appended
@@ -2476,6 +2489,11 @@ class TestMergeHooks:
 
 
 class TestIsOrmahHook:
+    def test_non_string_command_returns_false(self):
+        assert _is_ormah_hook({"command": 123}) is False
+        assert _is_ormah_hook({"command": ["a", "b"]}) is False
+        assert _is_ormah_hook({"command": {"x": 1}}) is False
+
     def test_matches_real_ormah_hook(self):
         assert _is_ormah_hook({"command": "/usr/bin/ormah whisper inject"})
         assert _is_ormah_hook({"command": "/abs/path/ormah whisper store"})
@@ -2605,6 +2623,17 @@ class TestConfigureClaudeHooksMerge:
 
         sp = tmp_path / "settings.json"
         sp.write_text(json.dumps({"theme": "dark", "hooks": {"UserPromptSubmit": {"oops": 1}}}) + "\n")
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+    def test_uniterable_matcher_hooks_fail_closed(self, tmp_path, capsys):
+        """A non-iterable 'hooks' value inside a matcher triggers the backstop:
+        file is left unchanged, no success message printed."""
+        sp = tmp_path / "settings.json"
+        sp.write_text(json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": 5}]}}) + "\n")
         before = sp.read_text()
         with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
             configure_claude_hooks("/abs/ormah")
