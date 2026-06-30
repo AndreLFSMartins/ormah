@@ -281,6 +281,40 @@ def test_llm_none_does_not_advance_past_node(engine):
     assert mock_llm.call_count >= 1
 
 
+def test_empty_vector_index_does_not_advance_watermark(engine):
+    """Regression (#30): when node_vectors is empty/underfilled (e.g. mid full_rebuild,
+    after vectors are deleted but before _reindex_all_embeddings restores them),
+    vec_store.search returns no candidates. The watermark must NOT advance past those
+    unchecked nodes, and once vectors are restored the pair must still be evaluated."""
+    from ormah.background.auto_linker import run_auto_linker, _get_watermark
+
+    id_a, id_b = _create_pair(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    _reset_adapter()
+
+    # Simulate the rebuild window: vectors gone, not yet restored.
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors")
+
+    mock_llm = MagicMock(return_value=json.dumps({"relationship": "supports", "reason": "x"}))
+    with patch(_LLM_PATCH, mock_llm):
+        run_auto_linker(engine)
+
+    # Nothing could be checked → no LLM call, watermark stays at 0, no edge.
+    assert mock_llm.call_count == 0
+    assert _get_watermark(engine.db.conn) == 0
+    assert len(_edges_between(engine, id_a, id_b)) == 0
+
+    # Vectors restored → the pair is finally evaluated and the watermark advances.
+    engine._reindex_all_embeddings()
+    mock_llm2 = MagicMock(return_value=json.dumps({"relationship": "supports", "reason": "x"}))
+    with patch(_LLM_PATCH, mock_llm2):
+        run_auto_linker(engine)
+    assert mock_llm2.call_count >= 1
+    assert _get_watermark(engine.db.conn) > 0
+
+
 def test_max_edges_does_not_skip_interrupted_node(engine):
     """imp#4: max_edges mid-run must not advance the watermark past unprocessed nodes."""
     from ormah.background.auto_linker import run_auto_linker, _get_watermark, _select_nodes_after
