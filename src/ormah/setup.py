@@ -255,6 +255,11 @@ def _install_hooks(path: str, ormah_hooks: dict) -> bool:
     elif not isinstance(current, dict):
         warn(f"{path} has a non-object 'hooks' section — leaving it unchanged; hooks not configured")
         return False
+    for event in ormah_hooks:
+        value = current.get(event)
+        if value is not None and not isinstance(value, list):
+            warn(f"{path} has a non-list '{event}' hooks entry — leaving it unchanged; hooks not configured")
+            return False
     existing["hooks"] = _merge_hooks(current, ormah_hooks)
     _atomic_write(path, json.dumps(existing, indent=2) + "\n")
     return True

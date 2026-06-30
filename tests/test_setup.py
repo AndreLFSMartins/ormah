@@ -587,6 +587,22 @@ class TestConfigureCodexHooks:
         enable.assert_not_called()
         assert "Codex hooks installed" not in capsys.readouterr().out
 
+    def test_non_list_event_no_false_success(self, tmp_path, capsys):
+        """Non-list value on a claimed event (e.g. Stop) must leave file unchanged."""
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({"hooks": {"Stop": "bad"}}) + "\n")
+        before = hooks_path.read_text()
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path), \
+             patch("ormah.setup._enable_codex_feature") as enable:
+            configure_codex_hooks("/abs/ormah")
+
+        assert hooks_path.read_text() == before
+        enable.assert_not_called()
+        assert "Codex hooks installed" not in capsys.readouterr().out
+
 
 class TestRunSetup:
     def test_server_timeout_exits_nonzero_without_success_summary(self, tmp_path, capsys):
@@ -2525,6 +2541,18 @@ class TestConfigureClaudeHooksMerge:
         with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
             configure_claude_hooks("/abs/ormah")
         assert sp.read_text() == before
+
+    def test_non_list_event_left_unchanged(self, tmp_path, capsys):
+        """Non-list value on a claimed event (nested schema drift) must leave file unchanged."""
+        from ormah.setup import configure_claude_hooks
+
+        sp = tmp_path / "settings.json"
+        sp.write_text(json.dumps({"theme": "dark", "hooks": {"UserPromptSubmit": {"oops": 1}}}) + "\n")
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
 
 
 class TestConfigureCodexHooksMerge:
