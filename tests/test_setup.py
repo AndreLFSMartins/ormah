@@ -25,7 +25,10 @@ from ormah.setup import (
     CODEX_AGENTS_SENTINEL_START,
     CLAUDE_MD_SENTINEL_END,
     CLAUDE_MD_SENTINEL_START,
+    _atomic_write,
     _discover_transcripts,
+    _is_ormah_hook,
+    _merge_hooks,
     _merge_json_file,
     _preload_local_models,
     _print_setup_summary,
@@ -38,6 +41,7 @@ from ormah.setup import (
     _remove_claude_md_block,
     _remove_fastembed_cache,
     _remove_mcp_from_json,
+    _strip_ormah_hooks,
     _write_env_file,
     configure_claude_hooks,
     configure_claude_code_mcp,
@@ -272,6 +276,31 @@ class TestConfigureClaudeHooks:
 
         assert data["allowedTools"] == ["bash"]
         assert "hooks" in data
+
+    def test_non_object_hooks_section_left_unchanged(self, tmp_path, capsys):
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_text(json.dumps({"theme": "dark", "hooks": []}) + "\n")
+        before = settings_path.read_text()
+
+        with patch("ormah.setup.os.path.expanduser", return_value=str(settings_path)):
+            configure_claude_hooks("/abs/ormah")
+
+        assert settings_path.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+    def test_preserves_top_level_keys(self, tmp_path):
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_text(
+            json.dumps({"theme": "dark", "permissions": {"allow": ["x"]}}) + "\n"
+        )
+
+        with patch("ormah.setup.os.path.expanduser", return_value=str(settings_path)):
+            configure_claude_hooks("/abs/ormah")
+
+        data = json.loads(settings_path.read_text())
+        assert data["theme"] == "dark"
+        assert data["permissions"] == {"allow": ["x"]}
+        assert "UserPromptSubmit" in data["hooks"]
 
 
 class TestConfigureClaudeCodeMcp:
@@ -561,7 +590,40 @@ class TestConfigureCodexHooks:
 
         hooks_data = json.loads(hooks_path.read_text())
         assert "UserPromptSubmit" in hooks_data["hooks"]
-        assert hooks_data["hooks"]["Stop"][0]["hooks"][0]["command"] == "/abs/path/ormah whisper store"
+        stop_cmds = [h["command"] for m in hooks_data["hooks"]["Stop"] for h in m["hooks"]]
+        assert "/abs/path/ormah whisper store" in stop_cmds
+        assert "/bin/other" in stop_cmds  # co-tenant preserved
+
+    def test_non_object_hooks_section_no_false_success(self, tmp_path, capsys):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({"hooks": "bad"}) + "\n")
+        before = hooks_path.read_text()
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path), \
+             patch("ormah.setup._enable_codex_feature") as enable:
+            configure_codex_hooks("/abs/ormah")
+
+        assert hooks_path.read_text() == before
+        enable.assert_not_called()
+        assert "Codex hooks installed" not in capsys.readouterr().out
+
+    def test_non_list_event_no_false_success(self, tmp_path, capsys):
+        """Non-list value on a claimed event (e.g. Stop) must leave file unchanged."""
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({"hooks": {"Stop": "bad"}}) + "\n")
+        before = hooks_path.read_text()
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path), \
+             patch("ormah.setup._enable_codex_feature") as enable:
+            configure_codex_hooks("/abs/ormah")
+
+        assert hooks_path.read_text() == before
+        enable.assert_not_called()
+        assert "Codex hooks installed" not in capsys.readouterr().out
 
 
 class TestRunSetup:
@@ -906,6 +968,110 @@ class TestEnvFile:
             _write_env_file({"SECRET": "value"})
         file_mode = stat.S_IMODE(env_path.stat().st_mode)
         assert file_mode == 0o600
+
+
+class TestWriteEnvPreservation:
+    def test_atomic_write_preserves_relative_symlink(self, tmp_path):
+        target = tmp_path / "managed.env"
+        target.write_text("A=old\n")
+        target.chmod(0o644)
+        link = tmp_path / ".env"
+        link.symlink_to(target.name)
+
+        _atomic_write(str(link), "A=new\n", mode=0o600)
+
+        assert link.is_symlink()
+        assert link.read_text() == "A=new\n"
+        assert target.read_text() == "A=new\n"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    def test_preserves_comments_and_manual_key(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# header comment\nMANUAL_KEY=keep\n\nORMAH_X=old\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"MANUAL_KEY": "keep", "ORMAH_X": "new"})
+        text = env_path.read_text()
+        assert "# header comment" in text
+        assert "MANUAL_KEY=keep" in text
+        assert "ORMAH_X=new" in text
+        assert "ORMAH_X=old" not in text
+
+    def test_removed_key_dropped_comments_kept(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# keep me\nDROP=1\nKEEP=2\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"KEEP": "2"})
+        text = env_path.read_text()
+        assert "# keep me" in text
+        assert "KEEP=2" in text
+        assert "DROP" not in text
+
+    def test_new_key_appended(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# c\nA=1\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"A": "1", "B": "2"})
+        lines = [ln for ln in env_path.read_text().splitlines() if ln.strip()]
+        assert lines[-1] == "B=2"
+        assert "# c" in env_path.read_text()
+
+    def test_nonexistent_file_writes_dict_order(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"A": "1", "B": "2"})
+        assert env_path.read_text() == "A=1\nB=2\n"
+
+    def test_untouched_key_with_inline_comment_preserved(self, tmp_path):
+        from ormah.setup import _read_env_file, _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("MANUAL=val  # keep this note\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            env = _read_env_file()
+            _write_env_file(env)
+        assert "# keep this note" in env_path.read_text()
+
+    def test_configure_llm_flow_preserves_block_comment(self, tmp_path):
+        from ormah.setup import _read_env_file, _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# my ormah config\nORMAH_LLM_PROVIDER=none\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            env = _read_env_file()
+            env["ORMAH_LLM_PROVIDER"] = "ollama"
+            _write_env_file(env)
+        text = env_path.read_text()
+        assert "# my ormah config" in text
+        assert "ORMAH_LLM_PROVIDER=ollama" in text
+
+    def test_duplicate_keys_collapsed(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("DUP=1\nDUP=2\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"DUP": "2"})
+        text = env_path.read_text()
+        assert text.count("DUP=") == 1
+        assert "DUP=2" in text
+
+    def test_existing_file_mode_forced_to_600(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("A=1\n")
+        env_path.chmod(0o644)
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"A": "1"})
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
 
 # --- Server wrapper tests ---
@@ -1532,6 +1698,30 @@ class TestRemoveClaudeHooks:
         assert len(hooks) == 1
         assert hooks[0]["command"] == "/usr/bin/other-tool run"
 
+    def test_preserves_untouched_empty_and_missing_hooks_matchers(self, tmp_path):
+        data = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"matcher": "empty", "hooks": []},
+                    {"hooks": [{"command": "/usr/bin/ormah whisper inject"}]},
+                ],
+                "PreToolUse": [{"matcher": "Write"}],
+            }
+        }
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.json"
+        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()
+
+        result = json.loads(settings_path.read_text())
+        assert result["hooks"] == {
+            "UserPromptSubmit": [{"matcher": "empty", "hooks": []}],
+            "PreToolUse": [{"matcher": "Write"}],
+        }
+
     def test_no_settings_file_is_noop(self, tmp_path, capsys):
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
@@ -1675,6 +1865,29 @@ class TestRemoveCodexHooks:
         result = json.loads(hooks_path.read_text())
         assert result["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == "/usr/bin/other-tool run"
         assert "Stop" not in result["hooks"]
+
+    def test_preserves_untouched_empty_and_missing_hooks_matchers(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({
+            "hooks": {
+                "Stop": [
+                    {"matcher": "empty", "hooks": []},
+                    {"hooks": [{"command": "/usr/bin/ormah whisper store"}]},
+                ],
+                "PreToolUse": [{"matcher": "Write"}],
+            }
+        }, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_hooks()
+
+        result = json.loads(hooks_path.read_text())
+        assert result["hooks"] == {
+            "Stop": [{"matcher": "empty", "hooks": []}],
+            "PreToolUse": [{"matcher": "Write"}],
+        }
 
     def test_noop_when_missing(self, tmp_path):
         with patch("ormah.setup.Path.home", return_value=tmp_path):
@@ -2261,3 +2474,343 @@ class TestStopRunningServer:
             main()
 
         assert exc_info.value.code == 1
+
+
+class TestMergeHooks:
+    ORMAH = {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/x/ormah whisper inject"}]}]
+    }
+
+    def test_preserves_cotenant_under_same_event(self):
+        existing = {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "other-tool"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m["hooks"]]
+        assert "other-tool" in cmds
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_idempotent_no_duplicate_ormah(self):
+        once = _merge_hooks({}, self.ORMAH)
+        twice = _merge_hooks(once, self.ORMAH)
+        cmds = [h["command"] for m in twice["UserPromptSubmit"] for h in m["hooks"]]
+        assert cmds.count("/x/ormah whisper inject") == 1
+
+    def test_leaves_unclaimed_events_untouched(self):
+        existing = {"PreToolUse": [{"hooks": [{"type": "command", "command": "rtk hook claude"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        assert merged["PreToolUse"] == existing["PreToolUse"]
+
+    def test_substring_collision_not_stripped(self):
+        existing = {"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": "/opt/whisper inject-backup run"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m["hooks"]]
+        assert "/opt/whisper inject-backup run" in cmds
+
+    def test_preserves_matcher_without_hooks_key(self):
+        # matcher dict with no "hooks" key must survive the merge unchanged
+        existing = {"UserPromptSubmit": [{"matcher": "Write"}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        # user's hooks-less matcher is still present
+        assert {"matcher": "Write"} in merged["UserPromptSubmit"]
+        # ormah's matcher is also appended
+        cmds = [
+            h["command"]
+            for m in merged["UserPromptSubmit"]
+            if isinstance(m, dict)
+            for h in m.get("hooks", [])
+        ]
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_preserves_matcher_with_only_nonormah_hooks(self):
+        # regression guard: a matcher whose hooks are all non-ormah survives unchanged
+        existing = {"UserPromptSubmit": [{"hooks": [{"command": "/bin/other"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m.get("hooks", [])]
+        assert "/bin/other" in cmds
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_preserves_malformed_non_dict_hook_entry(self):
+        # a matcher whose hooks list contains a malformed (non-dict) entry must not crash
+        existing = {"UserPromptSubmit": [{"hooks": ["malformed-string-entry"]}]}
+        merged = _merge_hooks(existing, self.ORMAH)  # must NOT raise
+        # the malformed entry is preserved
+        all_hooks = [h for m in merged["UserPromptSubmit"] if isinstance(m, dict) for h in m.get("hooks", [])]
+        assert "malformed-string-entry" in all_hooks
+        # ormah's hook is also appended
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] if isinstance(m, dict) for h in m.get("hooks", []) if isinstance(h, dict)]
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_non_string_command_preserved(self):
+        # a hook with a non-string command is neither Ormah nor crash-worthy —
+        # it must be preserved and the merge must succeed
+        existing = {"UserPromptSubmit": [{"hooks": [{"command": 123}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)  # must not raise
+        preserved = [
+            h
+            for m in merged["UserPromptSubmit"]
+            if isinstance(m, dict)
+            for h in m.get("hooks", [])
+        ]
+        assert {"command": 123} in preserved
+
+    def test_drops_matcher_emptied_of_only_ormah_hooks(self):
+        # a matcher that held ONLY ormah hooks should be dropped after stripping,
+        # not left as {"hooks": []} — ormah's own fresh matcher is then appended
+        existing = {
+            "UserPromptSubmit": [{"hooks": [{"command": "/x/ormah whisper inject"}]}]
+        }
+        merged = _merge_hooks(existing, self.ORMAH)
+        # exactly one occurrence of the inject command (from ormah's appended matcher)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m.get("hooks", [])]
+        assert cmds.count("/x/ormah whisper inject") == 1
+        # no matcher left with an empty hooks list
+        empty_hook_matchers = [
+            m for m in merged["UserPromptSubmit"]
+            if isinstance(m, dict) and m.get("hooks") == []
+        ]
+        assert empty_hook_matchers == []
+
+
+class TestStripOrmahHooks:
+    def test_preserves_malformed_inner_hooks_verbatim(self):
+        existing = {
+            "UserPromptSubmit": [
+                {"hooks": 5},
+                {"hooks": "not-a-list"},
+                {"matcher": "missing"},
+            ]
+        }
+
+        cleaned, changed = _strip_ormah_hooks(existing)
+
+        assert changed is False
+        assert cleaned == existing
+
+    def test_removes_ormah_hook_without_rewriting_untouched_matchers(self):
+        untouched = {"matcher": "empty", "hooks": []}
+        existing = {
+            "UserPromptSubmit": [
+                untouched,
+                {
+                    "hooks": [
+                        {"command": "/x/ormah whisper inject"},
+                        {"command": "/bin/other"},
+                    ]
+                },
+            ]
+        }
+
+        cleaned, changed = _strip_ormah_hooks(existing)
+
+        assert changed is True
+        assert cleaned["UserPromptSubmit"] == [
+            untouched,
+            {"hooks": [{"command": "/bin/other"}]},
+        ]
+
+
+class TestIsOrmahHook:
+    def test_non_string_command_returns_false(self):
+        assert _is_ormah_hook({"command": 123}) is False
+        assert _is_ormah_hook({"command": ["a", "b"]}) is False
+        assert _is_ormah_hook({"command": {"x": 1}}) is False
+
+    def test_matches_real_ormah_hook(self):
+        assert _is_ormah_hook({"command": "/usr/bin/ormah whisper inject"})
+        assert _is_ormah_hook({"command": "/abs/path/ormah whisper store"})
+
+    def test_matches_plugin_wrapper_form(self):
+        assert _is_ormah_hook({"command": "/x/plugin/bin/ormah-whisper-inject"})
+        assert _is_ormah_hook({"command": "/x/plugin/bin/ormah-whisper-store"})
+
+    def test_rejects_substring_collision(self):
+        assert not _is_ormah_hook({"command": "/opt/whisper inject-backup run"})
+        assert not _is_ormah_hook({"command": "tools/whisper store-archive"})
+
+    def test_rejects_malformed_command(self):
+        assert not _is_ormah_hook({"command": ""})
+        assert not _is_ormah_hook({})
+        assert not _is_ormah_hook({"command": "unterminated 'quote"})
+
+    def test_non_dict_entry_returns_false(self):
+        assert _is_ormah_hook("a string") is False
+        assert _is_ormah_hook(123) is False
+        assert _is_ormah_hook(None) is False
+        assert _is_ormah_hook(["list"]) is False
+
+
+class TestRemoveClaudeHooksPluginWrapper:
+    def test_removes_plugin_wrapper_hook(self, tmp_path):
+        data = {"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": "/x/plugin/bin/ormah-whisper-inject"}]}
+        ]}}
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()
+
+        result = json.loads((claude_dir / "settings.json").read_text())
+        cmds = [
+            h["command"]
+            for m in result.get("hooks", {}).get("UserPromptSubmit", [])
+            for h in m["hooks"]
+        ]
+        assert "/x/plugin/bin/ormah-whisper-inject" not in cmds
+
+
+class TestConfigureClaudeHooksMerge:
+    def test_preserves_existing_userpromptsubmit_hook(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+        import json
+
+        sp = tmp_path / "settings.json"
+        sp.write_text(
+            json.dumps(
+                {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "other-tool"}]}]}}
+            )
+        )
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        data = json.loads(sp.read_text())
+        cmds = [h["command"] for m in data["hooks"]["UserPromptSubmit"] for h in m["hooks"]]
+        assert "other-tool" in cmds
+        assert "/abs/ormah whisper inject" in cmds
+
+    def test_rerun_does_not_duplicate(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+        import json
+
+        sp = tmp_path / "settings.json"
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+            configure_claude_hooks("/abs/ormah")
+        data = json.loads(sp.read_text())
+        cmds = [h["command"] for m in data["hooks"]["UserPromptSubmit"] for h in m["hooks"]]
+        assert cmds.count("/abs/ormah whisper inject") == 1
+
+    def test_preserves_existing_precompact_and_sessionend(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+        import json
+
+        sp = tmp_path / "settings.json"
+        sp.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreCompact": [
+                            {"hooks": [{"type": "command", "command": "other-precompact"}]}
+                        ],
+                        "SessionEnd": [
+                            {"hooks": [{"type": "command", "command": "other-sessionend"}]}
+                        ],
+                    }
+                }
+            )
+        )
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        data = json.loads(sp.read_text())
+        pre = [h["command"] for m in data["hooks"]["PreCompact"] for h in m["hooks"]]
+        end = [h["command"] for m in data["hooks"]["SessionEnd"] for h in m["hooks"]]
+        assert "other-precompact" in pre and "/abs/ormah whisper store" in pre
+        assert "other-sessionend" in end and "/abs/ormah whisper store" in end
+
+    def test_corrupt_json_left_unchanged_and_no_false_success(self, tmp_path, capsys):
+        from ormah.setup import configure_claude_hooks
+
+        sp = tmp_path / "settings.json"
+        sp.write_text('{ "theme": "dark", BROKEN')
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+    def test_non_object_json_left_unchanged(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+
+        sp = tmp_path / "settings.json"
+        sp.write_text('["not", "an", "object"]')
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+
+    def test_non_list_event_left_unchanged(self, tmp_path, capsys):
+        """Non-list value on a claimed event (nested schema drift) must leave file unchanged."""
+        from ormah.setup import configure_claude_hooks
+
+        sp = tmp_path / "settings.json"
+        sp.write_text(json.dumps({"theme": "dark", "hooks": {"UserPromptSubmit": {"oops": 1}}}) + "\n")
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+    def test_uniterable_matcher_hooks_fail_closed(self, tmp_path, capsys):
+        """A non-iterable 'hooks' value inside a matcher triggers the backstop:
+        file is left unchanged, no success message printed."""
+        sp = tmp_path / "settings.json"
+        sp.write_text(json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": 5}]}}) + "\n")
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+
+class TestConfigureCodexHooksMerge:
+    def test_preserves_existing_stop_hook(self, tmp_path):
+        import json
+
+        from ormah.setup import configure_codex_hooks
+
+        codex = tmp_path / ".codex"
+        codex.mkdir()
+        hp = codex / "hooks.json"
+        hp.write_text(
+            json.dumps(
+                {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other-stop"}]}]}}
+            )
+        )
+        with patch("ormah.setup.Path.home", return_value=tmp_path), patch(
+            "ormah.setup._enable_codex_feature"
+        ):
+            configure_codex_hooks("/abs/ormah")
+        data = json.loads(hp.read_text())
+        cmds = [h["command"] for m in data["hooks"]["Stop"] for h in m["hooks"]]
+        assert "other-stop" in cmds
+        assert "/abs/ormah whisper store" in cmds
+
+    def test_rerun_does_not_duplicate(self, tmp_path):
+        import json
+
+        from ormah.setup import configure_codex_hooks
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path), patch(
+            "ormah.setup._enable_codex_feature"
+        ):
+            configure_codex_hooks("/abs/ormah")
+            configure_codex_hooks("/abs/ormah")
+        data = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
+        cmds = [h["command"] for m in data["hooks"]["UserPromptSubmit"] for h in m["hooks"]]
+        assert cmds.count("/abs/ormah whisper inject") == 1
+
+    def test_corrupt_hooks_json_no_false_success(self, tmp_path, capsys):
+        from ormah.setup import configure_codex_hooks
+
+        codex = tmp_path / ".codex"
+        codex.mkdir()
+        hp = codex / "hooks.json"
+        hp.write_text("{ BROKEN")
+        before = hp.read_text()
+        with patch("ormah.setup.Path.home", return_value=tmp_path), patch(
+            "ormah.setup._enable_codex_feature"
+        ) as enable:
+            configure_codex_hooks("/abs/ormah")
+        assert hp.read_text() == before  # unchanged
+        enable.assert_not_called()  # feature flag NOT enabled on abort
+        assert "Codex hooks installed" not in capsys.readouterr().out
