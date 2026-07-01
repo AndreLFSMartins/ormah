@@ -219,13 +219,61 @@ def _merge_hooks(existing: dict, ormah_hooks: dict) -> dict:
     return merged
 
 
+def _strip_ormah_hooks(existing: dict) -> tuple[dict, bool]:
+    """Remove Ormah hook entries while preserving every untouched matcher.
+
+    Returns the cleaned hooks mapping and whether any Ormah hook was removed.
+    Missing, empty, or malformed inner ``hooks`` values are preserved verbatim:
+    only a matcher actually changed by removing an Ormah hook may be rewritten
+    or dropped.
+    """
+    cleaned = dict(existing)
+    changed = False
+    for event, matchers in existing.items():
+        if not isinstance(matchers, list):
+            continue
+
+        cleaned_matchers = []
+        event_changed = False
+        for matcher in matchers:
+            if not isinstance(matcher, dict):
+                cleaned_matchers.append(matcher)
+                continue
+
+            inner = matcher.get("hooks")
+            if not isinstance(inner, list):
+                cleaned_matchers.append(matcher)
+                continue
+
+            kept = [hook for hook in inner if not _is_ormah_hook(hook)]
+            if len(kept) == len(inner):
+                cleaned_matchers.append(matcher)
+                continue
+
+            event_changed = True
+            if kept:
+                cleaned_matchers.append({**matcher, "hooks": kept})
+
+        if event_changed:
+            changed = True
+            if cleaned_matchers:
+                cleaned[event] = cleaned_matchers
+            else:
+                cleaned.pop(event, None)
+
+    return cleaned, changed
+
+
 def _atomic_write(path: str, text: str, mode: int | None = None) -> None:
     """Write text to `path` atomically (temp file in the same dir + os.replace).
 
     Prevents a crash mid-write from leaving a truncated/corrupt config — the
     target is either the old bytes or the full new bytes, never a partial file.
+    If ``path`` is a symlink, atomically replace its resolved target so the link
+    itself remains intact.
     """
-    directory = os.path.dirname(os.path.abspath(path))
+    destination = os.path.realpath(path) if os.path.islink(path) else os.path.abspath(path)
+    directory = os.path.dirname(destination)
     os.makedirs(directory, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=directory)
     try:
@@ -233,7 +281,7 @@ def _atomic_write(path: str, text: str, mode: int | None = None) -> None:
             f.write(text)
         if mode is not None:
             os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        os.replace(tmp, destination)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -818,38 +866,14 @@ def _remove_codex_hooks() -> None:
         info("No hooks section — nothing to remove")
         return
 
-    changed = False
-    to_delete = []
-    for event, matchers in hooks_top.items():
-        if not isinstance(matchers, list):
-            continue
-        new_matchers = []
-        for matcher in matchers:
-            if not isinstance(matcher, dict):
-                new_matchers.append(matcher)
-                continue
-            inner = matcher.get("hooks", [])
-            filtered = [h for h in inner if not _is_ormah_hook(h)]
-            if len(filtered) != len(inner):
-                changed = True
-            if filtered:
-                new_matchers.append({**matcher, "hooks": filtered})
-            else:
-                changed = True
-        if new_matchers:
-            hooks_top[event] = new_matchers
-        else:
-            to_delete.append(event)
-            changed = True
-
-    for key in to_delete:
-        del hooks_top[key]
-    if not hooks_top:
-        del data["hooks"]
-        changed = True
+    cleaned_hooks, changed = _strip_ormah_hooks(hooks_top)
 
     if changed:
-        hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+        if cleaned_hooks:
+            data["hooks"] = cleaned_hooks
+        else:
+            data.pop("hooks", None)
+        _atomic_write(str(hooks_path), json.dumps(data, indent=2) + "\n")
         ok("Removed whisper hooks from ~/.codex/hooks.json")
     else:
         info("No ormah hooks found in hooks.json")
@@ -1389,38 +1413,14 @@ def _remove_claude_hooks() -> None:
         info("No hooks section — nothing to remove")
         return
 
-    changed = False
-    to_delete = []
-    for event, matchers in hooks_top.items():
-        if not isinstance(matchers, list):
-            continue
-        new_matchers = []
-        for matcher in matchers:
-            if not isinstance(matcher, dict):
-                new_matchers.append(matcher)
-                continue
-            inner = matcher.get("hooks", [])
-            filtered = [h for h in inner if not _is_ormah_hook(h)]
-            if len(filtered) != len(inner):
-                changed = True
-            if filtered:
-                new_matchers.append({**matcher, "hooks": filtered})
-            else:
-                changed = True
-        if new_matchers:
-            hooks_top[event] = new_matchers
-        else:
-            to_delete.append(event)
-            changed = True
-
-    for k in to_delete:
-        del hooks_top[k]
-    if not hooks_top:
-        del data["hooks"]
-        changed = True
+    cleaned_hooks, changed = _strip_ormah_hooks(hooks_top)
 
     if changed:
-        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+        if cleaned_hooks:
+            data["hooks"] = cleaned_hooks
+        else:
+            data.pop("hooks", None)
+        _atomic_write(str(settings_path), json.dumps(data, indent=2) + "\n")
         ok("Removed whisper hooks from ~/.claude/settings.json")
     else:
         info("No ormah hooks found in settings.json")

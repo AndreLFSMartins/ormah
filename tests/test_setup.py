@@ -25,6 +25,7 @@ from ormah.setup import (
     CODEX_AGENTS_SENTINEL_START,
     CLAUDE_MD_SENTINEL_END,
     CLAUDE_MD_SENTINEL_START,
+    _atomic_write,
     _is_ormah_hook,
     _merge_hooks,
     _merge_json_file,
@@ -39,6 +40,7 @@ from ormah.setup import (
     _remove_claude_md_block,
     _remove_fastembed_cache,
     _remove_mcp_from_json,
+    _strip_ormah_hooks,
     _write_env_file,
     configure_claude_hooks,
     configure_claude_code_mcp,
@@ -949,6 +951,20 @@ class TestEnvFile:
 
 
 class TestWriteEnvPreservation:
+    def test_atomic_write_preserves_relative_symlink(self, tmp_path):
+        target = tmp_path / "managed.env"
+        target.write_text("A=old\n")
+        target.chmod(0o644)
+        link = tmp_path / ".env"
+        link.symlink_to(target.name)
+
+        _atomic_write(str(link), "A=new\n", mode=0o600)
+
+        assert link.is_symlink()
+        assert link.read_text() == "A=new\n"
+        assert target.read_text() == "A=new\n"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
     def test_preserves_comments_and_manual_key(self, tmp_path):
         from ormah.setup import _write_env_file
 
@@ -1662,6 +1678,30 @@ class TestRemoveClaudeHooks:
         assert len(hooks) == 1
         assert hooks[0]["command"] == "/usr/bin/other-tool run"
 
+    def test_preserves_untouched_empty_and_missing_hooks_matchers(self, tmp_path):
+        data = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"matcher": "empty", "hooks": []},
+                    {"hooks": [{"command": "/usr/bin/ormah whisper inject"}]},
+                ],
+                "PreToolUse": [{"matcher": "Write"}],
+            }
+        }
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.json"
+        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()
+
+        result = json.loads(settings_path.read_text())
+        assert result["hooks"] == {
+            "UserPromptSubmit": [{"matcher": "empty", "hooks": []}],
+            "PreToolUse": [{"matcher": "Write"}],
+        }
+
     def test_no_settings_file_is_noop(self, tmp_path, capsys):
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
@@ -1805,6 +1845,29 @@ class TestRemoveCodexHooks:
         result = json.loads(hooks_path.read_text())
         assert result["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == "/usr/bin/other-tool run"
         assert "Stop" not in result["hooks"]
+
+    def test_preserves_untouched_empty_and_missing_hooks_matchers(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({
+            "hooks": {
+                "Stop": [
+                    {"matcher": "empty", "hooks": []},
+                    {"hooks": [{"command": "/usr/bin/ormah whisper store"}]},
+                ],
+                "PreToolUse": [{"matcher": "Write"}],
+            }
+        }, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_hooks()
+
+        result = json.loads(hooks_path.read_text())
+        assert result["hooks"] == {
+            "Stop": [{"matcher": "empty", "hooks": []}],
+            "PreToolUse": [{"matcher": "Write"}],
+        }
 
     def test_noop_when_missing(self, tmp_path):
         with patch("ormah.setup.Path.home", return_value=tmp_path):
@@ -2486,6 +2549,44 @@ class TestMergeHooks:
             if isinstance(m, dict) and m.get("hooks") == []
         ]
         assert empty_hook_matchers == []
+
+
+class TestStripOrmahHooks:
+    def test_preserves_malformed_inner_hooks_verbatim(self):
+        existing = {
+            "UserPromptSubmit": [
+                {"hooks": 5},
+                {"hooks": "not-a-list"},
+                {"matcher": "missing"},
+            ]
+        }
+
+        cleaned, changed = _strip_ormah_hooks(existing)
+
+        assert changed is False
+        assert cleaned == existing
+
+    def test_removes_ormah_hook_without_rewriting_untouched_matchers(self):
+        untouched = {"matcher": "empty", "hooks": []}
+        existing = {
+            "UserPromptSubmit": [
+                untouched,
+                {
+                    "hooks": [
+                        {"command": "/x/ormah whisper inject"},
+                        {"command": "/bin/other"},
+                    ]
+                },
+            ]
+        }
+
+        cleaned, changed = _strip_ormah_hooks(existing)
+
+        assert changed is True
+        assert cleaned["UserPromptSubmit"] == [
+            untouched,
+            {"hooks": [{"command": "/bin/other"}]},
+        ]
 
 
 class TestIsOrmahHook:
