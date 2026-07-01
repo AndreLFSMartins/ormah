@@ -8,7 +8,7 @@ import logging
 import math
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2158,10 +2158,13 @@ class MemoryEngine:
         rolling window is a simple string ``>=`` against a Python-computed
         cutoff — no SQLite date math, no timezone surprises.
         """
-        from datetime import timedelta
-
         conn = self.db.conn
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        # Fixed calendar week (Mon 00:00 UTC) so the count only ever increases
+        # within a week and resets once on Monday — never drifts down mid-week.
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
 
         used_key = "session_id || '|' || prompt_hash || '|' || logged_at"
         whispers_total = conn.execute(
@@ -2188,7 +2191,7 @@ class MemoryEngine:
             "whispers_used_total": whispers_total,
             "memories_this_week": memories_week,
             "memories_total": memories_total,
-            "window_days": days,
+            "window_days": now.weekday() + 1,  # days elapsed in this calendar week
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
