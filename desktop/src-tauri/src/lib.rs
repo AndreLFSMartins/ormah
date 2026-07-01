@@ -56,8 +56,9 @@ const MARK_IN_APP: &str = "window.__ORMAH_DESKTOP__ = true;";
 /// the app from starting.
 #[cfg(target_os = "linux")]
 fn single_instance_listener() -> std::io::Result<Option<std::os::unix::net::UnixListener>> {
+    use std::io::Write;
     use std::os::linux::net::SocketAddrExt;
-    use std::os::unix::net::{SocketAddr, UnixListener};
+    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
 
     // XDG_RUNTIME_DIR is already per-user (/run/user/<uid>), so embedding it
     // scopes the lock to this user without having to look up the uid.
@@ -66,7 +67,14 @@ fn single_instance_listener() -> std::io::Result<Option<std::os::unix::net::Unix
     let addr = SocketAddr::from_abstract_name(name.as_bytes())?;
     match UnixListener::bind_addr(&addr) {
         Ok(listener) => Ok(Some(listener)),
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            // Signal the first instance to show and focus its window, then
+            // let the caller exit this duplicate process.
+            if let Ok(mut stream) = UnixStream::connect_addr(&addr) {
+                let _ = stream.write_all(b"f");
+            }
+            Ok(None)
+        }
         Err(e) => Err(e),
     }
 }
@@ -110,12 +118,23 @@ pub fn run() {
             // duplicate tray icon. macOS handles this via the plugin above.
             #[cfg(target_os = "linux")]
             match single_instance_listener() {
-                // Another instance already owns the lock — exit before building
-                // anything. (Focusing its window would require IPC; skipped.)
+                // Another instance already owns the lock — it was signalled to
+                // show its window; exit before building anything.
                 Ok(None) => std::process::exit(0),
-                // First instance: hold the socket for the whole process life.
+                // First instance: accept focus signals from future duplicate launches.
+                // The thread owns the listener (keeping the socket alive), and
+                // shows/focuses the main window each time a duplicate connects.
+                // By the time any signal arrives the window is already built.
                 Ok(Some(listener)) => {
-                    app.manage(listener);
+                    let app_handle = app.handle().clone();
+                    std::thread::spawn(move || {
+                        for _ in listener.incoming() {
+                            if let Some(win) = app_handle.get_webview_window("main") {
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
+                        }
+                    });
                 }
                 // Mechanism unavailable — boot anyway rather than block startup.
                 Err(e) => eprintln!("single-instance guard unavailable, continuing: {e}"),
