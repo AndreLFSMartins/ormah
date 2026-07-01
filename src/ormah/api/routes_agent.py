@@ -253,7 +253,13 @@ def unwire_one(agent_id: str):
 @router.get("/stats")
 def get_stats(
     request: Request,
-    days: int = Query(7, ge=1, le=365, description="Rolling window in days for the *_this_week counts"),
+    days: int | None = Query(
+        None,
+        ge=1,
+        le=365,
+        description="Rolling window in days for the *_this_week counts. "
+        "Omit to use the fixed current calendar week (Mon-Sun UTC).",
+    ),
 ):
     """Ambient usage counts for the menubar/CLI surface (F09 counter)."""
     engine = request.app.state.engine

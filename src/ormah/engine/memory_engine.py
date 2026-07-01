@@ -2145,7 +2145,7 @@ class MemoryEngine:
 
         return f"Feedback recorded for node {resolved_node_id[:8]}..."
 
-    def get_stats(self, days: int = 7) -> dict[str, Any]:
+    def get_stats(self, days: int | None = None) -> dict[str, Any]:
         """Return ambient usage counts for the menubar/CLI surface (F09/F10).
 
         A "whisper used" is a single whisper call that actually injected at
@@ -2154,17 +2154,27 @@ class MemoryEngine:
         the ``(session_id, prompt_hash, logged_at)`` triple where
         ``was_injected = 1``. Memory counts come straight from ``nodes``.
 
+        With ``days=None`` (the default, used by the tray/CLI), the "week"
+        window is the fixed current calendar week (Mon 00:00 UTC) so the count
+        only ever increases within a week and resets once on Monday — it never
+        drifts down mid-week the way a rolling N-day window would. Passing an
+        explicit ``days`` opts into a rolling N-day window ending now instead,
+        for ad-hoc/custom-range queries.
+
         ISO-8601 UTC timestamps compare correctly lexicographically, so the
-        rolling window is a simple string ``>=`` against a Python-computed
-        cutoff — no SQLite date math, no timezone surprises.
+        window is a simple string ``>=`` against a Python-computed cutoff — no
+        SQLite date math, no timezone surprises.
         """
         conn = self.db.conn
-        # Fixed calendar week (Mon 00:00 UTC) so the count only ever increases
-        # within a week and resets once on Monday — never drifts down mid-week.
         now = datetime.now(timezone.utc)
-        cutoff = (now - timedelta(days=now.weekday())).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ).isoformat()
+        if days is None:
+            window_days = now.weekday() + 1  # days elapsed in this calendar week
+            cutoff = (now - timedelta(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).isoformat()
+        else:
+            window_days = days
+            cutoff = (now - timedelta(days=days)).isoformat()
 
         used_key = "session_id || '|' || prompt_hash || '|' || logged_at"
         whispers_total = conn.execute(
@@ -2191,7 +2201,7 @@ class MemoryEngine:
             "whispers_used_total": whispers_total,
             "memories_this_week": memories_week,
             "memories_total": memories_total,
-            "window_days": now.weekday() + 1,  # days elapsed in this calendar week
+            "window_days": window_days,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
