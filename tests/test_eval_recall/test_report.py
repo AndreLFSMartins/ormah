@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from eval.recall.report import format_report, write_results, load_previous_run
 
 

@@ -154,6 +154,15 @@ class Settings(BaseSettings):
     # Whisper (involuntary recall)
     whisper_max_nodes: int = 6
     whisper_min_relevance_score: float = 0.45
+    # Candidate pool fed to the reranker/gate = whisper_max_nodes * this
+    # multiplier. Retrieve-then-rerank needs a deep pool so the cross-encoder
+    # can rescue memories the bi-encoder under-ranked; final injection is
+    # still capped at whisper_max_nodes.
+    whisper_candidate_pool_multiplier: int = 5
+    # Max characters of node content injected for the top full-content
+    # whispers; truncated at a word boundary. Full content stays one
+    # recall_node call away (the whisper framing says so).
+    whisper_injected_content_max_chars: int = 600
 
     # Whisper reranking (cross-encoder with linear-rescale blended scoring)
     whisper_reranker_enabled: bool = True

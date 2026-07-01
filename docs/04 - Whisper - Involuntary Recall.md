@@ -96,7 +96,7 @@ This is intentionally narrower than "always combine recent prompts".
 
 The builder calls structured recall with:
 
-- `limit = whisper_max_nodes` (default `6`)
+- `limit = whisper_max_nodes * whisper_candidate_pool_multiplier` (defaults `6 * 5 = 30`) — a deep candidate pool so the reranker and gate can rescue memories the bi-encoder under-ranked; the final injected set is still capped at `whisper_max_nodes`
 - `tiers = [core, working]`
 - `touch_access = False`
 
@@ -139,7 +139,7 @@ Current output format:
 
 - heading: `# Ormah whispers`
 - ranked flat list of memories
-- top `2` results include full content
+- top `2` results include content, capped at `whisper_injected_content_max_chars` (default `600`) at a word boundary — the full node stays one `recall_node` call away
 - remaining results include title, type, and short id only
 
 There is no current formatter that splits output into `About the User`, `Core Memories`, and `Project` sections.

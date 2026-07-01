@@ -39,7 +39,7 @@ def format_report(
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     n = aggregate.get("case_count", 0)
     lines = [
-        f"═══ Ormah Recall Eval Report ═══════════════",
+        "═══ Ormah Recall Eval Report ═══════════════",
         f"Corpus: {corpus_label} ({n} cases) | {now}",
         "",
     ]

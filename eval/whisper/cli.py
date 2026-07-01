@@ -32,6 +32,8 @@ _EVAL_SETTINGS_OVERRIDES = {
     "claude_maintenance_enabled": False,
     "whisper_max_nodes": 6,
     "whisper_min_relevance_score": 0.45,
+    "whisper_candidate_pool_multiplier": 5,
+    "whisper_injected_content_max_chars": 600,
     "whisper_reranker_enabled": True,
     "whisper_reranker_model": "Xenova/ms-marco-MiniLM-L-6-v2",
     "whisper_reranker_min_score": 0.40,

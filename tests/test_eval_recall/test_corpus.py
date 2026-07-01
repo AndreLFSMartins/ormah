@@ -1,11 +1,10 @@
 import json
 import pytest
-from pathlib import Path
 from eval.recall.corpus import load_corpus, validate_case, CorpusError
 
 
 def _write_jsonl(path, lines):
-    path.write_text("\n".join(json.dumps(l) for l in lines) + "\n")
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
 
 
 def test_load_golden_case(tmp_path):
