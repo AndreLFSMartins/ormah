@@ -266,6 +266,16 @@ def get_stats(
     return engine.get_stats(days=days)
 
 
+@router.get("/whisper-stats")
+def get_whisper_stats(
+    request: Request,
+    days: int = Query(7, ge=1, le=365, description="Rolling window in days"),
+):
+    """Whisper outcome aggregates: silence rate, injection rate, outcome breakdown."""
+    engine = request.app.state.engine
+    return engine.get_whisper_stats(days=days)
+
+
 @router.get("/insights")
 def get_insights(request: Request):
     """Get belief evolutions and conflicting ideas detected by the system."""

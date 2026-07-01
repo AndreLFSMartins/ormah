@@ -901,6 +901,10 @@ class MemoryEngine:
                 prompt[:80],
                 session_id,
             )
+            self.context_builder._log_decision(
+                session_id=session_id, space=space, prompt=prompt,
+                intent=None, outcome="silent_blackout",
+            )
             maintenance_due = "" if onboarding else self._maybe_get_maintenance_due_signal()
             text = "\n\n".join(
                 section for section in (maintenance_due, onboarding) if section
@@ -2205,6 +2209,34 @@ class MemoryEngine:
             "memories_this_week": memories_week,
             "memories_total": memories_total,
             "window_days": window_days,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def get_whisper_stats(self, days: int = 7) -> dict[str, Any]:
+        """Whisper outcome aggregates over a rolling window (silence instrumentation).
+
+        Computed from whisper_decisions, which records exactly one row per
+        whisper call including silent ones — so silence_rate and
+        injection_rate partition all prompts (they sum to 1.0).
+        """
+        conn = self.db.conn
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        rows = conn.execute(
+            "SELECT outcome, COUNT(*) AS n FROM whisper_decisions "
+            "WHERE logged_at >= ? GROUP BY outcome",
+            (cutoff,),
+        ).fetchall()
+        breakdown = {row["outcome"]: row["n"] for row in rows}
+        total = sum(breakdown.values())
+        injected = breakdown.get("injected", 0)
+
+        return {
+            "window_days": days,
+            "prompts_total": total,
+            "injection_rate": injected / total if total else None,
+            "silence_rate": (total - injected) / total if total else None,
+            "outcome_breakdown": breakdown,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 

@@ -302,7 +302,15 @@ class HybridSearch:
             final_score = adjusted_score * tier_factor + r_boost + a_boost
             final_score = min(final_score, 1.0)  # CE blend assumes scores in [0, 1]
 
-            results.append({"node": node, "score": round(final_score, 6), "source": "hybrid"})
+            results.append({
+                "node": node,
+                "score": round(final_score, 6),
+                "source": "hybrid",
+                # Raw cosine similarity (pre length-penalty, pre blending):
+                # the only absolute signal on this path. Gates fall back to it
+                # when the cross-encoder is unavailable. 0.0 for FTS-only hits.
+                "raw_cosine": round(vec_scores.get(node_id, 0.0), 6),
+            })
 
         # Re-sort by boosted score since boosts may reorder results
         results.sort(key=lambda x: x["score"], reverse=True)

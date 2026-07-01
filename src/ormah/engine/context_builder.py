@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from datetime import datetime, timezone
@@ -159,6 +160,30 @@ def _find_review_candidate(conn, threshold: float) -> dict | None:
     return None
 
 
+def _gate_score(r: dict) -> float:
+    """Absolute relevance signal for gating decisions.
+
+    Gates answer "is anything here relevant?" and need a score whose meaning
+    does not change per query. The blended `score` is rank-relative (RRF is
+    min-max normalized per query, so any query's best candidate scores ~1.0)
+    — an absolute threshold on it cannot reject a weak query's least-bad
+    match. Prefer the cross-encoder's rescaled score; fall back to raw cosine
+    when the reranker didn't run. The affinity delta is included so learned
+    feedback can still lift a candidate over the gate. The blended `score`
+    remains the ordering key.
+    """
+    ce = r.get("ce_absolute")
+    if ce is not None:
+        return ce + r.get("_affinity_boost", 0.0)
+    cos = r.get("raw_cosine")
+    if cos is not None:
+        return cos + r.get("_affinity_boost", 0.0)
+    # Legacy/test results carry neither signal; fall back to the blended
+    # score (which already contains any affinity boost) so behavior degrades
+    # to the pre-contract gate rather than rejecting.
+    return r.get("score", 0.0)
+
+
 def _first_sentence_truncate(content: str, max_len: int) -> str:
     """Return the first sentence of content, capped to max_len."""
     content = content.strip()
@@ -203,6 +228,42 @@ class ContextBuilder:
             logger.warning("Failed to create prompt classifier: %s", e)
             return None
 
+    def _log_decision(
+        self,
+        *,
+        session_id: str | None,
+        space: str | None,
+        prompt: str,
+        intent,
+        outcome: str,
+        candidate_count: int = 0,
+        injected_count: int = 0,
+        max_gate_score: float | None = None,
+    ) -> None:
+        """Write one whisper_decisions row per whisper call — including silence.
+
+        whisper_log records candidates; this records the per-prompt outcome so
+        silence rate has a denominator. Never raises: instrumentation must not
+        break whisper.
+        """
+        if not self.engine:
+            return
+        try:
+            prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+            intent_str = ",".join(intent.categories) if intent is not None else None
+            with self.engine.db.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO whisper_decisions "
+                    "(session_id, space, prompt_hash, intent, outcome, "
+                    "candidate_count, injected_count, max_gate_score, logged_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, space, prompt_hash, intent_str, outcome,
+                     candidate_count, injected_count, max_gate_score,
+                     datetime.now(timezone.utc).isoformat()),
+                )
+        except Exception as e:
+            logger.warning("whisper_decisions write failed: %s", e)
+
     def build_whisper_context(
         self,
         prompt: str,
@@ -236,6 +297,10 @@ class ContextBuilder:
 
         if not prompt.strip():
             logger.info("Whisper diagnostics: empty prompt -> skip")
+            self._log_decision(
+                session_id=session_id, space=space, prompt=prompt,
+                intent=None, outcome="silent_short",
+            )
             if _return_debug:
                 return "", _injected_ids
             return ""
@@ -247,6 +312,10 @@ class ContextBuilder:
             logger.info(
                 "Whisper diagnostics: prompt=%r short_prompt -> skip",
                 prompt_snippet,
+            )
+            self._log_decision(
+                session_id=session_id, space=space, prompt=prompt,
+                intent=None, outcome="silent_short",
             )
             if _return_debug:
                 return "", _injected_ids
@@ -275,6 +344,10 @@ class ContextBuilder:
             logger.info(
                 "Whisper diagnostics: prompt=%r conversational_intent -> skip",
                 prompt_snippet,
+            )
+            self._log_decision(
+                session_id=session_id, space=space, prompt=prompt,
+                intent=intent, outcome="silent_conversational",
             )
             if _return_debug:
                 return "", _injected_ids
@@ -311,6 +384,10 @@ class ContextBuilder:
                                 prompt_snippet,
                                 similarity,
                                 topic_shift_threshold,
+                            )
+                            self._log_decision(
+                                session_id=session_id, space=space, prompt=prompt,
+                                intent=intent, outcome="silent_topic_shift",
                             )
                             if _return_debug:
                                 return "", _injected_ids
@@ -377,6 +454,10 @@ class ContextBuilder:
             search_results = self.engine.recall_search_structured(**search_kwargs)
         except Exception as e:
             logger.warning("Whisper search failed: %s", e)
+            self._log_decision(
+                session_id=session_id, space=space, prompt=prompt,
+                intent=intent, outcome="silent_error",
+            )
             if _return_debug:
                 return "", _injected_ids
             return ""
@@ -401,9 +482,17 @@ class ContextBuilder:
             effective_min_score = min(min_score, 0.30)
         else:
             effective_min_score = min_score
+        # A candidate reaches the reranker if EITHER signal clears the floor:
+        # the blended score is rank-relative and the length penalty can bury a
+        # long-but-relevant node's blend while its raw cosine stays high (the
+        # strongest match can otherwise be the lowest-blended candidate).
+        # The cross-encoder + absolute gate downstream handle any noise this
+        # lets through.
         search_results = [
             r for r in search_results
-            if r.get("score", 0) >= effective_min_score or r.get("source") == "temporal"
+            if r.get("score", 0) >= effective_min_score
+            or r.get("raw_cosine", 0.0) >= effective_min_score
+            or r.get("source") == "temporal"
         ]
         post_min_score_count = len(search_results)
         # Cross-encoder reranking — always pass min_score=0.0 so affinity boost
@@ -444,7 +533,15 @@ class ContextBuilder:
                     nid = r["node"]["id"]
                     rows = affinity_rows_map.get(nid, [])
                     boost = compute_affinity_boost(prompt_vec, nid, rows, self.engine.settings)
-                    boosted.append({**r, "score": r["score"] + boost, "_pre_boost_score": r["score"]})
+                    boosted.append({
+                        **r,
+                        "score": r["score"] + boost,
+                        "_pre_boost_score": r["score"],
+                        # Tagged separately so the (absolute-signal) gate can
+                        # include learned feedback without inheriting the
+                        # rank-relative blended score.
+                        "_affinity_boost": boost,
+                    })
                 # Apply 0.40 floor AFTER boost (spec: reranker_min_score is now a post-boost floor).
                 # Use the reranker_min_score parameter (passed from engine.settings); fall back to 0.40.
                 effective_floor = reranker_min_score if reranker_min_score > 0.0 else 0.40
@@ -494,15 +591,19 @@ class ContextBuilder:
                     ]
 
         # Injection gate: require at least one result with a strong enough
-        # blended score to justify injection.  Temporal queries are exempt
-        # (they rely on time filtering, not semantic relevance).
+        # ABSOLUTE relevance signal to justify injection (see _gate_score —
+        # the blended score is rank-relative and cannot reject a weak query's
+        # least-bad match; it stays the ordering key only). Temporal queries
+        # are exempt (they rely on time filtering, not semantic relevance).
+        max_gate_score: float | None = None
+        if search_results:
+            max_gate_score = max(_gate_score(r) for r in search_results)
         if not has_temporal and search_results:
-            max_blended = max(r.get("score", 0.0) for r in search_results)
-            if max_blended < injection_gate:
+            if max_gate_score < injection_gate:
                 logger.info(
-                    "Whisper diagnostics: prompt=%r gate_reject max_score=%.3f gate=%.3f",
+                    "Whisper diagnostics: prompt=%r gate_reject max_gate_score=%.3f gate=%.3f",
                     prompt_snippet,
-                    max_blended,
+                    max_gate_score,
                     injection_gate,
                 )
                 search_results = []
@@ -510,7 +611,7 @@ class ContextBuilder:
                 # Score-floor: only keep results that individually clear the
                 # injection gate.  Weak queries naturally get fewer results
                 # instead of padding to max_nodes with marginal matches.
-                search_results = [r for r in search_results if r.get("score", 0) >= injection_gate]
+                search_results = [r for r in search_results if _gate_score(r) >= injection_gate]
 
         # Exploration slot: inject one unconfirmed gated-out candidate to
         # surface false negatives and collect affinity signal for them.
@@ -573,6 +674,22 @@ class ContextBuilder:
         final_candidate_count = len(search_results)
         _injected_ids = [r["node"]["id"] for r in search_results]
 
+        # Per-prompt outcome row (silence instrumentation): exactly one row
+        # per whisper call so silence rate has a denominator.
+        if final_candidate_count > 0:
+            outcome = "injected"
+        elif post_min_score_count == 0:
+            outcome = "silent_no_candidates"
+        else:
+            outcome = "silent_gate"
+        self._log_decision(
+            session_id=session_id, space=space, prompt=prompt, intent=intent,
+            outcome=outcome,
+            candidate_count=initial_candidate_count,
+            injected_count=final_candidate_count,
+            max_gate_score=max_gate_score,
+        )
+
         # Build flat ranked list — top full_content_count get full content,
         # rest get title + type + node ID only.
         lines = []
@@ -604,8 +721,6 @@ class ContextBuilder:
         # are also logged. was_injected reflects the final post-gate, post-exploration decision.
         if session_id and prompt_vec is not None and self.engine is not None:
             try:
-                import hashlib
-
                 prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
                 now_iso = datetime.now(timezone.utc).isoformat()
                 vec_blob = prompt_vec.astype(np.float32).tobytes()

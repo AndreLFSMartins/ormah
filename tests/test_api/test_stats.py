@@ -133,3 +133,47 @@ def test_custom_window(stats_setup):
     data = client.get("/agent/stats", params={"days": 30}).json()
     assert data["whispers_used_this_week"] == 1
     assert data["window_days"] == 30
+
+
+def _log_decision(engine, *, outcome, logged_at=None, session_id="s1"):
+    logged_at = logged_at or datetime.now(timezone.utc).isoformat()
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO whisper_decisions "
+            "(session_id, space, prompt_hash, intent, outcome, "
+            "candidate_count, injected_count, max_gate_score, logged_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, None, "hash", None, outcome, 0, 0, None, logged_at),
+        )
+
+
+def test_whisper_stats_empty(stats_setup):
+    client, _ = stats_setup
+    data = client.get("/agent/whisper-stats").json()
+    assert data["prompts_total"] == 0
+    assert data["injection_rate"] is None
+    assert data["silence_rate"] is None
+
+
+def test_whisper_stats_rates_partition(stats_setup):
+    """silence_rate + injection_rate must cover all prompts."""
+    client, engine = stats_setup
+    _log_decision(engine, outcome="injected")
+    _log_decision(engine, outcome="injected")
+    _log_decision(engine, outcome="silent_gate")
+    _log_decision(engine, outcome="silent_short")
+    data = client.get("/agent/whisper-stats").json()
+    assert data["prompts_total"] == 4
+    assert data["injection_rate"] == pytest.approx(0.5)
+    assert data["silence_rate"] == pytest.approx(0.5)
+    assert data["outcome_breakdown"] == {
+        "injected": 2, "silent_gate": 1, "silent_short": 1,
+    }
+
+
+def test_whisper_stats_window(stats_setup):
+    client, engine = stats_setup
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    _log_decision(engine, outcome="injected", logged_at=old)
+    assert client.get("/agent/whisper-stats").json()["prompts_total"] == 0
+    assert client.get("/agent/whisper-stats", params={"days": 30}).json()["prompts_total"] == 1

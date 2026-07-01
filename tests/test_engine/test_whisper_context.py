@@ -1703,15 +1703,17 @@ class TestAffinityBoost:
 
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
-        # Candidate at 0.60 — above gate normally; with -0.15 boost → 0.45 → below gate
+        # Candidate with marginal CE relevance — above gate normally;
+        # with -0.15 affinity boost it drops below the gate.
         node = _make_node_dict("marginal", "Marginal memory")
         mock_engine.recall_search_structured.return_value = [
             {"node": node, "score": 0.60, "source": "hybrid"},
         ]
 
         mock_ce = MagicMock()
-        # CE score producing blended ~0.60
-        mock_ce.rerank.return_value = [1.0]
+        # Raw CE -0.8 → ce_absolute (-0.8+12)/18 ≈ 0.622: clears the 0.55
+        # gate on its own, but not after the negative affinity delta.
+        mock_ce.rerank.return_value = [-0.8]
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
              patch("ormah.engine.affinity.batch_fetch_affinity", return_value={"marginal": []}), \
@@ -1724,7 +1726,7 @@ class TestAffinityBoost:
                 injection_gate=0.55,
             )
 
-        # After -0.15 boost: score becomes 0.45 → below gate 0.55
+        # Gate score = ce_absolute 0.622 - 0.15 = 0.472 < 0.55 → suppressed
         assert "Marginal memory" not in result
 
 
@@ -2344,3 +2346,218 @@ class TestWhisperFlatRankedDisplay:
 
         assert "The most relevant memories are shown in full" in result
         assert "use recall with its node ID" in result
+
+
+class TestGateScoreContract:
+    """The injection gate cuts absolute signals (ce_absolute / raw_cosine),
+    never the rank-relative blended score (I2)."""
+
+    def _builder(self, mock_graph, results, ce_scores):
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        mock_engine.recall_search_structured.return_value = results
+        mock_ce = MagicMock()
+        mock_ce.rerank.return_value = ce_scores
+        return builder, mock_ce
+
+    def test_high_blended_low_ce_is_gated_out(self, mock_graph):
+        """A weak query's least-bad match: blended ~0.9 (rank-relative top)
+        but the cross-encoder condemns it. The gate must reject."""
+        node = _make_node_dict("weak-1", "Rank-relative winner")
+        builder, mock_ce = self._builder(
+            mock_graph,
+            [{"node": node, "score": 0.90, "source": "hybrid"}],
+            [-9.0],  # ce_absolute = (-9+12)/18 ≈ 0.167
+        )
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="unrelated topic query",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.50,
+            )
+
+        assert "Rank-relative winner" not in result
+
+    def test_low_blended_high_ce_survives_gate(self, mock_graph):
+        """A genuinely relevant match under-ranked by the bi-encoder: the
+        cross-encoder vouches, the gate passes it."""
+        node = _make_node_dict("strong-1", "Under-ranked gem")
+        builder, mock_ce = self._builder(
+            mock_graph,
+            [{"node": node, "score": 0.45, "source": "hybrid"}],
+            [4.0],  # ce_absolute = (4+12)/18 ≈ 0.889
+        )
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="find the gem",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.50,
+            )
+
+        assert "Under-ranked gem" in result
+
+    def test_reranker_off_gates_on_raw_cosine(self, mock_graph):
+        """Without the reranker, the gate falls back to raw_cosine, not the
+        blended score."""
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        noise = _make_node_dict("cos-low", "Cosine-weak result")
+        real = _make_node_dict("cos-high", "Cosine-strong result")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": noise, "score": 0.95, "source": "hybrid", "raw_cosine": 0.30},
+            {"node": real, "score": 0.60, "source": "hybrid", "raw_cosine": 0.72},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="cosine strong result topic",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+        )
+
+        assert "Cosine-strong result" in result
+        assert "Cosine-weak result" not in result
+
+    def test_legacy_results_fall_back_to_blended_score(self, mock_graph):
+        """Results carrying neither absolute signal keep pre-contract gate
+        behavior (blended score) instead of being rejected outright."""
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = _make_node_dict("legacy-1", "Legacy scored result")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.80, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="legacy scored result topic",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+        )
+
+        assert "Legacy scored result" in result
+
+
+class TestWhisperDecisions:
+    """Every whisper call writes exactly one whisper_decisions row (I10)."""
+
+    @pytest.fixture
+    def db_graph(self, tmp_path):
+        from ormah.index.db import Database
+
+        db = Database(tmp_path / "index.db")
+        db.init_schema()
+        graph = GraphIndex(db.conn)
+        return db, graph
+
+    def _builder_with_db(self, db, graph, results=None):
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock()
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+        mock_engine.db = db
+        mock_engine.recall_search_structured.return_value = results or []
+        return ContextBuilder(graph, engine=mock_engine)
+
+    def _decisions(self, db):
+        return db.conn.execute(
+            "SELECT * FROM whisper_decisions ORDER BY id"
+        ).fetchall()
+
+    def test_short_prompt_logs_silent_short(self, db_graph):
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph)
+
+        builder.build_whisper_context(prompt="ok", session_id="s1")
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "silent_short"
+        assert rows[0]["session_id"] == "s1"
+
+    def test_no_candidates_logs_silent_no_candidates(self, db_graph):
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph, results=[])
+
+        builder.build_whisper_context(
+            prompt="a topic with no memories", session_id="s2",
+        )
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "silent_no_candidates"
+        assert rows[0]["candidate_count"] == 0
+
+    def test_gate_reject_logs_silent_gate_with_score(self, db_graph):
+        db, graph = db_graph
+        node = _make_node_dict("gated-1", "Gated candidate")
+        builder = self._builder_with_db(
+            db, graph,
+            results=[{"node": node, "score": 0.80, "source": "hybrid",
+                      "raw_cosine": 0.30}],
+        )
+
+        builder.build_whisper_context(
+            prompt="gated candidate topic",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+            session_id="s3",
+        )
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "silent_gate"
+        assert rows[0]["candidate_count"] == 1
+        assert rows[0]["injected_count"] == 0
+        assert rows[0]["max_gate_score"] == pytest.approx(0.30)
+
+    def test_injection_logs_injected_with_counts(self, db_graph):
+        db, graph = db_graph
+        node = _make_node_dict("inj-1", "Injected candidate")
+        builder = self._builder_with_db(
+            db, graph,
+            results=[{"node": node, "score": 0.80, "source": "hybrid",
+                      "raw_cosine": 0.75}],
+        )
+
+        builder.build_whisper_context(
+            prompt="injected candidate topic",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+            session_id="s4",
+        )
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "injected"
+        assert rows[0]["injected_count"] == 1
+        assert rows[0]["max_gate_score"] == pytest.approx(0.75)
+
+    def test_one_row_per_call(self, db_graph):
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph)
+
+        builder.build_whisper_context(prompt="ok", session_id="s5")
+        builder.build_whisper_context(prompt="first real prompt about topics",
+                                      session_id="s5")
+
+        rows = self._decisions(db)
+        assert len(rows) == 2
