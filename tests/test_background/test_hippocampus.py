@@ -23,7 +23,7 @@ from ormah.background.hippocampus import (
 from ormah.config import Settings
 from ormah.engine.memory_engine import MemoryEngine
 
-_LLM_PATCH = "ormah.background.llm_client.llm_generate"
+_LLM_PATCH = "ormah.background.llm_client.ingest_llm_generate"
 
 _LLM_RESPONSE = json.dumps({"memories": [
     {
