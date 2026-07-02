@@ -337,6 +337,15 @@ class Settings(BaseSettings):
             )
         return self
 
+    @field_validator("claude_cli_timeout_seconds")
+    @classmethod
+    def _claude_cli_timeout_positive(cls, v: int) -> int:
+        # A zero/negative timeout would make subprocess.run raise/never wait — the whole
+        # extraction budget collapses to an instant failure. Reject it at config load.
+        if v < 1:
+            raise ValueError(f"claude_cli_timeout_seconds must be >= 1, got {v}")
+        return v
+
     @field_validator("llm_api_key_env_var")
     @classmethod
     def _llm_api_key_env_var_allowed(cls, v: str | None) -> str | None:
