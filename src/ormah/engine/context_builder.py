@@ -409,18 +409,30 @@ class ContextBuilder:
             intent is not None and "continuation" in intent.categories
         )
 
+        # Compute prompt_vec once, up front — reused by topic-shift detection,
+        # the affinity boost, and whisper_log (the prompt was previously
+        # encoded separately for topic-shift and again for prompt_vec).
+        prompt_vec: np.ndarray | None = None
+        try:
+            hybrid_search = self.engine._get_hybrid_search()
+            if hybrid_search is not None:
+                prompt_vec = hybrid_search.encoder.encode(prompt)
+        except Exception as e:
+            logger.warning("Failed to compute prompt_vec: %s", e)
+
         # Topic-shift detection: skip injection when topic hasn't changed
         if (
             topic_shift_enabled
             and recent_prompts
             and len(recent_prompts) >= 1
             and not follow_up_mode
+            and prompt_vec is not None
         ):
             try:
                 hybrid_search = self.engine._get_hybrid_search()
                 if hybrid_search is not None:
                     encoder = hybrid_search.encoder
-                    current_vec = encoder.encode(prompt)
+                    current_vec = prompt_vec
                     recent_vecs = encoder.encode_batch(recent_prompts[-3:])
                     centroid = np.mean(recent_vecs, axis=0)
                     norm_current = np.linalg.norm(current_vec)
@@ -470,15 +482,6 @@ class ContextBuilder:
                 }
             except Exception as e:
                 logger.warning("Failed to load identity-linked nodes: %s", e)
-
-        # Compute prompt_vec early — needed for affinity boost and whisper_log
-        prompt_vec: np.ndarray | None = None
-        try:
-            hybrid_search = self.engine._get_hybrid_search()
-            if hybrid_search is not None:
-                prompt_vec = hybrid_search.encoder.encode(prompt)
-        except Exception as e:
-            logger.warning("Failed to compute prompt_vec for affinity: %s", e)
 
         # Build context-enhanced search query from recent prompts
         search_query = prompt
