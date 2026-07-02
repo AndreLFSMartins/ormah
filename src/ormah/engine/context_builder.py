@@ -498,6 +498,10 @@ class ContextBuilder:
             "default_space": space,
             "tiers": ["core", "working"],
             "touch_access": False,
+            # Whisper needs the raw pool — it applies its own floors and an
+            # absolute-signal gate; the deliberate-recall floor would drop
+            # length-penalized long docs before the reranker can rescue them.
+            "min_relevance": 0.0,
         }
         if intent is not None:
             # Extract search_query override before merging (it's not a
