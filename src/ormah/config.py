@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     llm_num_predict: int = 4096
     llm_api_key_env_var: str | None = None
     llm_inherit_api_key: bool = False
+
+    # Ingest (server-side extraction) LLM override. Empty falls back to llm_provider/llm_model.
+    ingest_llm_provider: str = ""
+    ingest_llm_model: str = ""
+    claude_cli_timeout_seconds: int = 120
+    claude_cli_bin: str | None = None
+    claude_cli_max_concurrency: int = 1
 
     # Background intervals (LLM-dependent tasks default to daily to keep costs low)
     auto_link_interval_minutes: int = 1440
@@ -309,10 +316,26 @@ class Settings(BaseSettings):
     @field_validator("llm_provider")
     @classmethod
     def _llm_provider_enum(cls, v: str) -> str:
-        allowed = {"ollama", "litellm", "none"}
+        allowed = {"ollama", "litellm", "claude_cli", "none"}
         if v not in allowed:
             raise ValueError(f"llm_provider must be one of {allowed}, got {v!r}")
         return v
+
+    @field_validator("ingest_llm_provider")
+    @classmethod
+    def _ingest_llm_provider_enum(cls, v: str) -> str:
+        allowed = {"", "ollama", "litellm", "claude_cli", "none"}
+        if v not in allowed:
+            raise ValueError(f"ingest_llm_provider must be one of {allowed}, got {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def _ingest_llm_model_required_when_provider_overridden(self) -> "Settings":
+        if self.ingest_llm_provider and self.ingest_llm_provider != "none" and not self.ingest_llm_model:
+            raise ValueError(
+                "ingest_llm_model is required when ingest_llm_provider is overridden"
+            )
+        return self
 
     @field_validator("llm_api_key_env_var")
     @classmethod
