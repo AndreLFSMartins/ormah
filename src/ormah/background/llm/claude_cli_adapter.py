@@ -21,7 +21,10 @@ _HOOKS_OFF_ARGS = ["--settings", '{"hooks":{}}']
 # tools so a malicious transcript can only produce text, never act. Confirmed by Task 01.
 _TOOL_DENY_ARGS = ["--allowed-tools", ""]
 
-# Bound concurrent `claude -p` across all adapter instances/threads. One shared semaphore per max.
+# Bound concurrent `claude -p`: one shared semaphore per distinct max_concurrency value. All
+# adapters built with the same max share a bound (today ingest + maintenance read the same
+# claude_cli_max_concurrency, so it is effectively global); adapters with different maxes get
+# independent semaphores.
 _SEMAPHORES: dict[int, threading.Semaphore] = {}
 _SEM_LOCK = threading.Lock()
 
