@@ -567,6 +567,37 @@ class TestWhisperStoreCursor:
         cursors = json.loads(_WHISPER_CURSOR_FILE.read_text())
         assert cursors["sess1"] == transcript.stat().st_size
 
+    def test_non_dict_200_body_does_not_crash_or_advance(self, monkeypatch, tmp_path):
+        """A rogue proxy may return HTTP 200 with a valid-but-non-object JSON body
+        (null / list / number). The hook must not raise (its contract is 'never block
+        compaction, exit silently') and must not advance the cursor (unconfirmed success)."""
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text(_make_transcript(6))
+
+        def handler(request):
+            # A literal JSON null body: r.json() returns None (not an object), so
+            # resp.get("status") would raise AttributeError unless guarded.
+            return httpx.Response(200, content=b"null", headers={"content-type": "application/json"})
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(
+            "ormah.adapters.cli_adapter._whisper_store_client",
+            lambda: httpx.Client(transport=transport, base_url="http://test"),
+        )
+
+        hook_input = json.dumps({
+            "transcript_path": str(transcript),
+            "cwd": "/tmp",
+            "session_id": "sess1",
+            "trigger": "auto",
+        })
+
+        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+        assert code == 0
+
+        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
+        assert not _WHISPER_CURSOR_FILE.exists()
+
     def test_cursor_not_saved_on_error(self, monkeypatch, tmp_path):
         """On HTTP error, cursor is NOT updated."""
         transcript = tmp_path / "session.jsonl"
