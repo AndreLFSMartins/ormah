@@ -110,8 +110,11 @@ Return JSON:
 def _llm_classify_link(settings, node_row, other_row) -> dict | None:
     """Ask LLM to classify the relationship between two nodes.
 
-    Returns parsed dict with keys relationship, reason — or None if the LLM
-    is unavailable or returns invalid output.
+    Returns a dict with keys relationship, reason. On invalid/unparseable
+    output the relationship is the "error" sentinel (poison content — the
+    node is still marked resolved so it doesn't block the watermark, but no
+    edge is created). Returns raw None only when the LLM itself is
+    unavailable — a transient condition the caller retries.
     """
     from ormah.background.llm_client import extract_json, llm_generate
 

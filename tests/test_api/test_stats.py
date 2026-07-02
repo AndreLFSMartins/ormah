@@ -55,7 +55,9 @@ def test_stats_empty(stats_setup):
     assert data["whispers_used_this_week"] == 0
     assert data["memories_total"] == 0
     assert data["memories_this_week"] == 0
-    assert data["window_days"] == 7
+    # window_days is days elapsed in the current calendar week (1-7), not a
+    # fixed rolling-window size, since the default is now a fixed Mon-Sun week.
+    assert 1 <= data["window_days"] <= 7
     assert "generated_at" in data
 
 

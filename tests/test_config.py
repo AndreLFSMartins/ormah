@@ -78,6 +78,34 @@ def test_llm_num_predict_env(monkeypatch):
     assert s.llm_num_predict == 1024
 
 
+# --- ingest_llm_provider / ingest_llm_model ---
+
+def test_ingest_llm_provider_and_model_override():
+    s = _settings(llm_provider="ollama", ingest_llm_provider="claude_cli", ingest_llm_model="haiku")
+    assert s.ingest_llm_provider == "claude_cli"
+    assert s.ingest_llm_model == "haiku"
+
+
+def test_ingest_llm_provider_without_model_raises():
+    with pytest.raises(ValidationError, match="ingest_llm_model is required"):
+        _settings(ingest_llm_provider="claude_cli")
+
+
+def test_empty_ingest_llm_provider_does_not_require_model():
+    s = _settings()
+    assert s.ingest_llm_provider == ""
+    assert s.ingest_llm_model == ""
+
+
+def test_claude_cli_timeout_must_be_positive():
+    with pytest.raises(ValidationError, match="claude_cli_timeout_seconds must be >= 1"):
+        _settings(claude_cli_timeout_seconds=0)
+
+
+def test_claude_cli_timeout_default_is_valid():
+    assert _settings().claude_cli_timeout_seconds >= 1
+
+
 def test_llm_num_predict_zero():
     with pytest.raises(ValidationError, match="llm_num_predict must be >= 1"):
         _settings(llm_num_predict=0)

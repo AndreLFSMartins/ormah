@@ -57,12 +57,17 @@ def extract_json(raw: str) -> str:
 _cached_adapter: LLMAdapter | None = None
 _adapter_initialised: bool = False
 
+_cached_ingest_adapter: LLMAdapter | None = None
+_ingest_adapter_initialised: bool = False
+
 
 def reset_adapter() -> None:
-    """Clear the cached adapter (useful for test isolation)."""
-    global _cached_adapter, _adapter_initialised
+    """Clear the cached adapters (useful for test isolation)."""
+    global _cached_adapter, _adapter_initialised, _cached_ingest_adapter, _ingest_adapter_initialised
     _cached_adapter = None
     _adapter_initialised = False
+    _cached_ingest_adapter = None
+    _ingest_adapter_initialised = False
 
 
 def _get_or_create_adapter(settings) -> LLMAdapter | None:
@@ -71,6 +76,35 @@ def _get_or_create_adapter(settings) -> LLMAdapter | None:
         _cached_adapter = get_adapter(settings)
         _adapter_initialised = True
     return _cached_adapter
+
+
+def _resolve_ingest_provider(settings) -> str:
+    return settings.ingest_llm_provider or settings.llm_provider
+
+
+def _resolve_ingest_model(settings) -> str:
+    return settings.ingest_llm_model or settings.llm_model
+
+
+def _get_or_create_ingest_adapter(settings) -> LLMAdapter | None:
+    global _cached_ingest_adapter, _ingest_adapter_initialised
+    if not _ingest_adapter_initialised:
+        _cached_ingest_adapter = get_adapter(
+            settings,
+            provider=_resolve_ingest_provider(settings),
+            model=_resolve_ingest_model(settings),
+        )
+        _ingest_adapter_initialised = True
+    return _cached_ingest_adapter
+
+
+def ingest_llm_generate(settings, prompt: str, json_mode: bool = True, **kwargs) -> str | None:
+    """Generate for server-side extraction, using ingest_llm_provider/model (not the
+    maintenance-path llm_provider/llm_model)."""
+    adapter = _get_or_create_ingest_adapter(settings)
+    if adapter is None:
+        return None
+    return adapter.generate(prompt, json_mode=json_mode, **kwargs)
 
 
 def llm_generate(

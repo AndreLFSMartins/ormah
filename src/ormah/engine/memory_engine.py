@@ -10,7 +10,7 @@ import re
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2211,11 +2211,11 @@ class MemoryEngine:
         if the LLM is unavailable.
         """
         try:
-            from ormah.background.llm_client import llm_generate
+            from ormah.background.llm_client import ingest_llm_generate
 
             max_chars = self.settings.ingest_max_content_chars
             prompt = _INGEST_LLM_PROMPT.format(conversation=content[:max_chars])
-            raw = llm_generate(self.settings, prompt, json_mode=True)
+            raw = ingest_llm_generate(self.settings, prompt, json_mode=True)
             if raw is None:
                 return (
                     "No LLM available for server-side extraction. "
@@ -2384,7 +2384,7 @@ class MemoryEngine:
 
         return f"Feedback recorded for node {resolved_node_id[:8]}..."
 
-    def get_stats(self, days: int = 7) -> dict[str, Any]:
+    def get_stats(self, days: int | None = None) -> dict[str, Any]:
         """Return ambient usage counts for the menubar/CLI surface (F09/F10).
 
         A "whisper used" is a single whisper call that actually injected at
@@ -2393,14 +2393,27 @@ class MemoryEngine:
         the ``(session_id, prompt_hash, logged_at)`` triple where
         ``was_injected = 1``. Memory counts come straight from ``nodes``.
 
-        ISO-8601 UTC timestamps compare correctly lexicographically, so the
-        rolling window is a simple string ``>=`` against a Python-computed
-        cutoff — no SQLite date math, no timezone surprises.
-        """
-        from datetime import timedelta
+        With ``days=None`` (the default, used by the tray/CLI), the "week"
+        window is the fixed current calendar week (Mon 00:00 UTC) so the count
+        only ever increases within a week and resets once on Monday — it never
+        drifts down mid-week the way a rolling N-day window would. Passing an
+        explicit ``days`` opts into a rolling N-day window ending now instead,
+        for ad-hoc/custom-range queries.
 
+        ISO-8601 UTC timestamps compare correctly lexicographically, so the
+        window is a simple string ``>=`` against a Python-computed cutoff — no
+        SQLite date math, no timezone surprises.
+        """
         conn = self.db.conn
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        now = datetime.now(timezone.utc)
+        if days is None:
+            window_days = now.weekday() + 1  # days elapsed in this calendar week
+            cutoff = (now - timedelta(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).isoformat()
+        else:
+            window_days = days
+            cutoff = (now - timedelta(days=days)).isoformat()
 
         used_key = "session_id || '|' || prompt_hash || '|' || logged_at"
         whispers_total = conn.execute(
@@ -2427,7 +2440,7 @@ class MemoryEngine:
             "whispers_used_total": whispers_total,
             "memories_this_week": memories_week,
             "memories_total": memories_total,
-            "window_days": days,
+            "window_days": window_days,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 

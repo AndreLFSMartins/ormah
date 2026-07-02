@@ -26,7 +26,10 @@ from ormah.engine.memory_engine import MemoryEngine
 from ormah.models.node import CreateNodeRequest
 from ormah.transcript.parser import parse_transcript
 
-_LLM_PATCH = "ormah.background.llm_client.llm_generate"
+_LLM_PATCH = "ormah.background.llm_client.ingest_llm_generate"
+# The whisper-usage LLM judge uses the global llm_generate (maintenance path), NOT the
+# extraction-only ingest_llm_generate. Judge tests patch this; ingest tests patch _LLM_PATCH.
+_JUDGE_PATCH = "ormah.background.llm_client.llm_generate"
 
 _LLM_RESPONSE = json.dumps({"memories": [
     {
@@ -368,7 +371,7 @@ def test_llm_judge_disabled_by_default(engine, tmp_path):
     engine.settings.llm_provider = "ollama"
 
     mock_llm = MagicMock(return_value=json.dumps({"verdicts": []}))
-    with patch(_LLM_PATCH, mock_llm):
+    with patch(_JUDGE_PATCH, mock_llm):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 1
@@ -405,7 +408,7 @@ def test_llm_judge_promotes_used_verdict(engine, tmp_path):
             "reason": "The answer endorses the injected deployment guidance.",
         }]
     })
-    with patch(_LLM_PATCH, return_value=llm_response) as mock_llm:
+    with patch(_JUDGE_PATCH, return_value=llm_response) as mock_llm:
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 2
@@ -463,7 +466,7 @@ def test_llm_judge_falls_back_to_json_object_mode(engine, tmp_path):
         }]
     })
     mock_llm = MagicMock(side_effect=[None, llm_response])
-    with patch(_LLM_PATCH, mock_llm):
+    with patch(_JUDGE_PATCH, mock_llm):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 2
@@ -517,7 +520,7 @@ def test_llm_judge_promotes_irrelevant_verdict_as_negative(engine, tmp_path):
             "reason": "The memory is about graph UI rendering, not feedback schema work.",
         }]
     })
-    with patch(_LLM_PATCH, return_value=llm_response):
+    with patch(_JUDGE_PATCH, return_value=llm_response):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 2
@@ -568,7 +571,7 @@ def test_llm_judge_low_confidence_records_uncertain_without_affinity(engine, tmp
             "reason": "Maybe unrelated, but confidence is low.",
         }]
     })
-    with patch(_LLM_PATCH, return_value=llm_response):
+    with patch(_JUDGE_PATCH, return_value=llm_response):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 2
@@ -610,7 +613,7 @@ def test_llm_judge_skips_clear_heuristic_positive(engine, tmp_path):
     engine.settings.feedback_llm_judge_enabled = True
 
     mock_llm = MagicMock(return_value=json.dumps({"verdicts": []}))
-    with patch(_LLM_PATCH, mock_llm):
+    with patch(_JUDGE_PATCH, mock_llm):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
     assert recorded == 1
@@ -647,7 +650,7 @@ def test_llm_judge_is_idempotent(engine, tmp_path):
             "reason": "The memory is about graph UI rendering.",
         }]
     }))
-    with patch(_LLM_PATCH, mock_llm):
+    with patch(_JUDGE_PATCH, mock_llm):
         assert _record_whisper_usage_signals(engine, transcript) == 2
         assert _record_whisper_usage_signals(engine, transcript) == 0
 
