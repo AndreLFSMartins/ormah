@@ -116,9 +116,10 @@ Affinity uses stored feedback rows from the `affinity` table to nudge scores up 
 
 After retrieval, reranking, and affinity boost, whisper extracts topic tokens from the current prompt and checks which candidate nodes still have explicit topical overlap with that prompt.
 
-- if at least one candidate overlaps topically, Ormah narrows the set to overlapping candidates
+- candidates with topical overlap always pass
 - identity-linked nodes are still allowed through this filter
 - for identity-only prompts, global identity candidates are also preserved
+- a candidate with **no** overlap needs an absolute voucher: `ce_absolute >= whisper_no_overlap_ce_floor` (default 0.61), or `raw_cosine >= whisper_no_overlap_cosine_floor` (default 0.70) when the reranker didn't run — the filter fails closed instead of passing everything when nothing overlaps
 
 This step exists because semantic retrieval can surface broadly related memories that are directionally relevant but too vague for injection. Token overlap adds one more precision pass before the final gate.
 
@@ -132,6 +133,11 @@ The hard gate is controlled by `whisper_injection_gate`, which currently default
 ### 11. Exploration slot is optional
 
 If enabled, Ormah can add one lower-confidence candidate as an exploration slot. This is meant to create learning opportunities for later feedback.
+
+- exploration only piggybacks on real injections: when the gate decided on silence, silence stands
+- the exploration candidate is rendered with an `[exploring]` marker instead of its type, so agents can weigh it honestly
+
+Topic-shift suppression ("same topic → skip") only fires for topics that were actually **served** — if every earlier prompt on the topic produced silence, whisper proceeds instead of starving the topic for the whole session (served history is read from `whisper_log`).
 
 ### 12. Formatting is flat, not sectioned
 

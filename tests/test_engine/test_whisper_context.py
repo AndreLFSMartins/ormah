@@ -779,8 +779,9 @@ class TestWhisperRerankerBlendIntegration:
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce):
             # Default alpha: should pass min_score=0.15
+            # (prompt shares the "fact" token so the topical filter keeps it)
             result_default = builder.build_whisper_context(
-                prompt="test",
+                prompt="tell me about fact a",
                 min_score=0.1,
                 injection_gate=0.1,  # low gate to isolate reranker behavior
                 reranker_enabled=True,
@@ -789,7 +790,7 @@ class TestWhisperRerankerBlendIntegration:
             )
             # High alpha: CE dominates → should fail min_score=0.15
             result_high_alpha = builder.build_whisper_context(
-                prompt="test",
+                prompt="tell me about fact a",
                 min_score=0.1,
                 injection_gate=0.1,  # low gate to isolate reranker behavior
                 reranker_enabled=True,
@@ -935,8 +936,10 @@ class TestWhisperRerankerBlendIntegration:
         mock_ce.rerank.return_value = [-3.0, 8.0]
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce):
+            # Prompt shares the "embedding" token with both titles so the
+            # topical filter keeps them.
             result = builder.build_whisper_context(
-                prompt="test query",
+                prompt="embedding order check",
                 space="proj",
                 min_score=0.1,
                 reranker_enabled=True,
@@ -1602,6 +1605,8 @@ def _make_settings_mock(
     affinity_max_boost=0.15,
     affinity_implicit_weight=0.8,
     claude_maintenance_enabled=False,
+    whisper_no_overlap_ce_floor=0.45,
+    whisper_no_overlap_cosine_floor=0.70,
 ):
     """Create a MagicMock settings object with affinity-related float attributes."""
     settings = MagicMock()
@@ -1612,6 +1617,8 @@ def _make_settings_mock(
     settings.affinity_max_boost = affinity_max_boost
     settings.affinity_implicit_weight = affinity_implicit_weight
     settings.claude_maintenance_enabled = claude_maintenance_enabled
+    settings.whisper_no_overlap_ce_floor = whisper_no_overlap_ce_floor
+    settings.whisper_no_overlap_cosine_floor = whisper_no_overlap_cosine_floor
     return settings
 
 
@@ -1815,7 +1822,7 @@ class TestExplorationSlot:
              patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
              patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
             result = builder.build_whisper_context(
-                prompt="test query",
+                prompt="injected exploration memory check",
                 min_score=0.1,
                 reranker_enabled=True,
                 reranker_min_score=0.40,
@@ -1823,6 +1830,8 @@ class TestExplorationSlot:
             )
 
         assert "Exploration memory" in result
+        # Exploration candidates are labeled so the agent can weigh them
+        assert "**[exploring]** Exploration memory" in result
 
     def test_exploration_skips_candidate_with_existing_affinity_signal(self, mock_graph):
         """A gated-out candidate that already has an affinity signal for a similar prompt
@@ -2003,7 +2012,7 @@ class TestExplorationCEGate:
              patch("ormah.engine.affinity.batch_fetch_affinity", return_value={"maybe-1": []}), \
              patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
             result = builder.build_whisper_context(
-                prompt="how does fastapi routing work",
+                prompt="relevant fact or maybe useful",
                 injection_gate=0.50,
                 reranker_enabled=True,
                 reranker_min_score=0.40,
@@ -2652,3 +2661,243 @@ class TestWhisperDecisions:
 
         rows = self._decisions(db)
         assert len(rows) == 2
+
+
+class TestExplorationRespectsSilence:
+    """Exploration piggybacks on real injections; it never breaks silence (I6)."""
+
+    def test_no_exploration_when_gate_rejected_everything(self, mock_graph):
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock(
+            whisper_exploration_enabled=True,
+            whisper_reranker_min_score=0.40,
+        )
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        # Single candidate: above the 0.40 exploration floor, below the gate.
+        node = _make_node_dict("lonely", "Lonely candidate")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.60, "source": "hybrid"},
+        ]
+
+        mock_ce = MagicMock()
+        # CE -5 → ce_absolute 0.389 < 0.50 gate; blended 0.4*0.389+0.6*0.6 = 0.516 ≥ 0.40 floor
+        mock_ce.rerank.return_value = [-5.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="lonely candidate topic",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.40,
+                injection_gate=0.50,
+            )
+
+        # Gate rejected the only candidate → silence stands, no exploration.
+        assert "Lonely candidate" not in result
+
+
+class TestTopicalFilterFailClosed:
+    """Candidates with no lexical overlap need an absolute voucher (I7)."""
+
+    def test_no_overlap_weak_ce_dropped(self, mock_graph):
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = _make_node_dict("stranger", "Unrelated embedding neighbor")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.85, "source": "hybrid"},
+        ]
+
+        mock_ce = MagicMock()
+        # CE -5.0 → ce_absolute 0.389, below the 0.45 no-overlap floor
+        mock_ce.rerank.return_value = [-5.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="deployment pipeline problems",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.10,
+            )
+
+        assert "Unrelated embedding neighbor" not in result
+
+    def test_no_overlap_strong_ce_survives(self, mock_graph):
+        """A true paraphrase match with zero shared words survives via the CE voucher."""
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = _make_node_dict("paraphrase", "Semantically equivalent answer")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.55, "source": "hybrid"},
+        ]
+
+        mock_ce = MagicMock()
+        # CE +3 → ce_absolute 0.833 ≥ 0.61 voucher
+        mock_ce.rerank.return_value = [3.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="deployment pipeline problems",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.10,
+            )
+
+        assert "Semantically equivalent answer" in result
+
+    def test_no_overlap_cosine_voucher_when_reranker_off(self, mock_graph):
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        strong = _make_node_dict("cos-strong", "Semantic twin")
+        weak = _make_node_dict("cos-weak", "Embedding stranger")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": strong, "score": 0.80, "source": "hybrid", "raw_cosine": 0.78},
+            {"node": weak, "score": 0.75, "source": "hybrid", "raw_cosine": 0.55},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="deployment pipeline problems",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.10,
+        )
+
+        assert "Semantic twin" in result
+        assert "Embedding stranger" not in result
+
+
+class TestTopicShiftServedMemory:
+    """Topic-shift suppression only fires for topics that were served (I9)."""
+
+    @pytest.fixture
+    def db_graph(self, tmp_path):
+        from ormah.index.db import Database
+
+        db = Database(tmp_path / "index.db")
+        db.init_schema()
+        graph = GraphIndex(db.conn)
+        return db, graph
+
+    def _builder(self, db, graph, prompt_vec):
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock()
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        # encode_batch: recent prompts on the same topic → same vector
+        mock_encoder.encode_batch.return_value = np.stack([prompt_vec])
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+        mock_engine.db = db
+        return mock_engine, ContextBuilder(graph, engine=mock_engine)
+
+    def _insert_whisper_log(self, db, *, session_id, prompt_vec, was_injected):
+        with db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO whisper_log "
+                "(session_id, space, prompt_hash, prompt_text, prompt_vec, "
+                "node_id, score, was_injected, logged_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                (session_id, None, "h", "p", prompt_vec.astype(np.float32).tobytes(),
+                 "n1", 0.9, was_injected),
+            )
+
+    def test_same_topic_never_served_proceeds(self, db_graph):
+        """Turn 1 was gate-rejected (logged was_injected=0); turn 2 on the
+        same topic must NOT be topic-shift-skipped — the topic is starved."""
+        db, graph = db_graph
+        vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        self._insert_whisper_log(db, session_id="sess-starved", prompt_vec=vec, was_injected=0)
+
+        mock_engine, builder = self._builder(db, graph, vec)
+        node = _make_node_dict("served-1", "Starved topic memory")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.85, "source": "hybrid", "raw_cosine": 0.80},
+        ]
+
+        with patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None):
+            result = builder.build_whisper_context(
+                prompt="starved topic memory question",
+                min_score=0.1,
+                reranker_enabled=False,
+                injection_gate=0.10,
+                topic_shift_enabled=True,
+                topic_shift_threshold=0.75,
+                recent_prompts=["starved topic memory question earlier"],
+                session_id="sess-starved",
+            )
+
+        assert "Starved topic memory" in result
+
+    def test_same_topic_already_served_skips(self, db_graph):
+        """Turn 1 injected (was_injected=1); turn 2 on the same topic is
+        correctly suppressed — no repeat spam."""
+        db, graph = db_graph
+        vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        self._insert_whisper_log(db, session_id="sess-served", prompt_vec=vec, was_injected=1)
+
+        mock_engine, builder = self._builder(db, graph, vec)
+        node = _make_node_dict("served-2", "Served topic memory")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.85, "source": "hybrid", "raw_cosine": 0.80},
+        ]
+
+        with patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None):
+            result = builder.build_whisper_context(
+                prompt="served topic memory question",
+                min_score=0.1,
+                reranker_enabled=False,
+                injection_gate=0.10,
+                topic_shift_enabled=True,
+                topic_shift_threshold=0.75,
+                recent_prompts=["served topic memory question earlier"],
+                session_id="sess-served",
+            )
+
+        assert "Served topic memory" not in result
+
+    def test_no_session_id_preserves_plain_skip(self, db_graph):
+        """Without a session_id there is no served history — the plain
+        topic-shift skip behavior is preserved."""
+        db, graph = db_graph
+        vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_engine, builder = self._builder(db, graph, vec)
+        node = _make_node_dict("served-3", "Sessionless topic memory")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.85, "source": "hybrid", "raw_cosine": 0.80},
+        ]
+
+        with patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None):
+            result = builder.build_whisper_context(
+                prompt="sessionless topic memory question",
+                min_score=0.1,
+                reranker_enabled=False,
+                injection_gate=0.10,
+                topic_shift_enabled=True,
+                topic_shift_threshold=0.75,
+                recent_prompts=["sessionless topic memory question earlier"],
+                session_id=None,
+            )
+
+        assert "Sessionless topic memory" not in result

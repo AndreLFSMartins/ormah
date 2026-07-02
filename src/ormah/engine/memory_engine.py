@@ -931,6 +931,8 @@ class MemoryEngine:
             reranker_max_doc_chars=self.settings.whisper_reranker_max_doc_chars,
             recent_prompts=recent_prompts,
             injection_gate=self.settings.whisper_injection_gate,
+            no_overlap_ce_floor=self.settings.whisper_no_overlap_ce_floor,
+            no_overlap_cosine_floor=self.settings.whisper_no_overlap_cosine_floor,
             topic_shift_enabled=self.settings.whisper_topic_shift_enabled,
             topic_shift_threshold=self.settings.whisper_topic_shift_threshold,
             session_id=session_id,
