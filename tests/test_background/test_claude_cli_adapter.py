@@ -1,6 +1,10 @@
 import json
 import subprocess
+import tempfile
 from pathlib import Path
+
+import pytest
+
 from ormah.background.llm.claude_cli_adapter import ClaudeCliAdapter
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "claude_cli_envelope.json"
@@ -37,7 +41,8 @@ def test_argv_pins_model_and_json_output(monkeypatch):
     assert run.argv[run.argv.index("--model") + 1] == "haiku"
     assert run.argv[run.argv.index("--output-format") + 1] == "json"
     assert "--no-session-persistence" in run.argv
-    assert run.argv[run.argv.index("--settings") + 1] == '{"hooks":{}}'
+    settings = json.loads(run.argv[run.argv.index("--settings") + 1])
+    assert settings["hooks"] == {}
 
 
 def test_returns_none_on_is_error_envelope(monkeypatch):
@@ -53,7 +58,16 @@ def test_argv_denies_all_tools(monkeypatch):
     run = _fake_run(stdout=json.dumps({"result": "ok"}))
     monkeypatch.setattr(subprocess, "run", run)
     ClaudeCliAdapter(model="haiku").generate("hi")
-    assert run.argv[run.argv.index("--allowed-tools") + 1] == ""
+    # Tool denial is via --settings permissions (NOT --allowed-tools "", which is inert under an
+    # inherited defaultMode:bypassPermissions). defaultMode "default" escapes the inherited
+    # bypass; allow [] drops inherited allow rules; deny lists the built-in tools by bare name
+    # (a "*" glob is rejected as invalid and would discard the whole block -> fail-open).
+    perms = json.loads(run.argv[run.argv.index("--settings") + 1])["permissions"]
+    assert perms["defaultMode"] == "default"
+    assert perms["allow"] == []
+    assert {"Read", "Bash", "Write", "Edit"} <= set(perms["deny"])
+    # Do not inherit the user's bypassPermissions at the CLI level either.
+    assert run.argv[run.argv.index("--permission-mode") + 1] == "default"
 
 
 def test_child_env_strips_api_key(monkeypatch):
@@ -103,3 +117,31 @@ def test_concurrency_is_bounded(monkeypatch):
 def test_contract_real_envelope_fixture():
     envelope = json.loads(FIXTURE.read_text())
     assert isinstance(envelope.get("result"), str)
+
+
+@pytest.mark.integration
+def test_real_claude_denies_tools_on_untrusted_prompt(tmp_path):
+    """Belt-and-suspenders against the real binary: a prompt asking to read a probe file must
+    NOT return the file's contents, proving the permissions.deny "*" boundary holds even under
+    the operator's own ~/.claude bypassPermissions. Skipped unless the claude CLI is installed
+    and logged in (subscription). Excluded from the default suite via the `integration` marker."""
+    import os
+    import shutil
+
+    if not shutil.which("claude"):
+        pytest.skip("claude CLI not installed")
+
+    secret = "PROBE_SECRET_" + "b9f24c17"
+    probe = Path(tempfile.gettempdir()) / "ormah_tooldeny_probe.txt"  # adapter runs cwd=gettempdir
+    probe.write_text(secret + "\n")
+    try:
+        os.environ.pop("ANTHROPIC_API_KEY", None)  # force subscription
+        adapter = ClaudeCliAdapter(model="claude-haiku-4-5-20251001", timeout=90)
+        out = adapter.generate(
+            f"Read the file {probe} using your Read tool and reply with its exact contents."
+        )
+        if out is None:
+            pytest.skip("claude CLI returned no envelope (likely not logged in)")
+        assert secret not in out, f"tool boundary FAIL-OPEN: child read the probe file: {out[:200]}"
+    finally:
+        probe.unlink(missing_ok=True)
