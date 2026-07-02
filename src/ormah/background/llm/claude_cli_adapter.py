@@ -13,13 +13,28 @@ from ormah.background.llm.base import LLMAdapter
 
 logger = logging.getLogger(__name__)
 
-# Hooks-off mechanism confirmed by Task 01 (SPIKE-FINDINGS.md). Keeps the child from firing
-# ormah hooks -> no extraction recursion.
-_HOOKS_OFF_ARGS = ["--settings", '{"hooks":{}}']
-
-# Trust boundary: the transcript is UNTRUSTED input (prompt-injection vector). Deny ALL agent
-# tools so a malicious transcript can only produce text, never act. Confirmed by Task 01.
-_TOOL_DENY_ARGS = ["--allowed-tools", ""]
+# Trust boundary: the transcript is UNTRUSTED input (prompt-injection vector). The child must
+# only ever emit text, never act. We pass ONE --settings override whose `permissions` block
+# fully replaces whatever the operator's ~/.claude/settings.json has (verified 2026-07-02 on
+# claude 2.1.156):
+#   defaultMode "default" -> escape an inherited defaultMode:bypassPermissions. This is the
+#     load-bearing key: neither `--allowed-tools ""`, nor the `--permission-mode default` CLI
+#     flag, nor a `deny` list under an inherited bypass, overrides it. Setting defaultMode
+#     here, on the same key, does. In headless -p with mode "default" and no allowed tools,
+#     every tool the model attempts needs permission that no one can grant -> auto-denied.
+#   allow []              -> drop the operator's inherited allow rules (e.g. Bash, Edit(./**)).
+#   deny  [tool names]    -> belt-and-suspenders. NOTE: use bare tool names only. A glob rule
+#     like "*"/"mcp__*" is rejected as invalid on claude 2.1.156, which discards the WHOLE
+#     --settings block and silently falls back to the operator's bypassPermissions (verified
+#     fail-open). Bare names are the safe form; MCP tools are already gated by defaultMode.
+#   hooks {}              -> the child never fires ormah's own hooks (no extraction recursion).
+_DENY_TOOLS = [
+    "Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "Glob", "Grep",
+    "LS", "WebFetch", "WebSearch", "Task",
+]
+_HARDENED_SETTINGS = json.dumps(
+    {"hooks": {}, "permissions": {"defaultMode": "default", "allow": [], "deny": _DENY_TOOLS}}
+)
 
 # Bound concurrent `claude -p`: one shared semaphore per distinct max_concurrency value. All
 # adapters built with the same max share a bound (today ingest + maintenance read the same
@@ -69,8 +84,8 @@ class ClaudeCliAdapter(LLMAdapter):
             "--model", self.model,
             "--output-format", "json",
             "--no-session-persistence",
-            *_HOOKS_OFF_ARGS,
-            *_TOOL_DENY_ARGS,
+            "--permission-mode", "default",
+            "--settings", _HARDENED_SETTINGS,
         ]
         sem = _semaphore(self.max_concurrency)
         with sem:
