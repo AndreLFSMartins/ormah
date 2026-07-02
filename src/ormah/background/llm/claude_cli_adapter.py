@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from pathlib import Path
 
 from ormah.background.llm.base import LLMAdapter
 
@@ -27,14 +28,21 @@ logger = logging.getLogger(__name__)
 #     like "*"/"mcp__*" is rejected as invalid on claude 2.1.156, which discards the WHOLE
 #     --settings block and silently falls back to the operator's bypassPermissions (verified
 #     fail-open). Bare names are the safe form; MCP tools are already gated by defaultMode.
-#   hooks {}              -> the child never fires ormah's own hooks (no extraction recursion).
+#   disableAllHooks true  -> the operator's own hooks AND plugin hooks otherwise FIRE in this
+#     child (verified: a user SessionStart hook ran despite a hooks:{} override, because hooks
+#     MERGE across sources rather than being replaced). disableAllHooks is a boolean, so the
+#     --settings override actually takes effect, and it turns every non-managed hook off — no
+#     recursion, no side effects. (We keep --no-session-persistence for the transcript; the
+#     alternative, --setting-sources, disables hooks too but re-enables session persistence on
+#     this CLI, so it is NOT used.)
 _DENY_TOOLS = [
     "Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "Glob", "Grep",
     "LS", "WebFetch", "WebSearch", "Task",
 ]
-_HARDENED_SETTINGS = json.dumps(
-    {"hooks": {}, "permissions": {"defaultMode": "default", "allow": [], "deny": _DENY_TOOLS}}
-)
+_HARDENED_SETTINGS = json.dumps({
+    "disableAllHooks": True,
+    "permissions": {"defaultMode": "default", "allow": [], "deny": _DENY_TOOLS},
+})
 
 # Bound concurrent `claude -p`: one shared semaphore per distinct max_concurrency value. All
 # adapters built with the same max share a bound (today ingest + maintenance read the same
@@ -42,6 +50,22 @@ _HARDENED_SETTINGS = json.dumps(
 # independent semaphores.
 _SEMAPHORES: dict[int, threading.Semaphore] = {}
 _SEM_LOCK = threading.Lock()
+
+
+def _cleanup_persisted_stub(session_id: str) -> None:
+    """Best-effort: delete the child's own transcript stub. Even with
+    --no-session-persistence, `claude -p` writes a tiny ai-title record at
+    ~/.claude/projects/<encoded-cwd>/<session_id>.jsonl. It carries ZERO conversation turns, so
+    the session watcher skips it (not ingestible) — but removing it keeps ~/.claude clean and
+    avoids leaving a prompt-derived title on disk. Matched by the EXACT session_id, so no other
+    session's transcript is ever touched."""
+    if not session_id:
+        return
+    try:
+        for p in (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
+            p.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _semaphore(max_concurrency: int) -> threading.Semaphore:
@@ -110,6 +134,7 @@ class ClaudeCliAdapter(LLMAdapter):
             return None
         if not isinstance(envelope, dict):
             return None
+        _cleanup_persisted_stub(str(envelope.get("session_id") or envelope.get("sessionId") or ""))
         if envelope.get("is_error"):
             logger.warning("claude -p returned is_error envelope: %s", str(envelope.get("subtype"))[:100])
             return None
