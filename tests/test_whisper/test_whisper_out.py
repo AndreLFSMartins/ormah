@@ -598,6 +598,56 @@ class TestWhisperStoreCursor:
         from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
         assert not _WHISPER_CURSOR_FILE.exists()
 
+    @pytest.mark.parametrize("body", [
+        {"extracted": 0, "memories": []},            # missing status
+        {"status": "queued", "extracted": 0},         # unrecognized status
+        {"status": None},                              # null status
+    ])
+    def test_cursor_not_advanced_on_unknown_200_status(self, monkeypatch, tmp_path, body):
+        """Only status:"processed" advances the cursor. A 200 dict with a missing or
+        unrecognized status is not a confirmed success — do NOT advance, so the slice is
+        retried rather than silently lost."""
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text(_make_transcript(6))
+
+        transport = httpx.MockTransport(lambda request: _mock_response(body))
+        monkeypatch.setattr(
+            "ormah.adapters.cli_adapter._whisper_store_client",
+            lambda: httpx.Client(transport=transport, base_url="http://test"),
+        )
+        hook_input = json.dumps({
+            "transcript_path": str(transcript), "cwd": "/tmp",
+            "session_id": "sess1", "trigger": "auto",
+        })
+        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+        assert code == 0
+        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
+        assert not _WHISPER_CURSOR_FILE.exists()
+
+    def test_cursor_not_advanced_on_client_timeout(self, monkeypatch, tmp_path):
+        """If the ingest POST itself times out (claude_cli extraction outran the client
+        budget), the hook exits silently and the cursor is NOT advanced, so the slice is
+        retried on the next run instead of being lost."""
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text(_make_transcript(6))
+
+        def handler(request):
+            raise httpx.ReadTimeout("extraction outran the client timeout", request=request)
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(
+            "ormah.adapters.cli_adapter._whisper_store_client",
+            lambda: httpx.Client(transport=transport, base_url="http://test"),
+        )
+        hook_input = json.dumps({
+            "transcript_path": str(transcript), "cwd": "/tmp",
+            "session_id": "sess1", "trigger": "auto",
+        })
+        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+        assert code == 0
+        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
+        assert not _WHISPER_CURSOR_FILE.exists()
+
     def test_cursor_not_saved_on_error(self, monkeypatch, tmp_path):
         """On HTTP error, cursor is NOT updated."""
         transcript = tmp_path / "session.jsonl"
