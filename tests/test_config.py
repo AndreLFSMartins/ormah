@@ -97,6 +97,15 @@ def test_empty_ingest_llm_provider_does_not_require_model():
     assert s.ingest_llm_model == ""
 
 
+def test_claude_cli_timeout_must_be_positive():
+    with pytest.raises(ValidationError, match="claude_cli_timeout_seconds must be >= 1"):
+        _settings(claude_cli_timeout_seconds=0)
+
+
+def test_claude_cli_timeout_default_is_valid():
+    assert _settings().claude_cli_timeout_seconds >= 1
+
+
 def test_llm_num_predict_zero():
     with pytest.raises(ValidationError, match="llm_num_predict must be >= 1"):
         _settings(llm_num_predict=0)

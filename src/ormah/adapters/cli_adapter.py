@@ -488,18 +488,19 @@ def cmd_whisper_store(args):
             r = c.post("/ingest/conversation", json=body, params=params)
             r.raise_for_status()
             resp = r.json()
-            # /ingest/conversation returns HTTP 200 with {"status":"error"} when server-side
-            # extraction fails (e.g. claude_cli returned None). Treat that — and any body that
-            # is not the expected object (a rogue proxy could return a bare null/list/number,
-            # whose .get() would raise) — as failure: do NOT advance the cursor, so the slice
-            # is retried. status:"processed" (even extracted==0) is a legitimate empty
-            # extraction and MUST advance, else the same slice reprocesses forever.
-            extraction_failed = not isinstance(resp, dict) or resp.get("status") == "error"
+            # Advance the cursor ONLY on an explicit successful extraction. /ingest/conversation
+            # returns HTTP 200 {"status":"processed"} on success (even extracted==0 — a
+            # legitimate empty extraction that MUST advance, else the same slice reprocesses
+            # forever) and {"status":"error"} when extraction fails (e.g. claude_cli returned
+            # None). Anything else — a non-object body from a rogue proxy (null/list/number,
+            # whose .get() would raise), a missing status, or an unrecognized status — is
+            # treated as failure: do NOT advance, so the slice is retried rather than lost.
+            extraction_ok = isinstance(resp, dict) and resp.get("status") == "processed"
     except Exception:
         # Server down, timeout, or any error — exit silently, never block compaction
         sys.exit(0)
 
-    if extraction_failed:
+    if not extraction_ok:
         sys.exit(0)
 
     # Update cursor only after successful extraction, to the closed boundary so a
