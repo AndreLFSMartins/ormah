@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -52,18 +53,28 @@ _SEMAPHORES: dict[int, threading.Semaphore] = {}
 _SEM_LOCK = threading.Lock()
 
 
+# session_id comes from the CLI envelope (untrusted). Only ever treat it as an exact,
+# well-formed id — never as a glob pattern (a "*"/"?"/"[" could expand and delete unrelated
+# transcripts). Real Claude session ids are UUIDs; this also admits hex/dash/underscore.
+_SESSION_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,128}\Z")
+
+
 def _cleanup_persisted_stub(session_id: str) -> None:
     """Best-effort: delete the child's own transcript stub. Even with
     --no-session-persistence, `claude -p` writes a tiny ai-title record at
     ~/.claude/projects/<encoded-cwd>/<session_id>.jsonl. It carries ZERO conversation turns, so
     the session watcher skips it (not ingestible) — but removing it keeps ~/.claude clean and
-    avoids leaving a prompt-derived title on disk. Matched by the EXACT session_id, so no other
-    session's transcript is ever touched."""
-    if not session_id:
+    avoids leaving a prompt-derived title on disk. The id is validated and matched as an EXACT
+    filename (no glob interpolation), so no other session's transcript is ever touched."""
+    if not _SESSION_ID_RE.match(session_id or ""):
         return
+    target = f"{session_id}.jsonl"
     try:
-        for p in (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
-            p.unlink(missing_ok=True)
+        for proj_dir in (Path.home() / ".claude" / "projects").iterdir():
+            stub = proj_dir / target
+            if stub.is_file():
+                stub.unlink()
+                return
     except OSError:
         pass
 
