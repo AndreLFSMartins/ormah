@@ -607,7 +607,7 @@ class TestIngestEndpointExtraTags:
                 },
             ]
         })
-        with patch("ormah.background.llm_client.llm_generate", return_value=fake_llm_response):
+        with patch("ormah.background.llm_client.ingest_llm_generate", return_value=fake_llm_response):
             result = engine.ingest_conversation(
                 content="A conversation about database choices and architecture." * 10,
                 extra_tags=["whisper-out"],
