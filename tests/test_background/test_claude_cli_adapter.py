@@ -133,9 +133,48 @@ def test_cleanup_persisted_stub_removes_only_matching_session(tmp_path, monkeypa
     assert other.exists()
 
 
+def test_cleanup_persisted_stub_never_globs(tmp_path, monkeypatch):
+    """session_id comes from the CLI envelope (untrusted). A pattern-like value must NEVER be
+    expanded as a glob — otherwise '*' would wipe every transcript. Validated + exact-matched."""
+    from ormah.background.llm.claude_cli_adapter import _cleanup_persisted_stub
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    proj = tmp_path / ".claude" / "projects" / "-tmp-encoded"
+    proj.mkdir(parents=True)
+    victim = proj / "real-session.jsonl"
+    victim.write_text("{}")
+    for evil in ("*", "?", "*/*", "../*", "sess/../../*", "["):
+        _cleanup_persisted_stub(evil)
+    assert victim.exists()            # no glob metachar ever deleted an unrelated transcript
+
+
 def test_contract_real_envelope_fixture():
     envelope = json.loads(FIXTURE.read_text())
     assert isinstance(envelope.get("result"), str)
+
+
+@pytest.mark.integration
+def test_real_claude_disables_inherited_hooks(tmp_path, monkeypatch):
+    """Belt-and-suspenders against the real binary: an operator SessionStart hook must NOT fire
+    in the extractor child, proving disableAllHooks overrides the inherited (merged) hooks.
+    Uses an isolated CLAUDE_CONFIG_DIR with a sentinel hook + bypassPermissions (auth may fail
+    there, but the hook fires at session start regardless — verified). integration-marked."""
+    import shutil
+
+    if not shutil.which("claude"):
+        pytest.skip("claude CLI not installed")
+
+    sentinel = tmp_path / "hook_fired"
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "settings.json").write_text(json.dumps({
+        "permissions": {"defaultMode": "bypassPermissions"},
+        "hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": f"touch {sentinel}"}
+        ]}]},
+    }))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    ClaudeCliAdapter(model="claude-haiku-4-5-20251001", timeout=60).generate("Say OK.")
+    assert not sentinel.exists(), "inherited SessionStart hook fired despite disableAllHooks"
 
 
 @pytest.mark.integration
