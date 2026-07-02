@@ -6,7 +6,7 @@ import json
 from unittest.mock import patch
 
 
-_LLM_PATCH = "ormah.background.llm_client.llm_generate"
+_LLM_PATCH = "ormah.background.llm_client.ingest_llm_generate"
 
 
 class TestIngestDryRun:

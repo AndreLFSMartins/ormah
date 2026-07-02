@@ -2181,11 +2181,11 @@ class MemoryEngine:
         if the LLM is unavailable.
         """
         try:
-            from ormah.background.llm_client import llm_generate
+            from ormah.background.llm_client import ingest_llm_generate
 
             max_chars = self.settings.ingest_max_content_chars
             prompt = _INGEST_LLM_PROMPT.format(conversation=content[:max_chars])
-            raw = llm_generate(self.settings, prompt, json_mode=True)
+            raw = ingest_llm_generate(self.settings, prompt, json_mode=True)
             if raw is None:
                 return (
                     "No LLM available for server-side extraction. "
