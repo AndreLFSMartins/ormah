@@ -42,7 +42,7 @@ def test_argv_pins_model_and_json_output(monkeypatch):
     assert run.argv[run.argv.index("--output-format") + 1] == "json"
     assert "--no-session-persistence" in run.argv
     settings = json.loads(run.argv[run.argv.index("--settings") + 1])
-    assert settings["hooks"] == {}
+    assert settings["disableAllHooks"] is True
 
 
 def test_returns_none_on_is_error_envelope(monkeypatch):
@@ -68,6 +68,9 @@ def test_argv_denies_all_tools(monkeypatch):
     assert {"Read", "Bash", "Write", "Edit"} <= set(perms["deny"])
     # Do not inherit the user's bypassPermissions at the CLI level either.
     assert run.argv[run.argv.index("--permission-mode") + 1] == "default"
+    # Disable ALL inherited hooks (user + plugin) — they otherwise fire in the child because a
+    # hooks:{} override merges rather than replaces. disableAllHooks is a boolean that overrides.
+    assert perms and json.loads(run.argv[run.argv.index("--settings") + 1])["disableAllHooks"] is True
 
 
 def test_child_env_strips_api_key(monkeypatch):
@@ -112,6 +115,22 @@ def test_concurrency_is_bounded(monkeypatch):
         t.start()
     for t in threads:
         t.join()
+
+
+def test_cleanup_persisted_stub_removes_only_matching_session(tmp_path, monkeypatch):
+    from ormah.background.llm.claude_cli_adapter import _cleanup_persisted_stub
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    proj = tmp_path / ".claude" / "projects" / "-tmp-encoded"
+    proj.mkdir(parents=True)
+    mine = proj / "sess-abc.jsonl"
+    mine.write_text("{}")
+    other = proj / "sess-xyz.jsonl"
+    other.write_text("{}")
+    _cleanup_persisted_stub("sess-abc")
+    assert not mine.exists()          # the child's own stub is removed
+    assert other.exists()             # a different session is never touched
+    _cleanup_persisted_stub("")       # empty session_id is a no-op
+    assert other.exists()
 
 
 def test_contract_real_envelope_fixture():
