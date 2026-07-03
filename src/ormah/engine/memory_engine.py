@@ -2184,6 +2184,15 @@ class MemoryEngine:
             from ormah.background.llm_client import ingest_llm_generate
 
             max_chars = self.settings.ingest_max_content_chars
+            if len(content) > max_chars:
+                # The flush-bytes cap (session_watcher) bounds a MULTI-turn slice, but a
+                # SINGLE turn larger than max_chars still gets truncated here and the
+                # cursor still advances past it — make that loss observable, not silent.
+                logger.warning(
+                    "ingest extraction truncated: payload %d chars > ingest_max_content_chars %d; "
+                    "tail dropped (single oversized turn?)",
+                    len(content), max_chars,
+                )
             prompt = _INGEST_LLM_PROMPT.format(conversation=content[:max_chars])
             raw = ingest_llm_generate(self.settings, prompt, json_mode=True)
             if raw is None:
@@ -2399,11 +2408,7 @@ def _extract_json(raw: str) -> str:
     return stripped
 
 
-_INGEST_LLM_PROMPT = """\
-You are a memory curator for a persistent knowledge graph. Your job: read a conversation and extract memories that will be valuable in future sessions — days or weeks later, when all context is gone.
-
-These memories are stored as typed nodes in a graph with semantic search. They will be retrieved by an AI assistant to provide context it wouldn't otherwise have. Every memory you extract should pass this test: "Would an AI assistant benefit from knowing this when helping the user on a related task in the future?"
-
+_INGEST_LLM_RULES = """\
 ## Quality bar
 
 A good memory is **specific, self-contained, and searchable**. It must:
@@ -2464,8 +2469,14 @@ For each memory:
 
 Return: {{"memories": [...]}}
 Return {{"memories": []}} if nothing worth remembering was discussed.
-
-## Conversation
-
-{conversation}
 """
+
+_INGEST_LLM_PROMPT = """\
+You are a memory curator for a persistent knowledge graph. Read the conversation below and extract memories valuable in future sessions.
+
+<conversation>
+{conversation}
+</conversation>
+
+Now extract the memories, following these rules:
+""" + _INGEST_LLM_RULES
