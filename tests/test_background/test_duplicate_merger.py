@@ -243,3 +243,19 @@ def test_run_dedup_records_error_and_circuit_breaks(monkeypatch, tmp_path):
         assert errs >= 1
     finally:
         engine.shutdown()
+
+
+def test_run_dedup_stops_at_cap(monkeypatch, tmp_path):
+    from ormah.background import duplicate_merger as dm
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        dm, "_llm_check_duplicate",
+        lambda s, a, b: (calls.__setitem__("n", calls["n"] + 1) or {"is_duplicate": False}),
+    )
+    engine = _make_engine_with_many_similar_nodes(tmp_path, n=10)
+    try:
+        engine.settings.duplicate_check_max_llm_calls_per_run = 3
+        dm.run_duplicate_detection(engine)
+        assert calls["n"] == 3
+    finally:
+        engine.shutdown()

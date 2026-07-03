@@ -290,9 +290,13 @@ def run_duplicate_detection(engine) -> None:
         checked = set()
         proposals_created = 0
         consecutive_failures = 0
+        llm_calls = 0
+        max_calls = getattr(engine.settings, "duplicate_check_max_llm_calls_per_run", -1)
 
         for node in nodes:
             if consecutive_failures >= 3:
+                break
+            if max_calls >= 0 and llm_calls >= max_calls:
                 break
             if node["id"] == user_node_id:
                 continue
@@ -312,6 +316,8 @@ def run_duplicate_detection(engine) -> None:
             similar = vec_store.search(query_vec, limit=6)
 
             for match in similar:
+                if max_calls >= 0 and llm_calls >= max_calls:
+                    break
                 if match["id"] == node["id"]:
                     continue
                 if match["id"] == user_node_id:
@@ -353,6 +359,7 @@ def run_duplicate_detection(engine) -> None:
 
                 # --- LLM confirmation (mandatory) ---
                 llm_result = _llm_check_duplicate(settings, node, other)
+                llm_calls += 1
                 _now = datetime.now(timezone.utc).isoformat()
                 if llm_result is None:
                     consecutive_failures += 1
@@ -434,6 +441,11 @@ def run_duplicate_detection(engine) -> None:
                 proposals_created += 1
         if proposals_created:
             logger.info("Duplicate merger created %d proposals/auto-merges", proposals_created)
+        logger.info(
+            "Duplicate detection run: llm_calls=%d proposals=%d cap=%d cap_hit=%s",
+            llm_calls, proposals_created, max_calls,
+            bool(max_calls >= 0 and llm_calls >= max_calls),
+        )
 
     except Exception as e:
         logger.warning("Duplicate detection failed: %s", e)
