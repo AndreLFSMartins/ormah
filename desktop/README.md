@@ -52,9 +52,24 @@ Subsequent runs skip the install step since `ormah` is already on PATH.
 ## Release (CI — macOS + Linux)
 
 `.github/workflows/desktop-release.yml` triggers on `desktop-v*` tags. It
-builds per-arch on macOS (aarch64, x86_64) and Linux (x86_64) runners,
-downloads the matching `uv` binary into `binaries/`, and attaches `.dmg`,
-`.AppImage`, and `.deb` artifacts to the GitHub release.
+verifies the tag matches `tauri.conf.json`'s version, builds per-arch on
+macOS (aarch64) and Linux (x86_64) runners, downloads the matching `uv`
+binary into `binaries/`, and attaches `.dmg`, `.AppImage`, and `.deb`
+artifacts to the GitHub release.
+
+Auto-update: `createUpdaterArtifacts` makes the build emit signed updater
+bundles (`.AppImage.sig`, `.app.tar.gz` + `.sig`, signed with the
+`TAURI_SIGNING_PRIVATE_KEY` secret). The publish job then generates
+`latest.json` and uploads it to the rolling `desktop-latest` prerelease,
+which the app's updater polls (`plugins.updater.endpoints` in
+`tauri.conf.json`). The rolling release is a prerelease on purpose — GitHub's
+`/releases/latest` alternates between desktop and Python releases, so the
+feed needs its own stable URL.
+
+The app pins which ormah Python package it installs: `build.rs` reads the
+version from the repo's `pyproject.toml` at compile time (no manual sync).
+On Linux, AppImage runs self-register an app-menu entry + icons under
+`~/.local/share` on first launch; the `.deb` ships system-wide ones via dpkg.
 
 macOS-only secrets required for signing/notarization:
 

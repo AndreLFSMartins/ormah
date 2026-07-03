@@ -79,6 +79,60 @@ fn single_instance_listener() -> std::io::Result<Option<std::os::unix::net::Unix
     }
 }
 
+/// Desktop-menu integration for AppImage runs.
+///
+/// Raw AppImages don't register with the app menu, so the app is invisible to
+/// search/dock until the user wires a .desktop entry by hand. The `.deb` ships
+/// a system-wide entry via dpkg, and dev builds shouldn't pollute the menu, so
+/// this only runs when the AppImage runtime is detected (it sets $APPIMAGE to
+/// the image's path). Idempotent: rewritten only when the AppImage path moves.
+/// Best-effort by design — a failure here must never block startup.
+#[cfg(target_os = "linux")]
+fn integrate_appimage() {
+    let Ok(appimage) = std::env::var("APPIMAGE") else { return };
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let share = std::path::Path::new(&home).join(".local/share");
+
+    // Icon name matches the .deb packaging (Icon=ormah-desktop) so both
+    // install paths resolve the same themed icon.
+    let icons: [(&str, &[u8]); 2] = [
+        ("128x128", include_bytes!("../icons/128x128.png")),
+        ("256x256", include_bytes!("../icons/128x128@2x.png")),
+    ];
+    for (size, bytes) in icons {
+        let dir = share.join(format!("icons/hicolor/{size}/apps"));
+        let path = dir.join("ormah-desktop.png");
+        if !path.exists() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(&path, bytes);
+        }
+    }
+
+    let entry = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Ormah\n\
+         Comment=Local-first memory for your AI tools\n\
+         Exec=\"{appimage}\"\n\
+         Icon=ormah-desktop\n\
+         Terminal=false\n\
+         Categories=Office;\n\
+         StartupWMClass=ormah-desktop\n"
+    );
+    let apps_dir = share.join("applications");
+    let entry_path = apps_dir.join("ormah.desktop");
+    if std::fs::read_to_string(&entry_path).is_ok_and(|cur| cur == entry) {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&apps_dir);
+    if std::fs::write(&entry_path, entry).is_ok() {
+        // Refresh the menu cache; desktops that watch the dir pick it up anyway.
+        let _ = std::process::Command::new("update-desktop-database")
+            .arg(apps_dir)
+            .status();
+    }
+}
+
 pub fn run() {
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
@@ -139,6 +193,10 @@ pub fn run() {
                 // Mechanism unavailable — boot anyway rather than block startup.
                 Err(e) => eprintln!("single-instance guard unavailable, continuing: {e}"),
             }
+
+            // Register with the app menu when running as an AppImage.
+            #[cfg(target_os = "linux")]
+            integrate_appimage();
 
             // Start the bundled server as a daemon (survives app closing).
             sidecar::start(app.handle().clone());
