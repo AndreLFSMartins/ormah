@@ -304,3 +304,37 @@ def test_scan_sessions_honors_settings_flush_bytes(tmp_path):
 
     assert count == 1
     assert engine.recorded_lengths
+
+
+def test_prompt_is_delta_first():
+    from ormah.engine.memory_engine import _INGEST_LLM_PROMPT
+
+    filled = _INGEST_LLM_PROMPT.format(conversation="SENTINEL_CONVO")
+    assert filled.index("SENTINEL_CONVO") < filled.index("What to extract")
+
+
+def test_extraction_truncation_is_logged(tmp_path, caplog):
+    """A single closed turn whose cleaned text exceeds ingest_max_content_chars is still
+    truncated (unavoidable for one oversized turn) — but the loss must be observable."""
+    import logging
+    from unittest.mock import patch
+
+    from ormah.config import Settings
+    from ormah.engine.memory_engine import MemoryEngine
+
+    (tmp_path / "nodes").mkdir()
+    settings = Settings(
+        memory_dir=tmp_path, ingest_max_content_chars=1000, session_watcher_flush_bytes=1000,
+    )
+    engine = MemoryEngine(settings)
+    engine.startup()
+    try:
+        with patch(
+            "ormah.background.llm_client.ingest_llm_generate",
+            return_value='{"memories": []}',
+        ), caplog.at_level(logging.WARNING, logger="ormah.engine.memory_engine"):
+            engine._extract_memories_llm("x" * 5000)
+    finally:
+        engine.shutdown()
+
+    assert any("truncated" in r.message for r in caplog.records)
