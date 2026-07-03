@@ -117,3 +117,89 @@ def cmd_eval_whisper_run(args):
     else:
         show_failures = getattr(args, "show_failures", False)
         print(format_report(result, show_failures=show_failures))
+
+    fail_below = getattr(args, "fail_below", None)
+    if fail_below:
+        sys.exit(_check_fail_below(result.aggregate, fail_below))
+
+
+def cmd_eval_whisper_mine(args):
+    from eval.whisper.miner import mine
+
+    db = Path(getattr(args, "db", None) or
+              Path.home() / ".local" / "share" / "ormah" / "memory" / "index.db")
+    if not db.exists():
+        print(f"Error: live DB not found at {db}", file=sys.stderr)
+        sys.exit(1)
+    out = Path(args.out) if getattr(args, "out", None) else None
+
+    # Use the engine's intent classifier so stratified sampling can
+    # oversample the weak slices (preference/identity) properly.
+    engine = _make_engine()
+    try:
+        classifier = engine.context_builder._get_classifier()
+
+        def classify(prompt: str) -> str:
+            if classifier is None:
+                return "general"
+            cats = classifier.classify(prompt).categories
+            return cats[0] if cats else "general"
+
+        mined_path, review_path = mine(
+            db, limit=int(getattr(args, "limit", 80)), out_path=out, classify=classify,
+        )
+    finally:
+        engine.shutdown()
+    n = sum(1 for line in mined_path.read_text().splitlines() if line.strip())
+    print(f"Mined {n} provisional cases -> {mined_path}")
+    print(f"Review file -> {review_path}")
+    print("Labels do NOT bind until reviewed: edit mined.jsonl where drafts are wrong, "
+          "then run 'ormah eval whisper import-labels'.")
+
+
+def cmd_eval_whisper_import_labels(args):
+    from eval.whisper.miner import import_labels
+
+    try:
+        n = import_labels(Path(args.mined) if getattr(args, "mined", None) else None)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Confirmed {n} mined cases (provisional flags cleared).")
+
+
+def _check_fail_below(aggregate: dict, spec: str) -> int:
+    """Parse 'f1=0.65,suppression=0.90' and check thresholds. Returns 1 if any fails.
+
+    Metric aliases: recall→injection_recall, precision→injection_precision,
+    top2→top2_recall, suppression→suppression_accuracy. fp_rate is a
+    below-is-better metric and is checked as an upper bound.
+    """
+    key_map = {
+        "recall": "injection_recall",
+        "precision": "injection_precision",
+        "f1": "f1",
+        "top2": "top2_recall",
+        "suppression": "suppression_accuracy",
+        "fp_rate": "false_positive_rate",
+    }
+    failed = False
+    for part in spec.split(","):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        metric_raw, threshold_str = part.split("=", 1)
+        key = key_map.get(metric_raw.strip().lower(), metric_raw.strip().lower())
+        val = aggregate.get(key)
+        threshold = float(threshold_str)
+        if key == "false_positive_rate":
+            bad = val is None or val > threshold
+            op = ">"
+        else:
+            bad = val is None or val < threshold
+            op = "<"
+        if bad:
+            val_str = f"{val:.3f}" if val is not None else "N/A"
+            print(f"FAIL: {metric_raw}={val_str} {op} {threshold}", file=sys.stderr)
+            failed = True
+    return 1 if failed else 0

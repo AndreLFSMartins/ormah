@@ -1,4 +1,4 @@
-.PHONY: help dev server ui-dev ui-build install test restart clean logs smoke release
+.PHONY: help dev server ui-dev ui-build install test restart clean logs smoke release eval
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -36,6 +36,14 @@ test: ## Run the test suite
 
 lint: ## Run ruff linter
 	ruff check src/ tests/
+
+# Local eval gate. Bars are set just under the honest baseline measured
+# 2026-07-03 (whisper: f1 0.69, suppression 0.95 @ 100 prompts; recall:
+# recall@8 0.97, f1 0.69 @ 25 cases) so real regressions fail while
+# run-to-run jitter passes. Corpora are local-only (gitignored).
+eval: ## Run whisper + recall evals with fail-below bars
+	uv run python -m ormah.cli eval whisper run --fail-below f1=0.65,suppression=0.90
+	uv run python -m ormah.cli eval recall run --fail-below recall@8=0.90,f1=0.60
 
 clean: ## Remove build artifacts
 	rm -rf src/ormah/ui_dist ui/node_modules/.vite

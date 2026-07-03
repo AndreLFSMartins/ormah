@@ -44,6 +44,36 @@ def _cmd_eval_whisper_run(args):
     _cmd(args)
 
 
+def _cmd_eval_whisper_mine(args):
+    try:
+        from eval.whisper.cli import cmd_eval_whisper_mine as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.whisper", "eval.whisper.cli"}:
+            raise
+        print(
+            "The whisper eval harness is not installed in the published Ormah runtime.\n"
+            "Use a source checkout or editable dev install to run 'ormah eval whisper mine'."
+        )
+        sys.exit(1)
+
+    _cmd(args)
+
+
+def _cmd_eval_whisper_import_labels(args):
+    try:
+        from eval.whisper.cli import cmd_eval_whisper_import_labels as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.whisper", "eval.whisper.cli"}:
+            raise
+        print(
+            "The whisper eval harness is not installed in the published Ormah runtime.\n"
+            "Use a source checkout or editable dev install to run 'ormah eval whisper import-labels'."
+        )
+        sys.exit(1)
+
+    _cmd(args)
+
+
 def _cmd_eval_recall_run(args):
     try:
         from eval.recall.cli import cmd_eval_recall_run as _cmd
@@ -541,7 +571,21 @@ def main():
         help="Preserve the self node when reseeding eval cases",
     )
     ev_wh_run.add_argument("--json", action="store_true", help="Output as JSON")
+    ev_wh_run.add_argument("--corpus", default=None,
+                           help="Corpus file (absolute, or relative to eval/whisper/corpus/)")
+    ev_wh_run.add_argument("--fail-below", default=None, dest="fail_below",
+                           help="Fail if metrics below threshold, e.g. f1=0.65,suppression=0.90")
     ev_wh_run.set_defaults(func=_cmd_eval_whisper_run)
+
+    ev_wh_mine = ev_wh_sub.add_parser("mine", help="Mine provisional eval cases from the live whisper_log (read-only)")
+    ev_wh_mine.add_argument("--db", default=None, help="Path to live index.db (default: ~/.local/share/ormah/memory/index.db)")
+    ev_wh_mine.add_argument("--limit", type=int, default=80, help="Max cases to mine (default: 80)")
+    ev_wh_mine.add_argument("--out", default=None, help="Output file (default: eval/whisper/corpus/local/mined.jsonl)")
+    ev_wh_mine.set_defaults(func=_cmd_eval_whisper_mine)
+
+    ev_wh_import = ev_wh_sub.add_parser("import-labels", help="Confirm reviewed mined labels (clears provisional flags)")
+    ev_wh_import.add_argument("--mined", default=None, help="Mined corpus file (default: eval/whisper/corpus/local/mined.jsonl)")
+    ev_wh_import.set_defaults(func=_cmd_eval_whisper_import_labels)
 
     ev_rc = ev_sub.add_parser("recall", help="Evaluate recall/retrieval quality")
     ev_rc_sub = ev_rc.add_subparsers(dest="eval_recall_cmd", required=True)

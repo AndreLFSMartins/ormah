@@ -2,7 +2,29 @@
 
 from __future__ import annotations
 
-from ormah.models.node import MemoryNode, NodeType, Tier
+from datetime import datetime, timedelta, timezone
+
+from ormah.models.node import Connection, EdgeType, MemoryNode, NodeType, Tier
+
+
+def _seed_created(mem: dict) -> datetime | None:
+    """Return a created datetime for *mem*, or None for 'now'.
+
+    Supports ``created`` (ISO string) or ``created_days_ago`` (number).
+    """
+    days_ago = mem.get("created_days_ago")
+    if days_ago is not None:
+        return datetime.now(timezone.utc) - timedelta(days=float(days_ago))
+    iso = mem.get("created")
+    if iso:
+        s = str(iso).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    return None
 
 
 def seed_case(engine, case: dict) -> None:
@@ -13,6 +35,24 @@ def seed_case(engine, case: dict) -> None:
     """
     clear_eval_db(engine)
     for mem in case.get("memories", []):
+        connections: list[Connection] = []
+        for c in mem.get("connections", []) or []:
+            if not isinstance(c, dict) or not c.get("target"):
+                continue
+            try:
+                connections.append(Connection(
+                    target=c["target"],
+                    edge=EdgeType(c.get("edge", "related_to")),
+                    weight=float(c.get("weight", 0.5)),
+                ))
+            except Exception:
+                continue
+
+        # created may be backdated, but updated/last_accessed stay "now" so
+        # FSRS decay does not silently drop backdated nodes from retrieval.
+        # Cases that want decayed nodes set stability explicitly.
+        created = _seed_created(mem)
+        now = datetime.now(timezone.utc)
         node = MemoryNode(
             id=mem["node_id"],
             type=NodeType(mem.get("type", "fact")),
@@ -21,8 +61,13 @@ def seed_case(engine, case: dict) -> None:
             content=mem.get("content", ""),
             space=mem.get("space"),
             tags=mem.get("tags", []),
+            connections=connections,
             source="eval:corpus",
             confidence=float(mem.get("confidence", 1.0)),
+            stability=float(mem.get("stability", 1.0)),
+            created=created or now,
+            updated=now,
+            last_accessed=now,
         )
         path = engine.file_store.save(node)
         engine.builder.index_single(path)
