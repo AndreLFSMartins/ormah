@@ -156,3 +156,19 @@ def test_merged_content_stored_in_proposal(engine):
     assert "Python Programming Language" in proposal["proposed_action"]
     assert "Python is a popular programming language used widely." in proposal["proposed_action"]
     assert "Both describe Python" in proposal["reason"]
+
+
+def test_llm_check_passes_json_schema_response_format(monkeypatch):
+    import ormah.background.llm_client as llm_client
+    from ormah.background import duplicate_merger as dm
+    captured = {}
+    def _fake_generate(settings, prompt, json_mode=True, **kwargs):
+        captured.update(kwargs)
+        return '{"is_duplicate": false, "merged_title": null, "merged_content": null, "reason": "x"}'
+    monkeypatch.setattr(llm_client, "llm_generate", _fake_generate)
+    result = dm._llm_check_duplicate(object(),
+        {"title": "A", "type": "fact", "content": "a"}, {"title": "B", "type": "fact", "content": "b"})
+    rf = captured.get("response_format")
+    assert rf and rf["type"] == "json_schema"
+    assert "is_duplicate" in rf["json_schema"]["schema"]["properties"]
+    assert result == {"is_duplicate": False, "merged_title": None, "merged_content": None, "reason": "x"}
