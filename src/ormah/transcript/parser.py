@@ -237,7 +237,8 @@ def parse_transcript(
     _safe_len = 0
     _safe_users = 0
     _seen_assistant_text = False  # a text-bearing assistant appeared in the current block
-    _leading_orphan = False  # dropped assistant content before the first user (bad cursor)
+    _leading_orphan = False  # dropped assistant content before any user record (bad cursor)
+    _saw_user_record = False  # any user-role record seen (incl. a text-less tool_result)
     _capped = False  # max_bytes stopped the parse before an overshooting turn
 
     def _would_overshoot(new_safe_end: int) -> bool:
@@ -290,6 +291,12 @@ def parse_transcript(
                 continue
 
             if entry_type == "user":
+                # Any user-role record — including a tool_result with no text — means this
+                # slice sits inside a proper turn, not stranded mid-response. Track it so a
+                # following assistant is not misread as a leading orphan: a tool-use chain
+                # runs assistant -> user(tool_result, empty text) -> assistant, and those
+                # text-less users don't advance user_turn_count.
+                _saw_user_record = True
                 text = _extract_user_text(content)
                 if text and not _is_bootstrap_user_text(text):
                     # A new user turn definitively closes any still-open response (an
@@ -309,13 +316,14 @@ def parse_transcript(
 
             elif entry_type == "assistant":
                 text = _extract_assistant_text(content)
-                # Drop assistant content that precedes the first user turn in this slice:
-                # its prompt lies before start_offset (a cursor left mid-response by an
-                # older version), so committing it would emit an orphan fragment without
-                # its prompt. A correct cursor always starts a slice on a user turn, so
-                # this never drops legitimate content. The caller re-parses from 0 (see
-                # leading_orphan) to recover the dropped content with its prompt.
-                if text and user_turn_count == 0 and start_offset > 0:
+                # Drop assistant content that precedes ANY user record in this slice: its
+                # prompt lies before start_offset (a cursor left mid-response by an older
+                # version), so committing it would emit an orphan fragment without its
+                # prompt. Gate on _saw_user_record (not user_turn_count): a text-less
+                # tool_result user still marks a proper turn boundary, so a tool-use chain
+                # is not a false orphan. The caller re-parses from 0 (see leading_orphan)
+                # to recover a genuinely dropped fragment with its prompt.
+                if text and not _saw_user_record and start_offset > 0:
                     _leading_orphan = True
                 if text and user_turn_count > 0:
                     if _assistant_is_terminal(entry) and _would_overshoot(f.tell()):
