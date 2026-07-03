@@ -88,6 +88,14 @@ CREATE TABLE IF NOT EXISTS auto_link_checked (
     PRIMARY KEY (node_a, node_b)
 );
 
+CREATE TABLE IF NOT EXISTS duplicate_checked (
+    node_a TEXT NOT NULL,
+    node_b TEXT NOT NULL,
+    result TEXT NOT NULL,           -- 'not_duplicate' | 'error'
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (node_a, node_b)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     operation TEXT NOT NULL,        -- 'delete', 'update', 'mark_outdated'
