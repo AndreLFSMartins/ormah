@@ -576,9 +576,11 @@ def _record_whisper_usage_signals(
 def _is_subagent_transcript(path: Path) -> bool:
     """True for subagent transcripts (Claude Code writes them under ``<uuid>/subagents/``).
 
-    These are internal agent scratch, not user-facing sessions — ingesting them balloons
-    the store with low-value granular memories under a junk ``subagents`` space. Matches a
-    ``subagents`` segment at any depth so nested layouts are covered too.
+    Skipped for cost and redundancy, not for low value: a subagent transcript is large
+    (often ~10x a normal session), so ingesting one would burn many extraction calls, and
+    its deliverable already reaches the store through the parent session's tool-result — only
+    the intermediate tool-call noise is dropped. Matches a ``subagents`` segment at any depth
+    so nested layouts are covered too.
     """
     return "subagents" in path.parts
 
