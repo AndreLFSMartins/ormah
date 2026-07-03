@@ -148,6 +148,11 @@ class Settings(BaseSettings):
     # Auto-merge
     auto_merge_threshold: float = 0.85
 
+    # Per-run LLM confirmation cap for dedup. -1 = unlimited, 0 = no calls, N>=1 = cap.
+    # Conservative default; calibrate against clean-week growth. 0 is a valid "disable" value,
+    # NOT unlimited (that is -1).
+    duplicate_check_max_llm_calls_per_run: int = 100
+
     # Importance scoring weights (3 dynamic signals)
     importance_access_weight: float = 0.34
     importance_edge_weight: float = 0.33
@@ -586,6 +591,13 @@ class Settings(BaseSettings):
                 f"consolidation_max_cluster_nodes ({v}) must be >= "
                 f"consolidation_min_cluster_size ({min_size})"
             )
+        return v
+
+    @field_validator("duplicate_check_max_llm_calls_per_run")
+    @classmethod
+    def _dedup_cap_range(cls, v: int) -> int:
+        if v < -1:
+            raise ValueError(f"duplicate_check_max_llm_calls_per_run must be >= -1, got {v}")
         return v
 
     @field_validator("activation_decay")
