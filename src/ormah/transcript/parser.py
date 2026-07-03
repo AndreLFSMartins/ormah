@@ -43,6 +43,10 @@ class TranscriptResult:
     leading_orphan: bool = False
     turns: list[TranscriptTurn] = field(default_factory=list)
     source: str = "agent_jsonl"
+    # True when max_bytes stopped the parse before a turn that would have overshot the
+    # byte budget — more closed content remains past safe_end_offset for the caller to
+    # drain in a follow-up parse_transcript(start_offset=safe_end_offset, ...) call.
+    capped: bool = False
 
 
 def _extract_user_text(content) -> str | None:
@@ -199,7 +203,9 @@ def _conversation_from_turns(turns: list[TranscriptTurn]) -> str:
     )
 
 
-def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
+def parse_transcript(
+    path: Path, start_offset: int = 0, max_bytes: int | None = None
+) -> TranscriptResult:
     """Parse a supported JSONL transcript into cleaned conversation text.
 
     Reads line by line, extracting only user text and assistant text blocks.
@@ -209,6 +215,12 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
     When *start_offset* > 0, seeks to that byte position before reading.
     The caller must ensure the offset falls on a line boundary (e.g. from
     a previous call's ``end_offset``).
+
+    When *max_bytes* is set, parsing stops BEFORE committing a turn that would push the
+    closed slice (``safe_end_offset - start_offset``) past that budget — so a multi-turn
+    slice never exceeds max_bytes. The caller re-parses from the new ``safe_end_offset``
+    to drain the rest. A single turn larger than max_bytes is committed anyway (there is
+    no smaller slice to make progress with).
     """
     path = Path(path)
     total_chars = path.stat().st_size
@@ -226,6 +238,17 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
     _safe_users = 0
     _seen_assistant_text = False  # a text-bearing assistant appeared in the current block
     _leading_orphan = False  # dropped assistant content before the first user (bad cursor)
+    _capped = False  # max_bytes stopped the parse before an overshooting turn
+
+    def _would_overshoot(new_safe_end: int) -> bool:
+        # Only refuse a candidate boundary once something is already committed — a first
+        # turn alone can't be shrunk further, so it's always allowed through.
+        return (
+            max_bytes is not None
+            and _safe_len > 0
+            and (new_safe_end - start_offset) > max_bytes
+        )
+
     with open(path) as f:
         if start_offset > 0:
             f.seek(start_offset)
@@ -251,6 +274,9 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
                 # Codex end-of-turn: the open response is complete, advance the closed
                 # boundary past it (so a multi-record Codex turn is never split).
                 if _seen_assistant_text:
+                    if _would_overshoot(f.tell()):
+                        _capped = True
+                        break
                     _safe_end = f.tell()
                     _safe_len = len(turns)
                     _safe_users = user_turn_count
@@ -271,6 +297,9 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
                     # advances to the start of this user line. This never splits a
                     # response — the whole prior block is on the closed side.
                     if _seen_assistant_text:
+                        if _would_overshoot(pos_before):
+                            _capped = True
+                            break
                         _safe_end = pos_before  # boundary = start of this user line
                         _safe_len = len(turns)
                         _safe_users = user_turn_count
@@ -289,6 +318,9 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
                 if text and user_turn_count == 0 and start_offset > 0:
                     _leading_orphan = True
                 if text and user_turn_count > 0:
+                    if _assistant_is_terminal(entry) and _would_overshoot(f.tell()):
+                        _capped = True
+                        break
                     turns.append(TranscriptTurn(role="assistant", text=text))
                     if _assistant_is_terminal(entry):
                         # Reliable completion signal (Claude Code): the response is done,
@@ -321,4 +353,5 @@ def parse_transcript(path: Path, start_offset: int = 0) -> TranscriptResult:
         leading_orphan=_leading_orphan,
         turns=turns,
         source=source,
+        capped=_capped,
     )
