@@ -114,6 +114,9 @@ class ClaudeCliAdapter(LLMAdapter):
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         # Prompt on stdin (never argv) — avoids leaking transcript text to the process list and
         # ARG_MAX failures on large transcripts.
+        schema = None
+        if response_format and response_format.get("type") == "json_schema":
+            schema = response_format.get("json_schema", {}).get("schema")
         argv = [
             self.bin_path, "-p",
             "--model", self.model,
@@ -122,6 +125,8 @@ class ClaudeCliAdapter(LLMAdapter):
             "--permission-mode", "default",
             "--settings", _HARDENED_SETTINGS,
         ]
+        if schema is not None:
+            argv += ["--json-schema", json.dumps(schema)]
         sem = _semaphore(self.max_concurrency)
         with sem:
             try:
@@ -149,5 +154,8 @@ class ClaudeCliAdapter(LLMAdapter):
         if envelope.get("is_error"):
             logger.warning("claude -p returned is_error envelope: %s", str(envelope.get("subtype"))[:100])
             return None
+        if schema is not None:
+            structured = envelope.get("structured_output")
+            return json.dumps(structured) if structured is not None else None
         result = envelope.get("result")
         return result if isinstance(result, str) else None
