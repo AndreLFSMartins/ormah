@@ -30,6 +30,43 @@ def _reset_adapter():
     reset_adapter()
 
 
+def _make_engine(tmp_path):
+    from ormah.config import Settings
+    from ormah.engine.memory_engine import MemoryEngine
+
+    nodes_dir = tmp_path / "nodes"
+    nodes_dir.mkdir()
+    settings = Settings(memory_dir=tmp_path)
+    eng = MemoryEngine(settings)
+    eng.startup()
+    return eng
+
+
+def _make_engine_with_two_similar_nodes(tmp_path):
+    """Engine with a temp db + two near-identical nodes (pair the pre-filter)."""
+    eng = _make_engine(tmp_path)
+    eng.settings.llm_provider = "ollama"  # llm_enabled derives from this
+    _create_pair(eng)
+    return eng
+
+
+def _make_engine_with_many_similar_nodes(tmp_path, n):
+    """Engine with n near-identical nodes so the pre-filter pairs several of them."""
+    eng = _make_engine(tmp_path)
+    eng.settings.llm_provider = "ollama"  # llm_enabled derives from this
+    for i in range(n):
+        eng.remember(
+            CreateNodeRequest(
+                content=f"Python is a programming language, variant {i}.",
+                type=NodeType.fact,
+                title=f"Python language {i}",
+                tags=["test"],
+            ),
+            agent_id="test",
+        )
+    return eng
+
+
 def test_llm_confirms_duplicate_auto_merge(engine):
     """LLM confirms duplicate -> auto-merge with merged content."""
     id_a, id_b = _create_pair(engine)
@@ -172,3 +209,37 @@ def test_llm_check_passes_json_schema_response_format(monkeypatch):
     assert rf and rf["type"] == "json_schema"
     assert "is_duplicate" in rf["json_schema"]["schema"]["properties"]
     assert result == {"is_duplicate": False, "merged_title": None, "merged_content": None, "reason": "x"}
+
+
+def test_run_dedup_records_only_not_duplicate_never_duplicate(monkeypatch, tmp_path):
+    from ormah.background import duplicate_merger as dm
+    monkeypatch.setattr(dm, "_llm_check_duplicate", lambda s, a, b: {"is_duplicate": False})
+    engine = _make_engine_with_two_similar_nodes(tmp_path)
+    try:
+        dm.run_duplicate_detection(engine)
+        rows = engine.db.conn.execute("SELECT result FROM duplicate_checked").fetchall()
+        assert rows and all(r[0] == "not_duplicate" for r in rows)
+    finally:
+        engine.shutdown()
+
+
+def test_run_dedup_records_error_and_circuit_breaks(monkeypatch, tmp_path):
+    from ormah.background import duplicate_merger as dm
+    calls = {"n": 0}
+    def _fail(s, a, b):
+        calls["n"] += 1
+        return None
+    monkeypatch.setattr(dm, "_llm_check_duplicate", _fail)
+    engine = _make_engine_with_many_similar_nodes(tmp_path, n=20)
+    try:
+        # Settings is a pydantic model with extra="ignore" and no such field yet
+        # (added in a later task) — bypass __setattr__ to stash it for getattr().
+        object.__setattr__(engine.settings, "duplicate_check_max_llm_calls_per_run", 100)
+        dm.run_duplicate_detection(engine)
+        assert calls["n"] <= 3
+        errs = engine.db.conn.execute(
+            "SELECT count(*) FROM duplicate_checked WHERE result='error'"
+        ).fetchone()[0]
+        assert errs >= 1
+    finally:
+        engine.shutdown()
