@@ -76,7 +76,9 @@ class Settings(BaseSettings):
     session_watcher_debounce_seconds: float = 60.0
     session_watcher_min_turns: int = 5
     session_watcher_lookback_hours: int = 72
-    session_watcher_idle_threshold: float = 30.0
+    session_watcher_idle_threshold: float = 600.0  # was 30.0 — 30s flushed 1-turn batches
+    session_watcher_retry_seconds: float = 30.0    # FSEvents-miss retry — decoupled from idle
+    session_watcher_flush_bytes: int = 60000       # pending-delta bytes that close a Batch (~15-20K tok)
     session_watcher_reconcile_interval_minutes: int = 5
     session_watcher_reconcile_max_per_tick: int = 50
     session_watcher_reconcile_max_seconds: float = 30.0
@@ -369,6 +371,33 @@ class Settings(BaseSettings):
                 f"session_watcher_reconcile_max_seconds must be > 0, got {v}"
             )
         return v
+
+    @field_validator("session_watcher_retry_seconds")
+    @classmethod
+    def _retry_seconds_min(cls, v: float) -> float:
+        if v < 1.0:
+            raise ValueError(f"session_watcher_retry_seconds must be >= 1.0, got {v}")
+        return v
+
+    @field_validator("session_watcher_flush_bytes")
+    @classmethod
+    def _flush_bytes_min(cls, v: int) -> int:
+        if v < 1000:
+            raise ValueError(f"session_watcher_flush_bytes must be >= 1000, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _flush_bytes_within_cap(self) -> "Settings":
+        if self.session_watcher_flush_bytes > self.ingest_max_content_chars:
+            raise ValueError(
+                "session_watcher_flush_bytes "
+                f"({self.session_watcher_flush_bytes}) must be <= "
+                f"ingest_max_content_chars ({self.ingest_max_content_chars}); "
+                "a larger cap would let a MULTI-turn batch overshoot the extractor's "
+                "truncation limit (a single turn bigger than the cap is still truncated, "
+                "and logged, regardless of this setting)"
+            )
+        return self
 
     @field_validator("decay_interval_hours")
     @classmethod
