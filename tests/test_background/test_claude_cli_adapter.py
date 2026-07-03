@@ -152,6 +152,35 @@ def test_contract_real_envelope_fixture():
     assert isinstance(envelope.get("result"), str)
 
 
+def test_response_format_adds_json_schema_and_reads_structured_output(monkeypatch):
+    from ormah.background.llm import claude_cli_adapter as mod
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stderr = ""
+        stdout = '{"result": "", "is_error": false, "structured_output": {"is_duplicate": true}}'
+
+    def _fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return _Proc()
+
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+    adapter = mod.ClaudeCliAdapter(model="claude-haiku-4-5-20251001")
+    schema = {
+        "type": "object",
+        "properties": {"is_duplicate": {"type": "boolean"}},
+        "required": ["is_duplicate"],
+    }
+    raw = adapter.generate(
+        "hi", response_format={"type": "json_schema", "json_schema": {"schema": schema}}
+    )
+    assert "--json-schema" in captured["argv"]
+    i = captured["argv"].index("--json-schema")
+    assert '"is_duplicate"' in captured["argv"][i + 1]
+    assert json.loads(raw) == {"is_duplicate": True}
+
+
 @pytest.mark.integration
 def test_real_claude_disables_inherited_hooks(tmp_path, monkeypatch):
     """Belt-and-suspenders against the real binary: an operator SessionStart hook must NOT fire
