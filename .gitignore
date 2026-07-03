@@ -59,6 +59,10 @@ memory/deleted/
 # Whisper eval scratch DB (created by `ormah eval whisper run`)
 eval/whisper/eval_db/
 
+# Whisper eval corpora are local-only: real project/personal data, never pushed to GitHub.
+eval/whisper/corpus/golden/golden.jsonl
+eval/whisper/corpus/local/
+
 # Git worktrees
 .worktrees/
 

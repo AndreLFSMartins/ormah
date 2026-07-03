@@ -3,3 +3,5 @@ results/
 corpus/sessions/*.jsonl
 corpus/pending_labels.jsonl
 corpus/labels.jsonl
+# Golden corpus is local-only: real project/personal data, never pushed to GitHub.
+corpus/golden/golden.jsonl
