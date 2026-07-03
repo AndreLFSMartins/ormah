@@ -723,13 +723,24 @@ def _save_state(watch_dir: Path, state: dict) -> None:
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def _pending_bytes(prev_offset: int, payload_offset: int) -> int:
+    """Bytes of newly-closed content since the last committed cursor."""
+    return payload_offset - prev_offset
+
+
+def _should_flush(pending: int, is_idle: bool, flush_bytes: int) -> bool:
+    """A Batch closes once idle, or once the pending delta crosses flush_bytes."""
+    return is_idle or pending >= flush_bytes
+
+
 def _ingest_session(
     engine: MemoryEngine,
     path: Path,
     state: dict,
     watch_dir: Path,
     min_turns: int,
-    idle_threshold: float = 30.0,
+    idle_threshold: float = 600.0,
+    flush_bytes: int = 60000,
     on_defer_active=None,
     state_lock=None,
 ) -> IngestResult:
@@ -770,14 +781,14 @@ def _ingest_session(
         prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
 
     try:
-        result = parse_transcript(path, start_offset=prev_offset)
+        result = parse_transcript(path, start_offset=prev_offset, max_bytes=flush_bytes)
         if result.leading_orphan:
             # A cursor left mid-response by an older version: re-parse the whole file so
             # the dropped tail is recovered and re-paired with its prompt. A one-time
             # re-ingest of this file; the background dedup jobs reconcile any overlap.
             logger.info("Session watcher recovering legacy mid-response cursor for %s", rel)
             prev_offset = 0
-            result = parse_transcript(path, start_offset=0)
+            result = parse_transcript(path, start_offset=0, max_bytes=flush_bytes)
     except Exception as e:
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return IngestResult.NO_PROGRESS
@@ -793,7 +804,7 @@ def _ingest_session(
     payload_users = result.safe_user_turn_count
     payload_turns = result.safe_turns
 
-    # When the file looks idle/finished, commit whatever is closed even below min_turns,
+    # When the file looks idle/finished, commit whatever is closed even below flush_bytes,
     # so a short finished session is not stranded.
     try:
         age = time.time() - path.stat().st_mtime
@@ -810,8 +821,9 @@ def _ingest_session(
             return IngestResult.TRANSIENT  # will grow; retry, never park
         return IngestResult.NO_PROGRESS   # idle/frozen safe boundary -> park-eligible
 
-    # Short tail on an active session — defer until more turns close or the session idles.
-    if not is_idle and payload_users < min_turns:
+    # Batch gate: flush once idle, or once the pending closed delta crosses flush_bytes.
+    # Below that, defer so a Batch accumulates instead of round-tripping the LLM per turn.
+    if not _should_flush(_pending_bytes(prev_offset, payload_offset), is_idle, flush_bytes):
         if on_defer_active is not None:
             on_defer_active()  # schedule a retry so the tail is not lost
         return IngestResult.TRANSIENT
@@ -870,6 +882,11 @@ def _ingest_session(
         "Session watcher ingested %s (%d new turns, %d memories extracted, %d signals recorded)",
         rel, payload_users, count, signals_recorded,
     )
+    if result.capped and on_defer_active is not None:
+        # The parse stopped at the byte cap with more closed content past payload_offset —
+        # retrigger the retry timer so the next slice drains promptly instead of waiting
+        # for the next file-append event or reconcile tick.
+        on_defer_active()
     return IngestResult.OK
 
 
@@ -882,6 +899,11 @@ def _scan_sessions(
     """Scan for new/changed JSONL transcripts. Returns count ingested."""
     state = _load_state(watch_dir)
     ingested = 0
+
+    # Read from settings so a tuned flush_bytes/idle_threshold is honored at catch-up too,
+    # not just _ingest_session's hardcoded defaults.
+    flush_bytes = getattr(engine.settings, "session_watcher_flush_bytes", 60000)
+    idle_threshold = getattr(engine.settings, "session_watcher_idle_threshold", 600.0)
 
     now = time.time()
     cutoff = now - (lookback_hours * 3600) if lookback_hours > 0 else 0
@@ -902,7 +924,10 @@ def _scan_sessions(
         if rel not in state and lookback_hours < 0:
             continue
 
-        if _ingest_session(engine, jsonl_file, state, watch_dir, min_turns) == IngestResult.OK:
+        if _ingest_session(
+            engine, jsonl_file, state, watch_dir, min_turns,
+            idle_threshold=idle_threshold, flush_bytes=flush_bytes,
+        ) == IngestResult.OK:
             ingested += 1
 
     # Clean stale state entries for deleted files
@@ -927,8 +952,10 @@ class SessionHandler(FileSystemEventHandler):
         watch_dir: Path,
         debounce_seconds: float,
         min_turns: int,
-        idle_threshold: float = 30.0,
+        idle_threshold: float = 600.0,
         lookback_hours: int = 72,
+        retry_seconds: float = 30.0,
+        flush_bytes: int = 60000,
         stop_event: Event | None = None,
     ) -> None:
         self.engine = engine
@@ -937,6 +964,8 @@ class SessionHandler(FileSystemEventHandler):
         self.min_turns = min_turns
         self.idle_threshold = idle_threshold
         self.lookback_hours = lookback_hours
+        self.retry_seconds = retry_seconds
+        self.flush_bytes = flush_bytes
         self._state = _load_state(watch_dir)
         self._timers: dict[str, Timer] = {}
         self._ingesting: set[str] = set()
@@ -965,14 +994,15 @@ class SessionHandler(FileSystemEventHandler):
             timer.start()
 
     def _schedule_retry(self, path: Path) -> None:
-        """Re-attempt ingestion after idle_threshold so an active short tail is not lost."""
+        """Re-attempt ingestion after retry_seconds — decoupled from idle_threshold so an
+        FSEvents-miss (or a capped drain continuation) is retried promptly."""
         if self._stop_event.is_set():
             return
         key = str(path)
         with self._lock:
             if key in self._timers:
                 self._timers[key].cancel()
-            timer = Timer(self.idle_threshold, self._do_ingest, args=(path,))
+            timer = Timer(self.retry_seconds, self._do_ingest, args=(path,))
             timer.daemon = True
             self._timers[key] = timer
             timer.start()
@@ -998,6 +1028,7 @@ class SessionHandler(FileSystemEventHandler):
             result = _ingest_session(
                 self.engine, path, self._state, self.watch_dir, self.min_turns,
                 idle_threshold=self.idle_threshold,
+                flush_bytes=self.flush_bytes,
                 on_defer_active=lambda: self._schedule_retry(path),
                 state_lock=self._state_lock,
             )
@@ -1184,6 +1215,8 @@ def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
             handler = SessionHandler(
                 engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
                 s.session_watcher_idle_threshold, s.session_watcher_lookback_hours,
+                retry_seconds=s.session_watcher_retry_seconds,
+                flush_bytes=s.session_watcher_flush_bytes,
                 stop_event=stop_event,
             )
             observer = Observer()
