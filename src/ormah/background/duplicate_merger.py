@@ -14,6 +14,7 @@ _W_EMBEDDING = 0.6
 _W_TITLE = 0.2
 _W_TOKEN = 0.2
 _COMPOSITE_THRESHOLD = 0.60
+_DEDUP_ERROR_BACKOFF = "-6 hours"
 
 _LLM_DUPLICATE_PROMPT = """\
 You are deciding whether two memories in a knowledge graph are duplicates that should be merged into one. If merged, the resulting memory replaces both originals — one is kept (updated), one is deleted. All edges from the deleted node are remapped to the kept node. This is irreversible (though undoable), so be conservative.
@@ -203,6 +204,13 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
                 if already_checked:
                     continue
 
+                dup_skip = engine.db.conn.execute(
+                    "SELECT 1 FROM duplicate_checked WHERE node_a = ? AND node_b = ? AND result = 'not_duplicate'",
+                    pair,
+                ).fetchone()
+                if dup_skip:
+                    continue
+
                 embedding_sim = match["similarity"]
                 if embedding_sim < 0.25:
                     continue
@@ -269,11 +277,16 @@ def run_duplicate_detection(engine) -> None:
 
         user_node_id = getattr(engine, "user_node_id", None)
 
-        nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes").fetchall()
+        nodes = engine.db.conn.execute(
+            "SELECT id, content, title, type FROM nodes ORDER BY created DESC"
+        ).fetchall()
         checked = set()
         proposals_created = 0
+        consecutive_failures = 0
 
         for node in nodes:
+            if consecutive_failures >= 3:
+                break
             if node["id"] == user_node_id:
                 continue
             text = f"{node['title'] or ''} {node['content']}".strip()
@@ -294,6 +307,14 @@ def run_duplicate_detection(engine) -> None:
                 if pair in checked:
                     continue
                 checked.add(pair)
+
+                skip = engine.db.conn.execute(
+                    "SELECT 1 FROM duplicate_checked WHERE node_a = ? AND node_b = ? AND "
+                    "(result = 'not_duplicate' OR (result = 'error' AND checked_at > datetime('now', ?)))",
+                    (*pair, _DEDUP_ERROR_BACKOFF),
+                ).fetchone()
+                if skip:
+                    continue
 
                 embedding_sim = match["similarity"]
                 # Pre-filter: skip very dissimilar pairs to avoid wasted work
@@ -318,16 +339,31 @@ def run_duplicate_detection(engine) -> None:
 
                 # --- LLM confirmation (mandatory) ---
                 llm_result = _llm_check_duplicate(settings, node, other)
+                _now = datetime.now(timezone.utc).isoformat()
                 if llm_result is None:
-                    # LLM unavailable for this pair — skip
+                    consecutive_failures += 1
+                    with engine.db.transaction() as conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) "
+                            "VALUES (?, ?, 'error', ?)", (*pair, _now))
+                    if consecutive_failures >= 3:
+                        logger.warning("Duplicate detection: 3 consecutive LLM failures, aborting run")
+                        break
                     continue
+                consecutive_failures = 0
                 if not llm_result.get("is_duplicate"):
                     logger.debug(
                         "LLM rejected duplicate for %s / %s: %s",
                         node["id"][:8], match["id"][:8],
                         llm_result.get("reason", ""),
                     )
+                    with engine.db.transaction() as conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) "
+                            "VALUES (?, ?, 'not_duplicate', ?)", (*pair, _now))
                     continue
+                # is_duplicate True: do NOT persist here (execute_merge invalidates on success;
+                # pending-proposal check below prevents re-churn).
 
                 # Extract LLM-generated merge content
                 merged_content = llm_result.get("merged_content")
