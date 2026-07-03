@@ -717,14 +717,15 @@ def _save_state(watch_dir: Path, state: dict) -> None:
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-def _pending_bytes(prev_offset: int, payload_offset: int) -> int:
-    """Bytes of newly-closed content since the last committed cursor."""
-    return payload_offset - prev_offset
+def _should_flush(is_idle: bool, capped: bool) -> bool:
+    """A Batch closes once idle, or once the parser filled a full flush_bytes batch.
 
-
-def _should_flush(pending: int, is_idle: bool, flush_bytes: int) -> bool:
-    """A Batch closes once idle, or once the pending delta crosses flush_bytes."""
-    return is_idle or pending >= flush_bytes
+    Gating on ``capped`` (not ``pending >= flush_bytes``) matters: break-before capping
+    guarantees a multi-turn slice's pending bytes stay BELOW flush_bytes, so a
+    byte-threshold comparison would never fire for the common multi-turn case. ``capped``
+    is the parser's own "a full batch is ready, more closed content remains" signal.
+    """
+    return is_idle or capped
 
 
 def _ingest_session(
@@ -815,9 +816,10 @@ def _ingest_session(
             return IngestResult.TRANSIENT  # will grow; retry, never park
         return IngestResult.NO_PROGRESS   # idle/frozen safe boundary -> park-eligible
 
-    # Batch gate: flush once idle, or once the pending closed delta crosses flush_bytes.
-    # Below that, defer so a Batch accumulates instead of round-tripping the LLM per turn.
-    if not _should_flush(_pending_bytes(prev_offset, payload_offset), is_idle, flush_bytes):
+    # Batch gate: flush once idle, or once the parser filled a full flush_bytes batch
+    # (result.capped). Below that, defer so a Batch accumulates instead of round-tripping
+    # the LLM per turn.
+    if not _should_flush(is_idle, result.capped):
         if on_defer_active is not None:
             on_defer_active()  # schedule a retry so the tail is not lost
         return IngestResult.TRANSIENT
