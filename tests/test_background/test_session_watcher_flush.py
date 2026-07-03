@@ -97,12 +97,14 @@ def test_parse_transcript_single_oversized_turn_commits_anyway(tmp_path):
 
 
 def test_byte_gate():
-    from ormah.background.session_watcher import _pending_bytes, _should_flush
+    """The gate fires on the parser's own capped signal, not a pending-bytes comparison:
+    break-before capping pins a multi-turn slice's pending bytes BELOW flush_bytes, so a
+    byte-threshold comparison would never fire for the common multi-turn case."""
+    from ormah.background.session_watcher import _should_flush
 
-    assert _pending_bytes(prev_offset=0, payload_offset=5000) == 5000
-    assert _should_flush(pending=5000, is_idle=False, flush_bytes=60000) is False
-    assert _should_flush(pending=60000, is_idle=False, flush_bytes=60000) is True
-    assert _should_flush(pending=10, is_idle=True, flush_bytes=60000) is True
+    assert _should_flush(is_idle=False, capped=False) is False
+    assert _should_flush(is_idle=False, capped=True) is True
+    assert _should_flush(is_idle=True, capped=False) is True
 
 
 class _FakeConn:
@@ -230,18 +232,15 @@ def test_ingest_session_subcap_flush_does_not_retrigger(tmp_path):
 
 
 def test_ingest_session_active_session_flushes_when_over_flush_bytes(tmp_path):
-    """Primary production trigger: an active (non-idle) session whose closed content
-    crosses flush_bytes flushes immediately, without waiting for idle."""
+    """Primary production trigger: an ACTIVE (non-idle) session with MULTIPLE closed turns
+    totaling well over flush_bytes flushes a full ~flush_bytes batch immediately, without
+    waiting for idle. This is the common case the byte gate exists for — a single turn
+    happening to exceed flush_bytes is a degenerate edge case, not what this proves."""
     from ormah.background.session_watcher import IngestResult, _ingest_session
 
     watch_dir = tmp_path
     path = watch_dir / "active.jsonl"
-    lines = [
-        {"type": "user", "message": {"role": "user", "content": "u " + "x" * 70000}},
-        {"type": "assistant", "message": {"role": "assistant",
-                  "content": [{"type": "text", "text": "a"}], "stop_reason": "end_turn"}},
-    ]
-    path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    _write_turns(path, turns=4, pad=20000)  # ~80KB closed content, well over flush_bytes
     # mtime left fresh (not backdated) — the file is NOT idle.
 
     engine = _FakeEngine()
@@ -250,6 +249,25 @@ def test_ingest_session_active_session_flushes_when_over_flush_bytes(tmp_path):
 
     assert result == IngestResult.OK
     assert engine.recorded_lengths
+    assert engine.recorded_lengths[-1] <= 60000  # break-before caps the committed slice
+
+
+def test_ingest_session_active_multiturn_below_flush_bytes_defers(tmp_path):
+    """An active session whose total closed content stays below flush_bytes never gets
+    capped by the parser, so the gate correctly defers (waits for more or idle)."""
+    from ormah.background.session_watcher import IngestResult, _ingest_session
+
+    watch_dir = tmp_path
+    path = watch_dir / "active_below_cap.jsonl"
+    _write_turns(path, turns=2, pad=100)  # tiny — nowhere near flush_bytes
+    # mtime left fresh (not backdated) — the file is NOT idle.
+
+    engine = _FakeEngine()
+    state: dict = {}
+    result = _ingest_session(engine, path, state, watch_dir, min_turns=1, flush_bytes=60000)
+
+    assert result == IngestResult.TRANSIENT
+    assert not engine.recorded_lengths
 
 
 def test_ingest_session_active_small_session_defers(tmp_path):
@@ -285,19 +303,19 @@ def test_ingest_session_active_small_session_defers(tmp_path):
 def test_scan_sessions_honors_settings_flush_bytes(tmp_path):
     """_scan_sessions must read flush_bytes/idle_threshold from engine.settings, not the
     _ingest_session defaults — otherwise a tuned (lowered) flush_bytes has no effect on the
-    startup catch-up scan."""
+    startup catch-up scan.
+
+    Two turns so the parser's break-before capping can actually fire at the lowered
+    threshold (a lone first turn always commits uncapped, regardless of flush_bytes).
+    """
     from ormah.background.session_watcher import _scan_sessions
 
     watch_dir = tmp_path
     path = watch_dir / "small.jsonl"
-    lines = [
-        {"type": "user", "message": {"role": "user", "content": "u " + "x" * 2000}},
-        {"type": "assistant", "message": {"role": "assistant",
-                  "content": [{"type": "text", "text": "a"}], "stop_reason": "end_turn"}},
-    ]
-    path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+    _write_turns(path, turns=2, pad=2000)
     # Not idle and well below the function's default flush_bytes (60000), but above a
-    # lowered setting — only flushes if _scan_sessions actually threads the setting through.
+    # lowered setting — only capped (and so flushed) if _scan_sessions actually threads
+    # the setting through to parse_transcript's max_bytes.
     engine = _FakeEngine(flush_bytes=1000, idle_threshold=600.0)
 
     count = _scan_sessions(engine, watch_dir, min_turns=1, lookback_hours=72)
