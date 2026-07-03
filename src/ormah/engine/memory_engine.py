@@ -848,6 +848,10 @@ class MemoryEngine:
                     "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
                     (node_id, node_id),
                 )
+                conn.execute(
+                    "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
+                    (node_id, node_id),
+                )
 
         # Audit log
         self._write_audit_log(
@@ -892,6 +896,10 @@ class MemoryEngine:
                 "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
                 (node_id, node_id),
             )
+            conn.execute(
+                "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
+                (node_id, node_id),
+            )
 
         # Soft-delete from disk (move to deleted/ directory)
         self.file_store.soft_delete(node_id)
@@ -928,6 +936,10 @@ class MemoryEngine:
             self.builder._remove_node(node_id)
             conn.execute(
                 "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
+                (node_id, node_id),
+            )
+            conn.execute(
+                "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
                 (node_id, node_id),
             )
             conn.execute(
@@ -1411,9 +1423,17 @@ class MemoryEngine:
                 "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
                 (removed.id, removed.id),
             )
+            conn.execute(
+                "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
+                (removed.id, removed.id),
+            )
             if merged_content is not None or merged_title is not None:
                 conn.execute(
                     "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
+                    (kept.id, kept.id),
+                )
+                conn.execute(
+                    "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
                     (kept.id, kept.id),
                 )
 
