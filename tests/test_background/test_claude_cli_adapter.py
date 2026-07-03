@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -232,3 +233,16 @@ def test_real_claude_denies_tools_on_untrusted_prompt(tmp_path):
         assert secret not in out, f"tool boundary FAIL-OPEN: child read the probe file: {out[:200]}"
     finally:
         probe.unlink(missing_ok=True)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
+def test_real_claude_json_schema_returns_structured_output():
+    from ormah.background.llm.claude_cli_adapter import ClaudeCliAdapter
+    adapter = ClaudeCliAdapter(model="claude-haiku-4-5-20251001", timeout=60)
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}},
+              "required": ["n"], "additionalProperties": False}
+    raw = adapter.generate("Return the integer 7 in a field n.",
+        response_format={"type": "json_schema", "json_schema": {"schema": schema}})
+    import json
+    assert json.loads(raw) == {"n": 7}
