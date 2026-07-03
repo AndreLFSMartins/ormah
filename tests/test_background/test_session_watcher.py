@@ -63,9 +63,13 @@ def _mark_idle(path: Path) -> None:
 
     A fresh file is considered active, so its trailing user+assistant block is held back
     until a following user turn (or the idle flush) confirms the response is complete.
+
+    Recedes past the default session_watcher_idle_threshold (600s, see _ingest_session)
+    so callers relying on either that default or a smaller explicit idle_threshold see the
+    file as idle.
     """
     now = time.time()
-    os.utime(path, (now, now - 120))
+    os.utime(path, (now, now - 700))
 
 
 def _write_turn_jsonl(path: Path, prompt: str, response: str) -> None:
@@ -151,6 +155,7 @@ def test_ingest_session_basic(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "abc123.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
@@ -193,7 +198,9 @@ def test_scan_skips_subagents_keeps_primary(engine, tmp_path):
     project_dir = watch_dir / "-Users-alice-Code-myproject"
     sub_dir = project_dir / "abc123" / "subagents"
     sub_dir.mkdir(parents=True)
-    _make_jsonl(project_dir / "abc123.jsonl", user_turns=6)
+    primary = project_dir / "abc123.jsonl"
+    _make_jsonl(primary, user_turns=6)
+    _mark_idle(primary)  # finished session, below flush_bytes → idle flush
     _make_jsonl(sub_dir / "agent-deadbeef.jsonl", user_turns=6)
 
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
@@ -681,8 +688,9 @@ def test_min_turns_filter(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
-    # A fresh (active, not idle) file below min_turns hits the short-tail branch and
-    # defers → TRANSIENT (retry until it grows past min_turns or the session idles).
+    # min_turns no longer gates the active-flush path — the byte gate (flush_bytes /
+    # idle) replaced it. A fresh (active, not idle) file below flush_bytes defers →
+    # TRANSIENT (retry until it crosses flush_bytes or the session idles).
     assert result == IngestResult.TRANSIENT
     assert str(jsonl.relative_to(watch_dir)) not in state
 
@@ -696,6 +704,7 @@ def test_unchanged_session_skipped(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "session.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
@@ -713,6 +722,7 @@ def test_scan_respects_lookback(engine, tmp_path):
 
     recent = project_dir / "recent.jsonl"
     _make_jsonl(recent, user_turns=6)
+    _mark_idle(recent)  # finished session, below flush_bytes → idle flush
 
     old = project_dir / "old.jsonl"
     _make_jsonl(old, user_turns=6)
@@ -864,6 +874,7 @@ def test_incremental_only_new_turns(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     captured: list[str] = []
     real_ingest = engine.ingest_conversation
@@ -880,6 +891,7 @@ def test_incremental_only_new_turns(engine, tmp_path):
         assert first_offset > 0
 
         _make_jsonl(jsonl, user_turns=12)  # identical first 6 turns + 6 appended
+        _mark_idle(jsonl)  # appended session, below flush_bytes → idle flush
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " not in captured[1]
@@ -896,6 +908,7 @@ def test_incremental_defers_small_append(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     calls = 0
     real_ingest = engine.ingest_conversation
@@ -927,6 +940,7 @@ def test_shrink_resets_cursor(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=10)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     captured: list[str] = []
     real_ingest = engine.ingest_conversation
@@ -941,6 +955,7 @@ def test_shrink_resets_cursor(engine, tmp_path):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
         _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset
+        _mark_idle(jsonl)  # shrunk session, below flush_bytes → idle flush
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " in captured[1]
@@ -1010,6 +1025,7 @@ def test_inflight_multirecord_response_not_split(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
 
     _make_jsonl(jsonl, user_turns=6)  # 6 complete (end_turn) pairs
+    _mark_idle(jsonl)  # finished-so-far session, below flush_bytes → idle flush
     state = {}
     captured: list[str] = []
     real_ingest = engine.ingest_conversation
@@ -1026,15 +1042,18 @@ def test_inflight_multirecord_response_not_split(engine, tmp_path):
 
         # New turn: prompt + a FIRST assistant record still in flight (tool_use). The
         # response is not complete, so nothing new commits and the cursor must not move
-        # into the middle of the response.
+        # into the middle of the response. Mark idle too: this must hold back regardless
+        # of idle, because the trailing record is genuinely incomplete (not just small).
         _append_user(jsonl, 6)
         _append_assistant(jsonl, 6, stop_reason="tool_use")
+        _mark_idle(jsonl)
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) != IngestResult.OK
         assert state[rel]["end_offset"] == cursor1
 
         # The response completes with a terminal record: prompt + BOTH assistant records
         # commit together — never split.
         _append_assistant(jsonl, 6, stop_reason="end_turn")
+        _mark_idle(jsonl)
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     committed = captured[-1]
@@ -1055,6 +1074,7 @@ def test_codex_multirecord_turn_committed_whole_via_task_complete(engine, tmp_pa
     _append_codex_turn(jsonl, 1, records=2, complete=True)
     # In-flight final turn: two assistant records, no task_complete yet.
     _append_codex_turn(jsonl, 2, records=2, complete=False)
+    _mark_idle(jsonl)  # below flush_bytes → idle flush for the closed turns
 
     state = {}
     captured: list[str] = []
@@ -1093,6 +1113,7 @@ def test_legacy_mid_response_cursor_recovered(engine, tmp_path):
             "content": [{"type": "text", "text": "Second part with the actual answer"}]}},
     ]
     jsonl.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     # A legacy state cursor saved mid-response (after the first assistant record), with the
     # CORRECT file hash — the file is unchanged. Recovery must still fire because the stored
@@ -1136,6 +1157,7 @@ def test_codex_inflight_turn_not_split_on_idle(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
 
     _append_codex_turn(jsonl, 0, records=2, complete=True)
+    _mark_idle(jsonl)  # finished-so-far turn, below flush_bytes → idle flush
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
@@ -1293,6 +1315,7 @@ def test_concurrent_ingest_skipped(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     started = threading.Event()
     release = threading.Event()
@@ -1333,6 +1356,7 @@ def test_inflight_skip_reschedules(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
 
     scheduled = []
 
@@ -1385,6 +1409,7 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
 
     _make_jsonl(jsonl, user_turns=10)
+    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
@@ -1392,6 +1417,7 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     assert first_nodes  # first ingest produced at least one node
 
     _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset → full re-ingest
+    _mark_idle(jsonl)  # shrunk session, below flush_bytes → idle flush
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
