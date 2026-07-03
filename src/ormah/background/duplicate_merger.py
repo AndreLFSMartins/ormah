@@ -61,6 +61,18 @@ Return JSON:
   "reason": "one sentence referencing the actual memory titles"
 }}"""
 
+_DUP_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_duplicate": {"type": "boolean"},
+        "merged_title": {"type": ["string", "null"]},
+        "merged_content": {"type": ["string", "null"]},
+        "reason": {"type": ["string", "null"]},
+    },
+    "required": ["is_duplicate", "merged_title", "merged_content", "reason"],
+    "additionalProperties": False,
+}
+
 
 def _title_similarity(title_a: str | None, title_b: str | None) -> float:
     """Levenshtein-ratio similarity between two titles. Returns 0.0 if either is None."""
@@ -118,7 +130,12 @@ def _llm_check_duplicate(settings, node_row, other_row) -> dict | None:
         content_b=other_row["content"][:2000],
     )
 
-    raw = llm_generate(settings, prompt, json_mode=True)
+    raw = llm_generate(
+        settings,
+        prompt,
+        json_mode=True,
+        response_format={"type": "json_schema", "json_schema": {"schema": _DUP_RESPONSE_SCHEMA}},
+    )
     if raw is None:
         return None
 
