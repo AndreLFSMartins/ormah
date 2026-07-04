@@ -172,6 +172,72 @@ def test_ingest_session_basic(engine, tmp_path):
     assert len(entry["node_ids"]) == 1
 
 
+def test_ingest_none_is_transient_and_does_not_advance(engine, tmp_path):
+    """LLM unavailable (adapter returns None) -> TRANSIENT, cursor must not advance."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=None):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    assert result == IngestResult.TRANSIENT
+    rel = str(jsonl.relative_to(watch_dir))
+    assert rel not in state  # cursor (end_offset) never written -> unchanged
+
+
+def test_ingest_valid_empty_memories_advances(engine, tmp_path):
+    """A valid {"memories": []} extraction is a SUCCESS: the slice is consumed and the
+    cursor advances, so session_watcher never re-processes a no-memory turn forever."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    state = {}
+    with patch(_LLM_PATCH, return_value='{"memories": []}'):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    assert result == IngestResult.OK
+    rel = str(jsonl.relative_to(watch_dir))
+    entry = state[rel]
+    assert entry["end_offset"] > 0  # cursor advanced past the consumed slice
+    assert entry["node_ids"] == []
+
+
+def test_ingest_null_optional_fields_does_not_wedge_cursor(engine, tmp_path):
+    """Cursor-wedge regression: the fallback extraction path is not --json-schema-
+    constrained, so tags/about_self/confidence can arrive as null. That must not raise
+    inside ingest_conversation -> propagate as an error string -> TRANSIENT forever."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    null_fields_response = json.dumps({"memories": [
+        {"content": "x", "type": "fact", "title": "t",
+         "tags": None, "about_self": None, "confidence": None},
+    ]})
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=null_fields_response):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+
+    assert result == IngestResult.OK
+    rel = str(jsonl.relative_to(watch_dir))
+    entry = state[rel]
+    assert entry["end_offset"] > 0  # cursor advanced, not wedged
+    assert len(entry["node_ids"]) == 1
+
+
 def test_subagent_transcript_is_not_ingested(engine, tmp_path):
     """Subagent transcripts (<uuid>/subagents/agent-*.jsonl) are internal agent scratch.
 

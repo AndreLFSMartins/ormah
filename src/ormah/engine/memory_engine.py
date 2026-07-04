@@ -2194,7 +2194,7 @@ class MemoryEngine:
         for mem in extracted:
             if not isinstance(mem, dict):
                 continue
-            mem_content = mem.get("content", "").strip()
+            mem_content = (mem.get("content") or "").strip()
             if not mem_content:
                 continue
 
@@ -2212,9 +2212,11 @@ class MemoryEngine:
             mem_title = mem.get("title") or _generate_title(mem_content)
 
             # Default confidence for auto-ingested memories: 0.7
-            confidence = mem.get("confidence", 0.7)
+            confidence = mem.get("confidence")
+            if confidence is None:
+                confidence = 0.7
 
-            tags = mem.get("tags", []) + ["auto-ingested"] + (extra_tags or [])
+            tags = (mem.get("tags") or []) + ["auto-ingested"] + (extra_tags or [])
 
             if dry_run:
                 created.append({
@@ -2222,7 +2224,7 @@ class MemoryEngine:
                     "content": mem_content,
                     "type": node_type.value,
                     "tags": tags,
-                    "about_self": mem.get("about_self", False),
+                    "about_self": bool(mem.get("about_self")),
                     "confidence": confidence,
                 })
                 continue
@@ -2233,7 +2235,7 @@ class MemoryEngine:
                 title=mem_title,
                 tags=tags,
                 space=space,
-                about_self=mem.get("about_self", False),
+                about_self=bool(mem.get("about_self")),
                 confidence=confidence,
             )
             node_id, _ = self.remember(req, agent_id=agent_id or "ingester")
@@ -2268,7 +2270,13 @@ class MemoryEngine:
                     len(content), max_chars,
                 )
             prompt = _INGEST_LLM_PROMPT.format(conversation=content[:max_chars])
-            raw = ingest_llm_generate(self.settings, prompt, json_mode=True)
+            raw = ingest_llm_generate(
+                self.settings, prompt, json_mode=True,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"schema": _INGEST_RESPONSE_SCHEMA},
+                },
+            )
             if raw is None:
                 return (
                     "No LLM available for server-side extraction. "
@@ -2604,6 +2612,36 @@ For each memory:
 Return: {{"memories": [...]}}
 Return {{"memories": []}} if nothing worth remembering was discussed.
 """
+
+_INGEST_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "memories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                    "type": {
+                        "type": "string",
+                        "enum": [t.value for t in NodeType],
+                    },
+                    "title": {"type": ["string", "null"]},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "about_self": {"type": "boolean"},
+                    "confidence": {"type": "number"},
+                },
+                "required": [
+                    "content", "type", "title", "tags", "about_self", "confidence",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["memories"],
+    "additionalProperties": False,
+}
+
 
 _INGEST_LLM_PROMPT = """\
 You are a memory curator for a persistent knowledge graph. Read the conversation below and extract memories valuable in future sessions.
