@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 _LLM_PATCH = "ormah.background.llm_client.llm_generate"
@@ -257,5 +258,77 @@ def test_run_dedup_stops_at_cap(monkeypatch, tmp_path):
         engine.settings.duplicate_check_max_llm_calls_per_run = 3
         dm.run_duplicate_detection(engine)
         assert calls["n"] == 3
+    finally:
+        engine.shutdown()
+
+
+# --- Shared pair_skip_sql routing (fixes lexical error-backoff bug) ---
+
+
+def test_dedup_error_row_backoff(monkeypatch, tmp_path):
+    """A fresh 'error' row hides the pair within the backoff window; a stale one
+    (past the window) lets the pair be re-checked. Guards against the lexical
+    ISO-vs-SQLite datetime() compare bug (checked_at stored with 'T'/tz)."""
+    from ormah.background import duplicate_merger as dm
+
+    engine = _make_engine_with_two_similar_nodes(tmp_path)
+    try:
+        ids = [r[0] for r in engine.db.conn.execute("SELECT id FROM nodes WHERE type = 'fact'").fetchall()]
+        pair = tuple(sorted(ids))
+
+        calls = {"n": 0}
+
+        def _count(s, a, b):
+            calls["n"] += 1
+            return {"is_duplicate": False}
+
+        monkeypatch.setattr(dm, "_llm_check_duplicate", _count)
+
+        # Fresh error row -> within backoff window -> pair skipped, LLM never called.
+        with engine.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) "
+                "VALUES (?, ?, 'error', ?)",
+                (*pair, datetime.now(timezone.utc).isoformat()),
+            )
+        dm.run_duplicate_detection(engine)
+        assert calls["n"] == 0
+
+        # Stale error row (past the 6h backoff window) -> pair re-checked.
+        stale = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
+        with engine.db.transaction() as conn:
+            conn.execute(
+                "UPDATE duplicate_checked SET checked_at = ? WHERE node_a = ? AND node_b = ?",
+                (stale, *pair),
+            )
+        dm.run_duplicate_detection(engine)
+        assert calls["n"] == 1
+    finally:
+        engine.shutdown()
+
+
+def test_dedup_ordered_pair_skip(tmp_path):
+    """A terminal row written as (a, b) also skips the reversed query (b, a)."""
+    from ormah.background.pair_skip import normalize_pair, pair_skip_sql
+
+    engine = _make_engine_with_two_similar_nodes(tmp_path)
+    try:
+        ids = [r[0] for r in engine.db.conn.execute("SELECT id FROM nodes WHERE type = 'fact'").fetchall()]
+        a_id, b_id = ids
+        pair = normalize_pair(a_id, b_id)
+
+        with engine.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) "
+                "VALUES (?, ?, 'not_duplicate', ?)",
+                (*pair, datetime.now(timezone.utc).isoformat()),
+            )
+
+        reversed_pair = normalize_pair(b_id, a_id)
+        assert reversed_pair == pair
+        skip = engine.db.conn.execute(
+            pair_skip_sql("duplicate_checked", ("not_duplicate",)), (*reversed_pair, "-6 hours")
+        ).fetchone()
+        assert skip is not None
     finally:
         engine.shutdown()
