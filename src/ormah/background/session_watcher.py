@@ -36,7 +36,6 @@ _HEURISTIC_SOURCE = "transcript_watcher_heuristic"
 _LLM_JUDGE_SOURCE = "transcript_watcher_llm_judge"
 _HEURISTIC_AFFINITY_SOURCE = "auto_heuristic"
 _LLM_JUDGE_AFFINITY_SOURCE = "auto_llm_judge"
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
 _DEFAULT_SESSION_WATCHER_DIR = Path("~/.claude/projects")
 _CODEX_SESSION_WATCHER_DIR = Path("~/.codex/sessions")
 
@@ -152,25 +151,6 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
     }
 
 
-def _extract_json(raw: str) -> str:
-    """Extract JSON from an LLM response that may contain fences or prose."""
-    stripped = raw.strip()
-    if stripped.startswith(("{", "[")):
-        return stripped
-
-    match = _FENCE_RE.search(raw)
-    if match:
-        return match.group(1).strip()
-
-    for start_char, end_char in [("{", "}"), ("[", "]")]:
-        start = raw.find(start_char)
-        end = raw.rfind(end_char)
-        if start != -1 and end > start:
-            return raw[start : end + 1]
-
-    return stripped
-
-
 def _normalise_judge_verdict(raw: object) -> str:
     """Map loose LLM verdict labels to the canonical feedback verdicts."""
     value = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
@@ -249,7 +229,7 @@ def _llm_judge_whisper_usage(
     if not rows:
         return {}
 
-    from ormah.background.llm_client import llm_generate
+    from ormah.background.llm_client import extract_json, llm_generate
 
     candidates = [
         {
@@ -283,7 +263,7 @@ def _llm_judge_whisper_usage(
         return {}
 
     try:
-        parsed = json.loads(_extract_json(raw))
+        parsed = json.loads(extract_json(raw))
     except (json.JSONDecodeError, TypeError, ValueError):
         logger.warning("LLM returned invalid JSON for feedback judgment")
         return {}

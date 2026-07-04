@@ -2355,7 +2355,7 @@ class MemoryEngine:
         if the LLM is unavailable.
         """
         try:
-            from ormah.background.llm_client import ingest_llm_generate
+            from ormah.background.llm_client import extract_json, ingest_llm_generate
 
             max_chars = self.settings.ingest_max_content_chars
             if len(content) > max_chars:
@@ -2381,8 +2381,10 @@ class MemoryEngine:
                     "Pass pre-extracted memories via the 'memories' parameter instead."
                 )
 
-            # Extract JSON from response — handle markdown fences and surrounding prose
-            stripped = _extract_json(raw)
+            # Extract JSON from response — handle markdown fences and surrounding prose.
+            # Uses the shared raw_decode-based extractor: a naive fence regex truncates
+            # valid JSON at a ``` quoted inside a memory's content value.
+            stripped = extract_json(raw)
             logger.debug("LLM raw (%d chars), extracted JSON (%d chars): %.300s",
                          len(raw), len(stripped), stripped)
             result = json.loads(stripped)
@@ -2636,31 +2638,6 @@ class MemoryEngine:
             logger.debug("Dedup check failed: %s", e)
 
         return False
-
-
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
-
-
-def _extract_json(raw: str) -> str:
-    """Extract JSON from an LLM response that may contain markdown fences or prose."""
-    # Try direct parse first
-    stripped = raw.strip()
-    if stripped.startswith(("{", "[")):
-        return stripped
-
-    # Look for ```json ... ``` fenced block
-    m = _FENCE_RE.search(raw)
-    if m:
-        return m.group(1).strip()
-
-    # Last resort: find first { or [ to last matching } or ]
-    for start_char, end_char in [("{", "}"), ("[", "]")]:
-        start = raw.find(start_char)
-        end = raw.rfind(end_char)
-        if start != -1 and end > start:
-            return raw[start : end + 1]
-
-    return stripped
 
 
 _INGEST_LLM_RULES = """\
