@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -11,6 +12,19 @@ from ormah.config import Settings
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.index.db import Database
 from ormah.store.file_store import FileStore
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_from_global_env(monkeypatch, tmp_path):
+    """Stop the global ~/.config/ormah/.env and stray ORMAH_* OS vars from
+    leaking into bare Settings() during tests (env pollution, not regressions).
+    """
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("")
+    monkeypatch.setitem(Settings.model_config, "env_file", str(empty_env))
+    for key in list(os.environ):
+        if key.startswith("ORMAH_"):
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture
