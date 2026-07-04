@@ -855,7 +855,9 @@ class MemoryEngine:
         self.builder.index_single(path)
         self._index_embedding(node)
 
-        # Invalidate auto-linker checked pairs if content/title changed
+        # Invalidate auto-linker/dedup checked pairs if content/title changed.
+        # Conflict semantics also depend on space/type, so invalidate conflict_checked
+        # on those edits too (a space- or type-only edit can flip conflict eligibility).
         if req.content is not None or req.title is not None:
             with self.db.transaction() as conn:
                 conn.execute(
@@ -864,6 +866,16 @@ class MemoryEngine:
                 )
                 conn.execute(
                     "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
+                    (node_id, node_id),
+                )
+                conn.execute(
+                    "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
+                    (node_id, node_id),
+                )
+        elif req.space is not None or req.type is not None:
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
                     (node_id, node_id),
                 )
 
@@ -912,6 +924,10 @@ class MemoryEngine:
             )
             conn.execute(
                 "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
+                (node_id, node_id),
+            )
+            conn.execute(
+                "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
                 (node_id, node_id),
             )
 
@@ -1373,6 +1389,10 @@ class MemoryEngine:
                 "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
                 (removed.id, removed.id),
             )
+            conn.execute(
+                "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
+                (removed.id, removed.id),
+            )
             if merged_content is not None or merged_title is not None:
                 conn.execute(
                     "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
@@ -1380,6 +1400,10 @@ class MemoryEngine:
                 )
                 conn.execute(
                     "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
+                    (kept.id, kept.id),
+                )
+                conn.execute(
+                    "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
                     (kept.id, kept.id),
                 )
 

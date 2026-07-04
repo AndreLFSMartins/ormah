@@ -150,6 +150,9 @@ class Settings(BaseSettings):
     # NOT unlimited (that is -1).
     duplicate_check_max_llm_calls_per_run: int = 100
 
+    # Per-run LLM cap for conflict detection. -1 = unlimited, 0 = disabled, N>=1 = cap.
+    conflict_check_max_llm_calls_per_run: int = 100
+
     # Importance scoring weights (3 dynamic signals)
     importance_access_weight: float = 0.34
     importance_edge_weight: float = 0.33
@@ -561,6 +564,13 @@ class Settings(BaseSettings):
     def _dedup_cap_range(cls, v: int) -> int:
         if v < -1:
             raise ValueError(f"duplicate_check_max_llm_calls_per_run must be >= -1, got {v}")
+        return v
+
+    @field_validator("conflict_check_max_llm_calls_per_run")
+    @classmethod
+    def _conflict_cap_range(cls, v: int) -> int:
+        if v < -1:
+            raise ValueError(f"conflict_check_max_llm_calls_per_run must be >= -1, got {v}")
         return v
 
     @field_validator("auto_link_max_llm_calls_per_run")
