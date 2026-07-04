@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS duplicate_checked (
 );
 
 CREATE TABLE IF NOT EXISTS consolidation_checked (
-    signature  TEXT PRIMARY KEY,   -- sha256 of sorted "{node_id}:{sha256(content)}"
+    signature  TEXT PRIMARY KEY,   -- sha256 of sorted per-node sha256("id|title|content|space|type")
     checked_at TEXT NOT NULL
 );
 
