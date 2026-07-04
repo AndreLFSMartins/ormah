@@ -8,6 +8,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+_VALID_NODE_TYPES = ("fact", "decision", "preference", "event", "person",
+                     "project", "concept", "procedure", "goal", "observation")
+
 _CONSOLIDATE_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -15,8 +18,7 @@ _CONSOLIDATE_RESPONSE_SCHEMA = {
         "summary": {"type": "string"},
         "type": {
             "type": "string",
-            "enum": ["fact", "decision", "preference", "event", "person",
-                     "project", "concept", "procedure", "goal", "observation"],
+            "enum": list(_VALID_NODE_TYPES),
         },
     },
     "required": ["title", "summary", "type"],
@@ -60,7 +62,7 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
         return []
 
     rows = conn.execute(
-        "SELECT id, title, content, space FROM nodes WHERE tier = 'working'"
+        "SELECT id, title, content, space, type FROM nodes WHERE tier = 'working'"
     ).fetchall()
     if len(rows) < min_size:
         return []
@@ -98,7 +100,7 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
             if match["similarity"] < threshold:
                 continue
             m_row = conn.execute(
-                "SELECT id, title, content, space, tier FROM nodes WHERE id = ?",
+                "SELECT id, title, content, space, type, tier FROM nodes WHERE id = ?",
                 (mid,),
             ).fetchone()
             if m_row is None or m_row["tier"] != "working":
@@ -286,13 +288,18 @@ Return a JSON object:
     try:
         result = json.loads(extract_json(raw))
     except (json.JSONDecodeError, TypeError, ValueError):
-        logger.warning("LLM returned invalid JSON for consolidation; recording no-op")
-        _record_signature(engine, sig)
+        # ponytail: transient parse failure -> retry next run (do NOT record). Now rare thanks to
+        # the adapter result-fallback. Ceiling: a cluster whose content DETERMINISTICALLY fails to
+        # parse is retried every run (bounded by _MAX_CLUSTERS_PER_RUN); add a checked_at backoff
+        # column if that ever bleeds.
+        logger.warning("LLM returned unparseable JSON for consolidation; will retry next run")
         return
 
     title = result.get("title", "Consolidated memory")
     summary = result.get("summary", "")
     node_type = result.get("type", "fact")
+    if node_type not in _VALID_NODE_TYPES:
+        node_type = "fact"
 
     if not summary:
         _record_signature(engine, sig)
