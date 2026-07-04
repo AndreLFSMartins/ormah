@@ -137,6 +137,11 @@ class Settings(BaseSettings):
     auto_link_max_edges_per_run: int = 500
     auto_link_max_nodes_per_run: int = 500  # cursor batch: nodes scanned per run
 
+    # Per-run LLM classification cap for auto-linking. -1 = unlimited, 0 = no calls, N>=1 = cap.
+    # Separate from auto_link_max_edges_per_run: this bounds LLM work (every candidate pair
+    # calls the LLM, including 'none'/'error' outcomes), that one bounds edges written.
+    auto_link_max_llm_calls_per_run: int = 100
+
     # Auto-merge
     auto_merge_threshold: float = 0.85
 
@@ -470,6 +475,13 @@ class Settings(BaseSettings):
     def _dedup_cap_range(cls, v: int) -> int:
         if v < -1:
             raise ValueError(f"duplicate_check_max_llm_calls_per_run must be >= -1, got {v}")
+        return v
+
+    @field_validator("auto_link_max_llm_calls_per_run")
+    @classmethod
+    def _auto_link_llm_cap_range(cls, v: int) -> int:
+        if v < -1:
+            raise ValueError(f"auto_link_max_llm_calls_per_run must be >= -1, got {v}")
         return v
 
     @field_validator("activation_decay")
