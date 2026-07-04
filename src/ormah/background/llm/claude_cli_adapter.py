@@ -156,6 +156,13 @@ class ClaudeCliAdapter(LLMAdapter):
             return None
         if schema is not None:
             structured = envelope.get("structured_output")
-            return json.dumps(structured) if structured is not None else None
+            if structured is not None:
+                return json.dumps(structured)
+            # Fallback: for some prompt+schema pairs the CLI answers in a single text turn,
+            # emitting valid schema-conformant JSON in `result` (```json-fenced) with
+            # structured_output=null. Callers run extract_json + json.loads, so hand them the
+            # raw result to recover; enum-integrity is normalized per-site by callers.
+            result = envelope.get("result")
+            return result if isinstance(result, str) and result.strip() else None
         result = envelope.get("result")
         return result if isinstance(result, str) else None
