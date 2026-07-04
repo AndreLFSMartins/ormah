@@ -280,15 +280,6 @@ def _llm_judge_whisper_usage(
         max_tokens=512,
     )
     if raw is None:
-        logger.info("LLM feedback judge schema call failed; falling back to JSON object mode")
-        raw = llm_generate(
-            engine.settings,
-            prompt,
-            json_mode=True,
-            temperature=0,
-            max_tokens=512,
-        )
-    if raw is None:
         return {}
 
     try:
