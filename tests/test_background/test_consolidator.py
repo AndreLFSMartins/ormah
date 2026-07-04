@@ -246,10 +246,15 @@ class TestConsolidationSignatureSkip:
             {"id": "n1", "title": "t", "content": "c", "space": "projectA"},
             {"id": "n2", "title": "t2", "content": "c2", "space": None},
         ]
+        type_edit = [
+            {"id": "n1", "title": "t", "content": "c", "space": None, "type": "decision"},
+            {"id": "n2", "title": "t2", "content": "c2", "space": None},
+        ]
 
         base_sig = consolidator._cluster_signature(base)
         assert base_sig != consolidator._cluster_signature(title_edit)
         assert base_sig != consolidator._cluster_signature(space_edit)
+        assert base_sig != consolidator._cluster_signature(type_edit)
 
     def test_consolidate_records_signature_on_noop_summary(self, monkeypatch, consolidation_engine):
         """An empty/blank summary is a no-op that must still record the signature."""
@@ -287,7 +292,11 @@ class TestConsolidationSignatureSkip:
         ).fetchone()
         assert row is None
 
-    def test_consolidate_records_signature_on_invalid_json(self, monkeypatch, consolidation_engine):
+    def test_consolidate_does_not_record_signature_on_invalid_json(
+        self, monkeypatch, consolidation_engine
+    ):
+        """Invalid JSON is now treated as transient (mirrors raw is None): retry next run,
+        do NOT permanently skip a consolidatable cluster on a one-off parse failure."""
         engine, _ = consolidation_engine
         cluster = [
             {"id": "n1", "title": "t", "content": "c", "space": None},
@@ -303,11 +312,37 @@ class TestConsolidationSignatureSkip:
         row = engine.db.conn.execute(
             "SELECT 1 FROM consolidation_checked WHERE signature = ?", (sig,)
         ).fetchone()
-        assert row is not None
+        assert row is None
+
+    def test_consolidate_clamps_off_enum_type_to_fact(self, monkeypatch, consolidation_engine):
+        """The result-fallback recovers JSON shape but not the schema's enum constraint —
+        an off-enum type from the LLM must be clamped, not written straight to the node."""
+        engine, original_ids = consolidation_engine
+        cluster = [
+            {"id": original_ids[0], "title": "t", "content": "c", "space": None},
+            {"id": original_ids[1], "title": "t2", "content": "c2", "space": None},
+        ]
+        monkeypatch.setattr(
+            "ormah.background.llm_client.llm_generate",
+            lambda *a, **k: json.dumps(
+                {"title": "x", "summary": "consolidated summary", "type": "architecture"}
+            ),
+        )
+
+        consolidator._consolidate_cluster(engine, cluster)
+
+        tag_row = engine.db.conn.execute(
+            "SELECT node_id FROM node_tags WHERE tag = 'consolidated'"
+        ).fetchone()
+        assert tag_row is not None
+        new_row = engine.db.conn.execute(
+            "SELECT type FROM nodes WHERE id = ?", (tag_row["node_id"],)
+        ).fetchone()
+        assert new_row["type"] == "fact"
 
     def test_consolidation_checked_table_exists_on_migrated_engine(self, engine):
-        """The skip table must be present via _migrate on an already-initialized DB, not
-        only on freshly-created ones (schema.sql alone is not enough for prod DBs)."""
+        """The skip table is created by init_schema()'s executescript(schema.sql), which
+        runs on every engine construction (fresh or reopened) — so it's always present."""
         row = engine.db.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='consolidation_checked'"
         ).fetchone()
@@ -332,9 +367,10 @@ def test_real_claude_cli_consolidate_creates_node_with_valid_type(consolidation_
     ).fetchall()
     cluster = [dict(r) for r in cluster]
 
-    # Probe the real adapter directly first: the CLI is a non-deterministic external
-    # service and occasionally declines to emit structured_output for a given prompt.
-    # Mirrors test_claude_cli_adapter.py's `if out is None: pytest.skip(...)` pattern.
+    # Capability probe: skip only when the CLI itself is unusable (not logged in, binary
+    # missing/broken), not when the real consolidate prompt merely produces a result — the
+    # adapter's result-fallback (e276baa) makes that round-trip reliably now, so a null
+    # result for the real prompt below is a genuine regression, not an environment issue.
     from ormah.background.consolidator import _CONSOLIDATE_RESPONSE_SCHEMA
     probe = llm_generate(
         engine.settings, "Return title='Test', summary='Hello', type='fact'.",
@@ -342,20 +378,17 @@ def test_real_claude_cli_consolidate_creates_node_with_valid_type(consolidation_
         response_format={"type": "json_schema", "json_schema": {"schema": _CONSOLIDATE_RESPONSE_SCHEMA}},
     )
     if probe is None:
-        pytest.skip("claude CLI declined structured output (likely not logged in or transient)")
+        pytest.skip("claude CLI unusable (likely not logged in or binary missing)")
 
     consolidator._consolidate_cluster(engine, cluster)
 
     tag_row = engine.db.conn.execute(
         "SELECT node_id FROM node_tags WHERE tag = 'consolidated'"
     ).fetchone()
-    if tag_row is None:
-        pytest.skip("claude CLI declined structured output for the consolidate prompt")
+    assert tag_row is not None
     new_row = engine.db.conn.execute(
         "SELECT content, type FROM nodes WHERE id = ?", (tag_row["node_id"],)
     ).fetchone()
     assert new_row is not None
     assert new_row["content"]
     assert new_row["type"] in _CONSOLIDATE_RESPONSE_SCHEMA["properties"]["type"]["enum"]
-    assert new_row["content"]
-    assert new_row["type"] in consolidator._CONSOLIDATE_RESPONSE_SCHEMA["properties"]["type"]["enum"]
