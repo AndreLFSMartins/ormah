@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -16,6 +17,31 @@ _MIN_CLUSTER_SIZE = 2
 
 # Cosine similarity threshold for clustering.
 _CLUSTER_THRESHOLD = 0.6
+
+_CONSOLIDATE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "type": {
+            "type": "string",
+            "enum": ["fact", "decision", "preference", "event", "person",
+                     "project", "concept", "procedure", "goal", "observation"],
+        },
+    },
+    "required": ["title", "summary", "type"],
+    "additionalProperties": False,
+}
+
+
+def _cluster_signature(cluster: list[dict]) -> str:
+    """Content signature of a cluster: changes if any member's id/title/content/
+    space/type changes, so an unchanged cluster is skipped but any edit re-triggers
+    evaluation (self-invalidating — no explicit invalidation site needed)."""
+    def _fields(n: dict) -> str:
+        return "|".join(str(n.get(k) or "") for k in ("id", "title", "content", "space", "type"))
+    parts = sorted(hashlib.sha256(_fields(n).encode()).hexdigest() for n in cluster)
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
 def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
@@ -200,6 +226,13 @@ def _consolidate_cluster(engine, cluster: list[dict]) -> None:
     """Consolidate a single cluster using LLM summarization."""
     from ormah.background.llm_client import extract_json, llm_generate
 
+    sig = _cluster_signature(cluster)
+    seen = engine.db.conn.execute(
+        "SELECT 1 FROM consolidation_checked WHERE signature = ?", (sig,)
+    ).fetchone()
+    if seen:
+        return
+
     # Build prompt
     items = []
     for node in cluster:
@@ -239,17 +272,35 @@ Return a JSON object:
   "type": "fact|decision|preference|event|person|project|concept|procedure|goal|observation"
 }}"""
 
-    raw = llm_generate(engine.settings, prompt, json_mode=True)
+    raw = llm_generate(
+        engine.settings, prompt, json_mode=True,
+        response_format={"type": "json_schema", "json_schema": {"schema": _CONSOLIDATE_RESPONSE_SCHEMA}},
+    )
     if raw is None:
+        return  # LLM unavailable — transient, do NOT record, must retry next run
+
+    try:
+        result = json.loads(extract_json(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        logger.warning("LLM returned invalid JSON for consolidation; recording no-op")
+        _record_signature(engine, sig)
         return
 
-    result = json.loads(extract_json(raw))
     title = result.get("title", "Consolidated memory")
     summary = result.get("summary", "")
     node_type = result.get("type", "fact")
 
     if not summary:
+        _record_signature(engine, sig)
         return
 
     node_ids = [n["id"] for n in cluster]
     _apply_consolidation(engine, node_ids, title, summary, node_type)
+    _record_signature(engine, sig)
+
+
+def _record_signature(engine, sig: str) -> None:
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO consolidation_checked (signature, checked_at) "
+            "VALUES (?, datetime('now'))", (sig,))
