@@ -7,7 +7,11 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from ormah.background.pair_skip import normalize_pair, pair_skip_sql
+
 logger = logging.getLogger(__name__)
+
+_DUPLICATE_TERMINAL_RESULTS = ("not_duplicate",)
 
 # Multi-signal weights
 _W_EMBEDDING = 0.6
@@ -323,14 +327,13 @@ def run_duplicate_detection(engine) -> None:
                 if match["id"] == user_node_id:
                     continue
 
-                pair = tuple(sorted([node["id"], match["id"]]))
+                pair = normalize_pair(node["id"], match["id"])
                 if pair in checked:
                     continue
                 checked.add(pair)
 
                 skip = engine.db.conn.execute(
-                    "SELECT 1 FROM duplicate_checked WHERE node_a = ? AND node_b = ? AND "
-                    "(result = 'not_duplicate' OR (result = 'error' AND checked_at > datetime('now', ?)))",
+                    pair_skip_sql("duplicate_checked", _DUPLICATE_TERMINAL_RESULTS),
                     (*pair, _DEDUP_ERROR_BACKOFF),
                 ).fetchone()
                 if skip:
