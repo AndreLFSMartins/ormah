@@ -49,6 +49,15 @@ def test_dedup_cap_default_sentinel_and_validator():
         Settings(duplicate_check_max_llm_calls_per_run=-2)
 
 
+# --- Conflict detection LLM call cap ---
+
+def test_conflict_cap_default_sentinel_and_validator():
+    assert Settings().conflict_check_max_llm_calls_per_run == 100
+    assert Settings(conflict_check_max_llm_calls_per_run=-1).conflict_check_max_llm_calls_per_run == -1
+    with pytest.raises(ValueError):
+        Settings(conflict_check_max_llm_calls_per_run=-2)
+
+
 def test_llm_provider_defaults_to_none():
     s = _settings()
     assert s.llm_provider == "none"
