@@ -182,6 +182,44 @@ def test_response_format_adds_json_schema_and_reads_structured_output(monkeypatc
     assert json.loads(raw) == {"is_duplicate": True}
 
 
+def test_generate_schema_returns_structured_output_when_present(monkeypatch):
+    envelope = json.dumps({
+        "result": "", "is_error": False,
+        "structured_output": {"relationship": "related_to", "reason": "x"},
+    })
+    monkeypatch.setattr(subprocess, "run", _fake_run(stdout=envelope))
+    schema = {"type": "object", "properties": {"relationship": {"type": "string"}}}
+    raw = ClaudeCliAdapter(model="haiku").generate(
+        "hi", response_format={"type": "json_schema", "json_schema": {"schema": schema}}
+    )
+    assert json.loads(raw) == {"relationship": "related_to", "reason": "x"}
+
+
+def test_generate_schema_falls_back_to_result_when_structured_null(monkeypatch):
+    from ormah.background.llm_client import extract_json
+    fenced_result = '```json\n{"summary": "consolidated note"}\n```'
+    envelope = json.dumps({
+        "result": fenced_result, "is_error": False, "structured_output": None,
+    })
+    monkeypatch.setattr(subprocess, "run", _fake_run(stdout=envelope))
+    schema = {"type": "object", "properties": {"summary": {"type": "string"}}}
+    raw = ClaudeCliAdapter(model="haiku").generate(
+        "hi", response_format={"type": "json_schema", "json_schema": {"schema": schema}}
+    )
+    assert raw == fenced_result
+    assert json.loads(extract_json(raw)) == {"summary": "consolidated note"}
+
+
+def test_generate_schema_returns_none_when_structured_null_and_result_blank(monkeypatch):
+    envelope = json.dumps({"result": "", "is_error": False, "structured_output": None})
+    monkeypatch.setattr(subprocess, "run", _fake_run(stdout=envelope))
+    schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+    raw = ClaudeCliAdapter(model="haiku").generate(
+        "hi", response_format={"type": "json_schema", "json_schema": {"schema": schema}}
+    )
+    assert raw is None
+
+
 @pytest.mark.integration
 def test_real_claude_disables_inherited_hooks(tmp_path, monkeypatch):
     """Belt-and-suspenders against the real binary: an operator SessionStart hook must NOT fire
@@ -246,3 +284,33 @@ def test_real_claude_json_schema_returns_structured_output():
         response_format={"type": "json_schema", "json_schema": {"schema": schema}})
     import json
     assert json.loads(raw) == {"n": 7}
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
+def test_real_claude_json_schema_recovers_prose_json_fallback():
+    """Consolidator-style prompt: known to answer in a single text turn (structured_output
+    null, valid JSON in `result`). Proves the fallback recovers it end-to-end via the real
+    CLI, not a mocked envelope. Only a true no-output run (both fields empty) is a skip."""
+    from ormah.background.llm.claude_cli_adapter import ClaudeCliAdapter
+    from ormah.background.llm_client import extract_json
+
+    adapter = ClaudeCliAdapter(model="claude-haiku-4-5-20251001", timeout=60)
+    schema = {
+        "type": "object",
+        "properties": {"summary": {"type": "string"}},
+        "required": ["summary"],
+        "additionalProperties": False,
+    }
+    prompt = (
+        "Summarize this note in one short sentence: "
+        "'The user prefers dark mode and enabled it in settings.'\n\n"
+        'Return a JSON object:\n{"summary": "one-sentence summary"}'
+    )
+    raw = adapter.generate(
+        prompt, response_format={"type": "json_schema", "json_schema": {"schema": schema}}
+    )
+    if raw is None:
+        pytest.skip("claude CLI returned no output on either structured_output or result")
+    parsed = json.loads(extract_json(raw))
+    assert isinstance(parsed, dict) and isinstance(parsed.get("summary"), str) and parsed["summary"]
