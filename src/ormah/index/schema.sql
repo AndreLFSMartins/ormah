@@ -98,6 +98,11 @@ CREATE TABLE IF NOT EXISTS duplicate_checked (
     PRIMARY KEY (node_a, node_b)
 );
 
+CREATE TABLE IF NOT EXISTS consolidation_checked (
+    signature  TEXT PRIMARY KEY,   -- sha256 of sorted "{node_id}:{sha256(content)}"
+    checked_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     operation TEXT NOT NULL,        -- 'delete', 'update', 'mark_outdated'
