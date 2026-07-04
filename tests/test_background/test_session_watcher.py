@@ -509,11 +509,11 @@ def test_llm_judge_promotes_used_verdict(engine, tmp_path):
     assert affinity["source"] == "auto_llm_judge"
 
 
-def test_llm_judge_falls_back_to_json_object_mode(engine, tmp_path):
-    """Providers that reject JSON Schema can still use the JSON-object fallback."""
+def test_llm_judge_no_schemaless_fallback_on_schema_failure(engine, tmp_path):
+    """When the schema call fails, the judge gives up rather than retrying without a schema."""
     prompt = "How should we solve feedback collection?"
     response = "We should first fix the database uniqueness key."
-    transcript_path = tmp_path / "judge-schema-fallback-session.jsonl"
+    transcript_path = tmp_path / "judge-schema-failure-session.jsonl"
     _write_turn_jsonl(transcript_path, prompt, response)
     transcript = parse_transcript(transcript_path)
 
@@ -525,42 +525,25 @@ def test_llm_judge_falls_back_to_json_object_mode(engine, tmp_path):
     whisper_log_id = _insert_injected_whisper_log(
         engine,
         node_id=node_id,
-        session_id="judge-schema-fallback-session",
+        session_id="judge-schema-failure-session",
         prompt=prompt,
     )
     engine.settings.llm_provider = "ollama"
     engine.settings.feedback_llm_judge_enabled = True
 
-    llm_response = json.dumps({
-        "verdicts": [{
-            "whisper_log_id": whisper_log_id,
-            "verdict": "irrelevant",
-            "confidence": 0.91,
-        }]
-    })
-    mock_llm = MagicMock(side_effect=[None, llm_response])
+    mock_llm = MagicMock(return_value=None)
     with patch(_JUDGE_PATCH, mock_llm):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
-    assert recorded == 2
-    assert mock_llm.call_count == 2
-    first_kwargs = mock_llm.call_args_list[0].kwargs
-    second_kwargs = mock_llm.call_args_list[1].kwargs
-    assert first_kwargs["response_format"]["type"] == "json_schema"
-    assert first_kwargs["temperature"] == 0
-    assert first_kwargs["max_tokens"] == 512
-    assert "response_format" not in second_kwargs
-    assert second_kwargs["json_mode"] is True
-    assert second_kwargs["temperature"] == 0
-    assert second_kwargs["max_tokens"] == 512
+    assert recorded == 1
+    assert mock_llm.call_count == 1
 
     judge_signal = engine.db.conn.execute(
         "SELECT * FROM signals WHERE whisper_log_id = ? "
         "AND source = 'transcript_watcher_llm_judge'",
         (whisper_log_id,),
     ).fetchone()
-    assert judge_signal is not None
-    assert judge_signal["signal_type"] == "whisper_judged_irrelevant"
+    assert judge_signal is None
 
 
 def test_llm_judge_promotes_irrelevant_verdict_as_negative(engine, tmp_path):
