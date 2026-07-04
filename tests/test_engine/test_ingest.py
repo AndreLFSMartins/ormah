@@ -29,6 +29,32 @@ class TestExtractionSchema:
             is memory_engine._INGEST_RESPONSE_SCHEMA
         )
 
+    def test_fenced_json_with_inner_code_fence_is_parsed(self, engine):
+        """Regression: a memory 'content' that quotes a ```-fenced code block must not
+        truncate extraction. The old local ``_extract_json`` used a NON-GREEDY fence regex
+        that cut the (valid) JSON at the first inner ``` -> 'Unterminated string' -> the
+        method returned an error string -> the session_watcher cursor stalled on any coding
+        session. Routing through the robust ``llm_client.extract_json`` (raw_decode-based)
+        must recover the full document."""
+        inner = json.dumps({
+            "memories": [{
+                "type": "procedure",
+                "content": "Run the repro: ```python\nfoo()\n``` then check the output",
+                "title": "Repro snippet",
+                "tags": ["repro"],
+                "about_self": False,
+                "confidence": 0.8,
+            }]
+        })
+        # The model wraps its (valid) JSON in a ```json fence, as claude -p often does.
+        raw = "Here you go:\n\n```json\n" + inner + "\n```\n"
+        with patch(_LLM_PATCH, return_value=raw):
+            result = engine._extract_memories_llm("some conversation text")
+        assert isinstance(result, list), f"expected parsed list, got error string: {result!r}"
+        assert len(result) == 1
+        assert result[0]["type"] == "procedure"
+        assert "```python" in result[0]["content"]
+
     def test_null_optional_fields_do_not_crash_ingestion(self, engine):
         """The fallback (`result`) extraction path is not --json-schema-constrained, so a
         null for tags/about_self/confidence is genuinely plausible. None of the three is
