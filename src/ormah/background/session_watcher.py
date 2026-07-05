@@ -18,7 +18,11 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from ormah.background.llm_client import ingest_provider_configured
-from ormah.engine.memory_engine import MemoryEngine
+from ormah.engine.memory_engine import (
+    EXTRACT_ERR_CALL_FAILED,
+    EXTRACT_ERR_NO_PROVIDER,
+    MemoryEngine,
+)
 from ormah.text.tokens import distinctive_tokens
 from ormah.transcript.parser import TranscriptResult, TranscriptTurn, parse_transcript
 
@@ -902,6 +906,9 @@ def _ingest_session(
         # A locked DB (WAL contention with the background scheduler) or a transient disk error is
         # RETRYABLE — it resolves on a later tick. Never count it toward the cap: doing so would
         # permanently skip a slice that would have committed once the lock cleared (council-pr H2).
+        # Some OperationalErrors are deterministic (a broken schema) — treating those as transient
+        # too is deliberate (council-pr M): a broken DB should stall LOUDLY (a warning every tick,
+        # no data loss), never silently skip data the way capping would. Loud stall > silent loss.
         logger.warning("Session watcher transient storage error for %s: %s", path, e)
         return IngestResult.TRANSIENT
     except OSError as e:
@@ -919,12 +926,17 @@ def _ingest_session(
         return _record_extract_failure("ingest_exception_x3")
 
     if isinstance(ingested, str):
-        logger.warning("Session watcher ingestion failed for %s: %s", path, ingested)
-        # No provider is a GLOBAL, temporary state — never burn the slice (the data must survive
-        # until a provider returns). Only a failure WITH a provider present (a timeout or
-        # unparseable output on this exact slice) counts toward the per-slice cap.
-        if not provider_on:
+        # Provider-wide failures — no provider, or the LLM call itself failed (binary missing, auth,
+        # network, timeout -> raw is None) — resolve when the provider recovers, so they must NEVER
+        # burn the slice. Counting them would skip every slice during an outage after the cap = mass
+        # silent loss (council-pr H1). Only a SLICE-SPECIFIC failure (the LLM responded but its
+        # content was unparseable/invalid) is deterministic and counts toward the per-slice cap —
+        # this is the class that caused the original 1393x loop (a parse failure), still guarded.
+        if ingested in (EXTRACT_ERR_NO_PROVIDER, EXTRACT_ERR_CALL_FAILED):
+            logger.warning("Session watcher extraction deferred (provider-wide) for %s: %s",
+                           path, ingested)
             return IngestResult.TRANSIENT
+        logger.warning("Session watcher ingestion failed (slice-specific) for %s: %s", path, ingested)
         return _record_extract_failure("extract_failed_x3")
 
     count = len(ingested) if isinstance(ingested, list) else 0

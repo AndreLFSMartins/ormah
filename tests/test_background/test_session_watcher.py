@@ -28,6 +28,11 @@ from ormah.models.node import CreateNodeRequest
 from ormah.transcript.parser import parse_transcript
 
 _LLM_PATCH = "ormah.background.llm_client.ingest_llm_generate"
+# A slice-specific extraction failure: the LLM responds but the content is unparseable, so
+# _extract_memories_llm raises during json.loads and returns its generic error string. This is the
+# DETERMINISTIC failure that counts toward the per-slice cap (unlike a provider-wide call failure /
+# None, which is transient and never skips the slice — council-pr H1).
+_UNPARSEABLE = "this is not json at all"
 # The whisper-usage LLM judge uses the global llm_generate (maintenance path), NOT the
 # extraction-only ingest_llm_generate. Judge tests patch this; ingest tests patch _LLM_PATCH.
 _JUDGE_PATCH = "ormah.background.llm_client.llm_generate"
@@ -207,8 +212,8 @@ def test_toxic_slice_skipped_after_max_extract_failures(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
     state = {}
 
-    # Provider IS configured; every extraction call fails (None -> error string).
-    with patch(_LLM_PATCH, return_value=None), \
+    # Provider IS configured; the slice deterministically fails extraction (unparseable output).
+    with patch(_LLM_PATCH, return_value=_UNPARSEABLE), \
          patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
         for i in range(1, MAX_EXTRACT_FAILURES):
             assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
@@ -244,7 +249,7 @@ def test_capped_skip_schedules_drain_continuation(engine, tmp_path):
     defer_calls: list[int] = []
 
     result = None
-    with patch(_LLM_PATCH, return_value=None), \
+    with patch(_LLM_PATCH, return_value=_UNPARSEABLE), \
          patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
         for _ in range(MAX_EXTRACT_FAILURES):
             result = _ingest_session(
@@ -292,7 +297,7 @@ def test_extract_fail_count_persists_across_restart(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
     state = {}
 
-    with patch(_LLM_PATCH, return_value=None), \
+    with patch(_LLM_PATCH, return_value=_UNPARSEABLE), \
          patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
         for i in range(1, MAX_EXTRACT_FAILURES):
             assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
@@ -323,8 +328,9 @@ def test_success_after_cap_preserves_skipped_slices(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
     state = {}
 
-    # Phase 1: the first (capped) batch fails MAX_EXTRACT_FAILURES times -> quarantined + skipped.
-    with patch(_LLM_PATCH, return_value=None), \
+    # Phase 1: the first (capped) batch deterministically fails extraction MAX_EXTRACT_FAILURES
+    # times (slice-specific, unparseable) -> quarantined + skipped.
+    with patch(_LLM_PATCH, return_value=_UNPARSEABLE), \
          patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
         for _ in range(MAX_EXTRACT_FAILURES):
             _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_bytes=300)
@@ -396,6 +402,34 @@ def test_transient_storage_exception_never_skips_slice(engine, tmp_path):
     assert entry.get("end_offset", 0) == 0        # cursor never advanced
     assert "extract_fail_count" not in entry      # never counted toward the cap
     assert "skipped_slices" not in entry          # never quarantined -> no data loss
+
+
+def test_provider_wide_call_failure_never_skips_slice(engine, tmp_path):
+    """A provider-wide LLM call failure (binary/auth/network/timeout -> raw is None -> CALL_FAILED)
+    must stay TRANSIENT and never count toward the cap: during an outage every slice would otherwise
+    be skipped after the cap = mass silent loss (council-pr H1). Only slice-specific parse failures
+    are capped."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    # Both provider checks TRUE + call returns None -> _extract_memories_llm returns CALL_FAILED
+    # (a provider-wide failure, not a slice defect).
+    with patch(_LLM_PATCH, return_value=None), \
+         patch("ormah.engine.memory_engine.ingest_provider_configured", return_value=True), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for _ in range(MAX_EXTRACT_FAILURES + 3):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+
+    entry = state.get(rel, {})
+    assert entry.get("end_offset", 0) == 0    # cursor never advanced during the outage
+    assert "extract_fail_count" not in entry  # provider-wide failure never counts toward the cap
+    assert "skipped_slices" not in entry       # nothing skipped -> no data loss
 
 
 def test_ingest_valid_empty_memories_advances(engine, tmp_path):
