@@ -235,6 +235,7 @@ class Settings(BaseSettings):
 
     # Ingestion
     ingest_max_content_chars: int = 100000
+    ingest_chunk_chars: int = 40000  # timeout-safe payload per claude_cli call (~10K tokens)
 
     # Consolidation
     consolidation_interval_minutes: int = 1440
@@ -437,6 +438,13 @@ class Settings(BaseSettings):
     def _flush_bytes_min(cls, v: int) -> int:
         if v < 1000:
             raise ValueError(f"session_watcher_flush_bytes must be >= 1000, got {v}")
+        return v
+
+    @field_validator("ingest_chunk_chars")
+    @classmethod
+    def _ingest_chunk_chars_bounds(cls, v: int) -> int:
+        if v < 1000:
+            raise ValueError(f"ingest_chunk_chars must be >= 1000, got {v}")
         return v
 
     @model_validator(mode="after")

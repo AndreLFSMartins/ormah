@@ -78,6 +78,29 @@ def _embedding_text(title: str | None, content: str, max_content_chars: int = 51
     return f"{prefix} {truncated}".strip()
 
 
+def _split_for_extraction(content: str, chunk_chars: int, hard_cap: int) -> list[str]:
+    """Split content into <=chunk_chars pieces at line (turn) boundaries.
+
+    A single line longer than hard_cap is truncated (rare — one oversized turn); the
+    caller logs the loss. Never drops whole turns/lines."""
+    if len(content) <= chunk_chars:
+        return [content]
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for line in content.splitlines(keepends=True):
+        if len(line) > hard_cap:
+            line = line[:hard_cap]
+        if current and size + len(line) > chunk_chars:
+            chunks.append("".join(current))
+            current, size = [], 0
+        current.append(line)
+        size += len(line)
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
 # Edge type factors for spreading activation scoring.
 # Higher factor = tighter structural link = more activation propagated.
 _EDGE_TYPE_FACTORS: dict[str, float] = {
@@ -2279,47 +2302,62 @@ class MemoryEngine:
         try:
             from ormah.background.llm_client import extract_json, ingest_llm_generate
 
-            max_chars = self.settings.ingest_max_content_chars
-            if len(content) > max_chars:
-                # The flush-bytes cap (session_watcher) bounds a MULTI-turn slice, but a
-                # SINGLE turn larger than max_chars still gets truncated here and the
-                # cursor still advances past it — make that loss observable, not silent.
-                logger.warning(
-                    "ingest extraction truncated: payload %d chars > ingest_max_content_chars %d; "
-                    "tail dropped (single oversized turn?)",
-                    len(content), max_chars,
+            chunk_chars = self.settings.ingest_chunk_chars
+            hard_cap = self.settings.ingest_max_content_chars
+            chunks = _split_for_extraction(content, chunk_chars, hard_cap)
+            if len(chunks) > 1:
+                logger.info("ingest extraction: split %d-char payload into %d chunks",
+                            len(content), len(chunks))
+
+            all_memories: list[dict] = []
+            any_success = False
+            for i, chunk in enumerate(chunks):
+                prompt = _INGEST_LLM_PROMPT.format(conversation=chunk)
+                raw = ingest_llm_generate(
+                    self.settings, prompt, json_mode=True,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {"schema": _INGEST_RESPONSE_SCHEMA},
+                    },
                 )
-            prompt = _INGEST_LLM_PROMPT.format(conversation=content[:max_chars])
-            raw = ingest_llm_generate(
-                self.settings, prompt, json_mode=True,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {"schema": _INGEST_RESPONSE_SCHEMA},
-                },
-            )
-            if raw is None:
+                if raw is None:
+                    # A bad chunk is dropped (observable via this log), not a reason to
+                    # discard the chunks that DID succeed — see chunk-aware failure
+                    # accounting note above.
+                    logger.warning(
+                        "ingest extraction: chunk %d/%d (%d chars) returned no result — "
+                        "chunk dropped (observable partial loss)",
+                        i + 1, len(chunks), len(chunk),
+                    )
+                    continue
+                any_success = True
+
+                # Extract JSON from response — handle markdown fences and surrounding prose.
+                # Uses the shared raw_decode-based extractor: a naive fence regex truncates
+                # valid JSON at a ``` quoted inside a memory's content value.
+                stripped = extract_json(raw)
+                logger.debug("LLM raw (%d chars), extracted JSON (%d chars): %.300s",
+                             len(raw), len(stripped), stripped)
+                result = json.loads(stripped)
+                # Unwrap: support {"memories": [...]}, {"memories": {"memories": [...]}}, bare list
+                memories = result
+                while isinstance(memories, dict) and "memories" in memories:
+                    memories = memories["memories"]
+                if isinstance(memories, list):
+                    all_memories.extend(memories)
+
+            if not any_success:
+                # Every chunk failed — retryable error so Task 04's per-slice cap governs it.
                 if ingest_provider_configured(self.settings):
                     logger.warning(
-                        "Server-side extraction returned no result while a provider is "
-                        "configured — treating as a retryable call failure (timeout/error)."
+                        "Server-side extraction returned no result for all chunks while a "
+                        "provider is configured — treating as a retryable call failure "
+                        "(timeout/error)."
                     )
                     return EXTRACT_ERR_CALL_FAILED
                 return EXTRACT_ERR_NO_PROVIDER
 
-            # Extract JSON from response — handle markdown fences and surrounding prose.
-            # Uses the shared raw_decode-based extractor: a naive fence regex truncates
-            # valid JSON at a ``` quoted inside a memory's content value.
-            stripped = extract_json(raw)
-            logger.debug("LLM raw (%d chars), extracted JSON (%d chars): %.300s",
-                         len(raw), len(stripped), stripped)
-            result = json.loads(stripped)
-            # Unwrap: support {"memories": [...]}, {"memories": {"memories": [...]}}, or bare list
-            memories = result
-            while isinstance(memories, dict) and "memories" in memories:
-                memories = memories["memories"]
-            if isinstance(memories, list):
-                return memories
-            return []
+            return all_memories
         except Exception as e:
             logger.warning("LLM extraction failed: %s", e)
             return (
