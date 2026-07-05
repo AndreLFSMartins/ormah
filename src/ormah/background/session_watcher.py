@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -891,12 +892,22 @@ def _ingest_session(
             agent_id=result.source,
             extra_tags=["session-transcript"],
         )
+    except sqlite3.OperationalError as e:
+        # A locked DB (WAL contention with the background scheduler) or a transient disk error is
+        # RETRYABLE — it resolves on a later tick. Never count it toward the cap: doing so would
+        # permanently skip a slice that would have committed once the lock cleared (council-pr H2).
+        logger.warning("Session watcher transient storage error for %s: %s", path, e)
+        return IngestResult.TRANSIENT
+    except OSError as e:
+        # Filesystem-level transient failure — same reasoning as the SQLite lock above.
+        logger.warning("Session watcher transient I/O error for %s: %s", path, e)
+        return IngestResult.TRANSIENT
     except Exception as e:
         logger.warning("Session watcher ingestion error for %s: %s", path, e)
-        # A deterministic exception (e.g. a memory that always fails remember()/SQLite I/O) would
-        # pin the cursor forever, exactly like the extract-error loop. Count it toward the same
-        # per-slice cap. Reaching here means ingest_conversation ran past its own guard, so
-        # extraction produced memories -> a provider was configured (council-pr I1).
+        # A DETERMINISTIC exception (e.g. a memory whose content always breaks a write) would pin
+        # the cursor forever, re-calling the LLM every tick — count it toward the per-slice cap so
+        # it skips after MAX_EXTRACT_FAILURES. Transient storage/IO errors are handled above and
+        # never reach here. Reaching here means extraction produced memories -> provider on (I1).
         if not provider_on:
             return IngestResult.TRANSIENT
         return _record_extract_failure("ingest_exception_x3")
