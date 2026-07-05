@@ -63,11 +63,24 @@ class IndexBuilder:
                     "to override)"
                 )
 
+            edge_failures = 0
             for path in paths:
                 try:
                     self._index_file_edges(path)
                 except Exception as e:
+                    edge_failures += 1
                     logger.warning("Failed to index edges for %s: %s", path, e)
+            if edge_failures:
+                # Edges are DERIVED (auto_linker regenerates them; the watermark was cleared above),
+                # so a per-file edge failure is best-effort and must NOT abort the rebuild the way a
+                # missing node does — aborting on one bad link would roll back every good node and
+                # could leave the store empty, the exact failure this rebuild guards against. Surface
+                # the aggregate so the loss is not swallowed silently (council-pr H1).
+                logger.error(
+                    "full_rebuild: %d/%d files failed edge indexing; nodes are complete, edges are "
+                    "best-effort and will be rebuilt by auto_linker",
+                    edge_failures, len(paths),
+                )
 
         return count
 
