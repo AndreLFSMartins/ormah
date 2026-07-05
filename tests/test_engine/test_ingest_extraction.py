@@ -91,3 +91,19 @@ def test_all_chunks_failing_returns_retryable_error(engine):
         result = engine._extract_memories_llm(content)
 
     assert result == EXTRACT_ERR_CALL_FAILED
+
+
+def test_confidence_floor_drops_low_value_memories(engine):
+    """Extracted memories below ingest_min_confidence are dropped before node creation."""
+    engine.settings.ingest_min_confidence = 0.5
+    resp = json.dumps({"memories": [
+        {"content": "keep me", "type": "fact", "title": "hi", "confidence": 0.9},
+        {"content": "drop me", "type": "fact", "title": "lo", "confidence": 0.2},
+    ]})
+    with patch("ormah.background.llm_client.ingest_llm_generate", return_value=resp), \
+         patch("ormah.engine.memory_engine.ingest_provider_configured", return_value=True):
+        created = engine.ingest_conversation(content="x" * 100, space="test")
+
+    titles = [c["title"] for c in created]
+    assert "hi" in titles
+    assert "lo" not in titles
