@@ -2095,6 +2095,13 @@ class MemoryEngine:
                     # A bad chunk is dropped (observable via this log), not a reason to
                     # discard the chunks that DID succeed — see chunk-aware failure
                     # accounting note above.
+                    # ponytail: known limitation (council B1) — the dropped chunk is observable
+                    # (this WARNING) but NOT durable: unlike a whole-slice failure (session_watcher
+                    # caps at MAX_EXTRACT_FAILURES then records skipped_slices), a per-chunk drop has
+                    # no replay trail. It does NOT loop (the slice still advances) and is not silent.
+                    # Upgrade path if a flaky provider makes this bleed: return failed chunk ranges
+                    # from here and record them in the watcher's skipped_slices (needs the
+                    # memory_engine<->session_watcher coupling this design deliberately avoided).
                     logger.warning(
                         "ingest extraction: chunk %d/%d (%d chars) returned no result — "
                         "chunk dropped (observable partial loss)",
