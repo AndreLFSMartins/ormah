@@ -151,3 +151,36 @@ def test_full_rebuild_allow_partial_accepts_incomplete_pass(db, file_store, monk
 
     rows = db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()
     assert rows[0] == 1
+
+
+def test_full_rebuild_edge_failure_does_not_abort_but_is_surfaced(db, file_store, monkeypatch, caplog):
+    """A per-file edge-indexing failure must NOT abort the rebuild (edges are derived and
+    self-healing; aborting on one bad link would roll back every good node and risk an empty
+    store). But the aggregate failure must be surfaced, not swallowed silently (council-pr H1)."""
+    import logging
+
+    for i in range(3):
+        node = MemoryNode(
+            type=NodeType.fact,
+            source="agent:test",
+            content=f"Fact {i} for indexing.",
+            title=f"Fact {i}",
+        )
+        file_store.save(node)
+
+    builder = IndexBuilder(db, file_store)
+    original = builder._index_file_edges
+
+    def flaky_edges(path):
+        if "Fact 1" in path.read_text(encoding="utf-8"):
+            raise RuntimeError("bad link")
+        return original(path)
+
+    monkeypatch.setattr(builder, "_index_file_edges", flaky_edges)
+
+    with caplog.at_level(logging.ERROR, logger="ormah.index.builder"):
+        count = builder.full_rebuild()
+
+    assert count == 3  # all nodes committed despite the edge failure
+    assert db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 3
+    assert any("failed edge indexing" in r.message for r in caplog.records)  # surfaced, not silent
