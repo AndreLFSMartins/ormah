@@ -68,6 +68,29 @@ def run_cleanup(engine, backup_service, *, rows, preserve: set[str]) -> int:
     nodes_dir = engine.file_store.nodes_dir
     quarantine_dir = Path(tempfile.mkdtemp(prefix="ormah_cleanup_quarantine_", dir=str(nodes_dir.parent)))
 
+    def _restore(moved_pairs: list[tuple[Path, Path]]) -> bool:
+        """Best-effort restore; each move is isolated so one failure does not strand the rest.
+        Returns True only if every quarantined file made it back to nodes_dir."""
+        all_back = True
+        for original, destination in moved_pairs:
+            if not destination.exists():
+                continue
+            try:
+                shutil.move(str(destination), str(original))
+            except Exception as exc:  # noqa: BLE001
+                all_back = False
+                print(f"WARNING: could not restore {destination} -> {original}: {exc}", file=sys.stderr)
+        return all_back
+
+    def _drop_quarantine_only_if_empty() -> None:
+        """Never rmtree unconditionally — only remove the quarantine once it holds nothing
+        un-restored, so a secondary I/O failure can never destroy files that never made it back."""
+        if not any(quarantine_dir.iterdir()):
+            shutil.rmtree(quarantine_dir, ignore_errors=True)
+        else:
+            print(f"Quarantine KEPT at {quarantine_dir} (files not fully restored). "
+                  f"Recover from backup: {backup_info.path}", file=sys.stderr)
+
     moved: list[tuple[Path, Path]] = []
     try:
         for path in sorted(nodes_dir.glob("*.md")):
@@ -76,21 +99,27 @@ def run_cleanup(engine, backup_service, *, rows, preserve: set[str]) -> int:
                 destination = quarantine_dir / path.name
                 shutil.move(str(path), str(destination))
                 moved.append((path, destination))
+    except Exception as exc:  # move-in failed partway -> restore what we moved, keep any that fail
+        print(f"QUARANTINE MOVE FAILED ({exc}); restoring moved files.", file=sys.stderr)
+        _restore(moved)
+        _drop_quarantine_only_if_empty()
+        return EXIT_REBUILD_FAILED
 
+    try:
+        engine.builder.full_rebuild()
+    except Exception as exc:
+        print(f"REBUILD FAILED ({exc}); restoring quarantined files.", file=sys.stderr)
+        _restore(moved)
         try:
             engine.builder.full_rebuild()
-        except Exception as exc:
-            print(f"REBUILD FAILED ({exc}); restoring quarantined files.", file=sys.stderr)
-            for original, destination in moved:
-                shutil.move(str(destination), str(original))
-            try:
-                engine.builder.full_rebuild()
-            except Exception:
-                pass
-            return EXIT_REBUILD_FAILED
-    finally:
-        shutil.rmtree(quarantine_dir, ignore_errors=True)
+        except Exception:
+            pass
+        _drop_quarantine_only_if_empty()
+        return EXIT_REBUILD_FAILED
 
+    # Success: the doomed files are gone from the index and their markdown is safely quarantined —
+    # now it is safe to delete the quarantine.
+    shutil.rmtree(quarantine_dir, ignore_errors=True)
     print(f"Deleted {len(moved)} nodes ({sorted(to_delete)}); rebuilt index.")
     return EXIT_OK
 
