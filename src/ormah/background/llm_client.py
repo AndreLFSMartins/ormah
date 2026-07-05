@@ -78,12 +78,12 @@ def _get_or_create_adapter(settings) -> LLMAdapter | None:
     return _cached_adapter
 
 
-def _resolve_ingest_provider(settings) -> str:
-    return settings.ingest_llm_provider or settings.llm_provider
+def _resolve_ingest_provider(settings) -> str | None:
+    return getattr(settings, "ingest_llm_provider", None) or getattr(settings, "llm_provider", None)
 
 
-def _resolve_ingest_model(settings) -> str:
-    return settings.ingest_llm_model or settings.llm_model
+def _resolve_ingest_model(settings) -> str | None:
+    return getattr(settings, "ingest_llm_model", None) or getattr(settings, "llm_model", None)
 
 
 def _get_or_create_ingest_adapter(settings) -> LLMAdapter | None:
@@ -105,6 +105,15 @@ def ingest_llm_generate(settings, prompt: str, json_mode: bool = True, **kwargs)
     if adapter is None:
         return None
     return adapter.generate(prompt, json_mode=json_mode, **kwargs)
+
+
+def ingest_provider_configured(settings) -> bool:
+    """True when a server-side extraction adapter is available (ingest provider != none).
+
+    Lets callers tell "no provider" (a global, temporary state) apart from "the call failed"
+    (a timeout/error while a provider IS configured) — both of which surface as a None from
+    ``ingest_llm_generate``."""
+    return _get_or_create_ingest_adapter(settings) is not None
 
 
 def llm_generate(
