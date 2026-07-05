@@ -2429,7 +2429,6 @@ class MemoryEngine:
                             len(content), len(chunks))
 
             all_memories: list[dict] = []
-            any_success = False
             for i, chunk in enumerate(chunks):
                 prompt = _INGEST_LLM_PROMPT.format(conversation=chunk)
                 raw = ingest_llm_generate(
@@ -2440,23 +2439,24 @@ class MemoryEngine:
                     },
                 )
                 if raw is None:
-                    # A bad chunk is dropped (observable via this log), not a reason to
-                    # discard the chunks that DID succeed — see chunk-aware failure
-                    # accounting note above.
-                    # ponytail: known limitation (council B1) — the dropped chunk is observable
-                    # (this WARNING) but NOT durable: unlike a whole-slice failure (session_watcher
-                    # caps at MAX_EXTRACT_FAILURES then records skipped_slices), a per-chunk drop has
-                    # no replay trail. It does NOT loop (the slice still advances) and is not silent.
-                    # Upgrade path if a flaky provider makes this bleed: return failed chunk ranges
-                    # from here and record them in the watcher's skipped_slices (needs the
-                    # memory_engine<->session_watcher coupling this design deliberately avoided).
+                    # One failed chunk means this slice was NOT fully extracted. Committing the
+                    # chunks that succeeded would advance the byte cursor past the unextracted
+                    # chunk = permanent silent loss (council B1). Instead discard the partial
+                    # result and surface a retryable error, reusing the whole-slice failure
+                    # machinery: session_watcher's per-slice cap retries the whole slice and
+                    # durably quarantines it in skipped_slices after MAX_EXTRACT_FAILURES. No
+                    # chunk->byte coupling needed.
+                    # ponytail: a transient flake re-runs the already-succeeded chunks on retry
+                    # (bounded by MAX_EXTRACT_FAILURES). If that rework ever bites, record
+                    # succeeded chunk ranges to skip them — until then, correctness over the churn.
                     logger.warning(
                         "ingest extraction: chunk %d/%d (%d chars) returned no result — "
-                        "chunk dropped (observable partial loss)",
+                        "whole slice retryable (partial result discarded)",
                         i + 1, len(chunks), len(chunk),
                     )
-                    continue
-                any_success = True
+                    if ingest_provider_configured(self.settings):
+                        return EXTRACT_ERR_CALL_FAILED
+                    return EXTRACT_ERR_NO_PROVIDER
 
                 # Extract JSON from response — handle markdown fences and surrounding prose.
                 # Uses the shared raw_decode-based extractor: a naive fence regex truncates
@@ -2471,17 +2471,6 @@ class MemoryEngine:
                     memories = memories["memories"]
                 if isinstance(memories, list):
                     all_memories.extend(memories)
-
-            if not any_success:
-                # Every chunk failed — retryable error so Task 04's per-slice cap governs it.
-                if ingest_provider_configured(self.settings):
-                    logger.warning(
-                        "Server-side extraction returned no result for all chunks while a "
-                        "provider is configured — treating as a retryable call failure "
-                        "(timeout/error)."
-                    )
-                    return EXTRACT_ERR_CALL_FAILED
-                return EXTRACT_ERR_NO_PROVIDER
 
             return all_memories
         except Exception as e:

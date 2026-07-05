@@ -55,9 +55,11 @@ def test_oversized_payload_is_chunked_not_truncated(engine):
     assert len(result) == len(calls)  # every chunk's memory survived (no tail drop)
 
 
-def test_middle_chunk_failure_keeps_good_chunks(engine):
-    """A single failing chunk (e.g. the middle one) does not discard the memories
-    already extracted from the chunks that succeeded — the result stays a list."""
+def test_partial_chunk_failure_is_retryable(engine):
+    """A single failing chunk makes the WHOLE slice a retryable error (council B1): a partial
+    commit would advance the byte cursor past unextracted content = permanent silent loss.
+    Instead the partial result is discarded so session_watcher's per-slice cap retries the whole
+    slice and durably quarantines it after MAX_EXTRACT_FAILURES."""
     engine.settings.ingest_chunk_chars = 100
     content = "\n".join(f"Turn {i}: " + "x" * 50 for i in range(5))
 
@@ -65,7 +67,7 @@ def test_middle_chunk_failure_keeps_good_chunks(engine):
 
     def fake_generate(settings, prompt, **kwargs):
         calls.append(prompt)
-        if len(calls) == 2:  # fail the middle chunk only
+        if len(calls) == 2:  # fail the second chunk
             return None
         return json.dumps({"memories": [
             {"content": f"mem for call {len(calls)}", "type": "fact", "title": "t"},
@@ -75,9 +77,8 @@ def test_middle_chunk_failure_keeps_good_chunks(engine):
          patch("ormah.engine.memory_engine.ingest_provider_configured", return_value=True):
         result = engine._extract_memories_llm(content)
 
-    assert isinstance(result, list)          # not an error string — partial success
-    assert len(calls) >= 3
-    assert len(result) == len(calls) - 1     # every chunk except the failed one survived
+    assert result == EXTRACT_ERR_CALL_FAILED  # retryable, not a partial list
+    assert len(calls) == 2  # short-circuits at the first failure — no wasted calls on later chunks
 
 
 def test_all_chunks_failing_returns_retryable_error(engine):
