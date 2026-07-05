@@ -371,6 +371,33 @@ def test_ingest_exception_counts_toward_cap(engine, tmp_path):
     assert skipped[0]["reason"] == "ingest_exception_x3"  # distinguishable from extract failures (M1)
 
 
+def test_transient_storage_exception_never_skips_slice(engine, tmp_path):
+    """A retryable storage exception (SQLite lock under WAL contention) must stay TRANSIENT forever
+    and never advance the cursor or count toward the cap — else a lock that clears later loses the
+    slice permanently (council-pr H2). Only DETERMINISTIC exceptions may be capped."""
+    import sqlite3
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    with patch.object(engine, "ingest_conversation",
+                      side_effect=sqlite3.OperationalError("database is locked")), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for _ in range(MAX_EXTRACT_FAILURES + 2):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+
+    entry = state.get(rel, {})
+    assert entry.get("end_offset", 0) == 0        # cursor never advanced
+    assert "extract_fail_count" not in entry      # never counted toward the cap
+    assert "skipped_slices" not in entry          # never quarantined -> no data loss
+
+
 def test_ingest_valid_empty_memories_advances(engine, tmp_path):
     """A valid {"memories": []} extraction is a SUCCESS: the slice is consumed and the
     cursor advances, so session_watcher never re-processes a no-memory turn forever."""
