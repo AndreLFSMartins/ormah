@@ -155,7 +155,7 @@ def test_ingest_session_drain_continuation_self_triggers(tmp_path):
     re-invokes _ingest_session for the same path — rather than a test-only while loop,
     so this actually proves the code self-continues.
     """
-    from ormah.background.session_watcher import IngestResult, _ingest_session
+    from ormah.background.session_watcher import _ingest_session
     from ormah.transcript.parser import parse_transcript
 
     watch_dir = tmp_path
@@ -331,9 +331,10 @@ def test_prompt_is_delta_first():
     assert filled.index("SENTINEL_CONVO") < filled.index("What to extract")
 
 
-def test_extraction_truncation_is_logged(tmp_path, caplog):
-    """A single closed turn whose cleaned text exceeds ingest_max_content_chars is still
-    truncated (unavoidable for one oversized turn) — but the loss must be observable."""
+def test_oversized_turn_is_split_not_truncated(tmp_path, caplog):
+    """A single closed turn whose cleaned text exceeds ingest_max_content_chars is split into
+    bounded pieces and every piece is extracted — never truncated (council-pr C2). The split must
+    be observable."""
     import logging
     from unittest.mock import patch
 
@@ -346,13 +347,21 @@ def test_extraction_truncation_is_logged(tmp_path, caplog):
     )
     engine = MemoryEngine(settings)
     engine.startup()
+    calls = []
+
+    def fake_generate(settings, prompt, **kwargs):
+        calls.append(prompt)
+        return '{"memories": []}'
+
     try:
         with patch(
-            "ormah.background.llm_client.ingest_llm_generate",
-            return_value='{"memories": []}',
+            "ormah.background.llm_client.ingest_llm_generate", side_effect=fake_generate,
+        ), patch(
+            "ormah.engine.memory_engine.ingest_provider_configured", return_value=True,
         ), caplog.at_level(logging.WARNING, logger="ormah.engine.memory_engine"):
             engine._extract_memories_llm("x" * 5000)
     finally:
         engine.shutdown()
 
-    assert any("truncated" in r.message for r in caplog.records)
+    assert len(calls) >= 5  # 5000 chars / 1000 cap -> split into >=5 pieces, none truncated
+    assert any("split into" in r.message for r in caplog.records)

@@ -79,32 +79,45 @@ def _embedding_text(title: str | None, content: str, max_content_chars: int = 51
 
 
 def _split_for_extraction(content: str, chunk_chars: int, hard_cap: int) -> list[str]:
-    """Split content into <=chunk_chars pieces at line (turn) boundaries.
+    """Split content into pieces at line (turn) boundaries; each piece is <=hard_cap.
 
-    A chunk never exceeds hard_cap (the sanity ceiling). A single line longer than hard_cap
-    is truncated (rare — one oversized turn) and the loss is LOGGED (observable, not silent).
-    Never drops whole turns/lines."""
+    Chunks target chunk_chars but never exceed hard_cap (the sanity ceiling). A single line longer
+    than hard_cap is split at character boundaries into <=hard_cap pieces (rare — one oversized
+    turn), NOT truncated: reassembling the chunks reproduces the input exactly, so no tail is
+    dropped and the byte cursor never advances past unextracted content (council-pr C2). Never
+    drops whole turns/lines or their tails."""
     limit = min(chunk_chars, hard_cap)  # a chunk must never exceed the hard cap
     if len(content) <= limit:
         return [content]
     chunks: list[str] = []
     current: list[str] = []
     size = 0
-    for line in content.splitlines(keepends=True):
-        if len(line) > hard_cap:
-            logger.warning(
-                "ingest extraction: a single turn of %d chars exceeds ingest_max_content_chars "
-                "%d; truncated (tail dropped — observable loss)",
-                len(line), hard_cap,
-            )
-            line = line[:hard_cap]
-        if current and size + len(line) > limit:
+
+    def _flush() -> None:
+        nonlocal current, size
+        if current:
             chunks.append("".join(current))
             current, size = [], 0
+
+    for line in content.splitlines(keepends=True):
+        if len(line) > hard_cap:
+            # One oversized turn: break it into hard_cap-sized pieces instead of truncating, so
+            # every character is still extracted (no silent tail loss). Splits mid-turn, which is
+            # acceptable for a lone pathological turn (e.g. a huge tool-output paste).
+            logger.warning(
+                "ingest extraction: a single turn of %d chars exceeds ingest_max_content_chars "
+                "%d; split into %d pieces (no data dropped)",
+                len(line), hard_cap, -(-len(line) // hard_cap),
+            )
+            _flush()
+            for i in range(0, len(line), hard_cap):
+                chunks.append(line[i:i + hard_cap])
+            continue
+        if current and size + len(line) > limit:
+            _flush()
         current.append(line)
         size += len(line)
-    if current:
-        chunks.append("".join(current))
+    _flush()
     return chunks
 
 

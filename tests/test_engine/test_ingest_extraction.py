@@ -7,6 +7,7 @@ from unittest.mock import patch
 from ormah.engine.memory_engine import (
     EXTRACT_ERR_CALL_FAILED,
     EXTRACT_ERR_NO_PROVIDER,
+    _split_for_extraction,
 )
 
 _CONTENT = "User asked about X. " * 20  # > 50 chars so extraction runs
@@ -108,3 +109,22 @@ def test_confidence_floor_drops_low_value_memories(engine):
     titles = [c["title"] for c in created]
     assert "hi" in titles
     assert "lo" not in titles
+
+
+def test_oversized_line_is_split_not_truncated():
+    """A single line (turn) longer than hard_cap is split into <=hard_cap pieces, never truncated:
+    reassembling the chunks reproduces the input exactly, so no tail is dropped and the byte cursor
+    never advances past unextracted content (council-pr C2)."""
+    content = "x" * 5000  # one line, no turn boundaries
+    chunks = _split_for_extraction(content, chunk_chars=1000, hard_cap=1000)
+    assert len(chunks) == 5
+    assert all(len(c) <= 1000 for c in chunks)
+    assert "".join(chunks) == content  # nothing dropped
+
+
+def test_oversized_line_among_normal_turns_loses_nothing():
+    """An oversized turn between normal turns is split without dropping any turn or its tail."""
+    content = "short turn 1\n" + "y" * 2500 + "\n" + "short turn 2\n"
+    chunks = _split_for_extraction(content, chunk_chars=1000, hard_cap=1000)
+    assert all(len(c) <= 1000 for c in chunks)
+    assert "".join(chunks) == content  # every turn + the oversized tail preserved
