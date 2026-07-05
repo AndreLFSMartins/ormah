@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ormah.background.llm_client import ingest_provider_configured
 from ormah.config import Settings
 from ormah.engine.context_builder import ContextBuilder
 from ormah.engine.maintenance_signal import (
@@ -48,6 +49,15 @@ logger = logging.getLogger(__name__)
 # Edge type factors for spreading activation scoring.
 # Higher factor = tighter structural link = more activation propagated.
 _EMBEDDING_SCHEMA_VERSION = 2
+
+EXTRACT_ERR_NO_PROVIDER = (
+    "No LLM available for server-side extraction. "
+    "Pass pre-extracted memories via the 'memories' parameter instead."
+)
+EXTRACT_ERR_CALL_FAILED = (
+    "Server-side extraction call returned no result (provider configured — likely a "
+    "timeout or error; see the adapter log). Will retry."
+)
 
 
 def _generate_title(content: str, max_chars: int = 60) -> str:
@@ -2288,10 +2298,13 @@ class MemoryEngine:
                 },
             )
             if raw is None:
-                return (
-                    "No LLM available for server-side extraction. "
-                    "Pass pre-extracted memories via the 'memories' parameter instead."
-                )
+                if ingest_provider_configured(self.settings):
+                    logger.warning(
+                        "Server-side extraction returned no result while a provider is "
+                        "configured — treating as a retryable call failure (timeout/error)."
+                    )
+                    return EXTRACT_ERR_CALL_FAILED
+                return EXTRACT_ERR_NO_PROVIDER
 
             # Extract JSON from response — handle markdown fences and surrounding prose.
             # Uses the shared raw_decode-based extractor: a naive fence regex truncates
