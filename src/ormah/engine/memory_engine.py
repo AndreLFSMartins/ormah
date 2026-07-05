@@ -80,17 +80,24 @@ def _embedding_text(title: str | None, content: str, max_content_chars: int = 51
 def _split_for_extraction(content: str, chunk_chars: int, hard_cap: int) -> list[str]:
     """Split content into <=chunk_chars pieces at line (turn) boundaries.
 
-    A single line longer than hard_cap is truncated (rare — one oversized turn); the
-    caller logs the loss. Never drops whole turns/lines."""
-    if len(content) <= chunk_chars:
+    A chunk never exceeds hard_cap (the sanity ceiling). A single line longer than hard_cap
+    is truncated (rare — one oversized turn) and the loss is LOGGED (observable, not silent).
+    Never drops whole turns/lines."""
+    limit = min(chunk_chars, hard_cap)  # a chunk must never exceed the hard cap
+    if len(content) <= limit:
         return [content]
     chunks: list[str] = []
     current: list[str] = []
     size = 0
     for line in content.splitlines(keepends=True):
         if len(line) > hard_cap:
+            logger.warning(
+                "ingest extraction: a single turn of %d chars exceeds ingest_max_content_chars "
+                "%d; truncated (tail dropped — observable loss)",
+                len(line), hard_cap,
+            )
             line = line[:hard_cap]
-        if current and size + len(line) > chunk_chars:
+        if current and size + len(line) > limit:
             chunks.append("".join(current))
             current, size = [], 0
         current.append(line)
