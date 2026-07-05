@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.cleanup_auto_ingested import plan_cleanup, run_cleanup
+import scripts.cleanup_auto_ingested as cleanup_mod
+from scripts.cleanup_auto_ingested import (
+    EXIT_QUARANTINE_ORPHAN,
+    plan_cleanup,
+    run_cleanup,
+)
 
 
 def _rows():
@@ -171,3 +176,60 @@ def test_run_cleanup_deletes_after_verified_backup_and_successful_rebuild(tmp_pa
     # 3 claude_code nodes deleted, 3 preserved (2 unknown + 1 system:self) remain.
     assert len(list(nodes_dir.glob("*.md"))) == 3
     assert engine.builder.calls == 1
+
+
+def test_run_cleanup_refuses_when_orphan_quarantine_exists(tmp_path):
+    """A leftover quarantine from a prior interrupted run must abort a new cleanup — otherwise it
+    compounds the markdown-outside-nodes_dir / stale-index inconsistency (council-pr I3)."""
+    rows = _small_rows()
+    nodes_dir = _make_nodes(tmp_path, rows)
+    engine = _FakeEngine(nodes_dir, rebuild_should_fail=False)
+    backup_path = tmp_path / "backups" / "b"
+    backup_path.mkdir(parents=True)
+    backup_service = _FakeBackupService(_FakeInfo(backup_path))
+
+    orphan = nodes_dir.parent / "ormah_cleanup_quarantine_prior"
+    orphan.mkdir()
+    (orphan / "stranded.md").write_text(
+        "---\nid: x\nsource: agent:claude_code\n---\nbody\n", encoding="utf-8"
+    )
+
+    rc = run_cleanup(engine, backup_service, rows=rows,
+                     preserve={"agent:unknown", "system:self"})
+
+    assert rc == EXIT_QUARANTINE_ORPHAN
+    assert len(list(nodes_dir.glob("*.md"))) == 6  # deleted nothing
+    assert engine.builder.calls == 0               # no rebuild attempted
+
+
+def test_run_cleanup_partial_restore_skips_second_rebuild(tmp_path, monkeypatch):
+    """When the rebuild fails AND restore is only partial, the script must NOT run a second rebuild
+    (it would index an incomplete node set) and must keep the un-restored quarantine (council-pr
+    I2)."""
+    rows = _small_rows()  # 3 claude_code to delete
+    nodes_dir = _make_nodes(tmp_path, rows)
+    engine = _FakeEngine(nodes_dir, rebuild_should_fail=True)
+    backup_path = tmp_path / "backups" / "b"
+    backup_path.mkdir(parents=True)
+    backup_service = _FakeBackupService(_FakeInfo(backup_path))
+
+    # 3 quarantine-in moves succeed; the FIRST restore move (call #4) fails -> partial restore.
+    real_move = cleanup_mod.shutil.move
+    seen = {"n": 0}
+
+    def flaky_move(src, dst):
+        seen["n"] += 1
+        if seen["n"] == 4:
+            raise OSError("cannot restore this one")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(cleanup_mod.shutil, "move", flaky_move)
+
+    rc = run_cleanup(engine, backup_service, rows=rows,
+                     preserve={"agent:unknown", "system:self"})
+
+    assert rc == 4
+    assert engine.builder.calls == 1  # partial restore -> the second rebuild is NOT attempted
+    # The un-restored file stays quarantined (not destroyed); the operator recovers from backup.
+    quarantines = list(nodes_dir.parent.glob("ormah_cleanup_quarantine_*"))
+    assert any(any(q.glob("*.md")) for q in quarantines)
