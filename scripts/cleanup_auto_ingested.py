@@ -23,6 +23,7 @@ EXIT_OK = 0
 EXIT_EMPTY_PRESERVE = 2
 EXIT_BACKUP_FAILED = 3
 EXIT_REBUILD_FAILED = 4
+EXIT_QUARANTINE_ORPHAN = 5
 
 
 def plan_cleanup(rows, preserve: set[str]) -> tuple[set[str], int]:
@@ -54,6 +55,20 @@ def run_cleanup(engine, backup_service, *, rows, preserve: set[str]) -> int:
     -> delete quarantine on success, or restore it (and rebuild again) on failure.
     """
     to_delete, _kept = plan_cleanup(rows, preserve)
+    nodes_dir = engine.file_store.nodes_dir
+
+    # A leftover quarantine from a prior interrupted run means markdown is still stranded outside
+    # nodes_dir with a stale index. Starting a fresh cleanup on top of that would compound the
+    # inconsistency, so refuse until the operator resolves it (council-pr I3).
+    orphans = [
+        d for d in nodes_dir.parent.glob("ormah_cleanup_quarantine_*")
+        if d.is_dir() and any(d.iterdir())
+    ]
+    if orphans:
+        print(f"REFUSING: leftover quarantine from an interrupted cleanup: "
+              f"{[str(o) for o in orphans]}. Restore those files into {nodes_dir} (or remove them "
+              f"if already handled) and rebuild the index, then rerun.", file=sys.stderr)
+        return EXIT_QUARANTINE_ORPHAN
 
     try:
         backup_info = backup_service.create(reason="pre-cleanup", prune=False)
@@ -65,7 +80,6 @@ def run_cleanup(engine, backup_service, *, rows, preserve: set[str]) -> int:
         print("REFUSING: forced backup produced no verified artifact; deleting nothing.", file=sys.stderr)
         return EXIT_BACKUP_FAILED
 
-    nodes_dir = engine.file_store.nodes_dir
     quarantine_dir = Path(tempfile.mkdtemp(prefix="ormah_cleanup_quarantine_", dir=str(nodes_dir.parent)))
 
     def _restore(moved_pairs: list[tuple[Path, Path]]) -> bool:
@@ -109,11 +123,20 @@ def run_cleanup(engine, backup_service, *, rows, preserve: set[str]) -> int:
         engine.builder.full_rebuild()
     except Exception as exc:
         print(f"REBUILD FAILED ({exc}); restoring quarantined files.", file=sys.stderr)
-        _restore(moved)
-        try:
-            engine.builder.full_rebuild()
-        except Exception:
-            pass
+        if _restore(moved):
+            # Every file is back in nodes_dir — rebuild the index to match the restored set.
+            try:
+                engine.builder.full_rebuild()
+            except Exception as exc2:
+                print(f"SECONDARY REBUILD FAILED ({exc2}); files restored but index stale — "
+                      f"rebuild manually. Backup: {backup_info.path}", file=sys.stderr)
+        else:
+            # Partial restore: some markdown is still only in quarantine. Do NOT rebuild — indexing
+            # an incomplete node set would drop the un-restored nodes from the index too. Leave the
+            # quarantine and point at the backup (council-pr I2).
+            print(f"PARTIAL RESTORE: some files remain only in quarantine; index NOT rebuilt to "
+                  f"avoid indexing an incomplete node set. Recover from backup: {backup_info.path}",
+                  file=sys.stderr)
         _drop_quarantine_only_if_empty()
         return EXIT_REBUILD_FAILED
 
