@@ -289,10 +289,13 @@ class TestIngestConfidence:
 
 class TestIngestTruncation:
     def test_content_truncated_to_setting(self, engine):
-        """Content passed to LLM should be truncated to ingest_max_content_chars."""
+        """A single oversized turn (no line breaks) larger than ingest_max_content_chars is
+        truncated to that hard cap rather than sent whole (chunking replaced whole-payload
+        truncation; a single line still can't exceed the hard cap)."""
         engine.settings.ingest_max_content_chars = 2000
+        engine.settings.ingest_chunk_chars = 2000
         marker = "ZQZQ"
-        long_content = marker * 2000  # 8000 chars total
+        long_content = marker * 2000  # 8000 chars total, single line (no newlines)
 
         captured_prompt = {}
 
