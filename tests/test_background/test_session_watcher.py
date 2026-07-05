@@ -826,11 +826,41 @@ def test_min_turns_filter(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
-    # min_turns no longer gates the active-flush path — the byte gate (flush_bytes /
-    # idle) replaced it. A fresh (active, not idle) file below flush_bytes defers →
-    # TRANSIENT (retry until it crosses flush_bytes or the session idles).
+    # A short ACTIVE window below min_turns defers (noise cut) rather than extracting —
+    # retry until it crosses min_turns, crosses flush_bytes, or the session idles.
     assert result == IngestResult.TRANSIENT
     assert str(jsonl.relative_to(watch_dir)) not in state
+
+
+def test_min_turns_skips_short_active_window(engine, tmp_path):
+    """A window below min_turns that is NOT idle must defer, not extract (noise cut)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=2)  # below min_turns=5
+    # NOT marked idle -> active short window
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+    assert result != IngestResult.OK
+    assert state == {}
+
+
+def test_min_turns_still_flushes_short_idle_session(engine, tmp_path):
+    """A short but FINISHED (idle) session must still be captured — not stranded."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=2)
+    _mark_idle(jsonl)  # finished
+
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+    assert result == IngestResult.OK
 
 
 # --- Test 4: Unchanged session skipped ---

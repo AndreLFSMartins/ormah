@@ -269,6 +269,7 @@ class Settings(BaseSettings):
     # Ingestion
     ingest_max_content_chars: int = 100000
     ingest_chunk_chars: int = 40000  # timeout-safe payload per claude_cli call (~10K tokens)
+    ingest_min_confidence: float = 0.0  # drop auto-extracted memories below this confidence (0 = off)
 
     # Consolidation
     consolidation_interval_minutes: int = 1440
@@ -291,6 +292,13 @@ class Settings(BaseSettings):
     def _port_range(cls, v: int) -> int:
         if not 1 <= v <= 65535:
             raise ValueError(f"port must be 1–65535, got {v}")
+        return v
+
+    @field_validator("ingest_min_confidence")
+    @classmethod
+    def _ingest_min_confidence_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"ingest_min_confidence must be in [0, 1], got {v}")
         return v
 
     @field_validator("log_format")
