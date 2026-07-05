@@ -799,6 +799,13 @@ def _ingest_session(
         age = idle_threshold + 1  # treat unstatable file as idle
     is_idle = age > idle_threshold
 
+    # Salience: don't extract from a below-threshold window unless the session is finished (idle).
+    # A short but complete session is still captured; a short ACTIVE window defers to accumulate.
+    if not is_idle and payload_users < min_turns:
+        if on_defer_active is not None:
+            on_defer_active()
+        return IngestResult.TRANSIENT
+
     # Nothing new to commit at the closed boundary.
     if payload_offset <= prev_offset:
         # Active session with appended-but-unclosed content (a still-streaming response):

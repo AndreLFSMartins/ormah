@@ -2364,6 +2364,13 @@ class MemoryEngine:
             if confidence is None:
                 confidence = 0.7
 
+            floor = getattr(self.settings, "ingest_min_confidence", 0.0)
+            if confidence < floor:
+                logger.debug("Ingestion: dropped low-confidence memory (%.2f < %.2f): %s",
+                             confidence, floor, mem.get("title", mem_content[:40]))
+                skipped += 1
+                continue
+
             tags = (mem.get("tags") or []) + ["auto-ingested"] + (extra_tags or [])
 
             if dry_run:
