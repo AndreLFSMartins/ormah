@@ -230,6 +230,33 @@ def test_toxic_slice_skipped_after_max_extract_failures(engine, tmp_path):
     assert skipped[0]["reason"] == "extract_failed_x3"
 
 
+def test_capped_skip_schedules_drain_continuation(engine, tmp_path):
+    """When the toxic slice is a CAPPED batch (more closed content follows), the skip must call
+    on_defer_active so the rest of the transcript drains on the next tick, not only via reconcile.
+    (Council adjustment #3 for Task 04 — mirrors the success-path capped continuation.)"""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=12)  # large enough that a small flush_bytes caps the first batch
+    _mark_idle(jsonl)
+    state = {}
+    defer_calls: list[int] = []
+
+    result = None
+    with patch(_LLM_PATCH, return_value=None), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for _ in range(MAX_EXTRACT_FAILURES):
+            result = _ingest_session(
+                engine, jsonl, state, watch_dir, min_turns=1,
+                flush_bytes=300,  # small -> the first closed batch is capped (content past it)
+                on_defer_active=lambda: defer_calls.append(1),
+            )
+
+    assert result == IngestResult.OK          # capped slice skipped after the cap
+    assert defer_calls, "on_defer_active must fire on a capped skip to drain the remainder"
+
+
 def test_no_provider_failure_never_burns_the_slice(engine, tmp_path):
     """Without a provider, a failure must stay TRANSIENT and never advance the cursor or count —
     the data must survive until a provider returns."""
