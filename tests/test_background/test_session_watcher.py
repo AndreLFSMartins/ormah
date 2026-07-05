@@ -183,12 +183,16 @@ def test_ingest_none_is_transient_and_does_not_advance(engine, tmp_path):
     _mark_idle(jsonl)
 
     state = {}
-    with patch(_LLM_PATCH, return_value=None):
+    # "LLM unavailable" == no provider configured: the failure stays TRANSIENT and is never
+    # counted toward the per-slice cap, so no state entry is written. Patch the provider check
+    # explicitly so the result does not depend on a cached ingest adapter left by an earlier test.
+    with patch(_LLM_PATCH, return_value=None), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=False):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
     assert result == IngestResult.TRANSIENT
     rel = str(jsonl.relative_to(watch_dir))
-    assert rel not in state  # cursor (end_offset) never written -> unchanged
+    assert rel not in state  # no provider -> failure never counted, cursor never written
 
 
 def test_toxic_slice_skipped_after_max_extract_failures(engine, tmp_path):
