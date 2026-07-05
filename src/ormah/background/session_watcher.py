@@ -16,6 +16,7 @@ from threading import Event, Lock, Thread, Timer
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from ormah.background.llm_client import ingest_provider_configured
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.text.tokens import distinctive_tokens
 from ormah.transcript.parser import TranscriptResult, TranscriptTurn, parse_transcript
@@ -32,6 +33,7 @@ class IngestResult(Enum):
 
 _STATE_FILENAME = ".session_watcher_state"
 MAX_RECONCILE_RETRIES = 3
+MAX_EXTRACT_FAILURES = 3  # per-slice extraction failures (provider present) before skipping it
 _HEURISTIC_SOURCE = "transcript_watcher_heuristic"
 _LLM_JUDGE_SOURCE = "transcript_watcher_llm_judge"
 _HEURISTIC_AFFINITY_SOURCE = "auto_heuristic"
@@ -696,6 +698,17 @@ def _save_state(watch_dir: Path, state: dict) -> None:
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def _commit_state(state: dict, rel: str, entry: dict, state_lock, watch_dir: Path) -> None:
+    """Write one state entry and persist, honoring the optional cross-thread lock."""
+    if state_lock is not None:
+        with state_lock:
+            state[rel] = entry
+            _save_state(watch_dir, state)
+    else:
+        state[rel] = entry
+        _save_state(watch_dir, state)
+
+
 def _should_flush(is_idle: bool, capped: bool) -> bool:
     """A Batch closes once idle, or once the parser filled a full flush_bytes batch.
 
@@ -812,6 +825,7 @@ def _ingest_session(
     space = _space_for_transcript(engine, path, result)
     signals_recorded = _record_whisper_usage_signals(engine, result, turns=payload_turns)
 
+    provider_on = ingest_provider_configured(engine.settings)
     try:
         ingested = engine.ingest_conversation(
             content=payload_conversation,
@@ -819,13 +833,71 @@ def _ingest_session(
             agent_id=result.source,
             extra_tags=["session-transcript"],
         )
-        if isinstance(ingested, str):
-            logger.warning("Session watcher ingestion failed for %s: %s", path, ingested)
-            return IngestResult.TRANSIENT
-        count = len(ingested) if isinstance(ingested, list) else 0
     except Exception as e:
         logger.warning("Session watcher ingestion error for %s: %s", path, e)
         return IngestResult.TRANSIENT
+
+    if isinstance(ingested, str):
+        logger.warning("Session watcher ingestion failed for %s: %s", path, ingested)
+        # No provider is a GLOBAL, temporary state — never burn the slice (the data must survive
+        # until a provider returns). Only a failure WITH a provider present (a timeout or
+        # unparseable output on this exact slice) counts toward the per-slice cap.
+        if not provider_on:
+            return IngestResult.TRANSIENT
+        # Per-slice failure cap: a deterministically un-extractable slice would otherwise pin the
+        # byte-cursor forever (every retry re-parses the same slice, re-fails, never advances).
+        # Count failures at this offset (persisted, so it survives restarts); once capped, SKIP the
+        # slice forward and record the loss durably (not just a log line) so it can be replayed.
+        fail_count = (
+            existing.get("extract_fail_count", 0) + 1
+            if existing and existing.get("extract_fail_offset") == prev_offset
+            else 1
+        )
+        if fail_count >= MAX_EXTRACT_FAILURES:
+            skip_entry = dict(existing or {})
+            skipped_slices = list(skip_entry.get("skipped_slices", []))
+            skipped_slices.append({
+                "start": prev_offset,
+                "end": payload_offset,
+                "source_hash": h,
+                "reason": "extract_failed_x3",
+                "at": datetime.now(timezone.utc).isoformat(),
+            })
+            skip_entry.update({
+                "hash": h,
+                "end_offset": payload_offset,  # advance past the toxic slice
+                "last_ingested": datetime.now(timezone.utc).isoformat(),
+                "session_id": result.session_id,
+                "source": result.source,
+                "space": space,
+                "skipped_slices": skipped_slices,
+            })
+            skip_entry.pop("extract_fail_offset", None)
+            skip_entry.pop("extract_fail_count", None)
+            _commit_state(state, rel, skip_entry, state_lock, watch_dir)
+            logger.error(
+                "Session watcher SKIPPING un-extractable slice for %s after %d failures: "
+                "cursor %d->%d, %d chars dropped (observable data loss)",
+                rel, fail_count, prev_offset, payload_offset, payload_offset - prev_offset,
+            )
+            # The cursor advanced -> progress, like a successful empty extraction. If more
+            # closed content remains past this slice, drain it now instead of waiting for the
+            # next reconcile tick (mirror the success path below).
+            if result.capped and on_defer_active is not None:
+                on_defer_active()
+            return IngestResult.OK
+        # Not yet capped: persist the counter (cursor stays) and retry.
+        fail_entry = dict(existing or {})
+        fail_entry.update({
+            "hash": h,
+            "end_offset": prev_offset,  # cursor unchanged; slice will be retried
+            "extract_fail_offset": prev_offset,
+            "extract_fail_count": fail_count,
+        })
+        _commit_state(state, rel, fail_entry, state_lock, watch_dir)
+        return IngestResult.TRANSIENT
+
+    count = len(ingested) if isinstance(ingested, list) else 0
 
     new_node_ids = [m["node_id"] for m in ingested] if isinstance(ingested, list) else []
     # prev_offset == 0 means a fresh/whole re-ingest; don't carry stale cumulative
@@ -845,13 +917,7 @@ def _ingest_session(
         "node_ids": prev_node_ids + new_node_ids,
         "signals_recorded": signals_recorded,
     }
-    if state_lock is not None:
-        with state_lock:
-            state[rel] = entry
-            _save_state(watch_dir, state)
-    else:
-        state[rel] = entry
-        _save_state(watch_dir, state)
+    _commit_state(state, rel, entry, state_lock, watch_dir)
 
     logger.info(
         "Session watcher ingested %s (%d new turns, %d memories extracted, %d signals recorded)",

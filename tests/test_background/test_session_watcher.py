@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ormah.background.session_watcher import (
+    MAX_EXTRACT_FAILURES,
     IngestResult,
     SessionHandler,
     _ingest_session,
@@ -188,6 +189,94 @@ def test_ingest_none_is_transient_and_does_not_advance(engine, tmp_path):
     assert result == IngestResult.TRANSIENT
     rel = str(jsonl.relative_to(watch_dir))
     assert rel not in state  # cursor (end_offset) never written -> unchanged
+
+
+def test_toxic_slice_skipped_after_max_extract_failures(engine, tmp_path):
+    """A slice that fails extraction MAX_EXTRACT_FAILURES times (provider present) must advance
+    the cursor past it — not re-drive ingestion forever (the 1393x loop)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    # Provider IS configured; every extraction call fails (None -> error string).
+    with patch(_LLM_PATCH, return_value=None), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for i in range(1, MAX_EXTRACT_FAILURES):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+            assert state[rel]["extract_fail_count"] == i
+            assert state[rel]["end_offset"] == 0  # cursor NOT advanced yet
+        # Capped: skip the toxic slice forward. The cursor advanced -> progress, so this is OK,
+        # not NO_PROGRESS (which would bump the reconcile-park counter for a slice that just
+        # progressed).
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
+
+    assert state[rel]["end_offset"] > 0            # cursor advanced past the toxic slice
+    assert "extract_fail_count" not in state[rel]  # counter cleared after skip
+    # Durable quarantine trail: the skipped range is recorded, not just logged, so it can be
+    # replayed after the provider issue is fixed.
+    skipped = state[rel]["skipped_slices"]
+    assert len(skipped) == 1
+    assert skipped[0]["start"] == 0
+    assert skipped[0]["end"] == state[rel]["end_offset"]
+    assert skipped[0]["reason"] == "extract_failed_x3"
+
+
+def test_no_provider_failure_never_burns_the_slice(engine, tmp_path):
+    """Without a provider, a failure must stay TRANSIENT and never advance the cursor or count —
+    the data must survive until a provider returns."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    with patch(_LLM_PATCH, return_value=None), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=False):
+        for _ in range(MAX_EXTRACT_FAILURES + 2):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+
+    # Never counted, never advanced: either no entry, or an entry with cursor still at 0 and no counter.
+    entry = state.get(rel, {})
+    assert entry.get("end_offset", 0) == 0
+    assert "extract_fail_count" not in entry
+
+
+def test_extract_fail_count_persists_across_restart(engine, tmp_path):
+    """The per-slice failure counter must survive a process restart (persisted state), not just
+    live in-memory — otherwise a restarted watcher resets the cap and the loop never breaks."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    with patch(_LLM_PATCH, return_value=None), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for i in range(1, MAX_EXTRACT_FAILURES):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+
+        assert state[rel]["extract_fail_count"] == MAX_EXTRACT_FAILURES - 1
+
+        # Simulate a restart: reload state from disk into a fresh dict.
+        reloaded_state = _load_state(watch_dir)
+        assert reloaded_state[rel]["extract_fail_count"] == MAX_EXTRACT_FAILURES - 1
+
+        # The (MAX_EXTRACT_FAILURES)th failure, on the reloaded state, must still trip the cap.
+        assert _ingest_session(engine, jsonl, reloaded_state, watch_dir, min_turns=5) == IngestResult.OK
+
+    assert reloaded_state[rel]["end_offset"] > 0
+    assert "extract_fail_count" not in reloaded_state[rel]
 
 
 def test_ingest_valid_empty_memories_advances(engine, tmp_path):
