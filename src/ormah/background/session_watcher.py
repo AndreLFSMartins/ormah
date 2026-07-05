@@ -827,28 +827,14 @@ def _ingest_session(
     signals_recorded = _record_whisper_usage_signals(engine, result, turns=payload_turns)
 
     provider_on = ingest_provider_configured(engine.settings)
-    try:
-        ingested = engine.ingest_conversation(
-            content=payload_conversation,
-            space=space,
-            agent_id=result.source,
-            extra_tags=["session-transcript"],
-        )
-    except Exception as e:
-        logger.warning("Session watcher ingestion error for %s: %s", path, e)
-        return IngestResult.TRANSIENT
 
-    if isinstance(ingested, str):
-        logger.warning("Session watcher ingestion failed for %s: %s", path, ingested)
-        # No provider is a GLOBAL, temporary state — never burn the slice (the data must survive
-        # until a provider returns). Only a failure WITH a provider present (a timeout or
-        # unparseable output on this exact slice) counts toward the per-slice cap.
-        if not provider_on:
-            return IngestResult.TRANSIENT
-        # Per-slice failure cap: a deterministically un-extractable slice would otherwise pin the
-        # byte-cursor forever (every retry re-parses the same slice, re-fails, never advances).
-        # Count failures at this offset (persisted, so it survives restarts); once capped, SKIP the
-        # slice forward and record the loss durably (not just a log line) so it can be replayed.
+    def _record_extract_failure(reason: str) -> IngestResult:
+        """Per-slice failure cap: a deterministically un-processable slice would otherwise pin the
+        byte-cursor forever (every retry re-parses the same slice, re-fails, never advances). Count
+        failures at this offset (persisted, so it survives restarts); once capped, SKIP the slice
+        forward and record the loss durably (not just a log line) so it can be replayed. Shared by
+        the extract-error-string path and the ingest-exception path so a deterministic non-string
+        failure cannot pin the cursor either (council-pr I1)."""
         fail_count = (
             existing.get("extract_fail_count", 0) + 1
             if existing and existing.get("extract_fail_offset") == prev_offset
@@ -861,7 +847,7 @@ def _ingest_session(
                 "start": prev_offset,
                 "end": payload_offset,
                 "source_hash": h,
-                "reason": "extract_failed_x3",
+                "reason": reason,
                 "at": datetime.now(timezone.utc).isoformat(),
             })
             skip_entry.update({
@@ -877,9 +863,9 @@ def _ingest_session(
             skip_entry.pop("extract_fail_count", None)
             _commit_state(state, rel, skip_entry, state_lock, watch_dir)
             logger.error(
-                "Session watcher SKIPPING un-extractable slice for %s after %d failures: "
+                "Session watcher SKIPPING un-processable slice for %s after %d failures (%s): "
                 "cursor %d->%d, %d chars dropped (observable data loss)",
-                rel, fail_count, prev_offset, payload_offset, payload_offset - prev_offset,
+                rel, fail_count, reason, prev_offset, payload_offset, payload_offset - prev_offset,
             )
             # The cursor advanced -> progress, like a successful empty extraction. If more
             # closed content remains past this slice, drain it now instead of waiting for the
@@ -898,6 +884,32 @@ def _ingest_session(
         _commit_state(state, rel, fail_entry, state_lock, watch_dir)
         return IngestResult.TRANSIENT
 
+    try:
+        ingested = engine.ingest_conversation(
+            content=payload_conversation,
+            space=space,
+            agent_id=result.source,
+            extra_tags=["session-transcript"],
+        )
+    except Exception as e:
+        logger.warning("Session watcher ingestion error for %s: %s", path, e)
+        # A deterministic exception (e.g. a memory that always fails remember()/SQLite I/O) would
+        # pin the cursor forever, exactly like the extract-error loop. Count it toward the same
+        # per-slice cap. Reaching here means ingest_conversation ran past its own guard, so
+        # extraction produced memories -> a provider was configured (council-pr I1).
+        if not provider_on:
+            return IngestResult.TRANSIENT
+        return _record_extract_failure("ingest_exception_x3")
+
+    if isinstance(ingested, str):
+        logger.warning("Session watcher ingestion failed for %s: %s", path, ingested)
+        # No provider is a GLOBAL, temporary state — never burn the slice (the data must survive
+        # until a provider returns). Only a failure WITH a provider present (a timeout or
+        # unparseable output on this exact slice) counts toward the per-slice cap.
+        if not provider_on:
+            return IngestResult.TRANSIENT
+        return _record_extract_failure("extract_failed_x3")
+
     count = len(ingested) if isinstance(ingested, list) else 0
 
     new_node_ids = [m["node_id"] for m in ingested] if isinstance(ingested, list) else []
@@ -907,7 +919,13 @@ def _ingest_session(
     prev_node_ids = existing.get("node_ids", []) if carry else []
     prev_turns = existing.get("user_turns", 0) if carry else 0
 
-    entry = {
+    # Carry forward durable state (esp. skipped_slices — the quarantine trail) when advancing
+    # incrementally. Building the entry from scratch wiped skipped_slices, so the first successful
+    # slice after a capped one destroyed the durable loss record (council-pr C1). A fresh whole
+    # re-ingest (prev_offset == 0, carry False) legitimately starts clean — those byte ranges are
+    # being re-read, so any prior quarantine of them is stale.
+    entry = dict(existing) if carry else {}
+    entry.update({
         "hash": h,
         "end_offset": payload_offset,
         "last_ingested": datetime.now(timezone.utc).isoformat(),
@@ -917,7 +935,9 @@ def _ingest_session(
         "user_turns": prev_turns + payload_users,
         "node_ids": prev_node_ids + new_node_ids,
         "signals_recorded": signals_recorded,
-    }
+    })
+    entry.pop("extract_fail_offset", None)  # a success at this offset clears the retry counter
+    entry.pop("extract_fail_count", None)
     _commit_state(state, rel, entry, state_lock, watch_dir)
 
     logger.info(

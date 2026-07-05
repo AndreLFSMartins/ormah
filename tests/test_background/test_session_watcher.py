@@ -310,6 +310,67 @@ def test_extract_fail_count_persists_across_restart(engine, tmp_path):
     assert "extract_fail_count" not in reloaded_state[rel]
 
 
+def test_success_after_cap_preserves_skipped_slices(engine, tmp_path):
+    """A capped slice records a durable skipped_slices entry; a LATER successful slice must not
+    wipe that quarantine trail. The success-path state write was building the entry from scratch
+    (dropping skipped_slices) while the cap path copied existing state (council-pr C1)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=12)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    # Phase 1: the first (capped) batch fails MAX_EXTRACT_FAILURES times -> quarantined + skipped.
+    with patch(_LLM_PATCH, return_value=None), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for _ in range(MAX_EXTRACT_FAILURES):
+            _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_bytes=300)
+    assert state[rel]["skipped_slices"], "precondition: first slice quarantined"
+    quarantined = list(state[rel]["skipped_slices"])
+
+    # Phase 2: the NEXT batch extracts successfully and writes fresh success state.
+    ok = json.dumps({"memories": [{"content": "a genuine memory to store", "type": "fact",
+                                   "title": "t"}]})
+    with patch(_LLM_PATCH, return_value=ok), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_bytes=300)
+
+    assert result == IngestResult.OK
+    # The durable quarantine trail must survive the successful write.
+    assert state[rel]["skipped_slices"] == quarantined
+
+
+def test_ingest_exception_counts_toward_cap(engine, tmp_path):
+    """A DETERMINISTIC exception in ingest_conversation must count toward the per-slice cap and
+    eventually skip the slice — otherwise it pins the cursor forever, the same loop the string
+    path already guards against (council-pr I1)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    with patch.object(engine, "ingest_conversation", side_effect=RuntimeError("boom")), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for i in range(1, MAX_EXTRACT_FAILURES):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+            assert state[rel]["extract_fail_count"] == i
+            assert state[rel]["end_offset"] == 0  # cursor pinned until capped
+        # The capped attempt skips the slice forward instead of looping forever.
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
+
+    assert state[rel]["end_offset"] > 0
+    skipped = state[rel]["skipped_slices"]
+    assert len(skipped) == 1
+    assert skipped[0]["reason"] == "ingest_exception_x3"  # distinguishable from extract failures (M1)
+
+
 def test_ingest_valid_empty_memories_advances(engine, tmp_path):
     """A valid {"memories": []} extraction is a SUCCESS: the slice is consumed and the
     cursor advances, so session_watcher never re-processes a no-memory turn forever."""
