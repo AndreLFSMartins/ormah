@@ -41,8 +41,10 @@ def cmd_eval_recall_run(args):
             sys.exit(1)
 
     if not cases:
-        print(f"Warning: no cases found in corpus '{corpus_label}'", file=sys.stderr)
-        sys.exit(0)
+        # A gate that evaluated zero cases must not report a pass — with
+        # local-only corpora, a fresh checkout would otherwise green-light.
+        print(f"Error: no cases found in corpus '{corpus_label}' — refusing to pass on zero cases", file=sys.stderr)
+        sys.exit(1)
 
     engine = _make_engine()
     try:
@@ -100,12 +102,19 @@ def _corpus_files_for_label(label: str) -> list[Path]:
     if label == "synthetic":
         return list((_CORPUS_DIR / "synthetic").glob("*.jsonl")) if (_CORPUS_DIR / "synthetic").exists() else []
     if label == "sessions":
-        return list((_CORPUS_DIR / "sessions").glob("*.jsonl"))
-    # "all"
+        # Captured session files are raw transcripts for the labeling
+        # workflow, not runnable cases (no memories to seed) — evaluating
+        # them would score against an empty database.
+        print(
+            "Error: 'sessions' is not a runnable corpus — captured transcripts have no "
+            "seedable memories. Use them via the labeling workflow instead.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # "all" = every runnable corpus (sessions excluded, see above)
     files = list((_CORPUS_DIR / "golden").glob("*.jsonl"))
     if (_CORPUS_DIR / "synthetic").exists():
         files += list((_CORPUS_DIR / "synthetic").glob("*.jsonl"))
-    files += list((_CORPUS_DIR / "sessions").glob("*.jsonl"))
     return files
 
 
@@ -122,13 +131,21 @@ def _check_fail_below(aggregate: dict, spec: str) -> int:
             "recall": "recall", "precision": "precision", "f1": "f1",
             "mrr": "mrr", "injection_rate": "injection_rate",
             "false_negative_rate": "false_negative_rate",
+            "fnr": "false_negative_rate",
+            "false_positive_rate": "false_positive_rate",
+            "fp_rate": "false_positive_rate",
         }
         key = key_map.get(metric_key, metric_key)
         val = aggregate.get(key)
         threshold = float(threshold_str)
-        if val is None or val < threshold:
+        # Rates where lower is better are checked as upper bounds.
+        if key in ("false_negative_rate", "false_positive_rate"):
+            bad, op = (val is None or val > threshold), ">"
+        else:
+            bad, op = (val is None or val < threshold), "<"
+        if bad:
             val_str = f"{val:.3f}" if val is not None else "N/A"
-            print(f"FAIL: {metric_raw}={val_str} < {threshold}", file=sys.stderr)
+            print(f"FAIL: {metric_raw}={val_str} {op} {threshold}", file=sys.stderr)
             failed = True
     return 1 if failed else 0
 

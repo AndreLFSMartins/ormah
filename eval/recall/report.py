@@ -53,6 +53,7 @@ def format_report(
         ("MRR", "mrr", True),
         ("Injection rate", "injection_rate", True),
         ("False neg rate", "false_negative_rate", False),
+        ("False pos rate", "false_positive_rate", False),
     ]
 
     for label, key, higher_is_better in metrics:

@@ -83,16 +83,34 @@ def false_negative_rate(
     return missed / len(should_inject)
 
 
+def false_positive_present(
+    should_not_inject: list[str],
+    ranked_ids: list[str],
+    k: int,
+) -> bool | None:
+    """True if any forbidden node appears in top-k.
+
+    Returns None if the prompt has no negative labels (undefined metric).
+    """
+    if not should_not_inject:
+        return None
+    top_k = set(ranked_ids[:k])
+    return any(nid in top_k for nid in should_not_inject)
+
+
 def compute_case_metrics(
     should_inject: list[str],
     ranked_ids: list[str],
     injection_gate: float,
     ranked_scores: list[float],
     k: int,
+    should_not_inject: list[str] | None = None,
 ) -> dict:
     """Compute all metrics for a single (prompt, results) pair.
 
     injection_fired: True if at least one result passes the injection_gate.
+    Negative-only cases (empty should_inject, non-empty should_not_inject)
+    contribute false_positive_present while positive metrics stay None.
     """
     above_gate = [nid for nid, score in zip(ranked_ids, ranked_scores) if score >= injection_gate]
     return {
@@ -101,5 +119,6 @@ def compute_case_metrics(
         "f1": f1_at_k(should_inject, ranked_ids, k),
         "mrr": mrr(should_inject, ranked_ids),
         "false_negative_rate": false_negative_rate(should_inject, ranked_ids, k),
+        "false_positive_present": false_positive_present(should_not_inject or [], ranked_ids, k),
         "injection_fired": len(above_gate) > 0,
     }

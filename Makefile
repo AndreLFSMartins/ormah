@@ -38,12 +38,13 @@ lint: ## Run ruff linter
 	ruff check src/ tests/
 
 # Local eval gate. Bars are set just under the honest baseline measured
-# 2026-07-03 (whisper: f1 0.69, suppression 0.95 @ 100 prompts; recall:
-# recall@8 0.97, f1 0.69 @ 25 cases) so real regressions fail while
-# run-to-run jitter passes. Corpora are local-only (gitignored).
+# 2026-07-06 with production-faithful floors (whisper: f1 0.69, suppression
+# 0.95 @ 100 prompts; recall: recall@8 0.99, f1 0.57, fp_rate 0.64 @ 25
+# cases) so real regressions fail while run-to-run jitter passes.
+# Corpora are local-only (gitignored).
 eval: ## Run whisper + recall evals with fail-below bars
 	uv run python -m ormah.cli eval whisper run --fail-below f1=0.65,suppression=0.90
-	uv run python -m ormah.cli eval recall run --fail-below recall@8=0.90,f1=0.60
+	uv run python -m ormah.cli eval recall run --fail-below recall@8=0.90,f1=0.50,fp_rate=0.75
 
 clean: ## Remove build artifacts
 	rm -rf src/ormah/ui_dist ui/node_modules/.vite

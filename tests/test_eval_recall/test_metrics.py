@@ -87,3 +87,39 @@ def test_injection_fired_false_when_gate_filters_all():
         k=8,
     )
     assert result["injection_fired"] is False
+
+
+def test_false_positive_present_none_without_negative_labels():
+    result = compute_case_metrics(
+        should_inject=["a"],
+        ranked_ids=["a", "b"],
+        injection_gate=0.45,
+        ranked_scores=[0.9, 0.8],
+        k=8,
+    )
+    assert result["false_positive_present"] is None
+
+
+def test_false_positive_present_detects_forbidden_node_in_top_k():
+    result = compute_case_metrics(
+        should_inject=["a"],
+        ranked_ids=["a", "bad"],
+        injection_gate=0.45,
+        ranked_scores=[0.9, 0.8],
+        k=8,
+        should_not_inject=["bad"],
+    )
+    assert result["false_positive_present"] is True
+
+
+def test_negative_only_case_scores_false_positive_without_positive_metrics():
+    result = compute_case_metrics(
+        should_inject=[],
+        ranked_ids=["x", "y"],
+        injection_gate=0.45,
+        ranked_scores=[0.9, 0.8],
+        k=8,
+        should_not_inject=["z"],
+    )
+    assert result["recall"] is None
+    assert result["false_positive_present"] is False
