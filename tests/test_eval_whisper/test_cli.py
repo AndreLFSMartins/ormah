@@ -90,7 +90,7 @@ class TestEvalWhisperCLI:
 
         def fake_load_corpus(path):
             seen["path"] = path
-            return []
+            return [{"id": "c1", "memories": [], "prompts": []}]
 
         monkeypatch.setattr("eval.whisper.corpus.load_corpus", fake_load_corpus)
         monkeypatch.setattr(
@@ -120,7 +120,10 @@ class TestEvalWhisperCLI:
             aggregate={"total_prompts": 1},
             category_aggregates={"factual": {"total_prompts": 1}},
         )
-        monkeypatch.setattr("eval.whisper.corpus.load_corpus", lambda path: [])
+        monkeypatch.setattr(
+            "eval.whisper.corpus.load_corpus",
+            lambda path: [{"id": "c1", "memories": [], "prompts": []}],
+        )
         monkeypatch.setattr("eval.whisper.runner.run_whisper_eval", lambda *args, **kwargs: fake_result)
         monkeypatch.setattr("eval.whisper.cli._make_engine", lambda: engine)
 
