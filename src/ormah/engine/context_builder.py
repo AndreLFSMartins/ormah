@@ -40,7 +40,8 @@ def _truncate_at_word_boundary(text: str, max_len: int = 300) -> str:
     truncated = text[:max_len]
     last_space = truncated.rfind(" ")
     if last_space == -1:
-        return truncated + "…"
+        # Ellipsis counts against the budget: never exceed max_len.
+        return truncated[: max_len - 1] + "…"
     return truncated[:last_space] + "…"
 
 

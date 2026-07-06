@@ -142,6 +142,15 @@ class TestWhisperCompactFormatting:
         assert len(injected_line) <= 2 + 600
         assert injected_line.endswith("…")
 
+    def test_content_cap_holds_for_unbroken_text(self, mock_graph):
+        """An unbroken (space-free) string must not exceed the cap by one."""
+        from ormah.engine.context_builder import _truncate_at_word_boundary
+
+        unbroken = "A" * 601
+        out = _truncate_at_word_boundary(unbroken, max_len=600)
+        assert len(out) <= 600
+        assert out.endswith("…")
+
     def test_content_cap_is_configurable(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
