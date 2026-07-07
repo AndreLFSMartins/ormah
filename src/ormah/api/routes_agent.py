@@ -146,6 +146,17 @@ async def whisper(request: Request):
         gap_seconds = settings.whisper_session_gap_minutes * 60
         buf_size = settings.whisper_context_buffer_size
 
+        # Evict dead sessions: a session whose newest prompt is older than
+        # the session gap will never contribute recent_prompts again, but
+        # previously stayed in the dict forever (slow leak on long-running
+        # servers). Runs on the event loop, so no lock is needed.
+        dead = [
+            sid for sid, b in _session_buffers.items()
+            if sid != session_id and (not b or (now - b[-1][1]) > gap_seconds)
+        ]
+        for sid in dead:
+            del _session_buffers[sid]
+
         buf = _session_buffers.get(session_id)
         if buf is None:
             buf = deque(maxlen=buf_size)

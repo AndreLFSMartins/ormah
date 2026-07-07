@@ -2901,3 +2901,99 @@ class TestTopicShiftServedMemory:
             )
 
         assert "Sessionless topic memory" not in result
+
+
+class TestSessionBufferEviction:
+    """Dead sessions are evicted from _session_buffers on access (I12)."""
+
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from ormah.api.routes_agent import router
+
+        app = FastAPI()
+        app.include_router(router)
+        engine = MagicMock()
+        engine.get_whisper_context.return_value = ""
+        app.state.engine = engine
+        return TestClient(app)
+
+    def test_dead_sessions_evicted_on_access(self, monkeypatch):
+        import time as time_mod
+        from collections import deque
+        from ormah.api.routes_agent import _session_buffers
+        from ormah.config import settings as global_settings
+
+        _session_buffers.clear()
+        gap_seconds = global_settings.whisper_session_gap_minutes * 60
+
+        now = time_mod.time()
+        stale = deque(maxlen=5)
+        stale.append(("old prompt", now - gap_seconds * 3))
+        _session_buffers["dead-session"] = stale
+
+        fresh = deque(maxlen=5)
+        fresh.append(("recent prompt", now - 5))
+        _session_buffers["live-session"] = fresh
+
+        client = self._client()
+        resp = client.post(
+            "/agent/whisper",
+            json={"prompt": "hello there world", "session_id": "another-session"},
+        )
+        assert resp.status_code == 200
+
+        assert "dead-session" not in _session_buffers
+        assert "live-session" in _session_buffers
+        assert "another-session" in _session_buffers
+
+        _session_buffers.clear()
+
+
+class TestEncodeOncePerWhisper:
+    """The prompt is embedded (encode) exactly once per whisper call (I15).
+
+    ``PromptClassifier.classify()`` encodes the raw prompt to score it
+    against archetypes; ``build_whisper_context`` reuses that same vector
+    (``intent.prompt_vec``) for topic-shift detection, the affinity boost,
+    and whisper_log instead of encoding again. The classifier must NOT be
+    mocked away here — doing so hides its internal ``encode()`` call and
+    would make the "encode once" assertion count only the *other* encodes,
+    silently passing even if classify() and the builder each encoded
+    separately (as happened before this test was fixed).
+    """
+
+    def test_classifier_and_prompt_vec_share_one_encode(self, mock_graph):
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock()
+        mock_engine.settings.whisper_intent_threshold = 0.65
+
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        # Archetype vectors are orthogonal to the prompt on every category
+        # (and to the recent-prompt centroid), so intent falls back to
+        # "general" and topic-shift sees a real shift -- both real code
+        # paths, driven by the real (un-mocked) PromptClassifier.
+        mock_encoder.encode_batch.side_effect = lambda prompts: np.tile(
+            np.array([0.0, 1.0, 0.0], dtype=np.float32), (len(prompts), 1)
+        )
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+        mock_engine.recall_search_structured.return_value = []
+
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        builder.build_whisper_context(
+            prompt="a fresh new topic entirely",
+            topic_shift_enabled=True,
+            topic_shift_threshold=0.75,
+            recent_prompts=["something else before"],
+            session_id="enc-1",
+        )
+
+        # encode() called exactly once for the whole whisper call: by
+        # PromptClassifier.classify(). Topic-shift, the affinity boost, and
+        # whisper_log all reuse intent.prompt_vec rather than re-encoding.
+        assert mock_encoder.encode.call_count == 1
