@@ -442,3 +442,28 @@ class TestRecallFloorAndSpaceOrdering:
             )
 
         assert any(r["node"]["id"] == "recent-1" for r in out)
+
+    def test_temporal_supplements_respect_space_priority(self, engine):
+        """A newer other-space node must NOT outrank an older current-space node."""
+        newer_other = self._node("newer-other", space="other")
+        newer_other["created"] = "2026-02-01T00:00:00Z"
+        older_current = self._node("older-current", space="proj")
+        older_current["created"] = "2026-01-01T00:00:00Z"
+
+        # No semantic hits: the supplement pulls SQL-recent nodes, which
+        # get_recent_nodes returns in recency order (newer other-space first).
+        ctx, _ = self._search_mock(engine, [])
+        with ctx, patch.object(
+            engine.graph, "get_recent_nodes",
+            return_value=[newer_other, older_current],
+        ):
+            out = engine.recall_search_structured(
+                "yesterday", limit=4, default_space="proj", touch_access=False,
+                created_after="2026-01-01T00:00:00Z",
+            )
+
+        ids = [r["node"]["id"] for r in out if r.get("source") == "temporal"]
+        # Current-space wins despite being older; the other-space node is
+        # demoted, not deleted.
+        assert ids[0] == "older-current"
+        assert set(ids) == {"older-current", "newer-other"}

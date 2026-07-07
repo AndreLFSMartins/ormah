@@ -599,7 +599,10 @@ class MemoryEngine:
             # Relevance floor: return fewer results rather than padding to
             # `limit` with cross-space noise. Recency-vouched supplements
             # (source="temporal") are exempt — their base score is not
-            # semantic by design.
+            # semantic by design. Graph-activated neighbours
+            # (source="activated"/"conflict") also bypass this floor: they are
+            # added by _spread_activation *after* the cut below, so a
+            # graph-vouched node may sit below the relevance floor by design.
             floor = (
                 min_relevance if min_relevance is not None
                 else self.settings.recall_min_relevance_score
@@ -624,6 +627,7 @@ class MemoryEngine:
                     results = self._supplement_temporal(
                         results if not is_pure_temporal else [],
                         limit, created_after, created_before, filters,
+                        default_space=default_space,
                     )
 
             results = self._spread_activation(results, limit)
@@ -658,6 +662,7 @@ class MemoryEngine:
         if created_after and len(enriched) < limit:
             enriched = self._supplement_temporal(
                 enriched, limit, created_after, created_before, filters,
+                default_space=default_space,
             )
 
         enriched = self._spread_activation(enriched, limit)
@@ -722,6 +727,7 @@ class MemoryEngine:
                     results = self._supplement_temporal(
                         results if not is_pure_temporal else [],
                         limit, created_after, created_before, filters,
+                        default_space=default_space,
                     )
 
             results = self._spread_activation(results, limit)
@@ -765,6 +771,7 @@ class MemoryEngine:
         if created_after and len(enriched) < limit:
             enriched = self._supplement_temporal(
                 enriched, limit, created_after, created_before, filters,
+                default_space=default_space,
             )
 
         enriched = self._spread_activation(enriched, limit)
@@ -1659,12 +1666,22 @@ class MemoryEngine:
         created_after: str,
         created_before: str | None,
         filters: dict,
+        default_space: str | None = None,
     ) -> list[dict]:
         """Supplement results with SQL-based recent nodes when temporal filters are active.
 
         Fetches nodes directly by ``created`` column, deduplicates against
         existing results, applies type/tier/space filters, and appends to
         the result list up to *limit*.
+
+        Supplements are ordered by (space priority, recency) so temporal
+        recall honours the same current/global/other-space prioritization
+        applied to semantic results (see ``_apply_space_scores``): a newer
+        other-project node cannot outrank an older current-project one. The
+        base score stays a low placeholder (exempt from the relevance floor)
+        — this is prioritization, not scoring — and each result carries a
+        ``_space_factor`` so downstream re-sorts (e.g. whisper's temporal
+        recency sort) keep the same space priority.
         """
         existing_ids = {r["node"]["id"] for r in results}
         needed = limit - len(results)
@@ -1679,10 +1696,11 @@ class MemoryEngine:
         tiers_filter = filters.get("tiers")
         spaces_filter = filters.get("spaces")
 
-        added = 0
+        boost_global = self.settings.space_boost_global
+        boost_other = self.settings.space_boost_other
+
+        candidates: list[tuple[float, dict]] = []
         for node in recent:
-            if added >= needed:
-                break
             if node["id"] in existing_ids:
                 continue
             if types_filter and node["type"] not in types_filter:
@@ -1691,10 +1709,29 @@ class MemoryEngine:
                 continue
             if spaces_filter and node.get("space") not in spaces_filter:
                 continue
-            existing_ids.add(node["id"])
-            # Use a low base score so these don't outrank relevance-matched results
-            results.append({"node": node, "score": 0.001, "source": "temporal"})
-            added += 1
+            space = node.get("space")
+            if not default_space or space == default_space:
+                factor = 1.0
+            elif space is None:
+                factor = boost_global
+            else:
+                factor = boost_other
+            candidates.append((factor, node))
+
+        # Space priority first, recency second: an older current-space node
+        # outranks a newer other-space one.
+        candidates.sort(
+            key=lambda c: (c[0], c[1].get("created") or ""), reverse=True
+        )
+
+        for factor, node in candidates[:needed]:
+            # Low base score so these don't outrank relevance-matched results
+            # and stay exempt from the relevance floor; _space_factor carries
+            # the space prioritization into any downstream re-sort.
+            results.append({
+                "node": node, "score": 0.001, "source": "temporal",
+                "_space_factor": factor,
+            })
 
         return results
 

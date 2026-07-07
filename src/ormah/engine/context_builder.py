@@ -761,12 +761,16 @@ class ContextBuilder:
             except Exception as e:
                 logger.warning("Exploration slot failed: %s", e)
 
-        # Temporal queries: re-sort by recency (most recent first).
+        # Temporal queries: re-sort by (space priority, recency).
         # Semantic scores already filtered noise via the 0.45 threshold,
         # but users expect chronological ordering for "what did we do today".
+        # Space priority stays the primary key so a newer other-project memory
+        # cannot outrank an older current-project one purely by recency — both
+        # semantic hits and temporal supplements carry _space_factor from the
+        # recall layer.
         if has_temporal and search_results:
             search_results.sort(
-                key=lambda r: r["node"].get("created") or "",
+                key=lambda r: (r.get("_space_factor", 1.0), r["node"].get("created") or ""),
                 reverse=True,
             )
 
