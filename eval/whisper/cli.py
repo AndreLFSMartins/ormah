@@ -44,7 +44,9 @@ _EVAL_SETTINGS_OVERRIDES = {
     "whisper_intent_threshold": 0.65,
     "whisper_topic_shift_enabled": True,
     "whisper_topic_shift_threshold": 0.75,
-    "whisper_injection_gate": 0.50,
+    "whisper_injection_gate": 0.45,
+    "whisper_no_overlap_ce_floor": 0.45,
+    "whisper_no_overlap_cosine_floor": 0.70,
     "whisper_exploration_enabled": True,
     # Ranking adjustments used by whisper post-processing
     "space_boost_global": 1.0,

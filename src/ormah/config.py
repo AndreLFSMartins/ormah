@@ -201,8 +201,18 @@ class Settings(BaseSettings):
 
     # Whisper injection gate — cuts the ABSOLUTE gate score (ce_absolute
     # when the reranker ran, raw_cosine otherwise, plus any affinity delta).
-    # 0.50 on the ce_absolute scale ≙ raw cross-encoder score −3.0.
-    whisper_injection_gate: float = 0.50
+    # 0.45 on the ce_absolute scale ≙ raw cross-encoder score −3.9: real
+    # paraphrase matches land around raw −3 (≈0.49) while true noise sits
+    # below raw −5 (≤0.39); tuned against eval/whisper (gate sweep, 2026-07).
+    whisper_injection_gate: float = 0.45
+
+    # Topical-filter vouchers for candidates sharing NO token with the prompt
+    # (the fail-closed path): such a candidate survives only with an ABSOLUTE
+    # relevance signal. The CE floor matches the injection gate (its added
+    # value is keeping no-overlap junk out of the exploration pool); the
+    # cosine floor applies when the reranker didn't run.
+    whisper_no_overlap_ce_floor: float = 0.45
+    whisper_no_overlap_cosine_floor: float = 0.70
 
     # Affinity boost (adaptive feedback loop)
     affinity_similarity_threshold: float = 0.70

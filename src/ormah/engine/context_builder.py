@@ -241,6 +241,43 @@ class ContextBuilder:
             logger.warning("Failed to create prompt classifier: %s", e)
             return None
 
+    def _topic_was_served(
+        self,
+        session_id: str | None,
+        prompt_vec: np.ndarray,
+        threshold: float,
+    ) -> bool:
+        """True when this session already had an injection on a similar topic.
+
+        Reads whisper_log (session_id + prompt_vec + was_injected) instead of
+        holding in-process state, so it works on every entry path and across
+        restarts. Without a session_id there is no history to consult —
+        return True to preserve the plain topic-shift skip behavior.
+        """
+        if not session_id:
+            return True
+        try:
+            rows = self.graph.conn.execute(
+                "SELECT DISTINCT prompt_vec FROM whisper_log "
+                "WHERE session_id = ? AND was_injected = 1",
+                (session_id,),
+            ).fetchall()
+            norm_current = float(np.linalg.norm(prompt_vec))
+            if norm_current == 0:
+                return True
+            for row in rows:
+                served_vec = np.frombuffer(row["prompt_vec"], dtype=np.float32)
+                norm_served = float(np.linalg.norm(served_vec))
+                if norm_served == 0:
+                    continue
+                sim = float(np.dot(prompt_vec, served_vec) / (norm_current * norm_served))
+                if sim >= threshold:
+                    return True
+            return False
+        except Exception as e:
+            logger.warning("_topic_was_served check failed: %s", e)
+            return True  # fail toward the historical skip behavior
+
     def _log_decision(
         self,
         *,
@@ -296,6 +333,8 @@ class ContextBuilder:
         topic_shift_enabled: bool = False,
         topic_shift_threshold: float = 0.75,
         injection_gate: float = 0.55,
+        no_overlap_ce_floor: float = 0.45,
+        no_overlap_cosine_floor: float = 0.70,
         session_id: str | None = None,
         _return_debug: bool = False,
     ) -> str | tuple[str, list[str]]:
@@ -391,7 +430,14 @@ class ContextBuilder:
                             np.dot(current_vec, centroid)
                             / (norm_current * norm_centroid)
                         )
-                        if similarity > topic_shift_threshold:
+                        # Suppress only topics that were actually SERVED: if
+                        # every earlier prompt on this topic produced silence
+                        # (gate reject, conversational, …), skipping again
+                        # would starve the topic for the whole session — the
+                        # first miss must not condemn the conversation.
+                        if similarity > topic_shift_threshold and self._topic_was_served(
+                            session_id, current_vec, topic_shift_threshold
+                        ):
                             logger.info(
                                 "Whisper diagnostics: prompt=%r topic_shift_skip similarity=%.3f threshold=%.3f",
                                 prompt_snippet,
@@ -592,24 +638,47 @@ class ContextBuilder:
                 for r in search_results
                 if _has_topical_overlap(prompt_tokens, r["node"])
             }
-            if overlapping_ids:
-                search_results = [
-                    r for r in search_results
-                    if (
-                        r["node"]["id"] in overlapping_ids
-                        or r["node"]["id"] in identity_linked_ids
-                        or (identity_only and r["node"].get("space") in (None, "null"))
-                    )
-                ]
-                if pre_gate_candidates:
-                    pre_gate_candidates = [
-                        r for r in pre_gate_candidates
-                        if (
-                            r["node"]["id"] in overlapping_ids
-                            or r["node"]["id"] in identity_linked_ids
-                            or (identity_only and r["node"].get("space") in (None, "null"))
-                        )
-                    ]
+
+            # Fail CLOSED: a candidate sharing no token with the prompt is
+            # the maximally suspicious case (embedding false-friends), so it
+            # needs a voucher — identity protection, or a strong absolute
+            # relevance signal. Previously the filter was skipped entirely
+            # when nothing overlapped, passing everything through in exactly
+            # the situation it exists to catch.
+            def _keep(r: dict) -> bool:
+                nid = r["node"]["id"]
+                if nid in overlapping_ids:
+                    return True
+                if nid in identity_linked_ids:
+                    return True
+                if identity_only and r["node"].get("space") in (None, "null"):
+                    return True
+                # Recency-vouched results: relevance comes from the time
+                # filter, not semantics — never demand a semantic voucher.
+                if r.get("source") == "temporal":
+                    return True
+                # Temporal and follow-up prompts are underspecified by design
+                # ("what did we do today", "and the second one?") — the CE
+                # judged them against the raw prompt, so its verdict is not a
+                # fair voucher. Keep pre-contract behavior for them: pass
+                # when nothing overlapped, drop when other candidates did.
+                if has_temporal or follow_up_mode:
+                    return not overlapping_ids
+                ce = r.get("ce_absolute")
+                if ce is not None:
+                    return ce >= no_overlap_ce_floor
+                cos = r.get("raw_cosine")
+                if cos is not None:
+                    return cos >= no_overlap_cosine_floor
+                # Results without absolute signals (spread-activation
+                # neighbors, legacy callers): preserve pre-contract behavior —
+                # dropped when other candidates overlap, passed when nothing
+                # overlapped.
+                return not overlapping_ids
+
+            search_results = [r for r in search_results if _keep(r)]
+            if pre_gate_candidates:
+                pre_gate_candidates = [r for r in pre_gate_candidates if _keep(r)]
 
         # Injection gate: require at least one result with a strong enough
         # ABSOLUTE relevance signal to justify injection (see _gate_score —
@@ -636,11 +705,15 @@ class ContextBuilder:
 
         # Exploration slot: inject one unconfirmed gated-out candidate to
         # surface false negatives and collect affinity signal for them.
+        # Piggybacks on real injections only (`search_results` non-empty):
+        # when the gate decided on silence, silence stands — exploration must
+        # never manufacture an injection from nothing.
         # CE gate: skip candidates the cross-encoder strongly rejected
         # (ce < -8 means "definitely not relevant") to prevent noise injection.
         if (not has_temporal
                 and getattr(self.engine.settings, "whisper_exploration_enabled", True)
                 and prompt_vec is not None
+                and search_results
                 and pre_gate_candidates):
             try:
                 from ormah.engine.affinity import batch_fetch_affinity
@@ -676,7 +749,10 @@ class ContextBuilder:
                                     has_signal = True
                                     break
                         if not has_signal:
-                            search_results.append(candidate)
+                            # Label it: the agent should weigh a deliberate
+                            # long-shot differently from a confident whisper,
+                            # and feedback on it stays honest.
+                            search_results.append({**candidate, "_exploration": True})
                             break  # one exploration slot only
             except Exception as e:
                 logger.warning("Exploration slot failed: %s", e)
@@ -722,8 +798,9 @@ class ContextBuilder:
             title = node.get("title") or (content_preview[:60].strip() + ("…" if len(content_preview) > 60 else ""))
             node_type = node.get("type", "fact")
             id_suffix = f" (id: {short_id})" if short_id else ""
+            marker = "[exploring]" if r.get("_exploration") else f"[{node_type}]"
 
-            lines.append(f"- **[{node_type}]** {title}{id_suffix}")
+            lines.append(f"- **{marker}** {title}{id_suffix}")
 
             if i < full_content_count:
                 content = node.get("content", "").strip()
