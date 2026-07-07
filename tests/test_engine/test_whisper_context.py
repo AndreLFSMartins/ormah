@@ -2748,7 +2748,7 @@ class TestTopicalFilterFailClosed:
         ]
 
         mock_ce = MagicMock()
-        # CE +3 → ce_absolute 0.833 ≥ 0.61 voucher
+        # CE +3 → ce_absolute 0.833 ≥ 0.45 voucher
         mock_ce.rerank.return_value = [3.0]
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \

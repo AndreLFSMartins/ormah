@@ -119,7 +119,7 @@ After retrieval, reranking, and affinity boost, whisper extracts topic tokens fr
 - candidates with topical overlap always pass
 - identity-linked nodes are still allowed through this filter
 - for identity-only prompts, global identity candidates are also preserved
-- a candidate with **no** overlap needs an absolute voucher: `ce_absolute >= whisper_no_overlap_ce_floor` (default 0.61), or `raw_cosine >= whisper_no_overlap_cosine_floor` (default 0.70) when the reranker didn't run — the filter fails closed instead of passing everything when nothing overlaps
+- a candidate with **no** overlap needs an absolute voucher: `ce_absolute >= whisper_no_overlap_ce_floor` (default 0.45), or `raw_cosine >= whisper_no_overlap_cosine_floor` (default 0.70) when the reranker didn't run — the filter fails closed instead of passing everything when nothing overlaps
 
 This step exists because semantic retrieval can surface broadly related memories that are directionally relevant but too vague for injection. Token overlap adds one more precision pass before the final gate.
 

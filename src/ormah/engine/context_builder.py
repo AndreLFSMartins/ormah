@@ -333,7 +333,7 @@ class ContextBuilder:
         topic_shift_enabled: bool = False,
         topic_shift_threshold: float = 0.75,
         injection_gate: float = 0.55,
-        no_overlap_ce_floor: float = 0.61,
+        no_overlap_ce_floor: float = 0.45,
         no_overlap_cosine_floor: float = 0.70,
         session_id: str | None = None,
         _return_debug: bool = False,
