@@ -57,6 +57,9 @@ def _eval_case(case: dict, engine, k: int, min_score: float, injection_gate: flo
             raw = engine.recall_search_structured(
                 query=prompt_text,
                 limit=k * 2,  # over-fetch before filtering
+                # Production callers always pass the project space (MCP/route
+                # default_space) — mirror it so space scoring is measured.
+                default_space=case.get("space"),
                 tiers=["core", "working"],
                 touch_access=False,
             )

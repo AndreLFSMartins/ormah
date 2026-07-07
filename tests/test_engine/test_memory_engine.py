@@ -1,6 +1,6 @@
 """Tests for the memory engine."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.engine.memory_engine import MemoryEngine, _embedding_text, _generate_title
@@ -322,7 +322,9 @@ def test_startup_preserves_existing_maintenance_timestamp(settings):
         engine.shutdown()
 
 
-def test_get_whisper_context_returns_empty_when_reranker_required_but_unavailable(engine):
+def test_get_whisper_context_degrades_when_reranker_unavailable(engine):
+    """Reranker unavailable (fresh install, model downloading) must degrade to
+    embedding-only whisper with the raised cosine-scale gate — never go dark (I4)."""
     engine.settings.whisper_reranker_enabled = True
     engine._whisper_reranker_available = False
     engine.settings.claude_maintenance_enabled = False
@@ -332,12 +334,28 @@ def test_get_whisper_context_returns_empty_when_reranker_required_but_unavailabl
     engine.db.conn.commit()
 
     with patch.object(
-        engine.context_builder, "build_whisper_context", return_value="unused"
+        engine.context_builder, "build_whisper_context", return_value="degraded whisper"
     ) as build:
         result = engine.get_whisper_context("auth prompt")
 
-    assert result == ""
-    build.assert_not_called()
+    assert result == "degraded whisper"
+    build.assert_called_once()
+    assert build.call_args.kwargs["reranker_enabled"] is False
+    assert (
+        build.call_args.kwargs["injection_gate"]
+        == engine.settings.whisper_injection_gate_no_reranker
+    )
+
+
+def test_get_whisper_context_normal_gate_when_reranker_available(engine):
+    engine._whisper_reranker_available = True
+
+    with patch.object(
+        engine.context_builder, "build_whisper_context", return_value=""
+    ) as build:
+        engine.get_whisper_context("auth prompt")
+
+    assert build.call_args.kwargs["injection_gate"] == engine.settings.whisper_injection_gate
 
 
 def test_whisper_onboarding_works_when_reranker_unavailable(engine):
@@ -346,10 +364,106 @@ def test_whisper_onboarding_works_when_reranker_unavailable(engine):
     engine.settings.claude_maintenance_enabled = True
 
     with patch.object(
-        engine.context_builder, "build_whisper_context", return_value="unused"
+        engine.context_builder, "build_whisper_context", return_value="whisper body"
     ) as build:
         result = engine.get_whisper_context("auth prompt")
 
     assert "onboarding" in result.lower()
     assert "maintenance_due" not in result
-    build.assert_not_called()
+    build.assert_called_once()
+
+
+class TestRecallFloorAndSpaceOrdering:
+    """Deliberate recall: wider pool, space scores before the cut, relevance
+    floor instead of padding (I8)."""
+
+    def _node(self, node_id, space=None):
+        return {
+            "id": node_id, "type": "fact", "tier": "working",
+            "title": node_id, "content": f"content of {node_id}",
+            "space": space, "access_count": 0,
+            "last_accessed": "2026-01-01T00:00:00Z",
+            "created": "2026-01-01T00:00:00Z",
+        }
+
+    def _search_mock(self, engine, results):
+        mock_search = MagicMock()
+        mock_search.search.return_value = results
+        return patch.object(engine, "_get_hybrid_search", return_value=mock_search), mock_search
+
+    def test_pool_widened_and_floor_drops_cross_space_noise(self, engine):
+        """Cross-space noise penalized below the floor is dropped, not padded."""
+        results = [
+            {"node": self._node("good-1", space="proj"), "score": 0.80, "source": "hybrid"},
+            {"node": self._node("good-2", space="proj"), "score": 0.62, "source": "hybrid"},
+            {"node": self._node("noise-1", space="other"), "score": 0.50, "source": "hybrid"},
+            {"node": self._node("noise-2", space="other"), "score": 0.48, "source": "hybrid"},
+        ]
+        ctx, mock_search = self._search_mock(engine, results)
+        with ctx:
+            out = engine.recall_search_structured(
+                "project question", limit=4, default_space="proj", touch_access=False,
+            )
+
+        # Pool widened to limit*3
+        assert mock_search.search.call_args.kwargs.get("limit") == 12
+        ids = [r["node"]["id"] for r in out if r.get("source") == "hybrid"]
+        # other-space results: 0.50*0.6=0.30 and 0.48*0.6=0.288 < 0.35 floor
+        assert ids == ["good-1", "good-2"]
+        assert len(out) < 4  # returns fewer rather than padding
+
+    def test_space_penalty_decides_survival_not_just_order(self, engine):
+        """A current-space match outside the old `limit` window survives the cut."""
+        # limit=2: previously only the first 2 raw results were fetched at all.
+        results = [
+            {"node": self._node("cross-1", space="other"), "score": 0.90, "source": "hybrid"},
+            {"node": self._node("cross-2", space="other"), "score": 0.88, "source": "hybrid"},
+            {"node": self._node("local-1", space="proj"), "score": 0.60, "source": "hybrid"},
+        ]
+        ctx, _ = self._search_mock(engine, results)
+        with ctx:
+            out = engine.recall_search_structured(
+                "project question", limit=2, default_space="proj", touch_access=False,
+            )
+
+        ids = [r["node"]["id"] for r in out if r.get("source") == "hybrid"]
+        # cross-1: 0.9*0.6=0.54, cross-2: 0.88*0.6=0.528, local-1: 0.60
+        # local-1 now wins the ordering AND survives the cut.
+        assert ids[0] == "local-1"
+
+    def test_temporal_supplements_exempt_from_floor(self, engine):
+        results = [
+            {"node": self._node("recent-1", space="proj"), "score": 0.001, "source": "temporal"},
+        ]
+        ctx, _ = self._search_mock(engine, results)
+        with ctx:
+            out = engine.recall_search_structured(
+                "project question", limit=4, default_space="proj", touch_access=False,
+            )
+
+        assert any(r["node"]["id"] == "recent-1" for r in out)
+
+    def test_temporal_supplements_respect_space_priority(self, engine):
+        """A newer other-space node must NOT outrank an older current-space node."""
+        newer_other = self._node("newer-other", space="other")
+        newer_other["created"] = "2026-02-01T00:00:00Z"
+        older_current = self._node("older-current", space="proj")
+        older_current["created"] = "2026-01-01T00:00:00Z"
+
+        # No semantic hits: the supplement pulls SQL-recent nodes, which
+        # get_recent_nodes returns in recency order (newer other-space first).
+        ctx, _ = self._search_mock(engine, [])
+        with ctx, patch.object(
+            engine.graph, "get_recent_nodes",
+            return_value=[newer_other, older_current],
+        ):
+            out = engine.recall_search_structured(
+                "yesterday", limit=4, default_space="proj", touch_access=False,
+                created_after="2026-01-01T00:00:00Z",
+            )
+
+        ids = [r["node"]["id"] for r in out if r.get("source") == "temporal"]
+        # Current-space wins despite being older; the other-space node is
+        # demoted, not deleted.
+        assert ids[0] == "older-current"
+        assert set(ids) == {"older-current", "newer-other"}

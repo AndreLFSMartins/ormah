@@ -214,6 +214,19 @@ class Settings(BaseSettings):
     whisper_no_overlap_ce_floor: float = 0.45
     whisper_no_overlap_cosine_floor: float = 0.70
 
+    # Injection gate when the reranker did not run (unavailable, still
+    # downloading, or disabled): the gate then cuts raw_cosine, a weaker
+    # absolute signal, so demand a higher bar — degraded mode is more
+    # conservative, never noisier. COSINE scale (bge noise floor ~0.5).
+    whisper_injection_gate_no_reranker: float = 0.60
+
+    # Deliberate recall floor: results below this are dropped rather than
+    # padding to `limit` (recency-vouched temporal supplements exempt).
+    # Cuts the RANK-RELATIVE blended score — pragmatic: observed cross-space
+    # padding noise scores ~0.30 while relevant results score 0.6+. More
+    # permissive than whisper's gate by design; recall is a deliberate act.
+    recall_min_relevance_score: float = 0.35
+
     # Affinity boost (adaptive feedback loop)
     affinity_similarity_threshold: float = 0.70
     affinity_half_life_days: float = 30.0

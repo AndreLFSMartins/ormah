@@ -561,7 +561,7 @@ class MemoryEngine:
 
     def recall_search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
-        touch_access: bool = True, **filters,
+        touch_access: bool = True, min_relevance: float | None = None, **filters,
     ) -> list[dict]:
         """Search memories and return structured results (list of dicts).
 
@@ -570,6 +570,11 @@ class MemoryEngine:
 
         When *touch_access* is False, access_count and last_accessed are not
         updated — useful for context loading that shouldn't inflate access stats.
+
+        *min_relevance* overrides the deliberate-recall floor
+        (settings.recall_min_relevance_score). Whisper passes 0.0: it needs
+        the raw candidate pool because it applies its own floors and an
+        absolute-signal gate downstream.
         """
         # Auto-extract temporal filters from query when none provided
         if not filters.get("created_after") and not filters.get("created_before"):
@@ -585,10 +590,28 @@ class MemoryEngine:
 
         search = self._get_hybrid_search()
         if search is not None:
-            results = search.search(query, limit=limit, **filters)
+            # Fetch a wider pool so the space penalty decides what SURVIVES,
+            # not just the order of whatever fit in `limit` — a current-space
+            # match at raw rank 11 can now outlive a penalized cross-space hit.
+            results = search.search(query, limit=limit * 3, **filters)
             if default_space and not explicit_spaces:
                 results = self._apply_space_scores(results, default_space)
 
+            # Relevance floor: return fewer results rather than padding to
+            # `limit` with cross-space noise. Recency-vouched supplements
+            # (source="temporal") are exempt — their base score is not
+            # semantic by design. Graph-activated neighbours
+            # (source="activated"/"conflict") also bypass this floor: they are
+            # added by _spread_activation *after* the cut below, so a
+            # graph-vouched node may sit below the relevance floor by design.
+            floor = (
+                min_relevance if min_relevance is not None
+                else self.settings.recall_min_relevance_score
+            )
+            results = [
+                r for r in results
+                if r.get("score", 0) >= floor or r.get("source") == "temporal"
+            ]
             results = results[:limit]
 
             # Detect pure temporal queries (no topical signal after stripping)
@@ -605,6 +628,7 @@ class MemoryEngine:
                     results = self._supplement_temporal(
                         results if not is_pure_temporal else [],
                         limit, created_after, created_before, filters,
+                        default_space=default_space,
                     )
 
             results = self._spread_activation(results, limit)
@@ -615,7 +639,9 @@ class MemoryEngine:
             return results
 
         # Fallback to FTS only
-        fts_results = self.graph.fts_search(query, limit=limit)
+        # Wider pool so space scores decide survival (no relevance floor
+        # here: raw FTS scores are negated BM25, not on a [0,1] scale).
+        fts_results = self.graph.fts_search(query, limit=limit * 3)
         created_after = filters.get("created_after")
         created_before = filters.get("created_before")
         enriched = []
@@ -637,6 +663,7 @@ class MemoryEngine:
         if created_after and len(enriched) < limit:
             enriched = self._supplement_temporal(
                 enriched, limit, created_after, created_before, filters,
+                default_space=default_space,
             )
 
         enriched = self._spread_activation(enriched, limit)
@@ -677,10 +704,17 @@ class MemoryEngine:
 
         search = self._get_hybrid_search()
         if search is not None:
-            results = search.search(query, limit=limit, **filters)
+            # Wider pool + space scores + relevance floor, then cut — see
+            # recall_search_structured for rationale.
+            results = search.search(query, limit=limit * 3, **filters)
             if default_space and not explicit_spaces:
                 results = self._apply_space_scores(results, default_space)
 
+            floor = self.settings.recall_min_relevance_score
+            results = [
+                r for r in results
+                if r.get("score", 0) >= floor or r.get("source") == "temporal"
+            ]
             results = results[:limit]
 
             # Detect pure temporal queries
@@ -694,6 +728,7 @@ class MemoryEngine:
                     results = self._supplement_temporal(
                         results if not is_pure_temporal else [],
                         limit, created_after, created_before, filters,
+                        default_space=default_space,
                     )
 
             results = self._spread_activation(results, limit)
@@ -713,7 +748,9 @@ class MemoryEngine:
             return format_search_results(results)
 
         # Fallback to FTS only
-        fts_results = self.graph.fts_search(query, limit=limit)
+        # Wider pool so space scores decide survival (no relevance floor
+        # here: raw FTS scores are negated BM25, not on a [0,1] scale).
+        fts_results = self.graph.fts_search(query, limit=limit * 3)
         created_after = filters.get("created_after")
         created_before = filters.get("created_before")
         enriched = []
@@ -735,6 +772,7 @@ class MemoryEngine:
         if created_after and len(enriched) < limit:
             enriched = self._supplement_temporal(
                 enriched, limit, created_after, created_before, filters,
+                default_space=default_space,
             )
 
         enriched = self._spread_activation(enriched, limit)
@@ -895,24 +933,21 @@ class MemoryEngine:
     ) -> str | tuple[str, list[str]]:
         """Get compact whisper context for involuntary recall injection."""
         onboarding = self._maybe_get_onboarding_nudge(space=space)
-        if self.settings.whisper_reranker_enabled and not self._whisper_reranker_available:
-            logger.error(
-                "Whisper reranker is required but unavailable; returning empty whisper context. "
-                "prompt=%r session_id=%r",
+
+        # Reranker unavailable (model still downloading on a fresh install,
+        # or load failed): degrade to embedding-only whisper with a raised
+        # (cosine-scale) gate instead of going dark. The raised gate keeps
+        # degraded mode more conservative, never noisier.
+        reranker_active = (
+            self.settings.whisper_reranker_enabled and self._whisper_reranker_available
+        )
+        if self.settings.whisper_reranker_enabled and not reranker_active:
+            logger.warning(
+                "Whisper reranker unavailable (model not yet loaded?); degrading to "
+                "embedding-only whisper with raised gate. prompt=%r session_id=%r",
                 prompt[:80],
                 session_id,
             )
-            self.context_builder._log_decision(
-                session_id=session_id, space=space, prompt=prompt,
-                intent=None, outcome="silent_blackout",
-            )
-            maintenance_due = "" if onboarding else self._maybe_get_maintenance_due_signal()
-            text = "\n\n".join(
-                section for section in (maintenance_due, onboarding) if section
-            )
-            if _return_debug:
-                return text, []
-            return text
 
         result = self.context_builder.build_whisper_context(
             prompt=prompt,
@@ -922,16 +957,19 @@ class MemoryEngine:
             min_score=self.settings.whisper_min_relevance_score,
             candidate_pool_multiplier=self.settings.whisper_candidate_pool_multiplier,
             injected_content_max_chars=self.settings.whisper_injected_content_max_chars,
-            reranker_enabled=(
-                self.settings.whisper_reranker_enabled
-                and self._whisper_reranker_available
-            ),
+            reranker_enabled=reranker_active,
             reranker_model=self.settings.whisper_reranker_model,
             reranker_min_score=self.settings.whisper_reranker_min_score,
             reranker_blend_alpha=self.settings.whisper_reranker_blend_alpha,
             reranker_max_doc_chars=self.settings.whisper_reranker_max_doc_chars,
             recent_prompts=recent_prompts,
-            injection_gate=self.settings.whisper_injection_gate,
+            # Without the reranker the gate cuts raw_cosine, a weaker
+            # absolute signal — use the higher cosine-scale gate.
+            injection_gate=(
+                self.settings.whisper_injection_gate
+                if reranker_active
+                else self.settings.whisper_injection_gate_no_reranker
+            ),
             no_overlap_ce_floor=self.settings.whisper_no_overlap_ce_floor,
             no_overlap_cosine_floor=self.settings.whisper_no_overlap_cosine_floor,
             topic_shift_enabled=self.settings.whisper_topic_shift_enabled,
@@ -1722,12 +1760,22 @@ class MemoryEngine:
         created_after: str,
         created_before: str | None,
         filters: dict,
+        default_space: str | None = None,
     ) -> list[dict]:
         """Supplement results with SQL-based recent nodes when temporal filters are active.
 
         Fetches nodes directly by ``created`` column, deduplicates against
         existing results, applies type/tier/space filters, and appends to
         the result list up to *limit*.
+
+        Supplements are ordered by (space priority, recency) so temporal
+        recall honours the same current/global/other-space prioritization
+        applied to semantic results (see ``_apply_space_scores``): a newer
+        other-project node cannot outrank an older current-project one. The
+        base score stays a low placeholder (exempt from the relevance floor)
+        — this is prioritization, not scoring — and each result carries a
+        ``_space_factor`` so downstream re-sorts (e.g. whisper's temporal
+        recency sort) keep the same space priority.
         """
         existing_ids = {r["node"]["id"] for r in results}
         needed = limit - len(results)
@@ -1742,10 +1790,11 @@ class MemoryEngine:
         tiers_filter = filters.get("tiers")
         spaces_filter = filters.get("spaces")
 
-        added = 0
+        boost_global = self.settings.space_boost_global
+        boost_other = self.settings.space_boost_other
+
+        candidates: list[tuple[float, dict]] = []
         for node in recent:
-            if added >= needed:
-                break
             if node["id"] in existing_ids:
                 continue
             if types_filter and node["type"] not in types_filter:
@@ -1754,10 +1803,29 @@ class MemoryEngine:
                 continue
             if spaces_filter and node.get("space") not in spaces_filter:
                 continue
-            existing_ids.add(node["id"])
-            # Use a low base score so these don't outrank relevance-matched results
-            results.append({"node": node, "score": 0.001, "source": "temporal"})
-            added += 1
+            space = node.get("space")
+            if not default_space or space == default_space:
+                factor = 1.0
+            elif space is None:
+                factor = boost_global
+            else:
+                factor = boost_other
+            candidates.append((factor, node))
+
+        # Space priority first, recency second: an older current-space node
+        # outranks a newer other-space one.
+        candidates.sort(
+            key=lambda c: (c[0], c[1].get("created") or ""), reverse=True
+        )
+
+        for factor, node in candidates[:needed]:
+            # Low base score so these don't outrank relevance-matched results
+            # and stay exempt from the relevance floor; _space_factor carries
+            # the space prioritization into any downstream re-sort.
+            results.append({
+                "node": node, "score": 0.001, "source": "temporal",
+                "_space_factor": factor,
+            })
 
         return results
 

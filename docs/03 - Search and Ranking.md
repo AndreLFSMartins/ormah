@@ -135,6 +135,12 @@ Current defaults:
 - `space_boost_global = 1.0`
 - `space_boost_other = 0.6`
 
+Recall fetches a `3 x limit` pool from hybrid search **before** applying space scores, so the penalty decides which results survive the cut — not just the order of whatever fit in `limit`.
+
+## Recall relevance floor
+
+Deliberate recall drops results below `recall_min_relevance_score` (default `0.35`) instead of padding to `limit` with cross-space noise — recall may legitimately return fewer results than requested. Recency-vouched temporal supplements (`source="temporal"`) are exempt. Whisper's internal candidate fetch bypasses this floor (`min_relevance=0.0`): it applies its own floors and an absolute-signal gate downstream.
+
 ## Spreading Activation
 
 **Code**: `src/ormah/engine/memory_engine.py:_spread_activation()`
