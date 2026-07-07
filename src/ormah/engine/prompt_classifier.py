@@ -212,6 +212,16 @@ class PromptIntent:
     search_params: dict = field(default_factory=dict)
     """Extra kwargs to merge into ``recall_search_structured`` call."""
 
+    prompt_vec: np.ndarray | None = None
+    """The (normalised) embedding of the prompt computed during classification.
+
+    Callers that need the prompt's vector for other purposes (topic-shift
+    detection, affinity boost, whisper_log) should reuse this instead of
+    re-encoding — ``classify()`` already encoded the identical raw prompt
+    string with the same encoder. ``None`` only in the degenerate case where
+    the encoder returned a zero vector.
+    """
+
 
 class PromptClassifier:
     """Classify prompt intent using cosine similarity to archetype embeddings.
@@ -302,7 +312,7 @@ class PromptClassifier:
             matched.remove("continuation")
 
         if not matched:
-            return PromptIntent(categories=["general"])
+            return PromptIntent(categories=["general"], prompt_vec=prompt_vec)
 
         # Build merged search_params from all matched categories
         search_params: dict = {}
@@ -319,7 +329,9 @@ class PromptClassifier:
                     now - timedelta(days=_DEFAULT_TEMPORAL_DAYS)
                 ).isoformat()
 
-        return PromptIntent(categories=sorted(matched), search_params=search_params)
+        return PromptIntent(
+            categories=sorted(matched), search_params=search_params, prompt_vec=prompt_vec
+        )
 
     # ------------------------------------------------------------------
     # Time heuristics (only for temporal intent)

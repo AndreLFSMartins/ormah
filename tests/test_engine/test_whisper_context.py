@@ -2951,17 +2951,32 @@ class TestSessionBufferEviction:
 
 
 class TestEncodeOncePerWhisper:
-    """The prompt is embedded (encode) exactly once per whisper call (I15)."""
+    """The prompt is embedded (encode) exactly once per whisper call (I15).
 
-    def test_topic_shift_reuses_prompt_vec(self, mock_graph):
+    ``PromptClassifier.classify()`` encodes the raw prompt to score it
+    against archetypes; ``build_whisper_context`` reuses that same vector
+    (``intent.prompt_vec``) for topic-shift detection, the affinity boost,
+    and whisper_log instead of encoding again. The classifier must NOT be
+    mocked away here — doing so hides its internal ``encode()`` call and
+    would make the "encode once" assertion count only the *other* encodes,
+    silently passing even if classify() and the builder each encoded
+    separately (as happened before this test was fixed).
+    """
+
+    def test_classifier_and_prompt_vec_share_one_encode(self, mock_graph):
         prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         mock_engine = MagicMock()
         mock_engine.settings = _make_settings_mock()
+        mock_engine.settings.whisper_intent_threshold = 0.65
+
         mock_encoder = MagicMock()
         mock_encoder.encode.return_value = prompt_vec
-        # Orthogonal recent vector → topic shifted → whisper proceeds
-        mock_encoder.encode_batch.return_value = np.stack(
-            [np.array([0.0, 1.0, 0.0], dtype=np.float32)]
+        # Archetype vectors are orthogonal to the prompt on every category
+        # (and to the recent-prompt centroid), so intent falls back to
+        # "general" and topic-shift sees a real shift -- both real code
+        # paths, driven by the real (un-mocked) PromptClassifier.
+        mock_encoder.encode_batch.side_effect = lambda prompts: np.tile(
+            np.array([0.0, 1.0, 0.0], dtype=np.float32), (len(prompts), 1)
         )
         mock_hybrid = MagicMock()
         mock_hybrid.encoder = mock_encoder
@@ -2970,15 +2985,15 @@ class TestEncodeOncePerWhisper:
 
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
-        with patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None):
-            builder.build_whisper_context(
-                prompt="a fresh new topic entirely",
-                topic_shift_enabled=True,
-                topic_shift_threshold=0.75,
-                recent_prompts=["something else before"],
-                session_id="enc-1",
-            )
+        builder.build_whisper_context(
+            prompt="a fresh new topic entirely",
+            topic_shift_enabled=True,
+            topic_shift_threshold=0.75,
+            recent_prompts=["something else before"],
+            session_id="enc-1",
+        )
 
-        # encode() called exactly once (topic-shift reused the same vector;
-        # search's encode_query is a separate, deliberate call).
+        # encode() called exactly once for the whole whisper call: by
+        # PromptClassifier.classify(). Topic-shift, the affinity boost, and
+        # whisper_log all reuse intent.prompt_vec rather than re-encoding.
         assert mock_encoder.encode.call_count == 1

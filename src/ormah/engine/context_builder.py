@@ -409,16 +409,20 @@ class ContextBuilder:
             intent is not None and "continuation" in intent.categories
         )
 
-        # Compute prompt_vec once, up front — reused by topic-shift detection,
-        # the affinity boost, and whisper_log (the prompt was previously
-        # encoded separately for topic-shift and again for prompt_vec).
-        prompt_vec: np.ndarray | None = None
-        try:
-            hybrid_search = self.engine._get_hybrid_search()
-            if hybrid_search is not None:
-                prompt_vec = hybrid_search.encoder.encode(prompt)
-        except Exception as e:
-            logger.warning("Failed to compute prompt_vec: %s", e)
+        # Reuse the prompt vector PromptClassifier already computed (it encodes
+        # the same raw prompt string with the same encoder) instead of
+        # encoding again — this vector is then reused by topic-shift
+        # detection, the affinity boost, and whisper_log. Only falls back to
+        # a fresh encode when there's no classifier or it hit the degenerate
+        # zero-vector case.
+        prompt_vec: np.ndarray | None = intent.prompt_vec if intent is not None else None
+        if prompt_vec is None:
+            try:
+                hybrid_search = self.engine._get_hybrid_search()
+                if hybrid_search is not None:
+                    prompt_vec = hybrid_search.encoder.encode(prompt)
+            except Exception as e:
+                logger.warning("Failed to compute prompt_vec: %s", e)
 
         # Topic-shift detection: skip injection when topic hasn't changed
         if (
