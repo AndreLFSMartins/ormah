@@ -902,6 +902,10 @@ class MemoryEngine:
                 prompt[:80],
                 session_id,
             )
+            self.context_builder._log_decision(
+                session_id=session_id, space=space, prompt=prompt,
+                intent=None, outcome="silent_blackout",
+            )
             maintenance_due = "" if onboarding else self._maybe_get_maintenance_due_signal()
             text = "\n\n".join(
                 section for section in (maintenance_due, onboarding) if section
@@ -1116,6 +1120,30 @@ class MemoryEngine:
         }
         return usage, window
 
+    def _whisper_decision_stats(self, cutoff: str, window_days: int) -> dict[str, Any]:
+        """Return whisper outcome aggregates from whisper_decisions.
+
+        ``whisper_decisions`` records exactly one row per whisper call,
+        including silent outcomes, so silence_rate and injection_rate partition
+        all prompts in the selected stats window.
+        """
+        rows = self.db.conn.execute(
+            "SELECT outcome, COUNT(*) AS n FROM whisper_decisions "
+            "WHERE logged_at >= ? GROUP BY outcome",
+            (cutoff,),
+        ).fetchall()
+        breakdown = {row["outcome"]: row["n"] for row in rows}
+        total = sum(breakdown.values())
+        injected = breakdown.get("injected", 0)
+
+        return {
+            "window_days": window_days,
+            "prompts_total": total,
+            "injection_rate": injected / total if total else None,
+            "silence_rate": (total - injected) / total if total else None,
+            "outcome_breakdown": breakdown,
+        }
+
     def stats(self, days: int | None = None) -> dict[str, Any]:
         """Return the canonical stats payload for tray, CLI, UI, and diagnostics."""
         now = datetime.now(timezone.utc)
@@ -1129,6 +1157,10 @@ class MemoryEngine:
         }
         usage, window = self._usage_stats(now, days=days)
         whisper_health = compute_whisper_health(self.db.conn, now)
+        whisper_decisions = self._whisper_decision_stats(
+            cutoff=window["cutoff"],
+            window_days=window["days"],
+        )
 
         return {
             "generated_at": now.isoformat(),
@@ -1137,6 +1169,7 @@ class MemoryEngine:
             "store": store,
             "whisper": {
                 "feedback_health": whisper_health,
+                "decisions": whisper_decisions,
             },
         }
 
@@ -1747,6 +1780,10 @@ class MemoryEngine:
                 factor = boost_global
             else:
                 factor = boost_other
+            # Record the factor so the whisper injection gate can re-apply
+            # cross-space demotion to the absolute gate signal (which, unlike
+            # the blended score mutated here, carries no space penalty).
+            r["_space_factor"] = factor
             r["score"] = r.get("score", 0.0) * factor
 
         results.sort(key=lambda r: r.get("score", 0.0), reverse=True)

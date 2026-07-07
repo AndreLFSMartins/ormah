@@ -151,8 +151,23 @@ class Settings(BaseSettings):
     # Whisper nudge (periodic reminder to use ormah)
     whisper_nudge_interval: int = 10  # Nudge every N prompts (0 = disabled)
 
+    # --- Score contract ------------------------------------------------
+    # Two kinds of scores flow through retrieval; every threshold below
+    # documents which kind it cuts:
+    #   RANK-RELATIVE (ordering only): the blended hybrid `score` — RRF is
+    #     min-max normalized per query, so any query's best candidate scores
+    #     ~1.0 regardless of absolute quality. Absolute thresholds on it are
+    #     meaningless across queries; use it only to order candidates.
+    #   ABSOLUTE (gating): `ce_absolute` (cross-encoder score linearly
+    #     rescaled from [-12, +6] to [0, 1]) and `raw_cosine` (pre-penalty
+    #     vector similarity). Safe to compare against fixed thresholds.
+
     # Whisper (involuntary recall)
     whisper_max_nodes: int = 6
+    # Pre-rerank noise trim: a candidate reaches the reranker if either its
+    # RANK-RELATIVE blended score or its ABSOLUTE raw cosine clears this.
+    # Its job is only to spare the cross-encoder obvious junk — the absolute
+    # injection gate does the real cutting after reranking.
     whisper_min_relevance_score: float = 0.45
     # Candidate pool fed to the reranker/gate = whisper_max_nodes * this
     # multiplier. Retrieve-then-rerank needs a deep pool so the cross-encoder
@@ -167,6 +182,8 @@ class Settings(BaseSettings):
     # Whisper reranking (cross-encoder with linear-rescale blended scoring)
     whisper_reranker_enabled: bool = True
     whisper_reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+    # Post-affinity-boost floor on the RANK-RELATIVE blended score; defines
+    # which candidates enter whisper_log and the exploration pool.
     whisper_reranker_min_score: float = 0.40
     whisper_reranker_blend_alpha: float = 0.6
     whisper_reranker_max_doc_chars: int = 512
@@ -182,7 +199,9 @@ class Settings(BaseSettings):
     whisper_topic_shift_enabled: bool = True
     whisper_topic_shift_threshold: float = 0.75  # cosine sim above this = same topic
 
-    # Whisper injection gate (minimum blended score to justify injection)
+    # Whisper injection gate — cuts the ABSOLUTE gate score (ce_absolute
+    # when the reranker ran, raw_cosine otherwise, plus any affinity delta).
+    # 0.50 on the ce_absolute scale ≙ raw cross-encoder score −3.0.
     whisper_injection_gate: float = 0.50
 
     # Affinity boost (adaptive feedback loop)

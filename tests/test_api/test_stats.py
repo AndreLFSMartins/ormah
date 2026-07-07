@@ -61,6 +61,9 @@ def test_stats_empty(stats_setup):
     assert data["usage"]["memories_this_week"] == 0
     assert data["store"]["total_nodes"] >= 1
     assert "feedback_health" in data["whisper"]
+    assert data["whisper"]["decisions"]["prompts_total"] == 0
+    assert data["whisper"]["decisions"]["injection_rate"] is None
+    assert data["whisper"]["decisions"]["silence_rate"] is None
     # window.days is days elapsed in the current calendar week (1-7), not a
     # fixed rolling-window size, since the default is now a fixed Mon-Sun week.
     assert 1 <= data["window"]["days"] <= 7
@@ -145,3 +148,41 @@ def test_custom_window(stats_setup):
     data = client.get("/stats", params={"days": 30}).json()
     assert data["usage"]["whispers_used_this_week"] == 1
     assert data["window"]["days"] == 30
+
+
+def _log_decision(engine, *, outcome, logged_at=None, session_id="s1"):
+    logged_at = logged_at or datetime.now(timezone.utc).isoformat()
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO whisper_decisions "
+            "(session_id, space, prompt_hash, intent, outcome, "
+            "candidate_count, injected_count, max_gate_score, logged_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, None, "hash", None, outcome, 0, 0, None, logged_at),
+        )
+
+
+def test_whisper_decision_rates_partition(stats_setup):
+    """silence_rate + injection_rate must cover all prompts."""
+    client, engine = stats_setup
+    _log_decision(engine, outcome="injected")
+    _log_decision(engine, outcome="injected")
+    _log_decision(engine, outcome="silent_gate")
+    _log_decision(engine, outcome="silent_short")
+    data = client.get("/stats").json()["whisper"]["decisions"]
+    assert data["prompts_total"] == 4
+    assert data["injection_rate"] == pytest.approx(0.5)
+    assert data["silence_rate"] == pytest.approx(0.5)
+    assert data["outcome_breakdown"] == {
+        "injected": 2, "silent_gate": 1, "silent_short": 1,
+    }
+
+
+def test_whisper_decision_window(stats_setup):
+    client, engine = stats_setup
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    _log_decision(engine, outcome="injected", logged_at=old)
+    assert client.get("/stats").json()["whisper"]["decisions"]["prompts_total"] == 0
+    data = client.get("/stats", params={"days": 30}).json()["whisper"]["decisions"]
+    assert data["prompts_total"] == 1
+    assert data["window_days"] == 30
