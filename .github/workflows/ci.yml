@@ -27,8 +27,8 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: uv sync --extra dev
-      - name: Ruff (non-blocking — pre-existing findings; tighten once clean)
-        run: uv run ruff check src/ tests/ || true
+      - name: Ruff
+        run: uv run ruff check src/ tests/
 
   # Eval gating is deliberately NOT in CI yet: the corpora are local-only
   # (real data, gitignored) and still growing, so fail-below bars would be

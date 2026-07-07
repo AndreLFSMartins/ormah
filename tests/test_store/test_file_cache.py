@@ -44,7 +44,7 @@ def test_stale_cache_entry_recovers(tmp_path):
     """If the cached path no longer exists, _find_file still finds via glob."""
     store = FileStore(tmp_path / "nodes")
     node = _make_node()
-    path = store.save(node)
+    store.save(node)
 
     # Corrupt the cache entry to point to a nonexistent path
     store._id_cache[node.id] = tmp_path / "nodes" / "ghost.md"

@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from ormah.background.hippocampus import (
     HippocampusHandler,
@@ -20,7 +18,6 @@ from ormah.background.hippocampus import (
     start_hippocampus,
     stop_hippocampus,
 )
-from ormah.config import Settings
 from ormah.engine.memory_engine import MemoryEngine
 
 _LLM_PATCH = "ormah.background.llm_client.llm_generate"

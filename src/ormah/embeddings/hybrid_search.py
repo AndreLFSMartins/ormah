@@ -18,6 +18,9 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ormah.config import Settings
+from ormah.embeddings.encoder import get_encoder
+from ormah.embeddings.vector_store import VectorStore
+from ormah.index.graph import GraphIndex
 
 if TYPE_CHECKING:
     from ormah.index.db import Database
@@ -33,9 +36,6 @@ _QUESTION_PATTERN = re.compile(
 def _is_question_query(query: str) -> bool:
     """Detect whether a query is a natural language question."""
     return _QUESTION_PATTERN.search(query) is not None
-from ormah.embeddings.encoder import get_encoder
-from ormah.embeddings.vector_store import VectorStore
-from ormah.index.graph import GraphIndex
 
 
 def _reciprocal_rank_fusion(
