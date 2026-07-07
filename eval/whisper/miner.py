@@ -18,6 +18,10 @@ from pathlib import Path
 
 _LOCAL_DIR = Path(__file__).parent / "corpus" / "local"
 
+
+class MinerError(Exception):
+    """Raised when the live DB cannot be mined (e.g. missing schema)."""
+
 # Draft-label thresholds (evidence heuristics, not ground truth).
 _DRAFT_INJECT_SCORE = 0.55   # injected + strong score → draft should_inject
 _DRAFT_EXCLUDE_SCORE = 0.30  # not injected + weak score → draft should_not_inject
@@ -42,20 +46,52 @@ def _default_classify(prompt: str) -> str:
 
 
 def _load_prompt_groups(conn: sqlite3.Connection) -> list[dict]:
-    """Group whisper_log rows by prompt_hash into candidate prompt records."""
+    """Group whisper_log rows by (session_id, prompt_hash) into prompt records.
+
+    Grouping by prompt_hash alone would merge the same prompt issued in
+    different sessions into one case with an unrelated union of candidates;
+    the session is part of a whisper call's identity.
+
+    Only groups that also appear in ``whisper_decisions`` (matched on
+    session_id + prompt_hash) are kept. ``whisper_log`` is ALSO written by
+    deliberate-recall exposures (``_log_feedback_candidates``, was_injected=1),
+    which are not whisper decisions; ``whisper_decisions`` has exactly one row
+    per real whisper call, so the join filters recall traffic out. Rows that
+    predate the ``whisper_decisions`` table simply don't match and are excluded.
+    """
+    has_decisions = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='whisper_decisions'"
+    ).fetchone()
+    if has_decisions is None:
+        raise MinerError(
+            "whisper_decisions table not found in the live DB. It records one row per "
+            "whisper call and is required to separate real whisper decisions from "
+            "deliberate-recall exposures (both land in whisper_log). Upgrade ormah and "
+            "start the server once so the schema is created, then re-run mining."
+        )
+    decision_keys = {
+        (r["session_id"], r["prompt_hash"])
+        for r in conn.execute(
+            "SELECT DISTINCT session_id, prompt_hash FROM whisper_decisions"
+        ).fetchall()
+    }
+
     rows = conn.execute(
         """
-        SELECT prompt_hash, prompt_text, space, node_id,
+        SELECT session_id, prompt_hash, prompt_text, space, node_id,
                MAX(score) AS score, MAX(was_injected) AS was_injected,
                MAX(logged_at) AS logged_at
         FROM whisper_log
         WHERE prompt_text IS NOT NULL AND TRIM(prompt_text) != ''
-        GROUP BY prompt_hash, node_id
+        GROUP BY session_id, prompt_hash, node_id
         """
     ).fetchall()
-    groups: dict[str, dict] = {}
+    groups: dict[tuple[str, str], dict] = {}
     for r in rows:
-        g = groups.setdefault(r["prompt_hash"], {
+        key = (r["session_id"], r["prompt_hash"])
+        if key not in decision_keys:
+            continue  # recall-exposure row or pre-whisper_decisions history
+        g = groups.setdefault(key, {
             "prompt": r["prompt_text"],
             "space": r["space"],
             "nodes": {},
@@ -178,7 +214,14 @@ def mine(db_path: Path, limit: int = 80, out_path: Path | None = None,
             "`ormah eval whisper import-labels` to clear the provisional flags.\n"
         )
         for i, g in enumerate(picked, start=1):
-            node_ids = list(g["nodes"].keys())[:_MAX_MEMORIES_PER_CASE]
+            # Deterministic truncation: keep injected candidates first, then by
+            # score, then node_id for stability — never let dict iteration order
+            # drop the actually-injected node from an over-long candidate set.
+            ordered = sorted(
+                g["nodes"].items(),
+                key=lambda kv: (not kv[1]["was_injected"], -kv[1]["score"], kv[0]),
+            )
+            node_ids = [nid for nid, _ in ordered[:_MAX_MEMORIES_PER_CASE]]
             snapshots = _snapshot_nodes(conn, node_ids)
             if not snapshots:
                 continue  # every involved node was deleted since logging

@@ -114,8 +114,15 @@ def write_results(
         f.write(json.dumps(entry) + "\n")
 
 
-def load_previous_run(results_dir: Path, corpus_label: str = "golden") -> dict | None:
-    """Return the last history entry for corpus_label, or None if no history exists."""
+def load_previous_run(
+    results_dir: Path, corpus_label: str = "golden", k: int | None = None
+) -> dict | None:
+    """Return the last comparable history entry, or None if none exists.
+
+    Runs at a different ``k`` are not comparable regression baselines (recall@8
+    vs recall@4 measure different things), so entries are filtered by ``k``
+    when it is given.
+    """
     history_file = results_dir / "history.jsonl"
     if not history_file.exists():
         return None
@@ -125,6 +132,9 @@ def load_previous_run(results_dir: Path, corpus_label: str = "golden") -> dict |
         if not line:
             continue
         entry = json.loads(line)
-        if entry.get("corpus_label") == corpus_label:
-            last = entry
+        if entry.get("corpus_label") != corpus_label:
+            continue
+        if k is not None and entry.get("k") != k:
+            continue
+        last = entry
     return last

@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from eval.settings import RETRIEVAL_EVAL_SETTINGS_OVERRIDES
+
 _EVAL_DIR = Path(__file__).parent
 _CORPUS_DIR = _EVAL_DIR / "corpus"
 _RESULTS_DIR = _EVAL_DIR / "results"
@@ -12,12 +14,16 @@ _EVAL_DB_DIR = _EVAL_DIR / "eval_db"
 
 
 def _make_engine():
-    """Create a MemoryEngine pointing at the isolated recall eval DB."""
+    """Create a MemoryEngine pointing at the isolated recall eval DB.
+
+    Settings are pinned to production defaults (eval/settings.py) so the
+    baseline is comparable across machines regardless of local ORMAH_* env.
+    """
     from ormah.config import Settings
     from ormah.engine.memory_engine import MemoryEngine
 
     (_EVAL_DB_DIR / "nodes").mkdir(parents=True, exist_ok=True)
-    settings = Settings(memory_dir=_EVAL_DB_DIR)
+    settings = Settings(memory_dir=_EVAL_DB_DIR, **RETRIEVAL_EVAL_SETTINGS_OVERRIDES)
     engine = MemoryEngine(settings)
     engine.startup()
     return engine
@@ -52,7 +58,7 @@ def cmd_eval_recall_run(args):
     finally:
         engine.shutdown()
 
-    previous = load_previous_run(_RESULTS_DIR, corpus_label=corpus_label)
+    previous = load_previous_run(_RESULTS_DIR, corpus_label=corpus_label, k=k)
     prev_agg = previous["aggregate"] if previous else None
     report = format_report(result.aggregate, result.case_results, k=k, corpus_label=corpus_label, previous=prev_agg)
     print(report)
@@ -85,33 +91,12 @@ def cmd_eval_recall_import_labels(args):
     print(f"Applied {n} labels to corpus files.")
 
 
-def cmd_eval_recall_capture_session(args):
-    from eval.recall.session import capture_session
-    import json
-
-    sessions_dir = _CORPUS_DIR / "sessions"
-    entry = capture_session(Path(args.path), sessions_dir)
-    out_file = sessions_dir / f"{entry['id']}.jsonl"
-    out_file.write_text(json.dumps(entry) + "\n")
-    print(f"Captured session -> {out_file} ({len(entry['prompts'])} prompts)")
-
-
 def _corpus_files_for_label(label: str) -> list[Path]:
     if label == "golden":
         return list((_CORPUS_DIR / "golden").glob("*.jsonl"))
     if label == "synthetic":
         return list((_CORPUS_DIR / "synthetic").glob("*.jsonl")) if (_CORPUS_DIR / "synthetic").exists() else []
-    if label == "sessions":
-        # Captured session files are raw transcripts for the labeling
-        # workflow, not runnable cases (no memories to seed) — evaluating
-        # them would score against an empty database.
-        print(
-            "Error: 'sessions' is not a runnable corpus — captured transcripts have no "
-            "seedable memories. Use them via the labeling workflow instead.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    # "all" = every runnable corpus (sessions excluded, see above)
+    # "all" = every runnable corpus
     files = list((_CORPUS_DIR / "golden").glob("*.jsonl"))
     if (_CORPUS_DIR / "synthetic").exists():
         files += list((_CORPUS_DIR / "synthetic").glob("*.jsonl"))
@@ -151,15 +136,28 @@ def _check_fail_below(aggregate: dict, spec: str) -> int:
 
 
 def _check_regression(current: dict, previous: dict, spec: str) -> int:
-    """Parse 'delta=0.05' and fail if any metric drops more than delta. Returns 1 if regression."""
+    """Parse 'delta=0.05' and fail if any metric worsens by more than delta.
+
+    Quality metrics (higher is better) regress when they drop; rate metrics
+    (false_negative_rate, false_positive_rate — lower is better) regress when
+    they rise. Returns 1 if any regression.
+    """
     delta = float(spec.split("=", 1)[1]) if "=" in spec else 0.05
     failed = False
-    for key in ("recall", "precision", "f1", "mrr"):
+    higher_better = ("recall", "precision", "f1", "mrr")
+    lower_better = ("false_negative_rate", "false_positive_rate")
+    for key in higher_better + lower_better:
         cur = current.get(key)
         prev = previous.get(key)
         if cur is None or prev is None:
             continue
-        if (prev - cur) > delta:
-            print(f"REGRESSION: {key} dropped {prev:.3f} -> {cur:.3f} (delta={prev-cur:.3f} > {delta})", file=sys.stderr)
+        worsened = (prev - cur) if key in higher_better else (cur - prev)
+        if worsened > delta:
+            direction = "dropped" if key in higher_better else "rose"
+            print(
+                f"REGRESSION: {key} {direction} {prev:.3f} -> {cur:.3f} "
+                f"(delta={worsened:.3f} > {delta})",
+                file=sys.stderr,
+            )
             failed = True
     return 1 if failed else 0

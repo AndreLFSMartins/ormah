@@ -10,6 +10,18 @@ tracked.
 - `golden/golden.jsonl` — hand-authored golden cases (JSONL, one case per line)
 - `local/` — cases mined from the live DB via `ormah eval whisper mine`
 
+## Mined cases are provisional until reviewed
+
+`ormah eval whisper mine` reads the live `whisper_log` **read-only** and drafts
+labels from what whisper actually did — circular evidence, not ground truth.
+Every mined case carries `"provisional": true` and is **skipped by
+`ormah eval whisper run`** (use `--include-provisional` for a smoke run only).
+Review the drafts in `local/mined-review.md`, correct wrong labels in
+`local/mined.jsonl`, then run `ormah eval whisper import-labels` to clear the
+flags and let the cases bind. The miner mines only prompts backed by a
+`whisper_decisions` row, so deliberate-recall exposures (which also land in
+`whisper_log`) are excluded.
+
 ## Case schema
 
 Each case: `id`, `space`, `memories[]`, `prompts[]`, and optionally

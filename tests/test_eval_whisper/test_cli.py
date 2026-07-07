@@ -82,6 +82,61 @@ class TestEvalWhisperCLI:
         assert run_mock.call_args.kwargs["preserve_self"] is True
         engine.shutdown.assert_called_once()
 
+    def test_provisional_cases_excluded_by_default(self, monkeypatch, capsys):
+        from eval.whisper.cli import cmd_eval_whisper_run
+
+        cases = [
+            {"id": "confirmed", "prompts": [{"text": "q", "category": "factual"}]},
+            {"id": "mined", "provisional": True, "prompts": [{"text": "m", "category": "factual"}]},
+        ]
+        engine = MagicMock()
+        run_mock = MagicMock(return_value=SimpleNamespace(aggregate={}, category_aggregates={}))
+        monkeypatch.setattr("eval.whisper.corpus.load_corpus", lambda path: cases)
+        monkeypatch.setattr("eval.whisper.runner.run_whisper_eval", run_mock)
+        monkeypatch.setattr("eval.whisper.report.format_report", lambda *a, **k: "REPORT")
+        monkeypatch.setattr("eval.whisper.cli._make_engine", lambda: engine)
+
+        args = Namespace(corpus=None, category=None, simulate_session=False,
+                         preserve_self=False, json=False, show_failures=False,
+                         include_provisional=False)
+        cmd_eval_whisper_run(args)
+
+        passed = run_mock.call_args.args[0]
+        assert [c["id"] for c in passed] == ["confirmed"]
+        assert "Skipping 1 provisional" in capsys.readouterr().err
+
+    def test_all_provisional_corpus_errors(self, monkeypatch, capsys):
+        from eval.whisper.cli import cmd_eval_whisper_run
+
+        cases = [{"id": "mined", "provisional": True, "prompts": [{"text": "m"}]}]
+        monkeypatch.setattr("eval.whisper.corpus.load_corpus", lambda path: cases)
+        monkeypatch.setattr("eval.whisper.cli._make_engine", lambda: MagicMock())
+
+        args = Namespace(corpus=None, category=None, simulate_session=False,
+                         preserve_self=False, json=False, show_failures=False,
+                         include_provisional=False)
+        with pytest.raises(SystemExit, match="1"):
+            cmd_eval_whisper_run(args)
+        assert "no confirmed cases" in capsys.readouterr().err
+
+    def test_include_provisional_flag_includes_mined(self, monkeypatch):
+        from eval.whisper.cli import cmd_eval_whisper_run
+
+        cases = [{"id": "mined", "provisional": True,
+                  "prompts": [{"text": "m", "category": "factual"}]}]
+        engine = MagicMock()
+        run_mock = MagicMock(return_value=SimpleNamespace(aggregate={}, category_aggregates={}))
+        monkeypatch.setattr("eval.whisper.corpus.load_corpus", lambda path: cases)
+        monkeypatch.setattr("eval.whisper.runner.run_whisper_eval", run_mock)
+        monkeypatch.setattr("eval.whisper.report.format_report", lambda *a, **k: "REPORT")
+        monkeypatch.setattr("eval.whisper.cli._make_engine", lambda: engine)
+
+        args = Namespace(corpus=None, category=None, simulate_session=False,
+                         preserve_self=False, json=False, show_failures=False,
+                         include_provisional=True)
+        cmd_eval_whisper_run(args)
+        assert [c["id"] for c in run_mock.call_args.args[0]] == ["mined"]
+
     def test_cmd_eval_whisper_run_uses_default_corpus_path(self, monkeypatch):
         from eval.whisper.cli import _CORPUS_DIR, cmd_eval_whisper_run
 

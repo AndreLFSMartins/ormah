@@ -5,31 +5,16 @@ import json
 import sys
 from pathlib import Path
 
+from eval.settings import RETRIEVAL_EVAL_SETTINGS_OVERRIDES
+
 _EVAL_DIR = Path(__file__).parent
 _CORPUS_DIR = _EVAL_DIR / "corpus"
 _EVAL_DB_DIR = _EVAL_DIR / "eval_db"
 
 _EVAL_SETTINGS_OVERRIDES = {
-    # Search / hybrid retrieval used by whisper
-    "embedding_provider": "local",
-    "embedding_model": "BAAI/bge-base-en-v1.5",
-    "embedding_dim": 768,
-    "fts_weight": 0.4,
-    "vector_weight": 0.6,
-    "similarity_threshold": 0.4,
-    "rrf_k": 60,
-    "fts_only_dampening": 0.5,
-    "min_result_score": 0.1,
-    "rrf_min_spread_ratio": 0.05,
-    "question_fts_weight_scale": 0.3,
-    "question_vector_weight_scale": 1.5,
-    "question_similarity_blend_weight": 0.85,
-    "similarity_blend_weight": 0.5,
-    "title_match_boost": 2.0,
-    "length_penalty_threshold": 300,
-    # Whisper pipeline
-    "whisper_out_enabled": False,
-    "claude_maintenance_enabled": False,
+    # Shared environment-independent retrieval pins (see eval/settings.py).
+    **RETRIEVAL_EVAL_SETTINGS_OVERRIDES,
+    # Whisper pipeline (re-enables the reranker the shared base disables)
     "whisper_max_nodes": 6,
     "whisper_min_relevance_score": 0.45,
     "whisper_candidate_pool_multiplier": 5,
@@ -49,8 +34,6 @@ _EVAL_SETTINGS_OVERRIDES = {
     "whisper_no_overlap_cosine_floor": 0.70,
     "whisper_exploration_enabled": True,
     # Ranking adjustments used by whisper post-processing
-    "space_boost_global": 1.0,
-    "space_boost_other": 0.6,
     "affinity_similarity_threshold": 0.70,
     "affinity_half_life_days": 30.0,
     "affinity_max_boost": 0.15,
@@ -86,6 +69,25 @@ def cmd_eval_whisper_run(args):
         cases = load_corpus(corpus_path)
     except CorpusError as e:
         print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Provisional (mined, unreviewed) labels must not bind: their drafts
+    # describe current behavior, not ground truth, until a human confirms
+    # them via `ormah eval whisper import-labels`.
+    if not getattr(args, "include_provisional", False):
+        provisional = sum(1 for c in cases if c.get("provisional"))
+        if provisional:
+            print(
+                f"Skipping {provisional} provisional cases (unreviewed labels do not bind; "
+                "use --include-provisional for a smoke run)",
+                file=sys.stderr,
+            )
+        cases = [c for c in cases if not c.get("provisional")]
+    if not cases:
+        print(
+            f"Error: no confirmed cases in corpus '{corpus_path}' — refusing to pass on zero cases",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if getattr(args, "category", None):
@@ -124,10 +126,12 @@ def cmd_eval_whisper_run(args):
 
 
 def cmd_eval_whisper_mine(args):
-    from eval.whisper.miner import mine
+    from ormah.config import Settings
+    from eval.whisper.miner import MinerError, mine
 
-    db = Path(getattr(args, "db", None) or
-              Path.home() / ".local" / "share" / "ormah" / "memory" / "index.db")
+    # Mine from the CONFIGURED live DB (respects ORMAH_MEMORY_DIR / .env),
+    # not a hardcoded default path.
+    db = Path(getattr(args, "db", None)) if getattr(args, "db", None) else Settings().db_path
     if not db.exists():
         print(f"Error: live DB not found at {db}", file=sys.stderr)
         sys.exit(1)
@@ -148,6 +152,9 @@ def cmd_eval_whisper_mine(args):
         mined_path, review_path = mine(
             db, limit=int(getattr(args, "limit", 80)), out_path=out, classify=classify,
         )
+    except MinerError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     finally:
         engine.shutdown()
     n = sum(1 for line in mined_path.read_text().splitlines() if line.strip())
