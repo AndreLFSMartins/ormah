@@ -6,8 +6,6 @@ from ormah.background.llm_client import reset_adapter
 
 
 def test_ingest_provider_configured_reflects_adapter(monkeypatch):
-    from ormah.background import llm_client
-
     reset_adapter()
     monkeypatch.setattr(llm_client, "get_adapter", lambda *a, **k: None)
     assert llm_client.ingest_provider_configured(object()) is False
