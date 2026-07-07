@@ -19,6 +19,7 @@ from ormah.engine.maintenance_signal import (
     is_maintenance_due_signal,
 )
 from ormah.engine.tier_manager import TierManager
+from ormah.engine.whisper_health import compute_whisper_health
 from ormah.engine.traversal import (
     format_node_with_neighbors,
     format_search_results,
@@ -1070,6 +1071,9 @@ class MemoryEngine:
             "total_nodes": total,
             "by_tier": tier_counts,
             "total_edges": edge_count,
+            "whisper_health": compute_whisper_health(
+                self.db.conn, datetime.now(timezone.utc)
+            ),
         }
 
     # --- Merge operations ---

@@ -69,7 +69,9 @@ def test_recall_not_found(client):
 def test_stats(client):
     resp = client.get("/admin/stats")
     assert resp.status_code == 200
-    assert "total_nodes" in resp.json()
+    body = resp.json()
+    assert "total_nodes" in body
+    assert "whisper_health" in body
 
 
 def test_backup_status_empty_store(client):
