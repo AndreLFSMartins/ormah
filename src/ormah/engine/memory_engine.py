@@ -1686,6 +1686,10 @@ class MemoryEngine:
                 factor = boost_global
             else:
                 factor = boost_other
+            # Record the factor so the whisper injection gate can re-apply
+            # cross-space demotion to the absolute gate signal (which, unlike
+            # the blended score mutated here, carries no space penalty).
+            r["_space_factor"] = factor
             r["score"] = r.get("score", 0.0) * factor
 
         results.sort(key=lambda r: r.get("score", 0.0), reverse=True)

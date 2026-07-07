@@ -2449,6 +2449,78 @@ class TestGateScoreContract:
 
         assert "Legacy scored result" in result
 
+    def test_identity_prompt_exempt_from_absolute_gate(self, mock_graph):
+        """Identity-only prompts skip the reranker, so they carry no
+        ce_absolute; gating them on raw cosine alone silences identity recall.
+        A name matched below the cosine gate must still inject."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        mock_classifier = MagicMock()
+        mock_classifier.classify.return_value = PromptIntent(categories=["identity"])
+        builder._classifier = mock_classifier
+
+        # Global identity node, raw cosine well below the 0.50 gate.
+        node = _make_node_dict("id-name", "User's name is Alena", space=None)
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.80, "source": "hybrid", "raw_cosine": 0.40},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="what is my name",
+            min_score=0.1,
+            reranker_enabled=True,
+            injection_gate=0.50,
+        )
+
+        assert "User's name is Alena" in result
+
+    def test_cross_space_memory_demoted_below_gate(self, mock_graph):
+        """The gate re-applies cross-space demotion the absolute signal drops:
+        a wrong-project memory the CE/cosine rates highly is still gated out."""
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = _make_node_dict("other-proj", "Auth in project B uses JWT", space="project-b")
+        mock_engine.recall_search_structured.return_value = [
+            # raw_cosine 0.72 clears 0.50 alone, but other-project factor 0.6
+            # → 0.72 * 0.6 = 0.432 < 0.50: cross-project leakage prevented.
+            {"node": node, "score": 0.80, "source": "hybrid",
+             "raw_cosine": 0.72, "_space_factor": 0.6},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="how do we handle auth",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+        )
+
+        assert "Auth in project B uses JWT" not in result
+
+    def test_low_confidence_memory_demoted_below_gate(self, mock_graph):
+        """The gate re-applies the confidence factor: a low-confidence memory
+        the cosine rates highly is demoted below the gate."""
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = _make_node_dict("shaky", "Auth uses session cookies", space=None)
+        node["confidence"] = 0.2  # confidence_factor 0.4 + 0.6*0.2 = 0.52
+        mock_engine.recall_search_structured.return_value = [
+            # 0.72 * 0.52 = 0.374 < 0.50: low-confidence memory gated out.
+            {"node": node, "score": 0.80, "source": "hybrid", "raw_cosine": 0.72},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="how does auth work",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+        )
+
+        assert "Auth uses session cookies" not in result
+
 
 class TestWhisperDecisions:
     """Every whisper call writes exactly one whisper_decisions row (I10)."""

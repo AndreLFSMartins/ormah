@@ -171,17 +171,30 @@ def _gate_score(r: dict) -> float:
     when the reranker didn't run. The affinity delta is included so learned
     feedback can still lift a candidate over the gate. The blended `score`
     remains the ordering key.
+
+    The raw absolute signals (ce_absolute, raw_cosine) are pure relevance and
+    carry none of the *suppression* factors the pre-contract blended gate
+    applied: cross-space demotion (_apply_space_scores) and the confidence
+    factor. Both are folded back in here so a wrong-project or low-confidence
+    memory must clear a higher bar — they are <= 1.0, so they can only push a
+    candidate below the gate, never lift noise over it. The blended fallback
+    already contains both, so it is returned unscaled.
     """
+    affinity = r.get("_affinity_boost", 0.0)
     ce = r.get("ce_absolute")
-    if ce is not None:
-        return ce + r.get("_affinity_boost", 0.0)
     cos = r.get("raw_cosine")
-    if cos is not None:
-        return cos + r.get("_affinity_boost", 0.0)
-    # Legacy/test results carry neither signal; fall back to the blended
-    # score (which already contains any affinity boost) so behavior degrades
-    # to the pre-contract gate rather than rejecting.
-    return r.get("score", 0.0)
+    if ce is None and cos is None:
+        # Legacy/FTS-only/spread-activation results carry neither absolute
+        # signal; fall back to the blended score (which already contains the
+        # suppression factors and any affinity boost) so behavior degrades to
+        # the pre-contract gate rather than rejecting.
+        return r.get("score", 0.0)
+    node = r.get("node", {})
+    confidence = node.get("confidence")
+    confidence_factor = 0.4 + 0.6 * (1.0 if confidence is None else confidence)
+    space_factor = r.get("_space_factor", 1.0)
+    signal = ce if ce is not None else cos
+    return signal * confidence_factor * space_factor + affinity
 
 
 def _first_sentence_truncate(content: str, max_len: int) -> str:
@@ -595,10 +608,18 @@ class ContextBuilder:
         # the blended score is rank-relative and cannot reject a weak query's
         # least-bad match; it stays the ordering key only). Temporal queries
         # are exempt (they rely on time filtering, not semantic relevance).
+        #
+        # Identity-only prompts are exempt too: the reranker is deliberately
+        # skipped for them (line ~501), so they never receive a ce_absolute,
+        # and their candidate pool is already narrowed to global identity
+        # results and topically filtered above. Gating them on raw cosine
+        # alone silences identity recall (e.g. a name matched via FTS/title
+        # has cosine well below the gate) — the exact regression the score
+        # contract must not introduce.
         max_gate_score: float | None = None
         if search_results:
             max_gate_score = max(_gate_score(r) for r in search_results)
-        if not has_temporal and search_results:
+        if not has_temporal and not identity_only and search_results:
             if max_gate_score < injection_gate:
                 logger.info(
                     "Whisper diagnostics: prompt=%r gate_reject max_gate_score=%.3f gate=%.3f",
