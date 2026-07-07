@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,6 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
     Does NOT call the LLM — pure similarity-based clustering.
     """
     try:
-        from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
     except ImportError:
         return []

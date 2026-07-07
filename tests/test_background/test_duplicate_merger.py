@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from unittest.mock import patch, MagicMock
 
-_LLM_PATCH = "ormah.background.llm_client.llm_generate"
-
 from ormah.models.node import CreateNodeRequest, NodeType
+
+_LLM_PATCH = "ormah.background.llm_client.llm_generate"
 
 
 def _create_pair(engine, title_a="Python language", content_a="Python is a programming language.",

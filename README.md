@@ -188,6 +188,23 @@ make install
 uv run pytest
 ```
 
+### Retrieval evals
+
+Two golden-corpus eval harnesses measure retrieval quality from a source checkout:
+
+```bash
+make eval                       # whisper + recall evals with fail-below quality bars
+ormah eval whisper run          # whisper pipeline eval (--show-failures, --category, --fail-below)
+ormah eval recall run           # recall/retrieval eval (--fail-below)
+ormah eval whisper mine         # mine provisional cases from your live whisper_log (read-only)
+ormah eval whisper import-labels  # confirm mined labels after human review
+```
+
+Eval corpora are intentionally **local-only and gitignored**: they seed real
+memories from the developer's own usage, so they never ship in the repo. See
+`eval/whisper/corpus/README.md` for the case-design and honest-labeling rules.
+CI runs tests and lint only; eval bars are enforced locally via `make eval`.
+
 ## Release Process
 
 Releases are published through the manual GitHub Actions `Release` workflow. The workflow

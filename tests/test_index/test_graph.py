@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from ormah.index.graph import GraphIndex
-from ormah.models.node import MemoryNode, NodeType
 
 
 @pytest.fixture
