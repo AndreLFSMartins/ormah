@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from ormah.engine import memory_engine
-from ormah.models.node import CreateNodeRequest, NodeType
+from ormah.models.node import NodeType
 
 _LLM_PATCH = "ormah.background.llm_client.ingest_llm_generate"
 
