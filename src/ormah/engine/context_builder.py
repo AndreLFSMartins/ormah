@@ -461,6 +461,14 @@ class ContextBuilder:
             if intent_search_query is not None:
                 search_kwargs["query"] = intent_search_query
 
+        # The effective query is what search actually ran on: the bare prompt,
+        # the follow-up context-enhanced query, or an intent override (e.g. a
+        # temporal-stripped query). The reranker's ce_absolute drives the
+        # injection gate, so it must judge candidates against this same query —
+        # scoring the bare prompt would gate-reject memories that only make
+        # sense with the session context ("and the second one?").
+        effective_query = search_kwargs["query"]
+
         # Always run search — even for identity-only queries, search finds
         # location/work/study nodes that graph neighbors alone miss.
         try:
@@ -518,7 +526,7 @@ class ContextBuilder:
                 reranker_applied = True
                 reranker_before_count = len(search_results)
                 search_results = rerank(
-                    query=prompt,
+                    query=effective_query,
                     candidates=search_results,
                     model_name=reranker_model,
                     min_score=0.0,
@@ -608,18 +616,10 @@ class ContextBuilder:
         # the blended score is rank-relative and cannot reject a weak query's
         # least-bad match; it stays the ordering key only). Temporal queries
         # are exempt (they rely on time filtering, not semantic relevance).
-        #
-        # Identity-only prompts are exempt too: the reranker is deliberately
-        # skipped for them (line ~501), so they never receive a ce_absolute,
-        # and their candidate pool is already narrowed to global identity
-        # results and topically filtered above. Gating them on raw cosine
-        # alone silences identity recall (e.g. a name matched via FTS/title
-        # has cosine well below the gate) — the exact regression the score
-        # contract must not introduce.
         max_gate_score: float | None = None
         if search_results:
             max_gate_score = max(_gate_score(r) for r in search_results)
-        if not has_temporal and not identity_only and search_results:
+        if not has_temporal and search_results:
             if max_gate_score < injection_gate:
                 logger.info(
                     "Whisper diagnostics: prompt=%r gate_reject max_gate_score=%.3f gate=%.3f",

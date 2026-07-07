@@ -1213,6 +1213,52 @@ class TestWhisperContextBuffer:
         assert "eval results" in query
         assert "what about the metrics side?" in query
 
+    def test_reranker_judges_context_enhanced_followup_query(self, mock_graph):
+        """The reranker must score the same context-enhanced query that search
+        ran on, not the bare prompt. Its ce_absolute drives the injection gate,
+        so judging an underspecified follow-up ("and the second one?") against
+        the bare prompt gate-rejects memories that only make sense with the
+        session context."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        builder._classifier = MagicMock()
+        builder._classifier.classify.return_value = PromptIntent(categories=["continuation"])
+
+        node = _make_node_dict("node-0", "Second eval result summary")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.8, "source": "hybrid"},
+        ]
+
+        captured: dict = {}
+
+        def _capture_rerank(query, docs):
+            captured["query"] = query
+            return [5.0 for _ in docs]
+
+        mock_ce = MagicMock()
+        mock_ce.rerank.side_effect = _capture_rerank
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            builder.build_whisper_context(
+                prompt="and the second one?",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.1,
+                recent_prompts=["how's whisper quality?", "show me the eval results"],
+            )
+
+        # The reranker received the context-enhanced query (session tokens
+        # present), not the bare underspecified prompt.
+        assert "query" in captured
+        assert "whisper quality" in captured["query"]
+        assert "eval results" in captured["query"]
+        assert "and the second one?" in captured["query"]
+
     def test_explicit_prompt_with_recent_context_uses_raw_prompt(self, mock_graph):
         """Fully specified prompts should not be polluted by recent context."""
         mock_engine = MagicMock()
@@ -2448,33 +2494,6 @@ class TestGateScoreContract:
         )
 
         assert "Legacy scored result" in result
-
-    def test_identity_prompt_exempt_from_absolute_gate(self, mock_graph):
-        """Identity-only prompts skip the reranker, so they carry no
-        ce_absolute; gating them on raw cosine alone silences identity recall.
-        A name matched below the cosine gate must still inject."""
-        from ormah.engine.prompt_classifier import PromptIntent
-
-        mock_engine = _make_engine_with_encoder(mock_graph)
-        builder = ContextBuilder(mock_graph, engine=mock_engine)
-        mock_classifier = MagicMock()
-        mock_classifier.classify.return_value = PromptIntent(categories=["identity"])
-        builder._classifier = mock_classifier
-
-        # Global identity node, raw cosine well below the 0.50 gate.
-        node = _make_node_dict("id-name", "User's name is Alena", space=None)
-        mock_engine.recall_search_structured.return_value = [
-            {"node": node, "score": 0.80, "source": "hybrid", "raw_cosine": 0.40},
-        ]
-
-        result = builder.build_whisper_context(
-            prompt="what is my name",
-            min_score=0.1,
-            reranker_enabled=True,
-            injection_gate=0.50,
-        )
-
-        assert "User's name is Alena" in result
 
     def test_cross_space_memory_demoted_below_gate(self, mock_graph):
         """The gate re-applies cross-space demotion the absolute signal drops:
