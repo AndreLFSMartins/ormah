@@ -102,7 +102,7 @@ class TestWhisperMinScore:
 class TestWhisperCompactFormatting:
     """Whisper formatting: flat list, top 2 full, rest title-only."""
 
-    def test_top_node_content_not_truncated(self, mock_graph):
+    def test_top_node_content_within_cap_not_truncated(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
@@ -118,6 +118,60 @@ class TestWhisperCompactFormatting:
         )
 
         assert long_content in result
+
+    def test_top_node_content_capped_at_word_boundary(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        giant_content = "word " * 800  # ~4KB, far over the cap
+        node = {**_make_node_dict("node-1", "Some title"), "content": giant_content}
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.9, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="something",
+            injection_gate=0.0,
+            injected_content_max_chars=600,
+        )
+
+        assert giant_content.strip() not in result
+        injected_line = next(
+            line for line in result.splitlines() if line.startswith("  word")
+        )
+        assert len(injected_line) <= 2 + 600
+        assert injected_line.endswith("…")
+
+    def test_content_cap_holds_for_unbroken_text(self, mock_graph):
+        """An unbroken (space-free) string must not exceed the cap by one."""
+        from ormah.engine.context_builder import _truncate_at_word_boundary
+
+        unbroken = "A" * 601
+        out = _truncate_at_word_boundary(unbroken, max_len=600)
+        assert len(out) <= 600
+        assert out.endswith("…")
+
+    def test_content_cap_is_configurable(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        content = "word " * 100  # 500 chars
+        node = {**_make_node_dict("node-1", "Some title"), "content": content}
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.9, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="something",
+            injection_gate=0.0,
+            injected_content_max_chars=100,
+        )
+
+        injected_line = next(
+            line for line in result.splitlines() if line.startswith("  word")
+        )
+        assert len(injected_line) <= 2 + 100
+        assert injected_line.endswith("…")
 
 
 class TestWhisperFailSilently:
@@ -180,17 +234,36 @@ class TestWhisperNodeLimit:
             {"node": n, "score": 0.9, "source": "hybrid"} for n in nodes
         ]
 
-        builder.build_whisper_context(
+        result = builder.build_whisper_context(
             prompt="test",
             max_nodes=3,
             min_score=0.1,
+            injection_gate=0.0,
         )
 
-        # recall_search_structured called with limit=max_nodes
+        # Search fetches a deep pool (max_nodes * multiplier) for the
+        # reranker/gate, but the final output stays capped at max_nodes.
         mock_engine.recall_search_structured.assert_called_once()
         call_kwargs = mock_engine.recall_search_structured.call_args
         limit = call_kwargs.kwargs.get("limit") or call_kwargs[1].get("limit")
-        assert limit == 3  # max_nodes
+        assert limit == 3 * 5  # max_nodes * default candidate_pool_multiplier
+        injected = sum(1 for i in range(10) if f"Fact {i}" in result)
+        assert injected <= 3
+
+    def test_candidate_pool_multiplier_configurable(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        mock_engine.recall_search_structured.return_value = []
+
+        builder.build_whisper_context(
+            prompt="test",
+            max_nodes=4,
+            candidate_pool_multiplier=3,
+        )
+
+        call_kwargs = mock_engine.recall_search_structured.call_args
+        limit = call_kwargs.kwargs.get("limit") or call_kwargs[1].get("limit")
+        assert limit == 12
 
     def test_total_budget_respected(self, mock_graph):
         """Total nodes in output should be <= max_nodes, even with identity nodes."""

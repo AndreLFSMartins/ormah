@@ -913,8 +913,11 @@ class MemoryEngine:
         result = self.context_builder.build_whisper_context(
             prompt=prompt,
             space=space,
+            user_node_id=self.user_node_id,
             max_nodes=self.settings.whisper_max_nodes,
             min_score=self.settings.whisper_min_relevance_score,
+            candidate_pool_multiplier=self.settings.whisper_candidate_pool_multiplier,
+            injected_content_max_chars=self.settings.whisper_injected_content_max_chars,
             reranker_enabled=(
                 self.settings.whisper_reranker_enabled
                 and self._whisper_reranker_available

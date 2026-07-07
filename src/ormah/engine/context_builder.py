@@ -40,7 +40,8 @@ def _truncate_at_word_boundary(text: str, max_len: int = 300) -> str:
     truncated = text[:max_len]
     last_space = truncated.rfind(" ")
     if last_space == -1:
-        return truncated + "…"
+        # Ellipsis counts against the budget: never exceed max_len.
+        return truncated[: max_len - 1] + "…"
     return truncated[:last_space] + "…"
 
 
@@ -210,6 +211,8 @@ class ContextBuilder:
         max_nodes: int = 8,
         min_score: float = 0.45,
         full_content_count: int = 2,
+        candidate_pool_multiplier: int = 5,
+        injected_content_max_chars: int = 600,
         reranker_enabled: bool = False,
         reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         reranker_min_score: float = 0.0,
@@ -350,9 +353,12 @@ class ContextBuilder:
             search_query = " ".join(context_parts)
 
         # Build search kwargs, merging any intent-derived params
+        # Fetch a deep candidate pool so the reranker/gate can rescue memories
+        # the bi-encoder under-ranked; the final injected set is capped at
+        # max_nodes after gating.
         search_kwargs: dict = {
             "query": search_query,
-            "limit": max_nodes,
+            "limit": max_nodes * max(candidate_pool_multiplier, 1),
             "default_space": space,
             "tiers": ["core", "working"],
             "touch_access": False,
@@ -584,6 +590,9 @@ class ContextBuilder:
             if i < full_content_count:
                 content = node.get("content", "").strip()
                 if content and content != title:
+                    content = _truncate_at_word_boundary(
+                        content, max_len=injected_content_max_chars
+                    )
                     lines.append(f"  {content}")
 
             lines.append("")
