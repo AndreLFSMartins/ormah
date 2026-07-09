@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 # How long (seconds) a misfired job is still allowed to run.
 # If the scheduler was blocked longer than this, the run is skipped.
 _MISFIRE_GRACE = 120
+
+
+# Spread the four LLM jobs so they don't burst together 24h after boot (#90).
+def _staggered(minutes: int) -> datetime:
+    return datetime.now(timezone.utc) + timedelta(minutes=minutes)
 
 
 def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTracker]:
@@ -35,6 +40,7 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         minutes=s.auto_link_interval_minutes,
         id="auto_linker",
         name="Auto-linker",
+        next_run_time=_staggered(5),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
@@ -57,6 +63,7 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         minutes=s.conflict_check_interval_minutes,
         id="conflict_detector",
         name="Conflict detector",
+        next_run_time=_staggered(15),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
@@ -68,6 +75,7 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         minutes=s.duplicate_check_interval_minutes,
         id="duplicate_merger",
         name="Duplicate merger",
+        next_run_time=_staggered(30),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
@@ -90,6 +98,7 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         minutes=s.consolidation_interval_minutes,
         id="consolidator",
         name="Consolidator",
+        next_run_time=_staggered(45),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 

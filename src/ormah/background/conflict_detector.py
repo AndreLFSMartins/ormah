@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_conflict_type
@@ -212,23 +213,26 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
         return []
 
 
-def run_conflict_detection(engine) -> None:
+def run_conflict_detection(engine) -> dict | None:
     """Find potentially contradicting nodes and create edges."""
+    t0 = time.monotonic()
     try:
         settings = engine.settings
 
         if not settings.llm_enabled:
             logger.debug("Conflict detection skipped: LLM not enabled")
-            return
+            return {"skipped": "llm_disabled"}
 
         candidates = _find_conflict_candidates(engine, limit=10000)
         edges_created = 0
+        pairs_evaluated = 0
         dirty_nodes: dict[str, list[Connection]] = {}
 
         for candidate in candidates:
             node_a = candidate["node_a"]
             node_b = candidate["node_b"]
 
+            pairs_evaluated += 1
             llm_result = _llm_check_conflict(settings, node_a, node_b)
             if llm_result is None:
                 continue
@@ -284,8 +288,17 @@ def run_conflict_detection(engine) -> None:
             except Exception as e:
                 logger.debug("Failed to persist conflict edge to markdown for %s: %s", nid[:8], e)
 
-        if edges_created:
-            logger.info("Conflict detector created %d edges", edges_created)
+        duration = time.monotonic() - t0
+        stats = {
+            "candidates_found": len(candidates),
+            "pairs_evaluated": pairs_evaluated,
+            "edges_created": edges_created,
+            "duration_s": round(duration, 1),
+            "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
+        }
+        logger.info("conflict_detector run: %s", stats)
+        return stats
 
     except Exception as e:
         logger.warning("Conflict detection failed: %s", e)
+        return None

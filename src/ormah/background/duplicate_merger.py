@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -237,7 +238,7 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
         return []
 
 
-def run_duplicate_detection(engine) -> None:
+def run_duplicate_detection(engine) -> dict | None:
     """Find near-duplicate nodes and create merge proposals.
 
     Uses a multi-signal approach: embedding similarity (primary),
@@ -245,6 +246,7 @@ def run_duplicate_detection(engine) -> None:
     LLM confirmation is mandatory — no merges happen without LLM
     saying ``is_duplicate: true``.
     """
+    t0 = time.monotonic()
     try:
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
@@ -255,13 +257,14 @@ def run_duplicate_detection(engine) -> None:
 
         if not settings.llm_enabled:
             logger.debug("Duplicate detection skipped: LLM not enabled")
-            return
+            return {"skipped": "llm_disabled"}
 
         user_node_id = getattr(engine, "user_node_id", None)
 
         nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes").fetchall()
         checked = set()
         proposals_created = 0
+        pairs_evaluated = 0
 
         for node in nodes:
             if node["id"] == user_node_id:
@@ -314,6 +317,7 @@ def run_duplicate_detection(engine) -> None:
                     continue
 
                 # --- LLM confirmation (mandatory) ---
+                pairs_evaluated += 1
                 llm_result = _llm_check_duplicate(settings, node, other)
                 if llm_result is None:
                     # LLM unavailable for this pair — skip
@@ -379,8 +383,18 @@ def run_duplicate_detection(engine) -> None:
                         ),
                     )
                 proposals_created += 1
-        if proposals_created:
-            logger.info("Duplicate merger created %d proposals/auto-merges", proposals_created)
+
+        duration = time.monotonic() - t0
+        stats = {
+            "nodes_scanned": len(nodes),
+            "pairs_evaluated": pairs_evaluated,
+            "proposals_created": proposals_created,
+            "duration_s": round(duration, 1),
+            "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
+        }
+        logger.info("duplicate_merger run: %s", stats)
+        return stats
 
     except Exception as e:
         logger.warning("Duplicate detection failed: %s", e)
+        return None
