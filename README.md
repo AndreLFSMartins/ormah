@@ -44,6 +44,16 @@ Silence is better than noise. Ormah should whisper, not shout.
 
 ## Install
 
+### Desktop App
+
+<p>
+  <a href="https://www.ormah.me/download/mac"><img src="https://img.shields.io/badge/Download-macOS_Apple_Silicon-black?logo=apple&logoColor=white&style=for-the-badge" alt="Download for macOS"></a>
+  &nbsp;
+  <a href="https://www.ormah.me/download/linux"><img src="https://img.shields.io/badge/Download-Linux_x86__64-black?logo=linux&logoColor=white&style=for-the-badge" alt="Download for Linux"></a>
+</p>
+
+No Python or terminal required. Download, open, and Ormah sets itself up.
+
 ### Terminal
 
 ```bash
@@ -177,6 +187,23 @@ cd ormah
 make install
 uv run pytest
 ```
+
+### Retrieval evals
+
+Two golden-corpus eval harnesses measure retrieval quality from a source checkout:
+
+```bash
+make eval                       # whisper + recall evals with fail-below quality bars
+ormah eval whisper run          # whisper pipeline eval (--show-failures, --category, --fail-below)
+ormah eval recall run           # recall/retrieval eval (--fail-below)
+ormah eval whisper mine         # mine provisional cases from your live whisper_log (read-only)
+ormah eval whisper import-labels  # confirm mined labels after human review
+```
+
+Eval corpora are intentionally **local-only and gitignored**: they seed real
+memories from the developer's own usage, so they never ship in the repo. See
+`eval/whisper/corpus/README.md` for the case-design and honest-labeling rules.
+CI runs tests and lint only; eval bars are enforced locally via `make eval`.
 
 ## Release Process
 

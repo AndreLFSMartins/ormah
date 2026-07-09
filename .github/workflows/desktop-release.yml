@@ -24,6 +24,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify tag matches app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#desktop-v}"
+          CONF_VERSION=$(python3 -c "import json; print(json.load(open('desktop/src-tauri/tauri.conf.json'))['version'])")
+          if [ "$TAG_VERSION" != "$CONF_VERSION" ]; then
+            echo "Tag desktop-v$TAG_VERSION does not match tauri.conf.json version $CONF_VERSION" >&2
+            exit 1
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -110,4 +121,50 @@ jobs:
             dist/**/*.AppImage*
             dist/**/*.deb
             dist/**/*.app.tar.gz*
-      # TODO: generate latest.json for auto-updater once .sig generation is confirmed
+
+      # The updater feed lives on a rolling prerelease so its URL is stable and
+      # it can never hijack GitHub's "/releases/latest" (prereleases are
+      # excluded), which alternates between desktop and Python releases.
+      - name: Publish latest.json to rolling desktop-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#desktop-v}"
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
+
+          APPIMAGE=$(find dist -name '*.AppImage' | head -1)
+          APPTAR=$(find dist -name '*.app.tar.gz' | head -1)
+          for f in "$APPIMAGE" "$APPIMAGE.sig" "$APPTAR" "$APPTAR.sig"; do
+            [ -s "$f" ] || { echo "missing updater artifact: $f" >&2; exit 1; }
+          done
+
+          python3 - "$VERSION" "$BASE_URL" "$APPIMAGE" "$APPTAR" > latest.json <<'EOF'
+          import json, pathlib, sys
+          from datetime import datetime, timezone
+          version, base_url, appimage, apptar = sys.argv[1:5]
+          def entry(path):
+              p = pathlib.Path(path)
+              return {
+                  "signature": pathlib.Path(path + ".sig").read_text().strip(),
+                  "url": f"{base_url}/{p.name}",
+              }
+          print(json.dumps({
+              "version": version,
+              "pub_date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "platforms": {
+                  "linux-x86_64": entry(appimage),
+                  "darwin-aarch64": entry(apptar),
+              },
+          }, indent=2))
+          EOF
+          cat latest.json
+
+          REPO="${{ github.repository }}"
+          if gh release view desktop-latest -R "$REPO" > /dev/null 2>&1; then
+            gh release upload desktop-latest latest.json --clobber -R "$REPO"
+          else
+            gh release create desktop-latest latest.json -R "$REPO" \
+              --prerelease \
+              --title "Desktop updater feed" \
+              --notes "Rolling release holding latest.json for the desktop auto-updater. Download the app from the versioned desktop-v* releases instead."
+          fi

@@ -5,12 +5,14 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     App, Listener,
 };
-use tauri_plugin_autostart::ManagerExt;
+use crate::{commands, sidecar, stats, updater};
 
-use crate::{commands, stats, updater};
+fn server_status_label(running: bool) -> &'static str {
+    if running { "Server: running  ●" } else { "Server: stopped  ○" }
+}
 
-fn login_label(enabled: bool) -> &'static str {
-    if enabled { "Start at login  ✓" } else { "Start at login" }
+fn server_toggle_label(running: bool) -> &'static str {
+    if running { "Stop server" } else { "Start server" }
 }
 
 pub fn build(app: &App) -> tauri::Result<()> {
@@ -24,6 +26,13 @@ pub fn build(app: &App) -> tauri::Result<()> {
         .enabled(false)
         .build(app)?;
 
+    // Server status (display-only) + start/stop action.
+    let server_status = MenuItemBuilder::with_id("server_status", server_status_label(true))
+        .enabled(false)
+        .build(app)?;
+    let server_toggle =
+        MenuItemBuilder::with_id("server_toggle", server_toggle_label(true)).build(app)?;
+
     // Shown only when a new version is available; enabled on that event.
     let update_item = MenuItemBuilder::with_id("install_update", "Update available…")
         .enabled(false)
@@ -31,19 +40,17 @@ pub fn build(app: &App) -> tauri::Result<()> {
 
     let open_graph = MenuItemBuilder::with_id("open_graph", "Open Ormah").build(app)?;
 
-    let autostart_on = handle.autolaunch().is_enabled().unwrap_or(false);
-    let start_login =
-        MenuItemBuilder::with_id("start_login", login_label(autostart_on)).build(app)?;
-
     let quit = MenuItemBuilder::with_id("quit", "Quit Ormah").build(app)?;
 
     let menu = MenuBuilder::new(app)
         .item(&stats_week)
         .item(&stats_total)
         .separator()
+        .item(&server_status)
+        .item(&server_toggle)
+        .separator()
         .item(&update_item)
         .item(&open_graph)
-        .item(&start_login)
         .separator()
         .item(&quit)
         .build()?;
@@ -58,7 +65,8 @@ pub fn build(app: &App) -> tauri::Result<()> {
         }
     });
 
-    let start_login_for_event = start_login.clone();
+    let server_toggle_for_event = server_toggle.clone();
+    let server_status_for_event = server_status.clone();
 
     let tray = TrayIconBuilder::with_id("ormah-tray")
         .icon(tauri::include_image!("icons/icon.png"))
@@ -69,14 +77,23 @@ pub fn build(app: &App) -> tauri::Result<()> {
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "install_update" => updater::install(app.clone()),
             "open_graph" => commands::open_graph(app),
-            "start_login" => {
-                let am = app.autolaunch();
-                let now_on = am.is_enabled().unwrap_or(false);
-                let _ = if now_on { am.disable() } else { am.enable() };
-                let _ = start_login_for_event.set_text(login_label(!now_on));
+            "server_toggle" => {
+                let toggle = server_toggle_for_event.clone();
+                let status = server_status_for_event.clone();
+                let currently_running =
+                    toggle.text().map(|t| t.contains("Stop")).unwrap_or(true);
+                if currently_running {
+                    sidecar::stop_daemon();
+                } else {
+                    sidecar::start_daemon();
+                }
+                // Optimistically flip labels; the poller will correct on next tick.
+                let now_running = !currently_running;
+                let _ = status.set_text(server_status_label(now_running));
+                let _ = toggle.set_text(server_toggle_label(now_running));
             }
             "quit" => {
-                crate::sidecar::stop();
+                sidecar::stop_daemon();
                 app.exit(0);
             }
             _ => {}
@@ -94,8 +111,16 @@ pub fn build(app: &App) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    // Poll /agent/stats and push the numbers into the tray title + menu lines.
-    stats::spawn_poller(handle.clone(), tray, stats_week, stats_total);
+    // Poll /stats + health every 60s; updates tray title, menu counters,
+    // and server status items.
+    stats::spawn_poller(
+        handle.clone(),
+        tray,
+        stats_week,
+        stats_total,
+        server_status,
+        server_toggle,
+    );
 
     Ok(())
 }

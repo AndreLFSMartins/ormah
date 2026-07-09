@@ -96,7 +96,7 @@ This is intentionally narrower than "always combine recent prompts".
 
 The builder calls structured recall with:
 
-- `limit = whisper_max_nodes` (default `6`)
+- `limit = whisper_max_nodes * whisper_candidate_pool_multiplier` (defaults `6 * 5 = 30`) — a deep candidate pool so the reranker and gate can rescue memories the bi-encoder under-ranked; the final injected set is still capped at `whisper_max_nodes`
 - `tiers = [core, working]`
 - `touch_access = False`
 
@@ -116,9 +116,10 @@ Affinity uses stored feedback rows from the `affinity` table to nudge scores up 
 
 After retrieval, reranking, and affinity boost, whisper extracts topic tokens from the current prompt and checks which candidate nodes still have explicit topical overlap with that prompt.
 
-- if at least one candidate overlaps topically, Ormah narrows the set to overlapping candidates
+- candidates with topical overlap always pass
 - identity-linked nodes are still allowed through this filter
 - for identity-only prompts, global identity candidates are also preserved
+- a candidate with **no** overlap needs an absolute voucher: `ce_absolute >= whisper_no_overlap_ce_floor` (default 0.45), or `raw_cosine >= whisper_no_overlap_cosine_floor` (default 0.70) when the reranker didn't run — the filter fails closed instead of passing everything when nothing overlaps
 
 This step exists because semantic retrieval can surface broadly related memories that are directionally relevant but too vague for injection. Token overlap adds one more precision pass before the final gate.
 
@@ -133,13 +134,18 @@ The hard gate is controlled by `whisper_injection_gate`, which currently default
 
 If enabled, Ormah can add one lower-confidence candidate as an exploration slot. This is meant to create learning opportunities for later feedback.
 
+- exploration only piggybacks on real injections: when the gate decided on silence, silence stands
+- the exploration candidate is rendered with an `[exploring]` marker instead of its type, so agents can weigh it honestly
+
+Topic-shift suppression ("same topic → skip") only fires for topics that were actually **served** — if every earlier prompt on the topic produced silence, whisper proceeds instead of starving the topic for the whole session (served history is read from `whisper_log`).
+
 ### 12. Formatting is flat, not sectioned
 
 Current output format:
 
 - heading: `# Ormah whispers`
 - ranked flat list of memories
-- top `2` results include full content
+- top `2` results include content, capped at `whisper_injected_content_max_chars` (default `600`) at a word boundary — the full node stays one `recall_node` call away
 - remaining results include title, type, and short id only
 
 There is no current formatter that splits output into `About the User`, `Core Memories`, and `Project` sections.

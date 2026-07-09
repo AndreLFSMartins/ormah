@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,6 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
     Does NOT call the LLM — pure similarity-based clustering.
     """
     try:
-        from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
     except ImportError:
         return []
@@ -198,7 +196,7 @@ def run_consolidation(engine) -> None:
 
 def _consolidate_cluster(engine, cluster: list[dict]) -> None:
     """Consolidate a single cluster using LLM summarization."""
-    from ormah.background.llm_client import llm_generate
+    from ormah.background.llm_client import extract_json, llm_generate
 
     # Build prompt
     items = []
@@ -243,7 +241,7 @@ Return a JSON object:
     if raw is None:
         return
 
-    result = json.loads(raw)
+    result = json.loads(extract_json(raw))
     title = result.get("title", "Consolidated memory")
     summary = result.get("summary", "")
     node_type = result.get("type", "fact")
