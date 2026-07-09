@@ -87,3 +87,24 @@ def test_multiple_jobs_independent():
     snap = tracker.snapshot()
     assert snap["job_a"]["error_count"] == 0
     assert snap["job_b"]["error_count"] == 1
+
+
+def test_record_success_stores_stats():
+    tracker = JobTracker()
+    tracker.record_success("auto_linker", 12.0, stats={"pairs_evaluated": 7})
+    snap = tracker.snapshot()
+    assert snap["auto_linker"]["last_stats"] == {"pairs_evaluated": 7}
+
+
+def test_tracked_captures_dict_return():
+    tracker = JobTracker()
+    job = tracked(tracker, "j", lambda: {"pairs_evaluated": 3})
+    job()
+    assert tracker.snapshot()["j"]["last_stats"] == {"pairs_evaluated": 3}
+
+
+def test_tracked_non_dict_return_keeps_stats_none():
+    tracker = JobTracker()
+    job = tracked(tracker, "j", lambda: None)
+    job()
+    assert tracker.snapshot()["j"]["last_stats"] is None
