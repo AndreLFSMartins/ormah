@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_link_type
@@ -311,16 +312,17 @@ def _apply_edge(
             logger.debug("Failed to persist connection to markdown for %s: %s", node_a_id[:8], e)
 
 
-def run_auto_linker(engine) -> None:
+def run_auto_linker(engine) -> dict | None:
     """Incrementally link nodes with seq above the watermark; advance only past
     fully-resolved nodes."""
+    t0 = time.monotonic()
     try:
         from ormah.embeddings.vector_store import VectorStore
 
         settings = engine.settings
         if not settings.llm_enabled:
             logger.debug("Auto-linker skipped: LLM not enabled")
-            return
+            return {"skipped": "llm_disabled"}
 
         vec_store = VectorStore(engine.db)
         conn = engine.db.conn
@@ -332,6 +334,7 @@ def run_auto_linker(engine) -> None:
         nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
 
         created = 0
+        pairs_evaluated = 0
         last_complete: int | None = None
 
         for node in nodes:
@@ -389,6 +392,7 @@ def run_auto_linker(engine) -> None:
                     if other is None:
                         continue
 
+                    pairs_evaluated += 1
                     llm_result = _llm_classify_link(settings, node, other)
                     if llm_result is None:
                         # LLM UNAVAILABLE (raw None) — transient. Leave node unresolved so the
@@ -412,8 +416,22 @@ def run_auto_linker(engine) -> None:
 
         if last_complete is not None:
             _set_watermark(engine, last_complete)
-        if created:
-            logger.info("Auto-linker created %d edges", created)
+
+        backlog = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE seq > ?", (last_complete or watermark,)
+        ).fetchone()[0]
+        duration = time.monotonic() - t0
+        stats = {
+            "nodes_scanned": len(nodes),
+            "pairs_evaluated": pairs_evaluated,
+            "edges_created": created,
+            "backlog_nodes": backlog,
+            "duration_s": round(duration, 1),
+            "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
+        }
+        logger.info("auto_linker run: %s", stats)
+        return stats
 
     except Exception as e:
         logger.warning("Auto-linker failed: %s", e)
+        return None
