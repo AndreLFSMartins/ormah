@@ -293,7 +293,7 @@ def run_conflict_detection(engine) -> dict | None:
             "candidates_found": len(candidates),
             "pairs_evaluated": pairs_evaluated,
             "edges_created": edges_created,
-            "duration_s": round(duration, 1),
+            "duration_s": round(duration, 3),
             "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
         }
         logger.info("conflict_detector run: %s", stats)
@@ -301,4 +301,4 @@ def run_conflict_detection(engine) -> dict | None:
 
     except Exception as e:
         logger.warning("Conflict detection failed: %s", e)
-        return None
+        return {"error": str(e)}

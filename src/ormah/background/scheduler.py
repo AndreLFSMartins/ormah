@@ -18,6 +18,8 @@ _MISFIRE_GRACE = 120
 
 
 # Spread the four LLM jobs so they don't burst together 24h after boot (#90).
+# Offset is relative to process start, not wall-clock — a restart loop shorter than
+# the offset (e.g. crash-looping every 2 min against a 5+ min offset) defers the first run indefinitely.
 def _staggered(minutes: int) -> datetime:
     return datetime.now(timezone.utc) + timedelta(minutes=minutes)
 

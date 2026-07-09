@@ -417,6 +417,9 @@ def run_auto_linker(engine) -> dict | None:
         if last_complete is not None:
             _set_watermark(engine, last_complete)
 
+        # `seq` is 1-based (meta.node_seq_next starts at 1 — see index/builder.py and
+        # the legacy backfill in index/db.py), so a real node's seq is never 0 and
+        # `last_complete or watermark` cannot silently fall back on a completed run.
         backlog = conn.execute(
             "SELECT COUNT(*) FROM nodes WHERE seq > ?", (last_complete or watermark,)
         ).fetchone()[0]
@@ -426,7 +429,7 @@ def run_auto_linker(engine) -> dict | None:
             "pairs_evaluated": pairs_evaluated,
             "edges_created": created,
             "backlog_nodes": backlog,
-            "duration_s": round(duration, 1),
+            "duration_s": round(duration, 3),
             "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
         }
         logger.info("auto_linker run: %s", stats)
@@ -434,4 +437,4 @@ def run_auto_linker(engine) -> dict | None:
 
     except Exception as e:
         logger.warning("Auto-linker failed: %s", e)
-        return None
+        return {"error": str(e)}

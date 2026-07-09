@@ -411,3 +411,25 @@ def test_checked_pairs_invalidated_on_update(engine):
         run_auto_linker(engine)
 
     assert mock_llm.call_count >= 1  # LLM was called again for this pair
+
+
+def test_pairs_evaluated_counts_one_candidate_pair(engine):
+    """Issue #90: pairs_evaluated must reflect exactly one LLM decision call.
+
+    Uses the default similarity threshold (not 0.0): the auto-created "Self"
+    node is far enough below threshold that it does not count as a second
+    candidate, leaving exactly the id_a/id_b pair.
+    """
+    id_a, id_b = _create_pair(engine)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.auto_linker._llm_classify_link",
+        return_value={"relationship": "none", "reason": "not related"},
+    ):
+        from ormah.background.auto_linker import run_auto_linker
+        stats = run_auto_linker(engine)
+
+    assert stats["pairs_evaluated"] == 1

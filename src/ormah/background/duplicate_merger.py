@@ -389,7 +389,7 @@ def run_duplicate_detection(engine) -> dict | None:
             "nodes_scanned": len(nodes),
             "pairs_evaluated": pairs_evaluated,
             "proposals_created": proposals_created,
-            "duration_s": round(duration, 1),
+            "duration_s": round(duration, 3),
             "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
         }
         logger.info("duplicate_merger run: %s", stats)
@@ -397,4 +397,4 @@ def run_duplicate_detection(engine) -> dict | None:
 
     except Exception as e:
         logger.warning("Duplicate detection failed: %s", e)
-        return None
+        return {"error": str(e)}
