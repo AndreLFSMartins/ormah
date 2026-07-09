@@ -205,7 +205,7 @@ def run_consolidation(engine) -> dict | None:
     stats = {
         "clusters_found": len(clusters),
         "clusters_consolidated": consolidated_count,
-        "duration_s": round(time.monotonic() - t0, 1),
+        "duration_s": round(time.monotonic() - t0, 3),
     }
     logger.info("consolidator run: %s", stats)
     return stats
