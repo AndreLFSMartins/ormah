@@ -58,6 +58,7 @@ def test_run_setup_json_wires_detected(monkeypatch):
     assert result["detected"] == ["claude_code"]
     assert result["wired"] == ["claude_code"]
     assert result["errors"] == {}
+    assert result["warnings"] == {}
     assert "configure_claude_hooks" in calls
 
 
@@ -82,6 +83,7 @@ def test_run_setup_json_captures_errors(monkeypatch):
 
     assert result["wired"] == []
     assert "claude_code" in result["errors"]
+    assert result["warnings"] == {}
     assert "RuntimeError" in result["errors"]["claude_code"]
 
 
@@ -104,9 +106,10 @@ def test_run_setup_json_preloads_models_and_keeps_stdout_clean(monkeypatch, caps
     assert captured.out == ""
     assert "preload progress" in captured.err
     assert result["errors"] == {}
+    assert result["warnings"] == {}
 
 
-def test_run_setup_json_preload_failure_is_non_fatal(monkeypatch):
+def test_run_setup_json_preload_failure_is_warning_not_error(monkeypatch):
     monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
     for agent in setup.AGENT_REGISTRY:
         monkeypatch.setattr(agent, "detect_fn", lambda: False)
@@ -120,4 +123,5 @@ def test_run_setup_json_preload_failure_is_non_fatal(monkeypatch):
 
     assert result["detected"] == []
     assert result["wired"] == []
-    assert result["errors"]["models"] == "RuntimeError: model host unavailable"
+    assert result["errors"] == {}
+    assert result["warnings"]["models"] == "RuntimeError: model host unavailable"

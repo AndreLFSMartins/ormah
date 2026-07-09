@@ -391,6 +391,37 @@ def test_get_whisper_context_loads_reranker_if_cached_after_startup(engine):
     assert build.call_args.kwargs["injection_gate"] == engine.settings.whisper_injection_gate
 
 
+def test_get_whisper_context_does_not_download_reranker_when_not_cached(engine):
+    """Whisper may load an already-cached reranker, but must not download it."""
+    engine.settings.whisper_reranker_enabled = True
+    engine._whisper_reranker_available = False
+    engine.settings.claude_maintenance_enabled = False
+    engine.db.conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
+    )
+    engine.db.conn.commit()
+
+    with (
+        patch("ormah.embeddings.reranker.model_is_cached", return_value=False),
+        patch("ormah.embeddings.reranker.preload_model") as preload_model,
+        patch.object(
+            engine.context_builder,
+            "build_whisper_context",
+            return_value="degraded",
+        ) as build,
+    ):
+        result = engine.get_whisper_context("where do I live?")
+
+    assert result == "degraded"
+    assert engine._whisper_reranker_available is False
+    preload_model.assert_not_called()
+    assert build.call_args.kwargs["reranker_enabled"] is False
+    assert (
+        build.call_args.kwargs["injection_gate"]
+        == engine.settings.whisper_injection_gate_no_reranker
+    )
+
+
 def test_whisper_onboarding_works_when_reranker_unavailable(engine):
     engine.settings.whisper_reranker_enabled = True
     engine._whisper_reranker_available = False

@@ -1685,8 +1685,9 @@ def _remove_uv_tool_install_files() -> bool:
     """Best-effort cleanup for uv-installed Ormah command files.
 
     This only removes the known Ormah shim and uv tool environment paths. It
-    intentionally does not delete arbitrary `ormah` executables from PATH such
-    as Homebrew, pipx, or system-managed installs.
+    intentionally does not delete arbitrary `ormah` executables discovered via
+    PATH such as Homebrew or system-managed installs. A command at the standard
+    desktop uv-tool shim path is treated as part of Ormah's managed install.
     """
     removed = False
     shims, tool_dirs = _uv_tool_install_candidates()
@@ -2081,12 +2082,13 @@ def run_setup_json() -> dict:
     detected_ids: list[str] = []
     wired: list[str] = []
     errors: dict[str, str] = {}
+    warnings: dict[str, str] = {}
 
     with contextlib.redirect_stdout(sys.stderr):
         try:
             _preload_local_models()
         except Exception as exc:  # noqa: BLE001
-            errors["models"] = f"{type(exc).__name__}: {exc}"
+            warnings["models"] = f"{type(exc).__name__}: {exc}"
 
         for agent in AGENT_REGISTRY:
             available = agent.platform is None or current_os in agent.platform
@@ -2104,6 +2106,7 @@ def run_setup_json() -> dict:
         "detected": detected_ids,
         "wired": wired,
         "errors": errors,
+        "warnings": warnings,
     }
 
 

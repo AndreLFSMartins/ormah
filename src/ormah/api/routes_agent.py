@@ -231,7 +231,7 @@ def get_clients():
 def run_setup():
     """Wire ormah hooks/MCP for every detected agent on this machine.
 
-    Runs non-interactively and returns {wired, errors} so the UI can
+    Runs non-interactively and returns {wired, errors, warnings} so the UI can
     show which agents were connected and surface any failures.
     """
     from ormah.setup import run_setup_json
