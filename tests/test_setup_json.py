@@ -42,6 +42,7 @@ def test_detect_clients_codex_via_dir(tmp_path):
 def test_run_setup_json_wires_detected(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
+    monkeypatch.setattr(setup, "_preload_local_models", lambda: None)
     # Drive detection via the registry's detect_fn (not detect_clients)
     monkeypatch.setattr(setup.AGENT_REGISTRY[0], "detect_fn", lambda: True)   # claude_code
     monkeypatch.setattr(setup.AGENT_REGISTRY[1], "detect_fn", lambda: False)  # codex
@@ -62,6 +63,7 @@ def test_run_setup_json_wires_detected(monkeypatch):
 
 def test_run_setup_json_captures_errors(monkeypatch):
     monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
+    monkeypatch.setattr(setup, "_preload_local_models", lambda: None)
     monkeypatch.setattr(setup.AGENT_REGISTRY[0], "detect_fn", lambda: True)   # claude_code
     monkeypatch.setattr(setup.AGENT_REGISTRY[1], "detect_fn", lambda: False)  # codex
     monkeypatch.setattr(setup.AGENT_REGISTRY[2], "detect_fn", lambda: False)  # claude_desktop
@@ -81,3 +83,41 @@ def test_run_setup_json_captures_errors(monkeypatch):
     assert result["wired"] == []
     assert "claude_code" in result["errors"]
     assert "RuntimeError" in result["errors"]["claude_code"]
+
+
+def test_run_setup_json_preloads_models_and_keeps_stdout_clean(monkeypatch, capsys):
+    calls: list[str] = []
+    monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
+    for agent in setup.AGENT_REGISTRY:
+        monkeypatch.setattr(agent, "detect_fn", lambda: False)
+
+    def preload():
+        print("preload progress")
+        calls.append("preload")
+
+    monkeypatch.setattr(setup, "_preload_local_models", preload)
+
+    result = setup.run_setup_json()
+
+    captured = capsys.readouterr()
+    assert calls == ["preload"]
+    assert captured.out == ""
+    assert "preload progress" in captured.err
+    assert result["errors"] == {}
+
+
+def test_run_setup_json_preload_failure_is_non_fatal(monkeypatch):
+    monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
+    for agent in setup.AGENT_REGISTRY:
+        monkeypatch.setattr(agent, "detect_fn", lambda: False)
+
+    def preload():
+        raise RuntimeError("model host unavailable")
+
+    monkeypatch.setattr(setup, "_preload_local_models", preload)
+
+    result = setup.run_setup_json()
+
+    assert result["detected"] == []
+    assert result["wired"] == []
+    assert result["errors"]["models"] == "RuntimeError: model host unavailable"

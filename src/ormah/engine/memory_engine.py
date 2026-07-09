@@ -411,6 +411,35 @@ class MemoryEngine:
             )
             self._whisper_reranker_available = False
 
+    def _refresh_whisper_reranker_if_cached(self) -> bool:
+        """Load the whisper reranker if setup cached it after server startup.
+
+        The desktop app starts the server before the user clicks "Connect".
+        That setup path can download the reranker after startup, so a one-time
+        startup check is not enough. This method never downloads: it only
+        notices an already-cached model and loads it into the process cache.
+        """
+        if not self.settings.whisper_reranker_enabled:
+            return False
+        if self._whisper_reranker_available:
+            return True
+
+        try:
+            from ormah.embeddings.reranker import model_is_cached, preload_model
+
+            model_name = self.settings.whisper_reranker_model
+            if not model_is_cached(model_name):
+                return False
+
+            logger.info("Whisper reranker found on disk after startup; loading...")
+            preload_model(model_name)
+            self._whisper_reranker_available = True
+            logger.info("Whisper reranker ready.")
+            return True
+        except Exception as e:
+            logger.warning("Whisper reranker refresh failed: %s", e)
+            return False
+
     def shutdown(self) -> None:
         self.db.close()
 
@@ -940,6 +969,8 @@ class MemoryEngine:
         # or load failed): degrade to embedding-only whisper with a raised
         # (cosine-scale) gate instead of going dark. The raised gate keeps
         # degraded mode more conservative, never noisier.
+        if self.settings.whisper_reranker_enabled and not self._whisper_reranker_available:
+            self._refresh_whisper_reranker_if_cached()
         reranker_active = (
             self.settings.whisper_reranker_enabled and self._whisper_reranker_available
         )

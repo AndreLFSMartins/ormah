@@ -1653,6 +1653,79 @@ def _remove_fastembed_cache() -> None:
         pass
 
 
+def _uv_tool_install_candidates() -> tuple[list[Path], list[Path]]:
+    """Return uv-tool paths owned by the Ormah install.
+
+    The desktop app installs the Python package with a bundled uv sidecar.
+    That creates the normal uv tool layout but does not guarantee a `uv`
+    executable is available later on the user's PATH during uninstall.
+    """
+    home = Path.home()
+
+    shims: list[Path] = [home / ".local" / "bin" / "ormah"]
+    tool_dirs: list[Path] = [home / ".local" / "share" / "uv" / "tools" / "ormah"]
+
+    uv_tool_bin_dir = os.environ.get("UV_TOOL_BIN_DIR")
+    if uv_tool_bin_dir:
+        shims.append(Path(uv_tool_bin_dir) / ("ormah.exe" if os.name == "nt" else "ormah"))
+
+    uv_tool_dir = os.environ.get("UV_TOOL_DIR")
+    if uv_tool_dir:
+        tool_dirs.append(Path(uv_tool_dir) / "ormah")
+
+    current_prefix = Path(sys.prefix).resolve(strict=False)
+    if current_prefix.name == "ormah" and current_prefix.parent.name == "tools":
+        tool_dirs.append(current_prefix)
+
+    # Preserve order while de-duplicating.
+    return list(dict.fromkeys(shims)), list(dict.fromkeys(tool_dirs))
+
+
+def _remove_uv_tool_install_files() -> bool:
+    """Best-effort cleanup for uv-installed Ormah command files.
+
+    This only removes the known Ormah shim and uv tool environment paths. It
+    intentionally does not delete arbitrary `ormah` executables from PATH such
+    as Homebrew, pipx, or system-managed installs.
+    """
+    removed = False
+    shims, tool_dirs = _uv_tool_install_candidates()
+
+    for shim in shims:
+        try:
+            if not shim.exists() and not shim.is_symlink():
+                continue
+            if shim.name not in {"ormah", "ormah.exe"}:
+                warn(f"Refusing to delete unexpected command path: {shim}")
+                continue
+            if shim.is_dir() and not shim.is_symlink():
+                warn(f"Refusing to delete directory where command shim was expected: {shim}")
+                continue
+            shim.unlink()
+            ok(f"Deleted command shim: {shim}")
+            removed = True
+        except Exception as exc:  # noqa: BLE001
+            warn(f"Could not delete command shim {shim}: {exc}")
+
+    for tool_dir in tool_dirs:
+        try:
+            if not tool_dir.exists():
+                continue
+            if tool_dir.name != "ormah":
+                warn(f"Refusing to delete unexpected uv tool directory: {tool_dir}")
+                continue
+            if tool_dir.is_symlink() or not tool_dir.is_dir():
+                warn(f"Refusing to delete unexpected uv tool path: {tool_dir}")
+                continue
+            shutil.rmtree(tool_dir)
+            ok(f"Deleted uv tool environment: {tool_dir}")
+            removed = True
+        except Exception as exc:  # noqa: BLE001
+            warn(f"Could not delete uv tool environment {tool_dir}: {exc}")
+
+    return removed
+
+
 def run_uninstall(yes: bool = False) -> None:
     """Remove all ormah integrations, data, and optionally the package itself."""
     print("This will remove all ormah integrations and data.\n")
@@ -1741,6 +1814,7 @@ def run_uninstall(yes: bool = False) -> None:
 
     # h. Uninstall the package
     step("Uninstalling ormah package")
+    uv_uninstalled = False
     try:
         result = subprocess.run(
             ["uv", "tool", "uninstall", "ormah"],
@@ -1748,10 +1822,15 @@ def run_uninstall(yes: bool = False) -> None:
         )
         if result.returncode == 0:
             ok("Package uninstalled via uv")
+            uv_uninstalled = True
         else:
-            warn("Could not uninstall via uv — remove manually with: uv tool uninstall ormah")
+            warn("Could not uninstall via uv; checking for desktop uv tool files")
     except Exception:
-        warn("Could not uninstall via uv — remove manually with: uv tool uninstall ormah")
+        warn("Could not uninstall via uv; checking for desktop uv tool files")
+
+    removed_tool_files = _remove_uv_tool_install_files()
+    if not uv_uninstalled and not removed_tool_files:
+        warn("Could not remove package files — remove manually with: uv tool uninstall ormah")
 
     print()
     ok("Ormah has been uninstalled")
@@ -1987,12 +2066,14 @@ def run_setup_json() -> dict:
     """Non-interactive agent wiring for the Mac app's one-click setup button.
 
     Wires hooks/MCP/guidance for every detected client and returns a structured
-    result the app can render. Deliberately narrow vs. run_setup(): no LLM
-    prompts, no server start (the app owns the bundled server sidecar), no
-    browser launch, no animations.
+    result the app can render. Also preloads local retrieval models so a fresh
+    desktop install has both the embedding model and whisper reranker cached.
+    Deliberately narrow vs. run_setup(): no LLM prompts, no server start (the
+    app owns the bundled server sidecar), no browser launch, no animations.
 
-    Human-readable progress from the underlying configure_* helpers is sent to
-    stderr so stdout stays clean JSON for the caller to parse.
+    Human-readable progress from model preload and the underlying configure_*
+    helpers is sent to stderr so stdout stays clean JSON for the caller to
+    parse.
     """
     import platform as _platform
     current_os = _platform.system().lower()
@@ -2002,6 +2083,11 @@ def run_setup_json() -> dict:
     errors: dict[str, str] = {}
 
     with contextlib.redirect_stdout(sys.stderr):
+        try:
+            _preload_local_models()
+        except Exception as exc:  # noqa: BLE001
+            errors["models"] = f"{type(exc).__name__}: {exc}"
+
         for agent in AGENT_REGISTRY:
             available = agent.platform is None or current_os in agent.platform
             if not available or not agent.detect_fn():

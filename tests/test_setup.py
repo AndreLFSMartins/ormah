@@ -2078,12 +2078,76 @@ class TestRunUninstall:
             patch("ormah.setup._remove_claude_agents"),
             patch("ormah.setup._remove_claude_commands"),
             patch("shutil.rmtree"),
+            patch("ormah.setup._remove_uv_tool_install_files", return_value=False),
             patch("subprocess.run", side_effect=Exception("uv not found")),
         ):
             run_uninstall(yes=True)  # must not raise
 
         captured = capsys.readouterr()
         assert "uv tool uninstall ormah" in captured.out
+
+    def test_uv_failure_removes_desktop_tool_install_files(self, tmp_path):
+        shim = tmp_path / ".local" / "bin" / "ormah"
+        shim.parent.mkdir(parents=True)
+        shim.write_text("#!/bin/sh\n")
+        shim.chmod(0o755)
+
+        tool_dir = tmp_path / ".local" / "share" / "uv" / "tools" / "ormah"
+        (tool_dir / "bin").mkdir(parents=True)
+        (tool_dir / "bin" / "ormah").write_text("#!/bin/sh\n")
+
+        fake_settings = MagicMock()
+        fake_settings.memory_dir = tmp_path / ".local" / "share" / "ormah" / "memory"
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.config.settings", fake_settings),
+            patch("ormah.setup._get_running_server_data_dir", return_value=None),
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_codex_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_codex_md_block"),
+            patch("ormah.setup._remove_codex_agents"),
+            patch("ormah.setup._remove_claude_agents"),
+            patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_fastembed_cache"),
+            patch("subprocess.run", side_effect=FileNotFoundError("uv")),
+        ):
+            run_uninstall(yes=True)
+
+        assert not shim.exists()
+        assert not tool_dir.exists()
+
+    def test_successful_uv_uninstall_still_removes_stale_command_shim(self, tmp_path):
+        shim = tmp_path / ".local" / "bin" / "ormah"
+        shim.parent.mkdir(parents=True)
+        shim.write_text("#!/bin/sh\n")
+        shim.chmod(0o755)
+
+        fake_settings = MagicMock()
+        fake_settings.memory_dir = tmp_path / ".local" / "share" / "ormah" / "memory"
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.config.settings", fake_settings),
+            patch("ormah.setup._get_running_server_data_dir", return_value=None),
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_codex_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_codex_md_block"),
+            patch("ormah.setup._remove_codex_agents"),
+            patch("ormah.setup._remove_claude_agents"),
+            patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_fastembed_cache"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            run_uninstall(yes=True)
+
+        assert not shim.exists()
 
     def test_eof_on_first_prompt_cancels(self, monkeypatch, capsys):
         def raise_eof(_):

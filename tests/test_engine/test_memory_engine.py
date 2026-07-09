@@ -333,9 +333,10 @@ def test_get_whisper_context_degrades_when_reranker_unavailable(engine):
     )
     engine.db.conn.commit()
 
-    with patch.object(
-        engine.context_builder, "build_whisper_context", return_value="degraded whisper"
-    ) as build:
+    with (
+        patch.object(engine, "_refresh_whisper_reranker_if_cached", return_value=False),
+        patch.object(engine.context_builder, "build_whisper_context", return_value="degraded whisper") as build,
+    ):
         result = engine.get_whisper_context("auth prompt")
 
     assert result == "degraded whisper"
@@ -355,6 +356,38 @@ def test_get_whisper_context_normal_gate_when_reranker_available(engine):
     ) as build:
         engine.get_whisper_context("auth prompt")
 
+    assert build.call_args.kwargs["injection_gate"] == engine.settings.whisper_injection_gate
+
+
+def test_get_whisper_context_loads_reranker_if_cached_after_startup(engine):
+    """Desktop setup may cache the reranker after the server already started.
+
+    The next whisper should notice the cached model, load it, and use the
+    normal reranker gate without requiring a server restart.
+    """
+    engine.settings.whisper_reranker_enabled = True
+    engine._whisper_reranker_available = False
+    engine.settings.claude_maintenance_enabled = False
+    engine.db.conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
+    )
+    engine.db.conn.commit()
+
+    with (
+        patch("ormah.embeddings.reranker.model_is_cached", return_value=True),
+        patch("ormah.embeddings.reranker.preload_model") as preload_model,
+        patch.object(
+            engine.context_builder,
+            "build_whisper_context",
+            return_value="reranked",
+        ) as build,
+    ):
+        result = engine.get_whisper_context("where do I live?")
+
+    assert result == "reranked"
+    assert engine._whisper_reranker_available is True
+    preload_model.assert_called_once_with(engine.settings.whisper_reranker_model)
+    assert build.call_args.kwargs["reranker_enabled"] is True
     assert build.call_args.kwargs["injection_gate"] == engine.settings.whisper_injection_gate
 
 
