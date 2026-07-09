@@ -199,6 +199,24 @@ def test_llm_disabled_skips_detection(engine):
     assert len(proposals) == 0
 
 
+def test_pairs_evaluated_counts_one_candidate_pair(engine):
+    """Issue #90: pairs_evaluated must reflect exactly one LLM decision call."""
+    id_a, id_b = _create_pair(engine, node_type=NodeType.fact)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.conflict_detector._llm_check_conflict",
+        return_value={"same_subject": True, "conflict": False, "type": "none",
+                      "explanation": "no conflict"},
+    ):
+        from ormah.background.conflict_detector import run_conflict_detection
+        stats = run_conflict_detection(engine)
+
+    assert stats["pairs_evaluated"] == 1
+
+
 def test_project_scoped_nodes_checked_when_flag_enabled(engine):
     """With conflict_check_all_spaces=True, project-scoped nodes are checked."""
     original_threshold = engine.settings.auto_link_similarity_threshold

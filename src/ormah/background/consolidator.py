@@ -191,7 +191,7 @@ def run_consolidation(engine) -> dict | None:
         return {
             "clusters_found": 0,
             "clusters_consolidated": 0,
-            "duration_s": round(time.monotonic() - t0, 1),
+            "duration_s": round(time.monotonic() - t0, 3),
         }
 
     consolidated_count = 0

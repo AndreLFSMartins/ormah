@@ -1,7 +1,9 @@
 """Issue #90: maintenance runs return a stats dict."""
+from ormah.background import auto_linker
 from ormah.background.auto_linker import run_auto_linker
 from ormah.background.conflict_detector import run_conflict_detection
 from ormah.background.duplicate_merger import run_duplicate_detection
+from ormah.background.job_tracker import JobTracker, tracked
 
 
 def test_auto_linker_returns_stats(engine):
@@ -23,6 +25,28 @@ def test_duplicate_merger_stats_shape(engine):
     stats = run_duplicate_detection(engine)
     for key in ("nodes_scanned", "pairs_evaluated", "proposals_created", "duration_s"):
         assert key in stats
+
+
+def test_run_failure_is_visible_as_error_stats(engine, monkeypatch):
+    """A run whose internals raise must NOT look like a clean, empty success."""
+    engine.settings.llm_provider = "ollama"
+
+    def boom(conn):
+        raise RuntimeError("watermark read failed")
+
+    monkeypatch.setattr(auto_linker, "_get_watermark", boom)
+
+    stats = run_auto_linker(engine)
+    assert stats is not None
+    assert stats["error"] == "watermark read failed"
+
+    # tracked() must store the error dict as last_stats, not None.
+    tracker = JobTracker()
+    job = tracked(tracker, "auto_linker", run_auto_linker, engine)
+    job()
+    last_stats = tracker.snapshot()["auto_linker"]["last_stats"]
+    assert last_stats is not None
+    assert "error" in last_stats
 
 
 def test_llm_jobs_are_staggered(engine, monkeypatch):
