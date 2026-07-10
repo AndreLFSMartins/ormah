@@ -1453,11 +1453,6 @@ class MemoryEngine:
             "total_nodes": total,
             "by_tier": tier_counts,
             "total_edges": edge_count,
-            "vec_count": vec_count,
-            # Embeddable nodes still missing a vector -- the honest embedding gap.
-            # Stays > 0 for any node that cannot be embedded (visible, never masked).
-            "embedding_gap": self._missing_embeddable_count(),
-            "embedding_schema_version": int(ver_row["value"]) if ver_row else 0,
         }
         usage, window = self._usage_stats(now, days=days)
         whisper_health = compute_whisper_health(self.db.conn, now)
@@ -1471,6 +1466,11 @@ class MemoryEngine:
             "window": window,
             "usage": usage,
             "store": store,
+            "vec_count": vec_count,
+            # Embeddable nodes still missing a vector -- the honest embedding gap.
+            # Stays > 0 for any node that cannot be embedded (visible, never masked).
+            "embedding_gap": self._missing_embeddable_count(),
+            "embedding_schema_version": int(ver_row["value"]) if ver_row else 0,
             "whisper": {
                 "feedback_health": whisper_health,
                 "decisions": whisper_decisions,
