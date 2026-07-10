@@ -196,3 +196,87 @@ def test_pairs_attempted_counts_llm_unavailable_pair_but_not_evaluated(engine):
 
     assert stats["pairs_attempted"] == 1
     assert stats["pairs_evaluated"] == 0
+
+
+# --- #87 pair batching ---
+
+def test_duplicate_prompt_is_composed_from_parts():
+    from ormah.background import duplicate_merger as dm
+    assert dm._LLM_DUPLICATE_PROMPT == (
+        dm._LLM_DUP_INTRO + "\n\n" + dm._LLM_DUP_PAIR + "\n\n" + dm._LLM_DUP_RULES
+    )
+    assert dm._LLM_DUP_INSTRUCTIONS == dm._LLM_DUP_INTRO + "\n\n" + dm._LLM_DUP_RULES
+
+
+def test_scan_order_randomizes_only_when_capped():
+    """Council C2: capped runs randomize scan order for fair coverage across runs."""
+    from ormah.background import duplicate_merger as dm
+    assert dm._scan_order(0) == ""
+    assert dm._scan_order(5) == " ORDER BY RANDOM()"
+
+
+def test_batched_dedup_creates_proposals(engine):
+    from ormah.background import duplicate_merger as dm
+    for _ in range(3):
+        engine.remember(CreateNodeRequest(
+            content="ormah stores memories in sqlite with fts5", title="ormah storage"))
+    engine.settings.llm_provider = "ollama"
+    engine.settings.maintenance_pairs_per_call = 2
+    engine.settings.auto_merge_threshold = 2.0     # force proposal path, not auto-merge
+    _reset_adapter()
+
+    def fake_batch(settings, prompt, json_mode=True, **kw):
+        n = prompt.count("### Pair ")
+        return json.dumps({"verdicts": [
+            {"pair_id": i, "is_duplicate": True, "merged_title": "t",
+             "merged_content": "c", "reason": "same fact"} for i in range(n)]})
+
+    single = {"is_duplicate": True, "merged_title": "t", "merged_content": "c",
+              "reason": "same fact"}
+    with patch("ormah.background.llm.pair_batch.llm_generate", fake_batch), \
+            patch("ormah.background.duplicate_merger._llm_check_duplicate", return_value=single):
+        stats = dm.run_duplicate_detection(engine)
+
+    n_props = engine.db.conn.execute(
+        "SELECT COUNT(*) FROM proposals WHERE type = 'merge'").fetchone()[0]
+    assert n_props >= 1
+    assert stats["pairs_evaluated"] >= 1
+
+
+def test_batched_dedup_skips_pairs_whose_node_was_merged_away(engine):
+    """Codex council finding (#87): overlapping pairs in one window (e.g. (A,B)
+    and (B,C)) — once an auto-merge deletes a shared node, a later pair must be
+    skipped, not re-merged on the stale (now-missing) node. execute_merge silently
+    no-ops on a missing node ('Node X not found.'), which would otherwise miscount
+    it as a successful merge."""
+    from ormah.background import duplicate_merger as dm
+    for _ in range(3):
+        engine.remember(CreateNodeRequest(
+            content="ormah stores memories in sqlite with fts5", title="ormah storage"))
+    engine.settings.llm_provider = "ollama"
+    engine.settings.maintenance_pairs_per_call = 3      # all candidate pairs in one window
+    engine.settings.auto_merge_threshold = 0.0          # force the auto-merge path for every pair
+    _reset_adapter()
+
+    real_merge = engine.execute_merge
+    bad_calls = []
+
+    def spy_merge(node_id_a, node_id_b, **kw):
+        for nid in (node_id_a, node_id_b):
+            if engine.db.conn.execute("SELECT 1 FROM nodes WHERE id = ?", (nid,)).fetchone() is None:
+                bad_calls.append(nid)
+        return real_merge(node_id_a, node_id_b, **kw)
+
+    def fake_batch(settings, prompt, json_mode=True, **kw):
+        n = prompt.count("### Pair ")
+        return json.dumps({"verdicts": [
+            {"pair_id": i, "is_duplicate": True, "merged_title": "t",
+             "merged_content": "c", "reason": "same"} for i in range(n)]})
+
+    single = {"is_duplicate": True, "merged_title": "t", "merged_content": "c", "reason": "same"}
+    with patch("ormah.background.llm.pair_batch.llm_generate", fake_batch), \
+            patch("ormah.background.duplicate_merger._llm_check_duplicate", return_value=single), \
+            patch.object(engine, "execute_merge", spy_merge):
+        dm.run_duplicate_detection(engine)
+
+    assert bad_calls == [], f"execute_merge called on already-deleted node(s): {bad_calls}"

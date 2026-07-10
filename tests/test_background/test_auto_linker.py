@@ -477,3 +477,88 @@ def test_pairs_attempted_counts_invalid_llm_output_but_not_evaluated(engine):
 
     assert stats["pairs_attempted"] == 1
     assert stats["pairs_evaluated"] == 0
+
+
+# --- #87 pair batching ---
+
+def test_link_prompt_is_composed_from_parts():
+    from ormah.background import auto_linker as al
+    assert al._LLM_LINK_PROMPT == (
+        al._LLM_LINK_INTRO + "\n\n" + al._LLM_LINK_PAIR + "\n\n" + al._LLM_LINK_RULES
+    )
+    assert al._LLM_LINK_INSTRUCTIONS == al._LLM_LINK_INTRO + "\n\n" + al._LLM_LINK_RULES
+
+
+def _seed_similar_nodes(engine, n=3):
+    ids = []
+    for _ in range(n):
+        nid, _created = engine.remember(CreateNodeRequest(
+            content="ormah uses sqlite-vec for vector search in the memory index",
+            title="ormah vector search"))
+        ids.append(nid)
+    return ids
+
+
+def test_batched_run_creates_edges_and_advances_watermark(engine):
+    from ormah.background import auto_linker as al
+    _seed_similar_nodes(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.maintenance_pairs_per_call = 2
+    _reset_adapter()
+
+    def fake_batch(settings, prompt, json_mode=True, **kw):
+        n = prompt.count("### Pair ")
+        return json.dumps({"verdicts": [
+            {"pair_id": i, "relationship": "related_to", "reason": "same subsystem"}
+            for i in range(n)]})
+
+    single = MagicMock(return_value=json.dumps({"relationship": "related_to", "reason": "x"}))
+    with patch("ormah.background.llm.pair_batch.llm_generate", fake_batch), \
+            patch(_LLM_PATCH, single):
+        stats = al.run_auto_linker(engine)
+
+    edges = engine.db.conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE edge_type = 'related_to'").fetchone()[0]
+    assert edges >= 1
+    assert stats["pairs_evaluated"] >= 1
+    assert al._get_watermark(engine.db.conn) > 0
+
+
+def test_outage_stops_after_first_window_and_blocks_watermark(engine):
+    """Council C1 regression: LLM down -> exactly one batch attempt, watermark held."""
+    from ormah.background import auto_linker as al
+    _seed_similar_nodes(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.maintenance_pairs_per_call = 2
+    _reset_adapter()
+    calls = {"n": 0}
+
+    def down(*a, **k):
+        calls["n"] += 1
+        return None
+
+    with patch("ormah.background.llm.pair_batch.llm_generate", down):
+        al.run_auto_linker(engine)
+    assert calls["n"] == 1
+    assert al._get_watermark(engine.db.conn) == 0
+
+
+def test_k1_stops_llm_calls_at_max_edges(engine):
+    """Cursor regression: no pair is judged once the edge budget is spent (K=1 path)."""
+    from ormah.background import auto_linker as al
+    _seed_similar_nodes(engine, n=4)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+    engine.settings.auto_link_max_edges_per_run = 1
+    _reset_adapter()
+    calls = {"n": 0}
+
+    def single(settings, prompt, json_mode=True, **kw):
+        calls["n"] += 1
+        return json.dumps({"relationship": "related_to", "reason": "r"})
+
+    with patch(_LLM_PATCH, single):
+        al.run_auto_linker(engine)
+    assert calls["n"] <= 2   # budget 1 -> at most the winning call + the boundary check
