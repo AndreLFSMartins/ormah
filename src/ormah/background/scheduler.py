@@ -20,8 +20,9 @@ _MISFIRE_GRACE = 120
 # Spread the four LLM jobs so they don't burst together 24h after boot (#90).
 # Offset is relative to process start, not wall-clock — a restart loop shorter than
 # the offset (e.g. crash-looping every 2 min against a 5+ min offset) defers the first run indefinitely.
-def _staggered(minutes: int) -> datetime:
-    return datetime.now(timezone.utc) + timedelta(minutes=minutes)
+def _staggered(minutes: int, interval_minutes: int) -> datetime:
+    """First run is offset to spread the LLM jobs, but never past one interval."""
+    return datetime.now(timezone.utc) + timedelta(minutes=min(minutes, interval_minutes))
 
 
 def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTracker]:
@@ -42,7 +43,7 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         minutes=s.auto_link_interval_minutes,
         id="auto_linker",
         name="Auto-linker",
-        next_run_time=_staggered(5),
+        next_run_time=_staggered(5, s.auto_link_interval_minutes),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
@@ -65,7 +66,7 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         minutes=s.conflict_check_interval_minutes,
         id="conflict_detector",
         name="Conflict detector",
-        next_run_time=_staggered(15),
+        next_run_time=_staggered(15, s.conflict_check_interval_minutes),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
@@ -77,7 +78,7 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         minutes=s.duplicate_check_interval_minutes,
         id="duplicate_merger",
         name="Duplicate merger",
-        next_run_time=_staggered(30),
+        next_run_time=_staggered(30, s.duplicate_check_interval_minutes),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
@@ -100,7 +101,7 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         minutes=s.consolidation_interval_minutes,
         id="consolidator",
         name="Consolidator",
-        next_run_time=_staggered(45),
+        next_run_time=_staggered(45, s.consolidation_interval_minutes),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 

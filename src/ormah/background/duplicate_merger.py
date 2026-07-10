@@ -264,6 +264,7 @@ def run_duplicate_detection(engine) -> dict | None:
         nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes").fetchall()
         checked = set()
         proposals_created = 0
+        pairs_attempted = 0
         pairs_evaluated = 0
 
         for node in nodes:
@@ -317,11 +318,12 @@ def run_duplicate_detection(engine) -> dict | None:
                     continue
 
                 # --- LLM confirmation (mandatory) ---
-                pairs_evaluated += 1
+                pairs_attempted += 1
                 llm_result = _llm_check_duplicate(settings, node, other)
                 if llm_result is None:
                     # LLM unavailable for this pair — skip
                     continue
+                pairs_evaluated += 1
                 if not llm_result.get("is_duplicate"):
                     logger.debug(
                         "LLM rejected duplicate for %s / %s: %s",
@@ -387,6 +389,7 @@ def run_duplicate_detection(engine) -> dict | None:
         duration = time.monotonic() - t0
         stats = {
             "nodes_scanned": len(nodes),
+            "pairs_attempted": pairs_attempted,
             "pairs_evaluated": pairs_evaluated,
             "proposals_created": proposals_created,
             "duration_s": round(duration, 3),

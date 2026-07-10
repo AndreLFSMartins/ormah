@@ -214,7 +214,27 @@ def test_pairs_evaluated_counts_one_candidate_pair(engine):
         from ormah.background.conflict_detector import run_conflict_detection
         stats = run_conflict_detection(engine)
 
+    assert stats["pairs_attempted"] == 1
     assert stats["pairs_evaluated"] == 1
+
+
+def test_pairs_attempted_counts_llm_unavailable_pair_but_not_evaluated(engine):
+    """Issue #90 (council finding 2): an LLM-unavailable pair (None decision)
+    must count as attempted but NOT as evaluated."""
+    id_a, id_b = _create_pair(engine, node_type=NodeType.fact)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.conflict_detector._llm_check_conflict",
+        return_value=None,
+    ):
+        from ormah.background.conflict_detector import run_conflict_detection
+        stats = run_conflict_detection(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 0
 
 
 def test_project_scoped_nodes_checked_when_flag_enabled(engine):
