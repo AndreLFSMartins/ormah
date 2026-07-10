@@ -311,6 +311,16 @@ def run_duplicate_detection(engine) -> dict | None:
                                  pair["node"]["id"][:8], pair["other"]["id"][:8],
                                  llm_result.get("reason", ""))
                     continue
+                # An earlier auto-merge in this window may have deleted one of these
+                # nodes (execute_merge picks the keeper by quality, not arg order, and
+                # silently no-ops on a missing node — which would miscount it as a
+                # merge). Skip stale pairs; they are re-collected next run against
+                # fresh state. (#87 council: overlapping in-flight pairs.)
+                if (conn.execute("SELECT 1 FROM nodes WHERE id = ?",
+                                 (pair["node"]["id"],)).fetchone() is None
+                        or conn.execute("SELECT 1 FROM nodes WHERE id = ?",
+                                        (pair["other"]["id"],)).fetchone() is None):
+                    continue
                 merged_content = llm_result.get("merged_content")
                 merged_title = llm_result.get("merged_title")
                 reason = llm_result.get("reason", "LLM confirmed duplicate")
