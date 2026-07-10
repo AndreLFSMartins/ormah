@@ -4,45 +4,25 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_conflict_type
-from ormah.background.pair_skip import normalize_pair, pair_skip_sql
 from ormah.models.node import Connection, EdgeType
 
 logger = logging.getLogger(__name__)
 
-_CONFLICT_ERROR_BACKOFF = "-6 hours"
-_CONFLICT_TERMINAL_RESULTS = ("none", "evolution", "tension")
+_LLM_CONFLICT_INTRO = """\
+You are checking whether two memories genuinely contradict each other. False positives create noise in the graph and waste the user's time resolving non-conflicts. Be very conservative — only flag true contradictions."""
 
-# Sentinel: the LLM answered but the response was internally inconsistent
-# (e.g. conflict=false with type != "none"). This is a terminal outcome —
-# record result='none' so it doesn't churn on the error backoff — but it
-# must NOT be conflated with "LLM unavailable/invalid" (which records 'error').
-_INCONSISTENT = object()
-
-_CONFLICT_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "same_subject": {"type": "boolean"},
-        "conflict": {"type": "boolean"},
-        "type": {"type": "string", "enum": ["evolution", "tension", "none"]},
-        "evolved_node": {"type": ["string", "null"]},
-        "explanation": {"type": ["string", "null"]},
-    },
-    "required": ["same_subject", "conflict", "type", "evolved_node", "explanation"],
-    "additionalProperties": False,
-}
-
-_LLM_CONFLICT_PROMPT = """\
-You are checking whether two memories genuinely contradict each other. False positives create noise in the graph and waste the user's time resolving non-conflicts. Be very conservative — only flag true contradictions.
-
+_LLM_CONFLICT_PAIR = """\
 Memory A (created: {created_a}, space: {space_a}): "{title_a}"
 {content_a}
 
 Memory B (created: {created_b}, space: {space_b}): "{title_b}"
-{content_b}
+{content_b}"""
 
+_LLM_CONFLICT_RULES = """\
 ## Decision process (stop at first "no")
 
 **1. Same space AND same specific subject?**
@@ -79,16 +59,26 @@ Return JSON only:
   "explanation": "one sentence using actual memory titles"
 }}"""
 
+_LLM_CONFLICT_PROMPT = _LLM_CONFLICT_INTRO + "\n\n" + _LLM_CONFLICT_PAIR + "\n\n" + _LLM_CONFLICT_RULES
+_LLM_CONFLICT_INSTRUCTIONS = _LLM_CONFLICT_INTRO + "\n\n" + _LLM_CONFLICT_RULES  # sent once per batch
 
-def _llm_check_conflict(settings, node_row, other_row) -> dict | object | None:
+
+def _render_conflict_pair(pair: dict) -> str:
+    """Render one candidate pair for a batched conflict prompt (#87)."""
+    a, b = pair["node_a"], pair["node_b"]
+    return _LLM_CONFLICT_PAIR.format(
+        title_a=a["title"] or "(untitled)", content_a=a["content"][:500],
+        created_a=a.get("created", "unknown"), space_a=a.get("space") or "global",
+        title_b=b["title"] or "(untitled)", content_b=b["content"][:500],
+        created_b=b.get("created", "unknown"), space_b=b.get("space") or "global",
+    )
+
+
+def _llm_check_conflict(settings, node_row, other_row) -> dict | None:
     """Ask LLM whether two nodes contradict each other.
 
-    Returns:
-    - a parsed, semantically-consistent dict on success.
-    - ``_INCONSISTENT`` if the LLM answered but the response was
-      internally inconsistent (answered-but-invalid; terminal 'none').
-    - ``None`` if the LLM is unavailable or returned unparseable output
-      (truly unavailable; terminal 'error', subject to backoff retry).
+    Returns parsed dict or None if the LLM is unavailable or returns
+    invalid output.
     """
     from ormah.background.llm_client import extract_json, llm_generate
 
@@ -109,12 +99,7 @@ def _llm_check_conflict(settings, node_row, other_row) -> dict | object | None:
         space_b=_get(other_row, "space", "global"),
     )
 
-    raw = llm_generate(
-        settings,
-        prompt,
-        json_mode=True,
-        response_format={"type": "json_schema", "json_schema": {"schema": _CONFLICT_RESPONSE_SCHEMA}},
-    )
+    raw = llm_generate(settings, prompt, json_mode=True)
     if raw is None:
         return None
 
@@ -124,31 +109,10 @@ def _llm_check_conflict(settings, node_row, other_row) -> dict | object | None:
             return None
         if "type" in result:
             result["type"] = normalize_conflict_type(result["type"])
+        return result
     except (json.JSONDecodeError, TypeError):
         logger.warning("LLM returned invalid JSON for conflict check")
         return None
-
-    ct = result.get("type")
-    if not result.get("conflict"):
-        if ct != "none":
-            return _INCONSISTENT
-    else:  # conflict is true
-        if not result.get("same_subject") or ct not in ("evolution", "tension"):
-            return _INCONSISTENT
-        if ct == "evolution" and result.get("evolved_node") not in ("a", "b"):
-            return _INCONSISTENT
-        if ct == "tension" and result.get("evolved_node") is not None:
-            result["evolved_node"] = None  # tension has no evolved node
-
-    return result
-
-
-def _record_terminal(engine, pair: tuple[str, str], result: str, now: str) -> None:
-    """Persist a terminal (stand-alone, non-edge) conflict_checked outcome."""
-    with engine.db.transaction() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO conflict_checked (node_a, node_b, result, checked_at) "
-            "VALUES (?, ?, ?, ?)", (*pair, result, now))
 
 
 _BELIEF_TYPES = ('preference', 'fact', 'observation', 'goal')
@@ -162,156 +126,160 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
     Node dicts include ``created`` so they can be passed directly to the
     LLM conflict-check prompt.  Does NOT call the LLM.
     """
-    try:
-        from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore
+    from ormah.embeddings.encoder import get_encoder
+    from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
-        settings = engine.settings
-        encoder = get_encoder(settings)
-        vec_store = VectorStore(engine.db)
+    settings = engine.settings
+    encoder = get_encoder(settings)
+    vec_store = VectorStore(engine.db)
 
-        if settings.conflict_check_all_spaces:
-            nodes = engine.db.conn.execute(
-                "SELECT id, content, title, type, created, space FROM nodes "
-                "WHERE type IN (?, ?, ?, ?) ORDER BY RANDOM()",
-                _BELIEF_TYPES,
-            ).fetchall()
-        else:
-            nodes = engine.db.conn.execute(
-                "SELECT id, content, title, type, created, space FROM nodes "
-                "WHERE type IN (?, ?, ?, ?) AND (space IS NULL OR space = 'null') ORDER BY RANDOM()",
-                _BELIEF_TYPES,
-            ).fetchall()
+    if settings.conflict_check_all_spaces:
+        nodes = engine.db.conn.execute(
+            "SELECT id, content, title, type, created, space FROM nodes "
+            "WHERE type IN (?, ?, ?, ?) ORDER BY RANDOM()",
+            _BELIEF_TYPES,
+        ).fetchall()
+    else:
+        nodes = engine.db.conn.execute(
+            "SELECT id, content, title, type, created, space FROM nodes "
+            "WHERE type IN (?, ?, ?, ?) AND (space IS NULL OR space = 'null') ORDER BY RANDOM()",
+            _BELIEF_TYPES,
+        ).fetchall()
 
-        checked: set[tuple[str, str]] = set()
-        candidates: list[dict] = []
+    checked: set[tuple[str, str]] = set()
+    candidates: list[dict] = []
 
-        for node in nodes:
+    for node in nodes:
+        if len(candidates) >= limit:
+            break
+
+        text = f"{node['title'] or ''} {node['content']}".strip()
+        if not text:
+            continue
+
+        query_vec = stored_or_encoded(
+            vec_store,
+            encoder,
+            node["id"],
+            node["title"],
+            node["content"],
+            settings.embedding_max_content_chars,
+        )
+        similar = vec_store.search(query_vec, limit=15)
+
+        for match in similar:
             if len(candidates) >= limit:
                 break
-
-            text = f"{node['title'] or ''} {node['content']}".strip()
-            if not text:
+            if match["id"] == node["id"]:
                 continue
 
-            query_vec = encoder.encode(text)
-            similar = vec_store.search(query_vec, limit=15)
+            pair = tuple(sorted([node["id"], match["id"]]))
+            if pair in checked:
+                continue
+            checked.add(pair)
 
-            for match in similar:
-                if len(candidates) >= limit:
-                    break
-                if match["id"] == node["id"]:
-                    continue
+            already_checked = engine.db.conn.execute(
+                "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+            ).fetchone()
+            if already_checked:
+                continue
 
-                pair = normalize_pair(node["id"], match["id"])
-                if pair in checked:
-                    continue
-                checked.add(pair)
+            similarity = match["similarity"]
+            if similarity < 0.4:
+                continue
 
-                already_checked = engine.db.conn.execute(
-                    pair_skip_sql("conflict_checked", _CONFLICT_TERMINAL_RESULTS),
-                    (*pair, _CONFLICT_ERROR_BACKOFF),
-                ).fetchone()
-                if already_checked:
-                    continue
+            other = engine.db.conn.execute(
+                "SELECT id, title, content, type, created, space FROM nodes WHERE id = ?",
+                (match["id"],),
+            ).fetchone()
+            if other is None:
+                continue
+            if other["type"] not in _BELIEF_TYPES:
+                continue
 
-                similarity = match["similarity"]
-                if similarity < 0.4:
-                    continue
+            has_edge = engine.db.conn.execute(
+                "SELECT 1 FROM edges WHERE edge_type IN ('contradicts', 'evolved_from') AND "
+                "((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))",
+                (node["id"], match["id"], match["id"], node["id"]),
+            ).fetchone()
+            if has_edge:
+                continue
 
-                other = engine.db.conn.execute(
-                    "SELECT id, title, content, type, created, space FROM nodes WHERE id = ?",
-                    (match["id"],),
-                ).fetchone()
-                if other is None:
-                    continue
-                if other["type"] not in _BELIEF_TYPES:
-                    continue
+            def _nd(row) -> dict:
+                return {
+                    "id": row["id"],
+                    "title": row["title"] or "",
+                    "type": row["type"] or "",
+                    "space": row["space"] or "",
+                    "content": (row["content"] or "")[:400],
+                    "created": row["created"] or "",
+                }
 
-                has_edge = engine.db.conn.execute(
-                    "SELECT 1 FROM edges WHERE edge_type IN ('contradicts', 'evolved_from') AND "
-                    "((source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?))",
-                    (node["id"], match["id"], match["id"], node["id"]),
-                ).fetchone()
-                if has_edge:
-                    continue
+            candidates.append({
+                "node_a": _nd(node),
+                "node_b": _nd(other),
+                "similarity": round(similarity, 3),
+            })
 
-                def _nd(row) -> dict:
-                    return {
-                        "id": row["id"],
-                        "title": row["title"] or "",
-                        "type": row["type"] or "",
-                        "space": row["space"] or "",
-                        "content": (row["content"] or "")[:400],
-                        "created": row["created"] or "",
-                    }
-
-                candidates.append({
-                    "node_a": _nd(node),
-                    "node_b": _nd(other),
-                    "similarity": round(similarity, 3),
-                })
-
-        return candidates
-
-    except Exception as e:
-        logger.warning("_find_conflict_candidates failed: %s", e)
-        return []
+    return candidates
 
 
-def run_conflict_detection(engine) -> None:
-    """Find potentially contradicting nodes and create edges."""
+def run_conflict_detection(engine) -> dict | None:
+    """Find potentially contradicting nodes and create edges.
+
+    Candidate pairs from _find_conflict_candidates are judged in K-sized LLM
+    calls (#87). At K=1 the judge is a pure map — one _llm_check_conflict per
+    candidate, exactly as before — so the existing suite is the K=1 regression
+    net. The finder already collects the full candidate list, so no streaming
+    window is needed here: judge the list, then apply verdicts by index.
+    """
+    t0 = time.monotonic()
     try:
+        from ormah.background.llm.pair_batch import judge_pairs
+
         settings = engine.settings
 
         if not settings.llm_enabled:
             logger.debug("Conflict detection skipped: LLM not enabled")
-            return
+            return {"skipped": "llm_disabled"}
 
-        max_calls = getattr(engine.settings, "conflict_check_max_llm_calls_per_run", -1)
-        candidate_limit = max_calls if max_calls >= 0 else 10000
-        candidates = _find_conflict_candidates(engine, limit=candidate_limit)
+        # Pair-denominated cap (#87): default 10000 == the previous hardcoded limit,
+        # so out-of-the-box behavior is unchanged; now operator-configurable. The
+        # finder scans ORDER BY RANDOM(), so a lowered cap stays fair across runs.
+        max_pairs = settings.conflict_check_max_pairs_per_run
+        candidates = _find_conflict_candidates(engine, limit=max_pairs)
+        k = max(settings.conflict_check_pairs_per_call or settings.maintenance_pairs_per_call, 1)
+
+        verdicts = judge_pairs(
+            settings, _LLM_CONFLICT_INSTRUCTIONS, candidates, _render_conflict_pair,
+            judge_single=lambda c: _llm_check_conflict(settings, c["node_a"], c["node_b"]),
+            k=k,
+        )
+
         edges_created = 0
+        pairs_attempted = 0
+        pairs_evaluated = 0
         dirty_nodes: dict[str, list[Connection]] = {}
-        llm_calls = 0
-        consecutive_failures = 0
 
-        for candidate in candidates:
-            if consecutive_failures >= 3:
-                logger.warning("Conflict detection: 3 consecutive LLM failures, aborting run")
-                break
-            if max_calls >= 0 and llm_calls >= max_calls:
-                break
-
+        for candidate, llm_result in zip(candidates, verdicts):
             node_a = candidate["node_a"]
             node_b = candidate["node_b"]
-            pair = normalize_pair(node_a["id"], node_b["id"])
 
-            llm_result = _llm_check_conflict(settings, node_a, node_b)
-            llm_calls += 1
-            _now = datetime.now(timezone.utc).isoformat()
-
+            pairs_attempted += 1
             if llm_result is None:
-                # LLM unavailable or unparseable output -> terminal 'error', backoff-retried.
-                consecutive_failures += 1
-                _record_terminal(engine, pair, "error", _now)
                 continue
-
-            if llm_result is _INCONSISTENT:
-                # LLM answered but the response was semantically inconsistent -> terminal
-                # 'none', not 'error' (does not churn on the backoff retry window).
-                consecutive_failures = 0
-                _record_terminal(engine, pair, "none", _now)
-                continue
-
-            consecutive_failures = 0
-
+            pairs_evaluated += 1
             if not llm_result.get("conflict"):
-                _record_terminal(engine, pair, "none", _now)
                 continue
+            if not llm_result.get("same_subject", True):
+                continue
+            # Batch verdicts arrive un-normalized; the single path already
+            # normalized inside _llm_check_conflict (double-normalize is idempotent).
+            if "type" in llm_result:
+                llm_result["type"] = normalize_conflict_type(llm_result["type"])
 
             explanation = llm_result.get("explanation", "")
-            now = _now
+            now = datetime.now(timezone.utc).isoformat()
             conflict_type = llm_result.get("type", "tension")
 
             with engine.db.transaction() as db_conn:
@@ -338,10 +306,6 @@ def run_conflict_detection(engine) -> None:
                     edge_type_str = "contradicts"
                     source_id, target_id = node_a["id"], node_b["id"]
 
-                db_conn.execute(
-                    "INSERT OR REPLACE INTO conflict_checked (node_a, node_b, result, checked_at) "
-                    "VALUES (?, ?, ?, ?)", (*pair, conflict_type, now))
-
             md_conn = Connection(
                 target=target_id,
                 edge=EdgeType(edge_type_str),
@@ -361,13 +325,19 @@ def run_conflict_detection(engine) -> None:
             except Exception as e:
                 logger.debug("Failed to persist conflict edge to markdown for %s: %s", nid[:8], e)
 
-        if edges_created:
-            logger.info("Conflict detector created %d edges", edges_created)
-        logger.info(
-            "Conflict detection run: llm_calls=%d edges=%d cap=%d cap_hit=%s",
-            llm_calls, edges_created, max_calls,
-            bool(max_calls >= 0 and llm_calls >= max_calls),
-        )
+        duration = time.monotonic() - t0
+        stats = {
+            "candidates_found": len(candidates),
+            "pairs_attempted": pairs_attempted,
+            "pairs_evaluated": pairs_evaluated,
+            "edges_created": edges_created,
+            "cap_hit": len(candidates) >= max_pairs,
+            "duration_s": round(duration, 3),
+            "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
+        }
+        logger.info("conflict_detector run: %s", stats)
+        return stats
 
     except Exception as e:
         logger.warning("Conflict detection failed: %s", e)
+        return {"error": str(e)}

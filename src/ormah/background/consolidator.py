@@ -5,18 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+import time
 
 logger = logging.getLogger(__name__)
-
-# Maximum number of clusters to consolidate per run.
-_MAX_CLUSTERS_PER_RUN = 10
-
-# Minimum cluster size to justify consolidation.
-_MIN_CLUSTER_SIZE = 2
-
-# Cosine similarity threshold for clustering.
-_CLUSTER_THRESHOLD = 0.6
 
 _VALID_NODE_TYPES = ("fact", "decision", "preference", "event", "person",
                      "project", "concept", "procedure", "goal", "observation")
@@ -45,31 +36,39 @@ def _cluster_signature(cluster: list[dict]) -> str:
     parts = sorted(hashlib.sha256(_fields(n).encode()).hexdigest() for n in cluster)
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
-
 def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
     """Find clusters of similar working-tier nodes for consolidation.
 
-    Returns up to *limit* clusters, each a list of node dicts (max 5 nodes).
+    Returns up to *limit* clusters, each a list of node dicts (max
+    ``engine.settings.consolidation_max_cluster_nodes`` nodes).
     Does NOT call the LLM — pure similarity-based clustering.
     """
     try:
-        from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
     except ImportError:
         return []
 
     conn = engine.db.conn
+    s = engine.settings
+    min_size = s.consolidation_min_cluster_size
+    max_nodes = s.consolidation_max_cluster_nodes
+    threshold = s.consolidation_cluster_threshold
+
+    if max_nodes < min_size:
+        logger.warning(
+            "consolidation_max_cluster_nodes (%d) < consolidation_min_cluster_size (%d); "
+            "no cluster can ever be emitted",
+            max_nodes, min_size,
+        )
+        return []
 
     rows = conn.execute(
         "SELECT id, title, content, space, type FROM nodes WHERE tier = 'working'"
     ).fetchall()
-    if len(rows) < _MIN_CLUSTER_SIZE:
+    if len(rows) < min_size:
         return []
 
-    try:
-        vec_store = VectorStore(engine.db)
-    except Exception:
-        return []
+    vec_store = VectorStore(engine.db)
 
     clustered_ids: set[str] = set()
     clusters: list[list[dict]] = []
@@ -91,12 +90,12 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
         clustered_ids.add(nid)
 
         for match in similar:
-            if len(cluster) >= 5:  # cap at 5 nodes per cluster
+            if len(cluster) >= max_nodes:
                 break
             mid = match["id"]
             if mid == nid or mid in clustered_ids:
                 continue
-            if match["similarity"] < _CLUSTER_THRESHOLD:
+            if match["similarity"] < threshold:
                 continue
             m_row = conn.execute(
                 "SELECT id, title, content, space, type, tier FROM nodes WHERE id = ?",
@@ -107,7 +106,7 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
             cluster.append(dict(m_row))
             clustered_ids.add(mid)
 
-        if len(cluster) >= _MIN_CLUSTER_SIZE:
+        if len(cluster) >= min_size:
             clusters.append(cluster)
 
     return clusters
@@ -178,14 +177,13 @@ def _apply_consolidation(
                 pass
             new_node = engine.file_store.load(new_id)
             if new_node and "about_self" not in new_node.tags:
-                from ormah.engine.memory_engine import apply_identity_space_invariants
-
                 new_node.tags.append("about_self")
-                # Identity is always global — force None + lock so auto_cluster never
-                # reassigns the consolidated node (the majority vote may have picked a
-                # project space). index_single syncs tags + space + space_locked.
-                apply_identity_space_invariants(new_node)
-                engine.builder.index_single(engine.file_store.save(new_node))
+                engine.file_store.save(new_node)
+                with engine.db.transaction() as tx_conn:
+                    tx_conn.execute(
+                        "INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, 'about_self')",
+                        (new_id,),
+                    )
 
     # Create derived_from edges and demote originals to archival
     for node_id in node_ids:
@@ -203,15 +201,22 @@ def _apply_consolidation(
     return new_id
 
 
-def run_consolidation(engine) -> None:
+def run_consolidation(engine) -> dict | None:
     """Find clusters of similar working memories and consolidate via LLM."""
+    t0 = time.monotonic()
     settings = engine.settings
     if not settings.llm_enabled:
-        return
+        return {"skipped": "llm_disabled"}
 
-    clusters = _find_consolidation_clusters(engine, limit=_MAX_CLUSTERS_PER_RUN)
+    clusters = _find_consolidation_clusters(
+        engine, limit=settings.consolidation_max_clusters_per_run
+    )
     if not clusters:
-        return
+        return {
+            "clusters_found": 0,
+            "clusters_consolidated": 0,
+            "duration_s": round(time.monotonic() - t0, 3),
+        }
 
     consolidated_count = 0
     for cluster in clusters:
@@ -221,8 +226,13 @@ def run_consolidation(engine) -> None:
         except Exception as e:
             logger.warning("Failed to consolidate cluster: %s", e)
 
-    if consolidated_count:
-        logger.info("Consolidated %d cluster(s)", consolidated_count)
+    stats = {
+        "clusters_found": len(clusters),
+        "clusters_consolidated": consolidated_count,
+        "duration_s": round(time.monotonic() - t0, 3),
+    }
+    logger.info("consolidator run: %s", stats)
+    return stats
 
 
 def _consolidate_cluster(engine, cluster: list[dict]) -> None:
@@ -287,7 +297,7 @@ Return a JSON object:
     except (json.JSONDecodeError, TypeError, ValueError):
         # ponytail: transient parse failure -> retry next run (do NOT record). Now rare thanks to
         # the adapter result-fallback. Ceiling: a cluster whose content DETERMINISTICALLY fails to
-        # parse is retried every run (bounded by _MAX_CLUSTERS_PER_RUN); add a checked_at backoff
+        # parse is retried every run (bounded by consolidation_max_clusters_per_run); add a checked_at backoff
         # column if that ever bleeds.
         logger.warning("LLM returned unparseable JSON for consolidation; will retry next run")
         return

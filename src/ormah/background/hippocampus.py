@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import subprocess
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, Timer

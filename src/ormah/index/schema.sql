@@ -181,6 +181,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_whisper_type_source_unique
     ON signals(whisper_log_id, signal_type, source)
     WHERE whisper_log_id IS NOT NULL;
 
+-- One row per whisper call recording the outcome — including silence.
+-- whisper_log (above) only records candidates; prompts where whisper stayed
+-- silent left no trace, making silence rate uncomputable. This table is the
+-- per-prompt denominator. Stores prompt_hash only (no text, no vectors).
+CREATE TABLE IF NOT EXISTS whisper_decisions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT,
+    space           TEXT,
+    prompt_hash     TEXT NOT NULL,
+    intent          TEXT,               -- comma-joined intent categories, NULL if unclassified
+    outcome         TEXT NOT NULL,      -- 'injected' | 'silent_short' | 'silent_conversational'
+                                        -- | 'silent_topic_shift' | 'silent_no_candidates'
+                                        -- | 'silent_gate' | 'silent_blackout' | 'silent_error'
+    candidate_count INTEGER DEFAULT 0,  -- results returned by search before filtering
+    injected_count  INTEGER DEFAULT 0,  -- memories actually injected
+    max_gate_score  REAL,               -- best absolute gate score among candidates
+    logged_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_whisper_decisions_session ON whisper_decisions(session_id);
+CREATE INDEX IF NOT EXISTS idx_whisper_decisions_logged  ON whisper_decisions(logged_at);
+
 CREATE TABLE IF NOT EXISTS review_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     node_id     TEXT NOT NULL,

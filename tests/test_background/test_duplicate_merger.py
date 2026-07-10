@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
-_LLM_PATCH = "ormah.background.llm_client.llm_generate"
-
 from ormah.models.node import CreateNodeRequest, NodeType
+
+_LLM_PATCH = "ormah.background.llm_client.llm_generate"
 
 
 def _create_pair(engine, title_a="Python language", content_a="Python is a programming language.",
@@ -29,43 +28,6 @@ def _create_pair(engine, title_a="Python language", content_a="Python is a progr
 def _reset_adapter():
     from ormah.background.llm_client import reset_adapter
     reset_adapter()
-
-
-def _make_engine(tmp_path):
-    from ormah.config import Settings
-    from ormah.engine.memory_engine import MemoryEngine
-
-    nodes_dir = tmp_path / "nodes"
-    nodes_dir.mkdir()
-    settings = Settings(memory_dir=tmp_path)
-    eng = MemoryEngine(settings)
-    eng.startup()
-    return eng
-
-
-def _make_engine_with_two_similar_nodes(tmp_path):
-    """Engine with a temp db + two near-identical nodes (pair the pre-filter)."""
-    eng = _make_engine(tmp_path)
-    eng.settings.llm_provider = "ollama"  # llm_enabled derives from this
-    _create_pair(eng)
-    return eng
-
-
-def _make_engine_with_many_similar_nodes(tmp_path, n):
-    """Engine with n near-identical nodes so the pre-filter pairs several of them."""
-    eng = _make_engine(tmp_path)
-    eng.settings.llm_provider = "ollama"  # llm_enabled derives from this
-    for i in range(n):
-        eng.remember(
-            CreateNodeRequest(
-                content=f"Python is a programming language, variant {i}.",
-                type=NodeType.fact,
-                title=f"Python language {i}",
-                tags=["test"],
-            ),
-            agent_id="test",
-        )
-    return eng
 
 
 def test_llm_confirms_duplicate_auto_merge(engine):
@@ -196,139 +158,125 @@ def test_merged_content_stored_in_proposal(engine):
     assert "Both describe Python" in proposal["reason"]
 
 
-def test_llm_check_passes_json_schema_response_format(monkeypatch):
-    import ormah.background.llm_client as llm_client
+def test_pairs_evaluated_counts_one_candidate_pair(engine):
+    """Issue #90: pairs_evaluated must reflect exactly one LLM decision call."""
+    id_a, id_b = _create_pair(engine)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.duplicate_merger._llm_check_duplicate",
+        return_value={"is_duplicate": False, "reason": "not a duplicate"},
+    ):
+        from ormah.background.duplicate_merger import run_duplicate_detection
+        stats = run_duplicate_detection(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 1
+    # duration_s must have millisecond resolution — a fast mocked-LLM run
+    # must not silently round down to 0.0 (issue #90 finding 2).
+    assert stats["duration_s"] > 0
+
+
+def test_pairs_attempted_counts_llm_unavailable_pair_but_not_evaluated(engine):
+    """Issue #90 (council finding 2): an LLM-unavailable pair (None decision)
+    must count as attempted but NOT as evaluated."""
+    id_a, id_b = _create_pair(engine)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.duplicate_merger._llm_check_duplicate",
+        return_value=None,
+    ):
+        from ormah.background.duplicate_merger import run_duplicate_detection
+        stats = run_duplicate_detection(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 0
+
+
+# --- #87 pair batching ---
+
+def test_duplicate_prompt_is_composed_from_parts():
     from ormah.background import duplicate_merger as dm
-    captured = {}
-    def _fake_generate(settings, prompt, json_mode=True, **kwargs):
-        captured.update(kwargs)
-        return '{"is_duplicate": false, "merged_title": null, "merged_content": null, "reason": "x"}'
-    monkeypatch.setattr(llm_client, "llm_generate", _fake_generate)
-    result = dm._llm_check_duplicate(object(),
-        {"title": "A", "type": "fact", "content": "a"}, {"title": "B", "type": "fact", "content": "b"})
-    rf = captured.get("response_format")
-    assert rf and rf["type"] == "json_schema"
-    assert "is_duplicate" in rf["json_schema"]["schema"]["properties"]
-    assert result == {"is_duplicate": False, "merged_title": None, "merged_content": None, "reason": "x"}
-
-
-def test_run_dedup_records_only_not_duplicate_never_duplicate(monkeypatch, tmp_path):
-    from ormah.background import duplicate_merger as dm
-    monkeypatch.setattr(dm, "_llm_check_duplicate", lambda s, a, b: {"is_duplicate": False})
-    engine = _make_engine_with_two_similar_nodes(tmp_path)
-    try:
-        dm.run_duplicate_detection(engine)
-        rows = engine.db.conn.execute("SELECT result FROM duplicate_checked").fetchall()
-        assert rows and all(r[0] == "not_duplicate" for r in rows)
-    finally:
-        engine.shutdown()
-
-
-def test_run_dedup_records_error_and_circuit_breaks(monkeypatch, tmp_path):
-    from ormah.background import duplicate_merger as dm
-    calls = {"n": 0}
-    def _fail(s, a, b):
-        calls["n"] += 1
-        return None
-    monkeypatch.setattr(dm, "_llm_check_duplicate", _fail)
-    engine = _make_engine_with_many_similar_nodes(tmp_path, n=20)
-    try:
-        # Settings is a pydantic model with extra="ignore" and no such field yet
-        # (added in a later task) — bypass __setattr__ to stash it for getattr().
-        object.__setattr__(engine.settings, "duplicate_check_max_llm_calls_per_run", 100)
-        dm.run_duplicate_detection(engine)
-        assert calls["n"] <= 3
-        errs = engine.db.conn.execute(
-            "SELECT count(*) FROM duplicate_checked WHERE result='error'"
-        ).fetchone()[0]
-        assert errs >= 1
-    finally:
-        engine.shutdown()
-
-
-def test_run_dedup_stops_at_cap(monkeypatch, tmp_path):
-    from ormah.background import duplicate_merger as dm
-    calls = {"n": 0}
-    monkeypatch.setattr(
-        dm, "_llm_check_duplicate",
-        lambda s, a, b: (calls.__setitem__("n", calls["n"] + 1) or {"is_duplicate": False}),
+    assert dm._LLM_DUPLICATE_PROMPT == (
+        dm._LLM_DUP_INTRO + "\n\n" + dm._LLM_DUP_PAIR + "\n\n" + dm._LLM_DUP_RULES
     )
-    engine = _make_engine_with_many_similar_nodes(tmp_path, n=10)
-    try:
-        engine.settings.duplicate_check_max_llm_calls_per_run = 3
-        dm.run_duplicate_detection(engine)
-        assert calls["n"] == 3
-    finally:
-        engine.shutdown()
+    assert dm._LLM_DUP_INSTRUCTIONS == dm._LLM_DUP_INTRO + "\n\n" + dm._LLM_DUP_RULES
 
 
-# --- Shared pair_skip_sql routing (fixes lexical error-backoff bug) ---
-
-
-def test_dedup_error_row_backoff(monkeypatch, tmp_path):
-    """A fresh 'error' row hides the pair within the backoff window; a stale one
-    (past the window) lets the pair be re-checked. Guards against the lexical
-    ISO-vs-SQLite datetime() compare bug (checked_at stored with 'T'/tz)."""
+def test_scan_order_randomizes_only_when_capped():
+    """Council C2: capped runs randomize scan order for fair coverage across runs."""
     from ormah.background import duplicate_merger as dm
+    assert dm._scan_order(0) == ""
+    assert dm._scan_order(5) == " ORDER BY RANDOM()"
 
-    engine = _make_engine_with_two_similar_nodes(tmp_path)
-    try:
-        ids = [r[0] for r in engine.db.conn.execute("SELECT id FROM nodes WHERE type = 'fact'").fetchall()]
-        pair = tuple(sorted(ids))
 
-        calls = {"n": 0}
+def test_batched_dedup_creates_proposals(engine):
+    from ormah.background import duplicate_merger as dm
+    for _ in range(3):
+        engine.remember(CreateNodeRequest(
+            content="ormah stores memories in sqlite with fts5", title="ormah storage"))
+    engine.settings.llm_provider = "ollama"
+    engine.settings.maintenance_pairs_per_call = 2
+    engine.settings.auto_merge_threshold = 2.0     # force proposal path, not auto-merge
+    _reset_adapter()
 
-        def _count(s, a, b):
-            calls["n"] += 1
-            return {"is_duplicate": False}
+    def fake_batch(settings, prompt, json_mode=True, **kw):
+        n = prompt.count("### Pair ")
+        return json.dumps({"verdicts": [
+            {"pair_id": i, "is_duplicate": True, "merged_title": "t",
+             "merged_content": "c", "reason": "same fact"} for i in range(n)]})
 
-        monkeypatch.setattr(dm, "_llm_check_duplicate", _count)
+    single = {"is_duplicate": True, "merged_title": "t", "merged_content": "c",
+              "reason": "same fact"}
+    with patch("ormah.background.llm.pair_batch.llm_generate", fake_batch), \
+            patch("ormah.background.duplicate_merger._llm_check_duplicate", return_value=single):
+        stats = dm.run_duplicate_detection(engine)
 
-        # Fresh error row -> within backoff window -> pair skipped, LLM never called.
-        with engine.db.transaction() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) "
-                "VALUES (?, ?, 'error', ?)",
-                (*pair, datetime.now(timezone.utc).isoformat()),
-            )
+    n_props = engine.db.conn.execute(
+        "SELECT COUNT(*) FROM proposals WHERE type = 'merge'").fetchone()[0]
+    assert n_props >= 1
+    assert stats["pairs_evaluated"] >= 1
+
+
+def test_batched_dedup_skips_pairs_whose_node_was_merged_away(engine):
+    """Codex council finding (#87): overlapping pairs in one window (e.g. (A,B)
+    and (B,C)) — once an auto-merge deletes a shared node, a later pair must be
+    skipped, not re-merged on the stale (now-missing) node. execute_merge silently
+    no-ops on a missing node ('Node X not found.'), which would otherwise miscount
+    it as a successful merge."""
+    from ormah.background import duplicate_merger as dm
+    for _ in range(3):
+        engine.remember(CreateNodeRequest(
+            content="ormah stores memories in sqlite with fts5", title="ormah storage"))
+    engine.settings.llm_provider = "ollama"
+    engine.settings.maintenance_pairs_per_call = 3      # all candidate pairs in one window
+    engine.settings.auto_merge_threshold = 0.0          # force the auto-merge path for every pair
+    _reset_adapter()
+
+    real_merge = engine.execute_merge
+    bad_calls = []
+
+    def spy_merge(node_id_a, node_id_b, **kw):
+        for nid in (node_id_a, node_id_b):
+            if engine.db.conn.execute("SELECT 1 FROM nodes WHERE id = ?", (nid,)).fetchone() is None:
+                bad_calls.append(nid)
+        return real_merge(node_id_a, node_id_b, **kw)
+
+    def fake_batch(settings, prompt, json_mode=True, **kw):
+        n = prompt.count("### Pair ")
+        return json.dumps({"verdicts": [
+            {"pair_id": i, "is_duplicate": True, "merged_title": "t",
+             "merged_content": "c", "reason": "same"} for i in range(n)]})
+
+    single = {"is_duplicate": True, "merged_title": "t", "merged_content": "c", "reason": "same"}
+    with patch("ormah.background.llm.pair_batch.llm_generate", fake_batch), \
+            patch("ormah.background.duplicate_merger._llm_check_duplicate", return_value=single), \
+            patch.object(engine, "execute_merge", spy_merge):
         dm.run_duplicate_detection(engine)
-        assert calls["n"] == 0
 
-        # Stale error row (past the 6h backoff window) -> pair re-checked.
-        stale = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
-        with engine.db.transaction() as conn:
-            conn.execute(
-                "UPDATE duplicate_checked SET checked_at = ? WHERE node_a = ? AND node_b = ?",
-                (stale, *pair),
-            )
-        dm.run_duplicate_detection(engine)
-        assert calls["n"] == 1
-    finally:
-        engine.shutdown()
-
-
-def test_dedup_ordered_pair_skip(tmp_path):
-    """A terminal row written as (a, b) also skips the reversed query (b, a)."""
-    from ormah.background.pair_skip import normalize_pair, pair_skip_sql
-
-    engine = _make_engine_with_two_similar_nodes(tmp_path)
-    try:
-        ids = [r[0] for r in engine.db.conn.execute("SELECT id FROM nodes WHERE type = 'fact'").fetchall()]
-        a_id, b_id = ids
-        pair = normalize_pair(a_id, b_id)
-
-        with engine.db.transaction() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) "
-                "VALUES (?, ?, 'not_duplicate', ?)",
-                (*pair, datetime.now(timezone.utc).isoformat()),
-            )
-
-        reversed_pair = normalize_pair(b_id, a_id)
-        assert reversed_pair == pair
-        skip = engine.db.conn.execute(
-            pair_skip_sql("duplicate_checked", ("not_duplicate",)), (*reversed_pair, "-6 hours")
-        ).fetchone()
-        assert skip is not None
-    finally:
-        engine.shutdown()
+    assert bad_calls == [], f"execute_merge called on already-deleted node(s): {bad_calls}"

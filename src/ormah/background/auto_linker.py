@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_link_type
@@ -11,19 +12,6 @@ from ormah.background.llm import normalize_link_type
 logger = logging.getLogger(__name__)
 
 _WATERMARK_KEY = "auto_link_watermark"
-
-_LINK_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "relationship": {
-            "type": "string",
-            "enum": ["supports", "contradicts", "part_of", "depends_on", "related_to", "none"],
-        },
-        "reason": {"type": ["string", "null"]},
-    },
-    "required": ["relationship", "reason"],
-    "additionalProperties": False,
-}
 
 
 def _get_watermark(conn) -> int:
@@ -53,9 +41,10 @@ def _select_nodes_after(conn, watermark: int, limit: int) -> list:
         (watermark, limit),
     ).fetchall()
 
-_LLM_LINK_PROMPT = """\
-You are classifying the relationship between two memories in a knowledge graph. These edges power spreading activation during search — when a user finds Memory A, the system traverses edges to surface related context. Bad edges inject noise; good edges dilute the signal from good ones.
+_LLM_LINK_INTRO = """\
+You are classifying the relationship between two memories in a knowledge graph. These edges power spreading activation during search — when a user finds Memory A, the system traverses edges to surface related context. Bad edges inject noise; good edges dilute the signal from good ones."""
 
+_LLM_LINK_PAIR = """\
 Memory A:
 - Title: {title_a}
 - Type: {type_a}
@@ -66,8 +55,9 @@ Memory B:
 - Title: {title_b}
 - Type: {type_b}
 - Space: {space_b}
-- Content: {content_b}
+- Content: {content_b}"""
 
+_LLM_LINK_RULES = """\
 ## Decision process
 
 **Step 1: Would surfacing B actually help someone reading A?**
@@ -119,6 +109,27 @@ Return JSON:
   "reason": "one concrete sentence: what specific insight does finding A give you about B?"
 }}"""
 
+_LLM_LINK_PROMPT = _LLM_LINK_INTRO + "\n\n" + _LLM_LINK_PAIR + "\n\n" + _LLM_LINK_RULES
+_LLM_LINK_INSTRUCTIONS = _LLM_LINK_INTRO + "\n\n" + _LLM_LINK_RULES  # fixed block, sent once per batch
+
+
+def _render_link_pair(pair: dict) -> str:
+    """Render one candidate pair for a batched link prompt (#87)."""
+    node, other = pair["node"], pair["other"]
+
+    def _get(row, key, default="unknown"):
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
+
+    return _LLM_LINK_PAIR.format(
+        title_a=node["title"] or "(untitled)", type_a=_get(node, "type"),
+        space_a=_get(node, "space", "global"), content_a=node["content"][:2000],
+        title_b=other["title"] or "(untitled)", type_b=_get(other, "type"),
+        space_b=_get(other, "space", "global"), content_b=other["content"][:2000],
+    )
+
 
 def _llm_classify_link(settings, node_row, other_row) -> dict | None:
     """Ask LLM to classify the relationship between two nodes.
@@ -148,12 +159,7 @@ def _llm_classify_link(settings, node_row, other_row) -> dict | None:
         content_b=other_row["content"][:2000],
     )
 
-    raw = llm_generate(
-        settings,
-        prompt,
-        json_mode=True,
-        response_format={"type": "json_schema", "json_schema": {"schema": _LINK_RESPONSE_SCHEMA}},
-    )
+    raw = llm_generate(settings, prompt, json_mode=True)
     if raw is None:
         return None  # LLM UNAVAILABLE — transient; caller leaves the node unresolved
 
@@ -188,92 +194,94 @@ def _find_link_candidates(engine, limit: int = 8) -> list[dict]:
     ``run_auto_linker`` (similarity threshold, cross-space penalty,
     not in auto_link_checked, no existing edge).
     """
-    try:
-        from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore
+    from ormah.embeddings.encoder import get_encoder
+    from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
-        settings = engine.settings
-        encoder = get_encoder(settings)
-        vec_store = VectorStore(engine.db)
+    settings = engine.settings
+    encoder = get_encoder(settings)
+    vec_store = VectorStore(engine.db)
 
-        conn = engine.db.conn
-        watermark = _get_watermark(conn)
-        nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
-        threshold = settings.auto_link_similarity_threshold
-        cross_space_penalty = settings.auto_link_cross_space_penalty
+    conn = engine.db.conn
+    watermark = _get_watermark(conn)
+    nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
+    threshold = settings.auto_link_similarity_threshold
+    cross_space_penalty = settings.auto_link_cross_space_penalty
 
-        candidates: list[dict] = []
-        seen_pairs: set[tuple[str, str]] = set()
+    candidates: list[dict] = []
+    seen_pairs: set[tuple[str, str]] = set()
 
-        for node in nodes:
+    for node in nodes:
+        if len(candidates) >= limit:
+            break
+
+        text = f"{node['title'] or ''} {node['content']}".strip()
+        if not text:
+            continue
+
+        query_vec = stored_or_encoded(
+            vec_store,
+            encoder,
+            node["id"],
+            node["title"],
+            node["content"],
+            settings.embedding_max_content_chars,
+        )
+        similar = vec_store.search(query_vec, limit=6)
+
+        for match in similar:
             if len(candidates) >= limit:
                 break
-
-            text = f"{node['title'] or ''} {node['content']}".strip()
-            if not text:
+            if match["id"] == node["id"]:
                 continue
 
-            query_vec = encoder.encode(text)
-            similar = vec_store.search(query_vec, limit=6)
+            similarity = match["similarity"]
 
-            for match in similar:
-                if len(candidates) >= limit:
-                    break
-                if match["id"] == node["id"]:
-                    continue
+            other_space = conn.execute(
+                "SELECT space FROM nodes WHERE id = ?", (match["id"],)
+            ).fetchone()
+            if other_space is not None:
+                src_space = node["space"] or ""
+                tgt_space = other_space["space"] or ""
+                if src_space != tgt_space:
+                    similarity -= cross_space_penalty
 
-                similarity = match["similarity"]
+            if similarity < threshold:
+                continue
 
-                other_space = conn.execute(
-                    "SELECT space FROM nodes WHERE id = ?", (match["id"],)
-                ).fetchone()
-                if other_space is not None:
-                    src_space = node["space"] or ""
-                    tgt_space = other_space["space"] or ""
-                    if src_space != tgt_space:
-                        similarity -= cross_space_penalty
+            pair = tuple(sorted([node["id"], match["id"]]))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
 
-                if similarity < threshold:
-                    continue
+            already_checked = conn.execute(
+                "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?",
+                pair,
+            ).fetchone()
+            if already_checked:
+                continue
 
-                pair = tuple(sorted([node["id"], match["id"]]))
-                if pair in seen_pairs:
-                    continue
-                seen_pairs.add(pair)
+            existing = conn.execute(
+                "SELECT 1 FROM edges WHERE "
+                "(source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
+                (node["id"], match["id"], match["id"], node["id"]),
+            ).fetchone()
+            if existing:
+                continue
 
-                already_checked = conn.execute(
-                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?",
-                    pair,
-                ).fetchone()
-                if already_checked:
-                    continue
+            other = conn.execute(
+                "SELECT id, title, content, type, space FROM nodes WHERE id = ?",
+                (match["id"],),
+            ).fetchone()
+            if other is None:
+                continue
 
-                existing = conn.execute(
-                    "SELECT 1 FROM edges WHERE "
-                    "(source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
-                    (node["id"], match["id"], match["id"], node["id"]),
-                ).fetchone()
-                if existing:
-                    continue
+            candidates.append({
+                "node_a": _node_dict(node),
+                "node_b": _node_dict(other),
+                "similarity": round(similarity, 3),
+            })
 
-                other = conn.execute(
-                    "SELECT id, title, content, type, space FROM nodes WHERE id = ?",
-                    (match["id"],),
-                ).fetchone()
-                if other is None:
-                    continue
-
-                candidates.append({
-                    "node_a": _node_dict(node),
-                    "node_b": _node_dict(other),
-                    "similarity": round(similarity, 3),
-                })
-
-        return candidates
-
-    except Exception as e:
-        logger.warning("_find_link_candidates failed: %s", e)
-        return []
+    return candidates
 
 
 def _apply_edge(
@@ -322,125 +330,193 @@ def _apply_edge(
             logger.debug("Failed to persist connection to markdown for %s: %s", node_a_id[:8], e)
 
 
-def run_auto_linker(engine) -> None:
-    """Incrementally link nodes with seq above the watermark; advance only past
-    fully-resolved nodes."""
+def run_auto_linker(engine) -> dict | None:
+    """Incrementally link nodes with seq above the watermark, judging candidate
+    pairs in K-sized LLM calls (#87) and advancing only past fully-resolved nodes.
+
+    One streaming loop for every K: pairs are collected across nodes into a window
+    of size K; when it fills it is judged (via pair_batch) and applied. At K=1 the
+    window is a single pair, so the flow is exactly the interleaved single-pair
+    loop — one judgment applied before the next pair is collected — which the
+    existing suite pins as the K=1 regression net. `active` holds the node states
+    whose pairs are still in flight, in seq order; a node advances the watermark
+    only once it is fully collected, drained, and resolved, with every earlier
+    node already advanced.
+    """
+    t0 = time.monotonic()
     try:
-        from ormah.embeddings.encoder import get_encoder
+        from ormah.background.llm.pair_batch import judge_pairs
         from ormah.embeddings.vector_store import VectorStore
 
         settings = engine.settings
         if not settings.llm_enabled:
             logger.debug("Auto-linker skipped: LLM not enabled")
-            return
+            return {"skipped": "llm_disabled"}
 
-        encoder = get_encoder(settings)
         vec_store = VectorStore(engine.db)
         conn = engine.db.conn
         threshold = settings.auto_link_similarity_threshold
         cross_space_penalty = settings.auto_link_cross_space_penalty
         max_edges = settings.auto_link_max_edges_per_run
-        max_calls = getattr(engine.settings, "auto_link_max_llm_calls_per_run", -1)
+        max_pairs = settings.auto_link_max_pairs_per_run      # 0 = unbounded (default)
+        k = max(settings.auto_link_pairs_per_call or settings.maintenance_pairs_per_call, 1)
 
         watermark = _get_watermark(conn)
         nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
 
+        seen_pairs: set[tuple[str, str]] = set()
+        window: list[dict] = []          # pending {state, pair}, at most K, across nodes
+        active: list[dict] = []          # node states with pairs in flight, seq order
         created = 0
-        llm_calls = 0
+        pairs_attempted = 0
+        pairs_evaluated = 0
         last_complete: int | None = None
+        cap_hit = False
+        stopped = False
+
+        def _advance_watermark() -> None:
+            """Pop fully-collected, drained, resolved nodes off the front of `active`;
+            each sets the watermark. Stop at the first node not yet done — it and
+            everything after it must be reprocessed next run."""
+            nonlocal last_complete
+            while active:
+                head = active[0]
+                if not head["collected"] or head["pending"] > 0 or not head["resolved"]:
+                    break
+                last_complete = head["node"]["seq"]
+                active.pop(0)
+
+        def _flush() -> bool:
+            """Judge + apply the pairs in `window` (one K-chunk). Returns False when
+            the run must stop (LLM outage or edge budget spent)."""
+            nonlocal created, pairs_attempted, pairs_evaluated
+            verdicts = judge_pairs(
+                settings, _LLM_LINK_INSTRUCTIONS, [slot["pair"] for slot in window],
+                _render_link_pair,
+                judge_single=lambda p: _llm_classify_link(settings, p["node"], p["other"]),
+                k=k,
+            )
+            ok = True
+            for slot, v in zip(window, verdicts):
+                state = slot["state"]
+                state["pending"] -= 1
+                if not ok:
+                    continue          # already stopping — just drain pending counts
+                if created >= max_edges:
+                    state["resolved"] = False   # budget spent -> don't advance past this node
+                    ok = False
+                    continue
+                pairs_attempted += 1
+                if v is None:                   # unavailable/unjudged -> fail closed
+                    state["resolved"] = False
+                    ok = False
+                    continue
+                # The "error" sentinel (unparseable/missing output) must never be
+                # normalized — normalize_link_type maps unknowns to related_to, which
+                # would forge an edge from poison content. Real values are normalized
+                # (matches _llm_classify_link's single-pair path and #90).
+                raw_rel = v.get("relationship", "error")
+                relationship = "error" if raw_rel == "error" else normalize_link_type(raw_rel)
+                if relationship != "error":
+                    pairs_evaluated += 1
+                _apply_edge(engine, state["node"]["id"], slot["pair"]["match_id"],
+                            relationship, v.get("reason", ""), slot["pair"]["similarity"])
+                # 'error' (poison content) is recorded in auto_link_checked by _apply_edge
+                # and the node still counts as resolved → watermark advances (council v2 crit#2).
+                if relationship not in ("none", "error"):
+                    created += 1
+            window.clear()
+            return ok
 
         for node in nodes:
-            if created >= max_edges:
-                break  # batch budget spent; do not advance past this node
-            if max_calls >= 0 and llm_calls >= max_calls:
-                break  # LLM-call budget spent; do not advance past this node
-
-            node_resolved = True
+            if stopped or cap_hit:
+                break
             text = f"{node['title'] or ''} {node['content']}".strip()
-            if text and vec_store.get(node["id"]) is None:
-                # Node has no vector yet (e.g. node_vectors wiped mid full_rebuild,
-                # before _reindex_all_embeddings restores them). search() would return no
-                # candidates and the watermark would advance past a node never actually
-                # checked — so leave it unresolved and let a later run reprocess it.
-                # Same fail-closed contract as the LLM-unavailable path below.
-                # ponytail: a node that never embeds blocks the watermark forever;
-                # acceptable today (embedding failures are already logged), revisit if a
-                # permanently-unembeddable node ever stalls the cursor in practice.
-                node_resolved = False
-            elif text:
-                query_vec = encoder.encode(text)
-                similar = vec_store.search(query_vec, limit=6)
-
-                for match in similar:
+            node_vec = vec_store.get(node["id"]) if text else None
+            if text and node_vec is None:
+                # Node has no vector yet (e.g. node_vectors wiped mid full_rebuild). search()
+                # would find nothing and the watermark would pass a node never checked — so
+                # leave it unresolved and let a later run reprocess it (fail-closed, same as
+                # the LLM-unavailable path). ponytail: a node that never embeds blocks the
+                # watermark forever; acceptable today, revisit if one ever stalls the cursor.
+                stopped = True
+                break
+            state = {"node": node, "resolved": True, "pending": 0, "collected": False}
+            active.append(state)
+            if text:
+                for match in vec_store.search(node_vec, limit=6):
                     if created >= max_edges:
-                        node_resolved = False  # interrupted mid-node
+                        state["resolved"] = False   # budget spent mid-node -> interrupted
+                        stopped = True
                         break
                     if match["id"] == node["id"]:
                         continue
-
                     similarity = match["similarity"]
                     other_space = conn.execute(
-                        "SELECT space FROM nodes WHERE id = ?", (match["id"],)
-                    ).fetchone()
+                        "SELECT space FROM nodes WHERE id = ?", (match["id"],)).fetchone()
                     if other_space is not None and (node["space"] or "") != (other_space["space"] or ""):
                         similarity -= cross_space_penalty
                     if similarity < threshold:
                         continue
-
-                    pair = tuple(sorted([node["id"], match["id"]]))
-                    if conn.execute(
-                        "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
-                    ).fetchone():
+                    pair_key = tuple(sorted([node["id"], match["id"]]))
+                    if pair_key in seen_pairs:
+                        continue
+                    if conn.execute("SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?",
+                                    pair_key).fetchone():
                         continue
                     if conn.execute(
-                        "SELECT 1 FROM edges WHERE (source_id = ? AND target_id = ?) "
-                        "OR (source_id = ? AND target_id = ?)",
-                        (node["id"], match["id"], match["id"], node["id"]),
-                    ).fetchone():
+                            "SELECT 1 FROM edges WHERE (source_id = ? AND target_id = ?) "
+                            "OR (source_id = ? AND target_id = ?)",
+                            (node["id"], match["id"], match["id"], node["id"])).fetchone():
                         continue
                     other = conn.execute(
                         "SELECT title, content, type, space FROM nodes WHERE id = ?",
-                        (match["id"],),
-                    ).fetchone()
+                        (match["id"],)).fetchone()
                     if other is None:
                         continue
-
-                    # Placed AFTER the filters (unlike the max_edges guard above): only a match
-                    # that actually reaches the LLM should trip the cap, else a node whose
-                    # remaining pairs are all pre-filtered would falsely stall the watermark.
-                    if max_calls >= 0 and llm_calls >= max_calls:
-                        node_resolved = False  # interrupted mid-node
+                    if max_pairs and (pairs_attempted + len(window)) >= max_pairs:
+                        cap_hit = True
+                        state["resolved"] = False   # partially collected -> never advance past
                         break
-                    llm_result = _llm_classify_link(settings, node, other)
-                    llm_calls += 1
-                    if llm_result is None:
-                        # LLM UNAVAILABLE (raw None) — transient. Leave node unresolved so the
-                        # watermark does not pass it. Not a poison: if the LLM is down, EVERY node
-                        # is unresolved, so the whole run waits — no single node blocks others.
-                        node_resolved = False
-                        continue
-                    relationship = llm_result["relationship"]  # may be 'error' (invalid output)
-                    _apply_edge(
-                        engine, node["id"], match["id"], relationship,
-                        llm_result.get("reason", ""), similarity,
-                    )
-                    # 'error' (poison content) is recorded in auto_link_checked by _apply_edge
-                    # and the node still counts as resolved → watermark advances (council v2 crit#2).
-                    if relationship not in ("none", "error"):
-                        created += 1
+                    seen_pairs.add(pair_key)
+                    state["pending"] += 1
+                    window.append({"state": state, "pair": {
+                        "node": node, "other": other,
+                        "match_id": match["id"], "similarity": similarity}})
+                    if len(window) >= k:
+                        if not _flush():
+                            stopped = True
+                            break
+            state["collected"] = True
+            if not stopped and not cap_hit:
+                _advance_watermark()
 
-            if not node_resolved:
-                break  # crit#1/imp#4: stop; watermark stays at the last fully-resolved node
-            last_complete = node["seq"]
+        if window and not stopped and not cap_hit:
+            _flush()
+        _advance_watermark()
 
         if last_complete is not None:
             _set_watermark(engine, last_complete)
-        if created:
-            logger.info("Auto-linker created %d edges", created)
-        logger.info(
-            "Auto-linker run: llm_calls=%d cap=%d cap_hit=%s",
-            llm_calls, max_calls, bool(max_calls >= 0 and llm_calls >= max_calls),
-        )
+
+        # `seq` is 1-based (meta.node_seq_next starts at 1), so a real node's seq is
+        # never 0 and `last_complete or watermark` cannot silently fall back.
+        backlog = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE seq > ?", (last_complete or watermark,)
+        ).fetchone()[0]
+        duration = time.monotonic() - t0
+        stats = {
+            "nodes_scanned": len(nodes),
+            "pairs_attempted": pairs_attempted,
+            "pairs_evaluated": pairs_evaluated,
+            "edges_created": created,
+            "cap_hit": cap_hit,
+            "backlog_nodes": backlog,
+            "duration_s": round(duration, 3),
+            "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
+        }
+        logger.info("auto_linker run: %s", stats)
+        return stats
 
     except Exception as e:
         logger.warning("Auto-linker failed: %s", e)
+        return {"error": str(e)}

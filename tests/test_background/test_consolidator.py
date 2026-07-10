@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ormah.config import Settings
 from ormah.background import consolidator
 from ormah.models.node import CreateNodeRequest, NodeType, Tier
 
@@ -126,6 +127,50 @@ class TestConsolidation:
         from ormah.background.consolidator import run_consolidation
         run_consolidation(engine)
         # Completes without error
+
+
+def test_consolidation_settings_defaults(tmp_path):
+    s = Settings(memory_dir=tmp_path)
+    assert s.consolidation_max_clusters_per_run == 10
+    assert s.consolidation_min_cluster_size == 2
+    assert s.consolidation_cluster_threshold == 0.6
+    assert s.consolidation_max_cluster_nodes == 5
+
+
+def test_consolidation_settings_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORMAH_CONSOLIDATION_MAX_CLUSTERS_PER_RUN", "3")
+    s = Settings(memory_dir=tmp_path)
+    assert s.consolidation_max_clusters_per_run == 3
+
+
+def test_run_consolidation_uses_settings_cap(engine, monkeypatch):
+    from ormah.background import consolidator
+
+    engine.settings.llm_provider = "ollama"
+    engine.settings.consolidation_max_clusters_per_run = 3
+    seen = {}
+
+    def fake_find(eng, limit):
+        seen["limit"] = limit
+        return []
+
+    monkeypatch.setattr(consolidator, "_find_consolidation_clusters", fake_find)
+    consolidator.run_consolidation(engine)
+    assert seen["limit"] == 3
+
+
+def test_inverted_cluster_bounds_returns_empty_and_warns(consolidation_engine, caplog):
+    from ormah.background.consolidator import _find_consolidation_clusters
+
+    engine, _ids = consolidation_engine
+    engine.settings.consolidation_max_cluster_nodes = 1
+    engine.settings.consolidation_min_cluster_size = 2
+
+    with caplog.at_level("WARNING"):
+        clusters = _find_consolidation_clusters(engine)
+
+    assert clusters == []
+    assert "consolidation_max_cluster_nodes" in caplog.text
 
 
 class TestConsolidationSignatureSkip:

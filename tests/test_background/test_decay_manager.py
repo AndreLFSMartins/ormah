@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from ormah.background.decay_manager import run_decay
 from ormah.models.node import CreateNodeRequest, NodeType, Tier

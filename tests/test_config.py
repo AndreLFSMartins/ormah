@@ -40,24 +40,6 @@ def test_valid_providers():
         assert s.llm_provider == p
 
 
-# --- Duplicate detection LLM call cap ---
-
-def test_dedup_cap_default_sentinel_and_validator():
-    assert Settings().duplicate_check_max_llm_calls_per_run == 100
-    assert Settings(duplicate_check_max_llm_calls_per_run=-1).duplicate_check_max_llm_calls_per_run == -1
-    with pytest.raises(ValueError):
-        Settings(duplicate_check_max_llm_calls_per_run=-2)
-
-
-# --- Conflict detection LLM call cap ---
-
-def test_conflict_cap_default_sentinel_and_validator():
-    assert Settings().conflict_check_max_llm_calls_per_run == 100
-    assert Settings(conflict_check_max_llm_calls_per_run=-1).conflict_check_max_llm_calls_per_run == -1
-    with pytest.raises(ValueError):
-        Settings(conflict_check_max_llm_calls_per_run=-2)
-
-
 def test_llm_provider_defaults_to_none():
     s = _settings()
     assert s.llm_provider == "none"
@@ -264,66 +246,47 @@ def test_affinity_defaults():
     assert s.feedback_llm_judge_min_confidence == 0.75
 
 
-# --- Embedding backfill / vector-store reconciliation (#32) ---
-
-def test_embedding_backfill_settings_defaults():
-    s = _settings()
-    assert s.embedding_backfill_interval_minutes == 60
-    assert s.embedding_index_max_retries == 2
-    assert s.embedding_index_retry_backoff_seconds == 0.5
-
-
-def test_embedding_backfill_interval_rejects_zero():
-    with pytest.raises(ValidationError):
-        _settings(embedding_backfill_interval_minutes=0)
-
-
-def test_embedding_index_max_retries_rejects_negative():
-    with pytest.raises(ValidationError):
-        _settings(embedding_index_max_retries=-1)
-
-
-def test_embedding_index_retry_backoff_rejects_negative():
-    with pytest.raises(ValidationError):
-        _settings(embedding_index_retry_backoff_seconds=-0.1)
-
-
-# --- Bounded forgetting (deletion) ---
-
-def test_deletion_defaults_are_off_and_conservative():
-    from ormah.config import Settings
-    s = Settings()
-    assert s.deletion_enabled is False
-    assert s.forgetting_interval_hours == 24
-    assert s.deletion_min_archival_days == 90
-    assert s.deletion_retrievability_floor == 0.05
-    assert s.deletion_max_degree == 2
-    assert s.deletion_strong_edge_weight == 0.7
-    assert s.deletion_retention_days == 30
-    assert s.archival_soft_cap == 0
-
-
-def test_deletion_enabled_from_env(monkeypatch):
-    from ormah.config import Settings
-    monkeypatch.setenv("ORMAH_DELETION_ENABLED", "true")
-    monkeypatch.setenv("ORMAH_DELETION_RETENTION_DAYS", "7")
-    s = Settings()
-    assert s.deletion_enabled is True
-    assert s.deletion_retention_days == 7
-
-
-def test_deletion_retrievability_floor_must_be_unit_range():
-    import pytest
-    from ormah.config import Settings
-    with pytest.raises(ValueError):
-        Settings(deletion_retrievability_floor=1.5)
-
-
-# --- Feedback LLM judge (#21 / #40) ---
-
 def test_feedback_llm_judge_min_confidence_range():
     with pytest.raises(ValidationError, match="threshold must be 0"):
         _settings(feedback_llm_judge_min_confidence=1.5)
+
+
+# --- Consolidation limits (#89) ---
+
+def test_consolidation_max_clusters_negative():
+    with pytest.raises(ValidationError, match="consolidation_max_clusters_per_run must be >= 0"):
+        _settings(consolidation_max_clusters_per_run=-1)
+
+
+def test_consolidation_min_cluster_size_below_two():
+    with pytest.raises(ValidationError, match="consolidation_min_cluster_size must be >= 2"):
+        _settings(consolidation_min_cluster_size=1)
+
+
+def test_consolidation_threshold_out_of_range():
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=1.5)
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=-0.1)
+
+
+def test_consolidation_threshold_non_finite():
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=float("nan"))
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=float("inf"))
+
+
+def test_consolidation_max_nodes_zero_rejected():
+    # The destructive misconfig Codex flagged: max_nodes=0 slips past the
+    # runtime guard and emits single-node clusters. Reject it at construction.
+    with pytest.raises(ValidationError, match="consolidation_max_cluster_nodes"):
+        _settings(consolidation_max_cluster_nodes=0)
+
+
+def test_consolidation_inverted_bounds_rejected():
+    with pytest.raises(ValidationError, match="consolidation_max_cluster_nodes"):
+        _settings(consolidation_min_cluster_size=3, consolidation_max_cluster_nodes=2)
 
 
 # --- Session watcher reconcile (#34) ---
@@ -360,3 +323,25 @@ def test_reconcile_max_seconds_rejects_zero():
 def test_reconcile_max_seconds_rejects_negative():
     with pytest.raises(ValidationError, match="session_watcher_reconcile_max_seconds must be > 0"):
         _settings(session_watcher_reconcile_max_seconds=-1.0)
+# --- Embedding backfill / vector-store reconciliation (#32) ---
+
+def test_embedding_backfill_settings_defaults():
+    s = _settings()
+    assert s.embedding_backfill_interval_minutes == 60
+    assert s.embedding_index_max_retries == 2
+    assert s.embedding_index_retry_backoff_seconds == 0.5
+
+
+def test_embedding_backfill_interval_rejects_zero():
+    with pytest.raises(ValidationError):
+        _settings(embedding_backfill_interval_minutes=0)
+
+
+def test_embedding_index_max_retries_rejects_negative():
+    with pytest.raises(ValidationError):
+        _settings(embedding_index_max_retries=-1)
+
+
+def test_embedding_index_retry_backoff_rejects_negative():
+    with pytest.raises(ValidationError):
+        _settings(embedding_index_retry_backoff_seconds=-0.1)

@@ -16,6 +16,7 @@ from typing import Any
 
 from ormah.background.llm_client import ingest_provider_configured
 from ormah.config import Settings
+from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
 from ormah.engine.maintenance_signal import (
     MAINTENANCE_DUE_SIGNAL,
@@ -506,6 +507,35 @@ class MemoryEngine:
             )
             self._whisper_reranker_available = False
 
+    def _refresh_whisper_reranker_if_cached(self) -> bool:
+        """Load the whisper reranker if setup cached it after server startup.
+
+        The desktop app starts the server before the user clicks "Connect".
+        That setup path can download the reranker after startup, so a one-time
+        startup check is not enough. This method never downloads: it only
+        notices an already-cached model and loads it into the process cache.
+        """
+        if not self.settings.whisper_reranker_enabled:
+            return False
+        if self._whisper_reranker_available:
+            return True
+
+        try:
+            from ormah.embeddings.reranker import model_is_cached, preload_model
+
+            model_name = self.settings.whisper_reranker_model
+            if not model_is_cached(model_name):
+                return False
+
+            logger.info("Whisper reranker found on disk after startup; loading...")
+            preload_model(model_name)
+            self._whisper_reranker_available = True
+            logger.info("Whisper reranker ready.")
+            return True
+        except Exception as e:
+            logger.warning("Whisper reranker refresh failed: %s", e)
+            return False
+
     def shutdown(self) -> None:
         self.db.close()
 
@@ -661,7 +691,7 @@ class MemoryEngine:
 
     def recall_search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
-        touch_access: bool = True, **filters,
+        touch_access: bool = True, min_relevance: float | None = None, **filters,
     ) -> list[dict]:
         """Search memories and return structured results (list of dicts).
 
@@ -670,6 +700,11 @@ class MemoryEngine:
 
         When *touch_access* is False, access_count and last_accessed are not
         updated — useful for context loading that shouldn't inflate access stats.
+
+        *min_relevance* overrides the deliberate-recall floor
+        (settings.recall_min_relevance_score). Whisper passes 0.0: it needs
+        the raw candidate pool because it applies its own floors and an
+        absolute-signal gate downstream.
         """
         # Auto-extract temporal filters from query when none provided
         if not filters.get("created_after") and not filters.get("created_before"):
@@ -685,10 +720,28 @@ class MemoryEngine:
 
         search = self._get_hybrid_search()
         if search is not None:
-            results = search.search(query, limit=limit, **filters)
+            # Fetch a wider pool so the space penalty decides what SURVIVES,
+            # not just the order of whatever fit in `limit` — a current-space
+            # match at raw rank 11 can now outlive a penalized cross-space hit.
+            results = search.search(query, limit=limit * 3, **filters)
             if default_space and not explicit_spaces:
                 results = self._apply_space_scores(results, default_space)
 
+            # Relevance floor: return fewer results rather than padding to
+            # `limit` with cross-space noise. Recency-vouched supplements
+            # (source="temporal") are exempt — their base score is not
+            # semantic by design. Graph-activated neighbours
+            # (source="activated"/"conflict") also bypass this floor: they are
+            # added by _spread_activation *after* the cut below, so a
+            # graph-vouched node may sit below the relevance floor by design.
+            floor = (
+                min_relevance if min_relevance is not None
+                else self.settings.recall_min_relevance_score
+            )
+            results = [
+                r for r in results
+                if r.get("score", 0) >= floor or r.get("source") == "temporal"
+            ]
             results = results[:limit]
 
             # Detect pure temporal queries (no topical signal after stripping)
@@ -705,6 +758,7 @@ class MemoryEngine:
                     results = self._supplement_temporal(
                         results if not is_pure_temporal else [],
                         limit, created_after, created_before, filters,
+                        default_space=default_space,
                     )
 
             results = self._spread_activation(results, limit)
@@ -715,7 +769,9 @@ class MemoryEngine:
             return results
 
         # Fallback to FTS only
-        fts_results = self.graph.fts_search(query, limit=limit)
+        # Wider pool so space scores decide survival (no relevance floor
+        # here: raw FTS scores are negated BM25, not on a [0,1] scale).
+        fts_results = self.graph.fts_search(query, limit=limit * 3)
         created_after = filters.get("created_after")
         created_before = filters.get("created_before")
         enriched = []
@@ -737,6 +793,7 @@ class MemoryEngine:
         if created_after and len(enriched) < limit:
             enriched = self._supplement_temporal(
                 enriched, limit, created_after, created_before, filters,
+                default_space=default_space,
             )
 
         enriched = self._spread_activation(enriched, limit)
@@ -777,10 +834,17 @@ class MemoryEngine:
 
         search = self._get_hybrid_search()
         if search is not None:
-            results = search.search(query, limit=limit, **filters)
+            # Wider pool + space scores + relevance floor, then cut — see
+            # recall_search_structured for rationale.
+            results = search.search(query, limit=limit * 3, **filters)
             if default_space and not explicit_spaces:
                 results = self._apply_space_scores(results, default_space)
 
+            floor = self.settings.recall_min_relevance_score
+            results = [
+                r for r in results
+                if r.get("score", 0) >= floor or r.get("source") == "temporal"
+            ]
             results = results[:limit]
 
             # Detect pure temporal queries
@@ -794,6 +858,7 @@ class MemoryEngine:
                     results = self._supplement_temporal(
                         results if not is_pure_temporal else [],
                         limit, created_after, created_before, filters,
+                        default_space=default_space,
                     )
 
             results = self._spread_activation(results, limit)
@@ -813,7 +878,9 @@ class MemoryEngine:
             return format_search_results(results)
 
         # Fallback to FTS only
-        fts_results = self.graph.fts_search(query, limit=limit)
+        # Wider pool so space scores decide survival (no relevance floor
+        # here: raw FTS scores are negated BM25, not on a [0,1] scale).
+        fts_results = self.graph.fts_search(query, limit=limit * 3)
         created_after = filters.get("created_after")
         created_before = filters.get("created_before")
         enriched = []
@@ -835,6 +902,7 @@ class MemoryEngine:
         if created_after and len(enriched) < limit:
             enriched = self._supplement_temporal(
                 enriched, limit, created_after, created_before, filters,
+                default_space=default_space,
             )
 
         enriched = self._spread_activation(enriched, limit)
@@ -1075,36 +1143,47 @@ class MemoryEngine:
     ) -> str | tuple[str, list[str]]:
         """Get compact whisper context for involuntary recall injection."""
         onboarding = self._maybe_get_onboarding_nudge(space=space)
+
+        # Reranker unavailable (model still downloading on a fresh install,
+        # or load failed): degrade to embedding-only whisper with a raised
+        # (cosine-scale) gate instead of going dark. The raised gate keeps
+        # degraded mode more conservative, never noisier.
         if self.settings.whisper_reranker_enabled and not self._whisper_reranker_available:
-            logger.error(
-                "Whisper reranker is required but unavailable; returning empty whisper context. "
-                "prompt=%r session_id=%r",
+            self._refresh_whisper_reranker_if_cached()
+        reranker_active = (
+            self.settings.whisper_reranker_enabled and self._whisper_reranker_available
+        )
+        if self.settings.whisper_reranker_enabled and not reranker_active:
+            logger.warning(
+                "Whisper reranker unavailable (model not yet loaded?); degrading to "
+                "embedding-only whisper with raised gate. prompt=%r session_id=%r",
                 prompt[:80],
                 session_id,
             )
-            maintenance_due = "" if onboarding else self._maybe_get_maintenance_due_signal()
-            text = "\n\n".join(
-                section for section in (maintenance_due, onboarding) if section
-            )
-            if _return_debug:
-                return text, []
-            return text
 
         result = self.context_builder.build_whisper_context(
             prompt=prompt,
             space=space,
+            user_node_id=self.user_node_id,
             max_nodes=self.settings.whisper_max_nodes,
             min_score=self.settings.whisper_min_relevance_score,
-            reranker_enabled=(
-                self.settings.whisper_reranker_enabled
-                and self._whisper_reranker_available
-            ),
+            candidate_pool_multiplier=self.settings.whisper_candidate_pool_multiplier,
+            injected_content_max_chars=self.settings.whisper_injected_content_max_chars,
+            reranker_enabled=reranker_active,
             reranker_model=self.settings.whisper_reranker_model,
             reranker_min_score=self.settings.whisper_reranker_min_score,
             reranker_blend_alpha=self.settings.whisper_reranker_blend_alpha,
             reranker_max_doc_chars=self.settings.whisper_reranker_max_doc_chars,
             recent_prompts=recent_prompts,
-            injection_gate=self.settings.whisper_injection_gate,
+            # Without the reranker the gate cuts raw_cosine, a weaker
+            # absolute signal — use the higher cosine-scale gate.
+            injection_gate=(
+                self.settings.whisper_injection_gate
+                if reranker_active
+                else self.settings.whisper_injection_gate_no_reranker
+            ),
+            no_overlap_ce_floor=self.settings.whisper_no_overlap_ce_floor,
+            no_overlap_cosine_floor=self.settings.whisper_no_overlap_cosine_floor,
             topic_shift_enabled=self.settings.whisper_topic_shift_enabled,
             topic_shift_threshold=self.settings.whisper_topic_shift_threshold,
             session_id=session_id,
@@ -1263,6 +1342,81 @@ class MemoryEngine:
         except Exception as e:
             logger.warning("Failed to reindex embeddings: %s", e)
 
+    def _usage_stats(
+        self,
+        now: datetime,
+        days: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return tray-facing usage counters and their window metadata."""
+        conn = self.db.conn
+        if days is None:
+            window_days = now.weekday() + 1  # days elapsed in this calendar week
+            cutoff = (now - timedelta(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).isoformat()
+            window_kind = "calendar_week"
+        else:
+            window_days = days
+            cutoff = (now - timedelta(days=days)).isoformat()
+            window_kind = "rolling"
+
+        used_key = "session_id || '|' || prompt_hash || '|' || logged_at"
+        whispers_total = conn.execute(
+            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log WHERE was_injected = 1"
+        ).fetchone()[0]
+        whispers_window = conn.execute(
+            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log "
+            "WHERE was_injected = 1 AND logged_at >= ?",
+            (cutoff,),
+        ).fetchone()[0]
+
+        # Exclude system-seeded bootstrap nodes (e.g. the "Self" node) so a
+        # fresh install honestly reads zero memories in the tray.
+        not_system = "source NOT LIKE 'system:%'"
+        memories_total = conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {not_system}"
+        ).fetchone()[0]
+        memories_window = conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {not_system} AND created >= ?", (cutoff,)
+        ).fetchone()[0]
+
+        usage = {
+            "whispers_used_this_week": whispers_window,
+            "whispers_used_total": whispers_total,
+            "memories_this_week": memories_window,
+            "memories_total": memories_total,
+        }
+        window = {
+            "kind": window_kind,
+            "days": window_days,
+            "cutoff": cutoff,
+        }
+        return usage, window
+
+    def _whisper_decision_stats(self, cutoff: str, window_days: int) -> dict[str, Any]:
+        """Return whisper outcome aggregates from whisper_decisions.
+
+        ``whisper_decisions`` records exactly one row per whisper call,
+        including silent outcomes, so silence_rate and injection_rate partition
+        all prompts in the selected stats window.
+        """
+        rows = self.db.conn.execute(
+            "SELECT outcome, COUNT(*) AS n FROM whisper_decisions "
+            "WHERE logged_at >= ? GROUP BY outcome",
+            (cutoff,),
+        ).fetchall()
+        breakdown = {row["outcome"]: row["n"] for row in rows}
+        total = sum(breakdown.values())
+        injected = breakdown.get("injected", 0)
+
+        return {
+            "window_days": window_days,
+            "prompts_total": total,
+            "injection_rate": injected / total if total else None,
+            "silence_rate": (total - injected) / total if total else None,
+            "outcome_breakdown": breakdown,
+        }
+
     # SQL proxy for "_embedding_text(title, content) is non-empty": a node is
     # embeddable when it has non-whitespace content OR title.
     _EMBEDDABLE_SQL = (
@@ -1358,8 +1512,9 @@ class MemoryEngine:
             "node_count": count,
         }
 
-    def stats(self) -> dict:
-        """Get memory store statistics."""
+    def stats(self, days: int | None = None) -> dict[str, Any]:
+        """Return the canonical stats payload for tray, CLI, UI, and diagnostics."""
+        now = datetime.now(timezone.utc)
         tier_counts = self.graph.count_by_tier()
         total = sum(tier_counts.values())
         edge_count = self.db.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
@@ -1367,7 +1522,7 @@ class MemoryEngine:
         ver_row = self.db.conn.execute(
             "SELECT value FROM meta WHERE key = 'embedding_schema_version'"
         ).fetchone()
-        return {
+        store = {
             "total_nodes": total,
             "by_tier": tier_counts,
             "total_edges": edge_count,
@@ -1379,6 +1534,28 @@ class MemoryEngine:
             "whisper_health": compute_whisper_health(
                 self.db.conn, datetime.now(timezone.utc)
             ),
+        }
+        usage, window = self._usage_stats(now, days=days)
+        whisper_health = compute_whisper_health(self.db.conn, now)
+        whisper_decisions = self._whisper_decision_stats(
+            cutoff=window["cutoff"],
+            window_days=window["days"],
+        )
+
+        return {
+            "generated_at": now.isoformat(),
+            "window": window,
+            "usage": usage,
+            "store": store,
+            "vec_count": vec_count,
+            # Embeddable nodes still missing a vector -- the honest embedding gap.
+            # Stays > 0 for any node that cannot be embedded (visible, never masked).
+            "embedding_gap": self._missing_embeddable_count(),
+            "embedding_schema_version": int(ver_row["value"]) if ver_row else 0,
+            "whisper": {
+                "feedback_health": whisper_health,
+                "decisions": whisper_decisions,
+            },
         }
 
     # --- Merge operations ---
@@ -1690,7 +1867,8 @@ class MemoryEngine:
         batches of candidates (link, conflict, merge, consolidation clusters)
         plus a summary string.  Batch sizes are capped: up to *limit_per_batch*
         pairs for link/conflict/merge (default from settings), up to 4 clusters
-        of max 5 nodes each for consolidation.
+        for consolidation (max nodes per cluster from
+        ``settings.consolidation_max_cluster_nodes``).
         """
         from ormah.background.auto_linker import _find_link_candidates
         from ormah.background.conflict_detector import _find_conflict_candidates
@@ -1700,10 +1878,49 @@ class MemoryEngine:
         if limit_per_batch is None:
             limit_per_batch = getattr(self.settings, "claude_maintenance_batch_size", 25)
 
-        link_candidates = _find_link_candidates(self, limit_per_batch)
-        conflict_candidates = _find_conflict_candidates(self, limit_per_batch)
-        merge_candidates = _find_merge_candidates(self, limit_per_batch)
-        consolidation_clusters = _find_consolidation_clusters(self, limit=4)
+        # Finders fail INDEPENDENTLY (issue #90 council R4) — each has its own
+        # query and data-dependent path, not a shared crash point, so a
+        # persistent defect in one must not block the other three. A healthy
+        # batch must still reach Phase 2; a failed batch must be explicit
+        # (batch_errors) rather than indistinguishable from "nothing found".
+        batch_errors: dict[str, str] = {}
+
+        try:
+            link_candidates = _find_link_candidates(self, limit_per_batch)
+        except Exception as e:
+            logger.warning("_find_link_candidates failed: %s", e)
+            link_candidates = []
+            batch_errors["link_candidates"] = f"{type(e).__name__}: {e}"
+        try:
+            conflict_candidates = _find_conflict_candidates(self, limit_per_batch)
+        except Exception as e:
+            logger.warning("_find_conflict_candidates failed: %s", e)
+            conflict_candidates = []
+            batch_errors["conflict_candidates"] = f"{type(e).__name__}: {e}"
+        try:
+            merge_candidates = _find_merge_candidates(self, limit_per_batch)
+        except Exception as e:
+            logger.warning("_find_merge_candidates failed: %s", e)
+            merge_candidates = []
+            batch_errors["merge_candidates"] = f"{type(e).__name__}: {e}"
+        try:
+            consolidation_clusters = _find_consolidation_clusters(self, limit=4)
+        except Exception as e:
+            logger.warning("_find_consolidation_clusters failed: %s", e)
+            consolidation_clusters = []
+            batch_errors["consolidation_clusters"] = f"{type(e).__name__}: {e}"
+
+        # Phase 2 (apply_maintenance_results) is a separate MCP call that never
+        # sees this return value — it learns about a failed batch only through
+        # this meta marker, so it can skip stamping last_maintenance_run.
+        with self.db.transaction() as conn:
+            if batch_errors:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('maintenance_phase1_errors', ?)",
+                    (json.dumps(batch_errors),),
+                )
+            else:
+                conn.execute("DELETE FROM meta WHERE key = 'maintenance_phase1_errors'")
 
         def _norm(node: dict) -> dict:
             return {
@@ -1731,8 +1948,11 @@ class MemoryEngine:
         if consolidation_clusters:
             parts.append(f"{len(consolidation_clusters)} cluster(s)")
         summary = ", ".join(parts) if parts else "nothing to process"
+        if batch_errors:
+            summary += "; FAILED: " + ", ".join(sorted(batch_errors))
 
         return {
+            "batch_errors": batch_errors,
             "link_candidates": [_norm_pair(c) for c in link_candidates],
             "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
             "merge_candidates": [_norm_pair(c) for c in merge_candidates],
@@ -1797,16 +2017,30 @@ class MemoryEngine:
             except Exception as exc:
                 logger.warning("apply_maintenance_results: consolidation failed: %s", exc)
 
-        # Record completion timestamp — silences maintenance_due signal for interval_hours.
-        try:
-            now = datetime.now(timezone.utc).isoformat()
-            with self.db.transaction() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_run', ?)",
-                    (now,),
-                )
-        except Exception as exc:
-            logger.warning("apply_maintenance_results: failed to record timestamp: %s", exc)
+        # Skip the stamp if the Phase 1 that produced these results had a
+        # failed batch — apply_maintenance_results is a separate MCP call
+        # and only learns this via the meta marker get_maintenance_batches
+        # left behind (issue #90 council R4).
+        phase1_errors_row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'maintenance_phase1_errors'"
+        ).fetchone()
+        if phase1_errors_row is not None:
+            logger.warning(
+                "apply_maintenance_results: skipping last_maintenance_run stamp — "
+                "Phase 1 had failed batches: %s",
+                phase1_errors_row["value"],
+            )
+        else:
+            # Record completion timestamp — silences maintenance_due signal for interval_hours.
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                with self.db.transaction() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_run', ?)",
+                        (now,),
+                    )
+            except Exception as exc:
+                logger.warning("apply_maintenance_results: failed to record timestamp: %s", exc)
 
         return counts
 
@@ -1944,12 +2178,22 @@ class MemoryEngine:
         created_after: str,
         created_before: str | None,
         filters: dict,
+        default_space: str | None = None,
     ) -> list[dict]:
         """Supplement results with SQL-based recent nodes when temporal filters are active.
 
         Fetches nodes directly by ``created`` column, deduplicates against
         existing results, applies type/tier/space filters, and appends to
         the result list up to *limit*.
+
+        Supplements are ordered by (space priority, recency) so temporal
+        recall honours the same current/global/other-space prioritization
+        applied to semantic results (see ``_apply_space_scores``): a newer
+        other-project node cannot outrank an older current-project one. The
+        base score stays a low placeholder (exempt from the relevance floor)
+        — this is prioritization, not scoring — and each result carries a
+        ``_space_factor`` so downstream re-sorts (e.g. whisper's temporal
+        recency sort) keep the same space priority.
         """
         existing_ids = {r["node"]["id"] for r in results}
         needed = limit - len(results)
@@ -1964,10 +2208,11 @@ class MemoryEngine:
         tiers_filter = filters.get("tiers")
         spaces_filter = filters.get("spaces")
 
-        added = 0
+        boost_global = self.settings.space_boost_global
+        boost_other = self.settings.space_boost_other
+
+        candidates: list[tuple[float, dict]] = []
         for node in recent:
-            if added >= needed:
-                break
             if node["id"] in existing_ids:
                 continue
             if types_filter and node["type"] not in types_filter:
@@ -1976,10 +2221,29 @@ class MemoryEngine:
                 continue
             if spaces_filter and node.get("space") not in spaces_filter:
                 continue
-            existing_ids.add(node["id"])
-            # Use a low base score so these don't outrank relevance-matched results
-            results.append({"node": node, "score": 0.001, "source": "temporal"})
-            added += 1
+            space = node.get("space")
+            if not default_space or space == default_space:
+                factor = 1.0
+            elif space is None:
+                factor = boost_global
+            else:
+                factor = boost_other
+            candidates.append((factor, node))
+
+        # Space priority first, recency second: an older current-space node
+        # outranks a newer other-space one.
+        candidates.sort(
+            key=lambda c: (c[0], c[1].get("created") or ""), reverse=True
+        )
+
+        for factor, node in candidates[:needed]:
+            # Low base score so these don't outrank relevance-matched results
+            # and stay exempt from the relevance floor; _space_factor carries
+            # the space prioritization into any downstream re-sort.
+            results.append({
+                "node": node, "score": 0.001, "source": "temporal",
+                "_space_factor": factor,
+            })
 
         return results
 
@@ -2004,6 +2268,10 @@ class MemoryEngine:
                 factor = boost_global
             else:
                 factor = boost_other
+            # Record the factor so the whisper injection gate can re-apply
+            # cross-space demotion to the absolute gate signal (which, unlike
+            # the blended score mutated here, carries no space penalty).
+            r["_space_factor"] = factor
             r["score"] = r.get("score", 0.0) * factor
 
         results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
@@ -2530,66 +2798,6 @@ class MemoryEngine:
                 )
 
         return f"Feedback recorded for node {resolved_node_id[:8]}..."
-
-    def get_stats(self, days: int | None = None) -> dict[str, Any]:
-        """Return ambient usage counts for the menubar/CLI surface (F09/F10).
-
-        A "whisper used" is a single whisper call that actually injected at
-        least one memory. ``whisper_log`` writes one row per candidate sharing
-        the same ``logged_at`` per call, so distinct used calls are counted by
-        the ``(session_id, prompt_hash, logged_at)`` triple where
-        ``was_injected = 1``. Memory counts come straight from ``nodes``.
-
-        With ``days=None`` (the default, used by the tray/CLI), the "week"
-        window is the fixed current calendar week (Mon 00:00 UTC) so the count
-        only ever increases within a week and resets once on Monday — it never
-        drifts down mid-week the way a rolling N-day window would. Passing an
-        explicit ``days`` opts into a rolling N-day window ending now instead,
-        for ad-hoc/custom-range queries.
-
-        ISO-8601 UTC timestamps compare correctly lexicographically, so the
-        window is a simple string ``>=`` against a Python-computed cutoff — no
-        SQLite date math, no timezone surprises.
-        """
-        conn = self.db.conn
-        now = datetime.now(timezone.utc)
-        if days is None:
-            window_days = now.weekday() + 1  # days elapsed in this calendar week
-            cutoff = (now - timedelta(days=now.weekday())).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ).isoformat()
-        else:
-            window_days = days
-            cutoff = (now - timedelta(days=days)).isoformat()
-
-        used_key = "session_id || '|' || prompt_hash || '|' || logged_at"
-        whispers_total = conn.execute(
-            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log WHERE was_injected = 1"
-        ).fetchone()[0]
-        whispers_week = conn.execute(
-            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log "
-            "WHERE was_injected = 1 AND logged_at >= ?",
-            (cutoff,),
-        ).fetchone()[0]
-
-        # Exclude system-seeded bootstrap nodes (e.g. the "Self" node) so a
-        # fresh install honestly reads zero memories.
-        not_system = "source NOT LIKE 'system:%'"
-        memories_total = conn.execute(
-            f"SELECT COUNT(*) FROM nodes WHERE {not_system}"
-        ).fetchone()[0]
-        memories_week = conn.execute(
-            f"SELECT COUNT(*) FROM nodes WHERE {not_system} AND created >= ?", (cutoff,)
-        ).fetchone()[0]
-
-        return {
-            "whispers_used_this_week": whispers_week,
-            "whispers_used_total": whispers_total,
-            "memories_this_week": memories_week,
-            "memories_total": memories_total,
-            "window_days": window_days,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
 
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""

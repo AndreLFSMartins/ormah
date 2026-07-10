@@ -18,6 +18,9 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ormah.config import Settings
+from ormah.embeddings.encoder import get_encoder
+from ormah.embeddings.vector_store import VectorStore
+from ormah.index.graph import GraphIndex
 
 if TYPE_CHECKING:
     from ormah.index.db import Database
@@ -33,9 +36,6 @@ _QUESTION_PATTERN = re.compile(
 def _is_question_query(query: str) -> bool:
     """Detect whether a query is a natural language question."""
     return _QUESTION_PATTERN.search(query) is not None
-from ormah.embeddings.encoder import get_encoder
-from ormah.embeddings.vector_store import VectorStore
-from ormah.index.graph import GraphIndex
 
 
 def _reciprocal_rank_fusion(
@@ -302,7 +302,23 @@ class HybridSearch:
             final_score = adjusted_score * tier_factor + r_boost + a_boost
             final_score = min(final_score, 1.0)  # CE blend assumes scores in [0, 1]
 
-            results.append({"node": node, "score": round(final_score, 6), "source": "hybrid"})
+            result = {
+                "node": node,
+                "score": round(final_score, 6),
+                "source": "hybrid",
+            }
+            # Raw cosine similarity (pre length-penalty, pre blending): the
+            # only absolute signal on this path, present ONLY when this node
+            # had a real vector measurement. FTS-only hits (and sub-threshold
+            # vector misses) have none — omit the key so the gate reads them
+            # as "no absolute signal" and falls back to the blended score,
+            # rather than misreading a 0.0 sentinel as "measured, irrelevant"
+            # and silencing an exact keyword match whenever the reranker is
+            # unavailable.
+            raw_cos = vec_scores.get(node_id)
+            if raw_cos is not None:
+                result["raw_cosine"] = round(raw_cos, 6)
+            results.append(result)
 
         # Re-sort by boosted score since boosts may reorder results
         results.sort(key=lambda x: x["score"], reverse=True)

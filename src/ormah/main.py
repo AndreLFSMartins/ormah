@@ -16,6 +16,7 @@ from ormah.api.middleware import AgentMiddleware
 from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
 from ormah.api.routes_ingest import router as ingest_router
+from ormah.api.routes_stats import router as stats_router
 from ormah.api.routes_ui import router as ui_router
 from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.config import settings
@@ -30,7 +31,7 @@ setup_logging(
 )
 logger = logging.getLogger(__name__)
 
-_RESERVED_API_PREFIXES = {"agent", "admin", "ingest", "ui"}
+_RESERVED_API_PREFIXES = {"agent", "admin", "ingest", "stats", "ui"}
 _LOCAL_CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
 
 
@@ -244,17 +245,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Ask the scheduler's embedding_backfill job to cancel cooperatively.
-    # scheduler.shutdown(wait=True) below honours this: the job exits between
-    # encodes. A single encoder.encode() call mid-flight is not interruptible
-    # (fundamental limit), but wait=True ensures the DB is released before any
-    # close — no corruption.
-    # Per-lifespan event (R1): always created in startup above, so direct
-    # attribute access is safe; getattr guard is kept for defensive clarity.
-    stop_ev = getattr(app.state, "lifecycle_stop_event", None)
-    if stop_ev is not None:
-        stop_ev.set()
-
     # Unschedule the reconcile job before stopping the watchers, to shrink the window where
     # a tick recreates an Observer that nothing then stops. remove_job() only cancels future
     # triggers, not an already-running tick, so a single in-flight tick can still recreate one
@@ -266,6 +256,16 @@ async def lifespan(app: FastAPI):
             app.state.scheduler.remove_job("session_reconcile")
         except Exception:
             pass
+    # Ask the scheduler's embedding_backfill job to cancel cooperatively.
+    # scheduler.shutdown(wait=True) below honours this: the job exits between
+    # encodes. A single encoder.encode() call mid-flight is not interruptible
+    # (fundamental limit), but wait=True ensures the DB is released before any
+    # close — no corruption.
+    # Per-lifespan event (R1): always created in startup above, so direct
+    # attribute access is safe; getattr guard is kept for defensive clarity.
+    stop_ev = getattr(app.state, "lifecycle_stop_event", None)
+    if stop_ev is not None:
+        stop_ev.set()
 
     # Shutdown — stop session watcher first
     if hasattr(app.state, "session_watcher_observers"):
@@ -323,6 +323,7 @@ app.add_middleware(AgentMiddleware)
 
 app.include_router(agent_router)
 app.include_router(admin_router)
+app.include_router(stats_router)
 app.include_router(ui_router)
 app.include_router(ingest_router)
 

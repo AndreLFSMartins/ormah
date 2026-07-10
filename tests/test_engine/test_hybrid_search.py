@@ -90,12 +90,13 @@ def mock_hybrid(tmp_path):
         db.conn = conn
         hs = HybridSearch(db, settings)
         # Stub get_node to return minimal node dicts
-        _node_dict = lambda nid: {
-            "id": nid,
-            "type": "fact",
-            "tier": "working",
-            "content": f"content of {nid}",
-        }
+        def _node_dict(nid):
+            return {
+                "id": nid,
+                "type": "fact",
+                "tier": "working",
+                "content": f"content of {nid}",
+            }
         MockGraph.return_value.get_node.side_effect = _node_dict
         MockGraph.return_value.get_nodes_batch.side_effect = lambda ids: {
             nid: _node_dict(nid) for nid in ids
@@ -246,12 +247,13 @@ def mock_hybrid_blended(tmp_path):
         db = MagicMock()
         db.conn = conn
         hs = HybridSearch(db, settings)
-        _node_dict = lambda nid: {
-            "id": nid,
-            "type": "fact",
-            "tier": "working",
-            "content": f"content of {nid}",
-        }
+        def _node_dict(nid):
+            return {
+                "id": nid,
+                "type": "fact",
+                "tier": "working",
+                "content": f"content of {nid}",
+            }
         MockGraph.return_value.get_node.side_effect = _node_dict
         MockGraph.return_value.get_nodes_batch.side_effect = lambda ids: {
             nid: _node_dict(nid) for nid in ids
@@ -301,12 +303,13 @@ def test_fts_only_dampened(tmp_path):
         db = MagicMock()
         db.conn = conn
         hs = HybridSearch(db, settings)
-        _node_dict = lambda nid: {
-            "id": nid,
-            "type": "fact",
-            "tier": "working",
-            "content": f"content of {nid}",
-        }
+        def _node_dict(nid):
+            return {
+                "id": nid,
+                "type": "fact",
+                "tier": "working",
+                "content": f"content of {nid}",
+            }
         MockGraph.return_value.get_nodes_batch.side_effect = lambda ids: {
             nid: _node_dict(nid) for nid in ids
         }
@@ -352,12 +355,13 @@ def test_min_score_filters_noise(tmp_path):
         db = MagicMock()
         db.conn = conn
         hs = HybridSearch(db, settings)
-        _node_dict = lambda nid: {
-            "id": nid,
-            "type": "fact",
-            "tier": "working",
-            "content": f"content of {nid}",
-        }
+        def _node_dict(nid):
+            return {
+                "id": nid,
+                "type": "fact",
+                "tier": "working",
+                "content": f"content of {nid}",
+            }
         MockGraph.return_value.get_nodes_batch.side_effect = lambda ids: {
             nid: _node_dict(nid) for nid in ids
         }
@@ -401,12 +405,13 @@ def test_min_score_disabled_when_zero(tmp_path):
         db = MagicMock()
         db.conn = conn
         hs = HybridSearch(db, settings)
-        _node_dict = lambda nid: {
-            "id": nid,
-            "type": "fact",
-            "tier": "working",
-            "content": f"content of {nid}",
-        }
+        def _node_dict(nid):
+            return {
+                "id": nid,
+                "type": "fact",
+                "tier": "working",
+                "content": f"content of {nid}",
+            }
         MockGraph.return_value.get_nodes_batch.side_effect = lambda ids: {
             nid: _node_dict(nid) for nid in ids
         }

@@ -44,6 +44,71 @@ def _cmd_eval_whisper_run(args):
     _cmd(args)
 
 
+def _cmd_eval_whisper_mine(args):
+    try:
+        from eval.whisper.cli import cmd_eval_whisper_mine as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.whisper", "eval.whisper.cli"}:
+            raise
+        print(
+            "The whisper eval harness is not installed in the published Ormah runtime.\n"
+            "Use a source checkout or editable dev install to run 'ormah eval whisper mine'."
+        )
+        sys.exit(1)
+
+    _cmd(args)
+
+
+def _cmd_eval_whisper_import_labels(args):
+    try:
+        from eval.whisper.cli import cmd_eval_whisper_import_labels as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.whisper", "eval.whisper.cli"}:
+            raise
+        print(
+            "The whisper eval harness is not installed in the published Ormah runtime.\n"
+            "Use a source checkout or editable dev install to run 'ormah eval whisper import-labels'."
+        )
+        sys.exit(1)
+
+    _cmd(args)
+
+
+def _cmd_eval_recall_run(args):
+    try:
+        from eval.recall.cli import cmd_eval_recall_run as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.recall", "eval.recall.cli"}:
+            raise
+        print(
+            "The recall eval harness is not installed in the published Ormah runtime.\n"
+            "Use a source checkout or editable dev install to run 'ormah eval recall run'."
+        )
+        sys.exit(1)
+
+    _cmd(args)
+
+
+def _cmd_eval_recall_export(args):
+    try:
+        from eval.recall.cli import cmd_eval_recall_export_for_labeling as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.recall", "eval.recall.cli"}:
+            raise
+        sys.exit(1)
+    _cmd(args)
+
+
+def _cmd_eval_recall_import(args):
+    try:
+        from eval.recall.cli import cmd_eval_recall_import_labels as _cmd
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"eval", "eval.recall", "eval.recall.cli"}:
+            raise
+        sys.exit(1)
+    _cmd(args)
+
+
 def _cmd_server_start(args):
     if args.daemon:
         from ormah.console import info, warn
@@ -496,7 +561,42 @@ def main():
         help="Preserve the self node when reseeding eval cases",
     )
     ev_wh_run.add_argument("--json", action="store_true", help="Output as JSON")
+    ev_wh_run.add_argument("--corpus", default=None,
+                           help="Corpus file (absolute, or relative to eval/whisper/corpus/)")
+    ev_wh_run.add_argument("--fail-below", default=None, dest="fail_below",
+                           help="Fail if metrics below threshold, e.g. f1=0.65,suppression=0.90")
+    ev_wh_run.add_argument("--include-provisional", action="store_true", dest="include_provisional",
+                           help="Include unreviewed mined (provisional) cases in the run (smoke only)")
     ev_wh_run.set_defaults(func=_cmd_eval_whisper_run)
+
+    ev_wh_mine = ev_wh_sub.add_parser("mine", help="Mine provisional eval cases from the live whisper_log (read-only)")
+    ev_wh_mine.add_argument("--db", default=None, help="Path to live index.db (default: from Settings)")
+    ev_wh_mine.add_argument("--limit", type=int, default=80, help="Max cases to mine (default: 80)")
+    ev_wh_mine.add_argument("--out", default=None, help="Output file (default: eval/whisper/corpus/local/mined.jsonl)")
+    ev_wh_mine.set_defaults(func=_cmd_eval_whisper_mine)
+
+    ev_wh_import = ev_wh_sub.add_parser("import-labels", help="Confirm reviewed mined labels (clears provisional flags)")
+    ev_wh_import.add_argument("--mined", default=None, help="Mined corpus file (default: eval/whisper/corpus/local/mined.jsonl)")
+    ev_wh_import.set_defaults(func=_cmd_eval_whisper_import_labels)
+
+    ev_rc = ev_sub.add_parser("recall", help="Evaluate recall/retrieval quality")
+    ev_rc_sub = ev_rc.add_subparsers(dest="eval_recall_cmd", required=True)
+
+    ev_rc_run = ev_rc_sub.add_parser("run", help="Run recall eval against golden corpus")
+    ev_rc_run.add_argument("--corpus", default="golden", choices=["golden", "synthetic", "all"],
+                           help="Corpus to evaluate (default: golden)")
+    ev_rc_run.add_argument("--k", type=int, default=8, help="Top-k for metrics (default: 8)")
+    ev_rc_run.add_argument("--fail-below", default=None,
+                           help="Fail if metrics below threshold, e.g. recall@8=0.70")
+    ev_rc_run.add_argument("--fail-on-regression", default=None,
+                           help="Fail if metric drops more than delta vs last run, e.g. delta=0.05")
+    ev_rc_run.set_defaults(func=_cmd_eval_recall_run)
+
+    ev_rc_export = ev_rc_sub.add_parser("export-for-labeling", help="Export unlabeled pairs to pending_labels.jsonl")
+    ev_rc_export.set_defaults(func=_cmd_eval_recall_export)
+
+    ev_rc_import = ev_rc_sub.add_parser("import-labels", help="Merge labels.jsonl into corpus ground truth")
+    ev_rc_import.set_defaults(func=_cmd_eval_recall_import)
 
     args = p.parse_args()
 

@@ -19,6 +19,31 @@ logger = logging.getLogger(__name__)
 _MISFIRE_GRACE = 120
 
 
+# Spread the four LLM jobs so they don't burst together 24h after boot (#90).
+# Offset is relative to process start, not wall-clock — a restart loop shorter than
+# the offset (e.g. crash-looping every 2 min against a 5+ min offset) defers the first run indefinitely.
+_STAGGER_REFERENCE_MINUTES = 60
+
+
+def _stagger_factor(s) -> float:
+    """One shared factor for all four jobs, so distinct nominal offsets stay
+    distinct regardless of which job has the shortest configured interval
+    (council R3 finding 2 — per-job scaling let jobs with different intervals
+    collide at the same offset)."""
+    shortest = min(
+        s.auto_link_interval_minutes,
+        s.conflict_check_interval_minutes,
+        s.duplicate_check_interval_minutes,
+        s.consolidation_interval_minutes,
+    )
+    return min(1.0, shortest / _STAGGER_REFERENCE_MINUTES)
+
+
+def _staggered(minutes: int, factor: float) -> datetime:
+    """First run is offset to spread the LLM jobs, always inside one interval."""
+    return datetime.now(timezone.utc) + timedelta(minutes=minutes * factor)
+
+
 def start_scheduler(
     engine: MemoryEngine,
     stop_event: Optional[threading.Event] = None,
@@ -34,6 +59,7 @@ def start_scheduler(
     scheduler = BackgroundScheduler()
     tracker = JobTracker()
     s = engine.settings
+    stagger_factor = _stagger_factor(s)
 
     from ormah.background.auto_linker import run_auto_linker
 
@@ -43,6 +69,7 @@ def start_scheduler(
         minutes=s.auto_link_interval_minutes,
         id="auto_linker",
         name="Auto-linker",
+        next_run_time=_staggered(5, stagger_factor),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
@@ -76,6 +103,7 @@ def start_scheduler(
         minutes=s.conflict_check_interval_minutes,
         id="conflict_detector",
         name="Conflict detector",
+        next_run_time=_staggered(15, stagger_factor),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
@@ -87,6 +115,7 @@ def start_scheduler(
         minutes=s.duplicate_check_interval_minutes,
         id="duplicate_merger",
         name="Duplicate merger",
+        next_run_time=_staggered(30, stagger_factor),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
@@ -109,6 +138,7 @@ def start_scheduler(
         minutes=s.consolidation_interval_minutes,
         id="consolidator",
         name="Consolidator",
+        next_run_time=_staggered(45, stagger_factor),
         misfire_grace_time=_MISFIRE_GRACE,
     )
 

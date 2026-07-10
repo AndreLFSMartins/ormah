@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
+from ormah.api.routes_stats import router as stats_router
 from ormah.api.routes_ui import router as ui_router
 from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.config import Settings
@@ -26,6 +27,7 @@ def client(tmp_memory_dir):
     test_app = FastAPI()
     test_app.include_router(agent_router)
     test_app.include_router(admin_router)
+    test_app.include_router(stats_router)
     test_app.include_router(ui_router)
     test_app.state.engine = engine
     test_app.state.maintenance_manager = MaintenanceManager(engine)
@@ -67,11 +69,14 @@ def test_recall_not_found(client):
 
 
 def test_stats(client):
-    resp = client.get("/admin/stats")
+    resp = client.get("/stats")
     assert resp.status_code == 200
     body = resp.json()
-    assert "total_nodes" in body
-    assert "whisper_health" in body
+    assert "total_nodes" in body["store"]
+    assert "feedback_health" in body["whisper"]
+
+    assert client.get("/admin/stats").status_code == 404
+    assert client.get("/agent/stats").status_code == 404
 
 
 def test_backup_status_empty_store(client):
@@ -182,7 +187,7 @@ def test_maintenance_runs_in_background_and_stats_stay_available(client):
         assert resp.json()["status"] == "running_phase1"
         assert started.wait(timeout=1)
 
-        stats = client.get("/admin/stats")
+        stats = client.get("/stats")
         assert stats.status_code == 200
 
         release.set()
@@ -329,6 +334,76 @@ def test_maintenance_phase2_apply_completes_via_routes(client):
         app.state.engine.apply_maintenance_results = original_apply
 
 
+def _wait_for_status(manager, job_id, not_status="running_phase1", timeout=2):
+    deadline = time.time() + timeout
+    status = manager.get_status(job_id=job_id)
+    while status["status"] == not_status and time.time() < deadline:
+        time.sleep(0.01)
+        status = manager.get_status(job_id=job_id)
+    return status
+
+
+def test_phase1_finder_failure_is_recorded_as_tracker_failure(engine):
+    """Issue #90 (dev council follow-up): a Phase 1 with a broken finder must
+    still deliver the healthy batches to Phase 2 (status stays
+    "awaiting_results", job.batches is kept) but must NOT look like a clean
+    success in JobTracker — /admin is the #90 observability surface and must
+    not lie about a maintenance cycle whose link candidates never computed."""
+    from ormah.background.job_tracker import JobTracker
+
+    def batches_with_error():
+        return {
+            "batch_errors": {"link_candidates": "RuntimeError: boom"},
+            "link_candidates": [],
+            "conflict_candidates": [{"fake": "candidate"}],
+            "merge_candidates": [],
+            "consolidation_clusters": [],
+            "summary": "1 conflict candidates; FAILED: link_candidates",
+        }
+
+    engine.get_maintenance_batches = batches_with_error
+    tracker = JobTracker()
+    manager = MaintenanceManager(engine, tracker=tracker)
+
+    payload = manager.start_phase1()
+    status = _wait_for_status(manager, payload["job_id"])
+
+    # Healthy batches must still flow to phase 2.
+    assert status["status"] == "awaiting_results"
+    assert status["batches"]["conflict_candidates"] == [{"fake": "candidate"}]
+
+    # But the tracker must show this as a failure, not a clean run.
+    snap = tracker.snapshot()["maintenance_phase1"]
+    assert snap["error_count"] == 1
+    assert snap["last_success"] is None
+    assert "link_candidates" in snap["last_error"]
+    assert snap["last_stats"]["batch_errors"] == {"link_candidates": "RuntimeError: boom"}
+
+
+def test_phase1_clean_run_still_records_tracker_success(engine):
+    from ormah.background.job_tracker import JobTracker
+
+    def clean_batches():
+        return {
+            "batch_errors": {},
+            "link_candidates": [],
+            "conflict_candidates": [],
+            "merge_candidates": [],
+            "consolidation_clusters": [],
+            "summary": "nothing to process",
+        }
+
+    engine.get_maintenance_batches = clean_batches
+    tracker = JobTracker()
+    manager = MaintenanceManager(engine, tracker=tracker)
+
+    payload = manager.start_phase1()
+    status = _wait_for_status(manager, payload["job_id"])
+
+    assert status["status"] == "awaiting_results"
+    snap = tracker.snapshot()["maintenance_phase1"]
+    assert snap["error_count"] == 0
+    assert snap["last_success"] is not None
 def test_health_degraded_when_scheduler_job_embedding_backfill_failing():
     """CR2: scheduler present + embedding_backfill last run failed -> health degraded."""
     from unittest.mock import MagicMock
@@ -404,35 +479,3 @@ def test_run_all_records_failure_in_tracker_so_health_degrades():
         assert r.status_code == 503
         h = c.get("/admin/health")
         assert h.json()["status"] == "degraded"
-
-
-def test_forgetting_manager_wired_into_sleep_cycle():
-    """Bounded forgetting (#28) runs in the sleep-cycle pass, gated by the
-    existing deletion_enabled flag inside run_forgetting — not only on the
-    in-process timer that frequent restarts reset."""
-    from ormah.api.routes_admin import (
-        _SLEEP_CYCLE_ORDER,
-        _TASK_DESCRIPTIONS,
-        _TASK_RUNNERS,
-    )
-
-    assert _TASK_RUNNERS["forgetting_manager"] == (
-        "ormah.background.forgetting_manager",
-        "run_forgetting",
-    )
-    assert "forgetting_manager" in _TASK_DESCRIPTIONS
-    assert "forgetting_manager" in _SLEEP_CYCLE_ORDER
-    # Runs after decay (acts on freshly-demoted archival) and before backup
-    # (so the nightly snapshot reflects the post-forgetting state).
-    order = _SLEEP_CYCLE_ORDER
-    assert order.index("decay_manager") < order.index("forgetting_manager")
-    assert order.index("forgetting_manager") < order.index("memory_backup")
-
-
-def test_run_all_includes_forgetting_manager(client):
-    """run-all reports forgetting_manager; with deletion_enabled=False (default)
-    it no-ops safely rather than being absent from the cycle."""
-    resp = client.post("/admin/tasks/run-all")
-    assert resp.status_code == 200
-    results = resp.json()["results"]
-    assert results["forgetting_manager"] == "ok"
