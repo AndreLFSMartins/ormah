@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +11,64 @@ from ormah.config import Settings
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.index.db import Database
 from ormah.store.file_store import FileStore
+
+
+_REAL_HOME = Path.home()
+_REAL_ORMAH_PATHS = (
+    _REAL_HOME / ".local" / "bin" / "ormah",
+    _REAL_HOME / ".local" / "share" / "uv" / "tools" / "ormah",
+    _REAL_HOME / ".local" / "share" / "ormah",
+    _REAL_HOME / ".cache" / "ormah",
+    _REAL_HOME / ".config" / "ormah",
+)
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_real_ormah_path(path: Path) -> bool:
+    expanded = path.expanduser()
+    candidates = {expanded, expanded.resolve(strict=False)}
+
+    for protected in _REAL_ORMAH_PATHS:
+        protected_candidates = {protected, protected.resolve(strict=False)}
+        for candidate in candidates:
+            for protected_candidate in protected_candidates:
+                if candidate == protected_candidate or _is_relative_to(
+                    candidate, protected_candidate
+                ):
+                    return True
+    return False
+
+
+@pytest.fixture(autouse=True)
+def prevent_tests_mutating_real_ormah_install(monkeypatch):
+    """Fail fast if a test tries to delete the developer's real Ormah install."""
+    real_unlink = Path.unlink
+    real_rmtree = shutil.rmtree
+
+    def assert_safe_to_delete(path: Path) -> None:
+        if _is_real_ormah_path(path):
+            raise AssertionError(
+                "Test attempted to delete the real Ormah install/config path "
+                f"{path}. Patch Path.home() to tmp_path or mock the destructive helper."
+            )
+
+    def guarded_unlink(self, *args, **kwargs):
+        assert_safe_to_delete(self)
+        return real_unlink(self, *args, **kwargs)
+
+    def guarded_rmtree(path, *args, **kwargs):
+        assert_safe_to_delete(Path(path))
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", guarded_unlink)
+    monkeypatch.setattr(shutil, "rmtree", guarded_rmtree)
 
 
 @pytest.fixture

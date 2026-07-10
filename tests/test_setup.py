@@ -1990,6 +1990,21 @@ class TestRemoveClaudeMdBlock:
 
 
 class TestRunUninstall:
+    @pytest.fixture(autouse=True)
+    def _isolate_uninstall_from_real_home(self, tmp_path):
+        """Keep uninstall tests from touching the developer's real Ormah install."""
+        fake_settings = MagicMock()
+        fake_settings.memory_dir = tmp_path / ".local" / "share" / "ormah" / "memory"
+        fake_settings.embedding_model = "BAAI/bge-base-en-v1.5"
+        fake_settings.whisper_reranker_model = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.config.settings", fake_settings),
+            patch("ormah.setup._get_running_server_data_dir", return_value=None),
+        ):
+            yield
+
     def _patch_all(self, mock_uninstall_autostart, mock_hooks, mock_mcp, mock_md, mock_rmtree, mock_run):
         """Shared patcher helper — not used directly, see individual tests."""
 
