@@ -290,7 +290,7 @@ Return a JSON object:
     except (json.JSONDecodeError, TypeError, ValueError):
         # ponytail: transient parse failure -> retry next run (do NOT record). Now rare thanks to
         # the adapter result-fallback. Ceiling: a cluster whose content DETERMINISTICALLY fails to
-        # parse is retried every run (bounded by _MAX_CLUSTERS_PER_RUN); add a checked_at backoff
+        # parse is retried every run (bounded by consolidation_max_clusters_per_run); add a checked_at backoff
         # column if that ever bleeds.
         logger.warning("LLM returned unparseable JSON for consolidation; will retry next run")
         return
