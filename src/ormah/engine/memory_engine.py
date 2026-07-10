@@ -1544,32 +1544,15 @@ class MemoryEngine:
         if limit_per_batch is None:
             limit_per_batch = getattr(self.settings, "claude_maintenance_batch_size", 25)
 
-        # Each finder can now raise on internal failure (issue #90 council R2
-        # finding 1 — a finder no longer swallows its own exceptions so a
-        # broken detector isn't invisible on /admin). This is the only caller
-        # outside the finders' own tracked() run_* jobs, so it must keep its
-        # pre-existing contract: one broken finder yields an empty batch for
-        # that key, not an uncaught exception for the whole batches response.
-        try:
-            link_candidates = _find_link_candidates(self, limit_per_batch)
-        except Exception as e:
-            logger.warning("_find_link_candidates failed: %s", e)
-            link_candidates = []
-        try:
-            conflict_candidates = _find_conflict_candidates(self, limit_per_batch)
-        except Exception as e:
-            logger.warning("_find_conflict_candidates failed: %s", e)
-            conflict_candidates = []
-        try:
-            merge_candidates = _find_merge_candidates(self, limit_per_batch)
-        except Exception as e:
-            logger.warning("_find_merge_candidates failed: %s", e)
-            merge_candidates = []
-        try:
-            consolidation_clusters = _find_consolidation_clusters(self, limit=4)
-        except Exception as e:
-            logger.warning("_find_consolidation_clusters failed: %s", e)
-            consolidation_clusters = []
+        # Finder failures propagate on purpose (issue #90 council R3 finding 1).
+        # A finder raising means a shared dependency (encoder/vector-store/DB)
+        # is down, so all four batches are suspect — swallowing it here would
+        # let Phase 2 stamp last_maintenance_run and silence the maintenance
+        # signal for a whole interval while the detector stays broken.
+        link_candidates = _find_link_candidates(self, limit_per_batch)
+        conflict_candidates = _find_conflict_candidates(self, limit_per_batch)
+        merge_candidates = _find_merge_candidates(self, limit_per_batch)
+        consolidation_clusters = _find_consolidation_clusters(self, limit=4)
 
         def _norm(node: dict) -> dict:
             return {

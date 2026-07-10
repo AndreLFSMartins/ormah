@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.models.node import CreateNodeRequest, NodeType
 
@@ -232,24 +234,44 @@ class TestGetMaintenanceBatches:
             for node in (c["node_a"], c["node_b"]):
                 assert len(node["content"]) <= 400
 
-    def test_survives_finder_failure(self, engine, monkeypatch):
-        """Issue #90 council R2 finding 1: get_maintenance_batches is the only
-        caller of the four finders outside their own run_* jobs and must keep
-        today's behavior — a blown-up finder yields an empty batch for that
-        key, not an uncaught exception, even though the finders themselves no
-        longer swallow exceptions internally."""
+    def test_finder_failure_raises(self, engine, monkeypatch):
+        """Issue #90 council R3 finding 1: a broken finder must make Phase 1
+        fail loudly, not substitute an empty batch. A finder failure means a
+        shared dependency (encoder/vector-store/DB) is down, so all four
+        batches are suspect anyway — silently reporting "nothing to process"
+        would let Phase 2 stamp last_maintenance_run and silence the
+        maintenance signal for a whole interval while the detector stays
+        broken (context_builder.py's "self-limiting" signal check)."""
         from ormah.background import auto_linker
 
         def boom(*a, **kw):
             raise RuntimeError("boom")
 
         monkeypatch.setattr(auto_linker, "_find_link_candidates", boom)
-        batches = engine.get_maintenance_batches()
-        assert batches["link_candidates"] == []
-        # The other three batches must be unaffected.
-        assert "conflict_candidates" in batches
-        assert "merge_candidates" in batches
-        assert "consolidation_clusters" in batches
+        with pytest.raises(RuntimeError, match="boom"):
+            engine.get_maintenance_batches()
+
+    def test_finder_failure_does_not_stamp_last_maintenance_run(self, engine, monkeypatch):
+        """Phase 2's last_maintenance_run stamp must never happen off the back
+        of a Phase 1 that raised."""
+        from ormah.background import auto_linker
+
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(auto_linker, "_find_link_candidates", boom)
+
+        def _read_stamp():
+            row = engine.db.conn.execute(
+                "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
+            ).fetchone()
+            return row["value"] if row else None
+
+        before = _read_stamp()
+        with pytest.raises(RuntimeError):
+            engine.get_maintenance_batches()
+        after = _read_stamp()
+        assert after == before
 
 
 class TestWhisperSignal:

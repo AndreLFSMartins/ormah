@@ -143,11 +143,8 @@ def test_consolidator_finder_failure_is_visible_via_tracked(engine, monkeypatch)
     assert snap["last_error"] is not None
 
 
-def test_llm_jobs_are_staggered(engine, monkeypatch):
-    """At default (1440-minute) intervals, all four offsets fit under the
-    interval and stay distinct."""
+def _spy_add_job(monkeypatch):
     from apscheduler.schedulers.background import BackgroundScheduler
-    from ormah.background import scheduler as sched_mod
 
     recorded = {}
     orig_add = BackgroundScheduler.add_job
@@ -158,54 +155,60 @@ def test_llm_jobs_are_staggered(engine, monkeypatch):
 
     monkeypatch.setattr(BackgroundScheduler, "add_job", spy)
     monkeypatch.setattr(BackgroundScheduler, "start", lambda self: None)
-    sched_mod.start_scheduler(engine)
-    llm_jobs = ["auto_linker", "conflict_detector", "duplicate_merger", "consolidator"]
-    times = [recorded[j] for j in llm_jobs]
-    assert all(t is not None for t in times)
-    assert len({t.replace(microsecond=0) for t in times}) == len(times)
+    return recorded
 
 
-def test_staggered_offsets_scale_and_stay_distinct(engine, monkeypatch):
-    """Issue #90 council R2 finding 3: clamping offsets with min() collapses
-    distinct offsets onto the same boundary at short intervals (e.g. interval=30
-    -> [5,15,30,30], interval=1 -> [1,1,1,1]), recreating the concurrent-LLM-load
-    burst the stagger exists to prevent. Offsets must instead scale
-    proportionally so they stay distinct and always land inside one interval."""
-    from datetime import timedelta, timezone
-    from apscheduler.schedulers.background import BackgroundScheduler
+def test_staggered_offsets_exact_at_default_intervals(engine, monkeypatch):
+    """At the 1440-minute defaults the nominal offsets (5/15/30/45) are
+    unscaled — shortest configured interval (1440) >> reference (60)."""
+    from datetime import datetime, timedelta, timezone
     from ormah.background import scheduler as sched_mod
 
-    llm_jobs = ["auto_linker", "conflict_detector", "duplicate_merger", "consolidator"]
+    recorded = _spy_add_job(monkeypatch)
+    before = datetime.now(timezone.utc)
+    sched_mod.start_scheduler(engine)
+    after = datetime.now(timezone.utc)
 
-    def run_with_interval(interval_minutes: int) -> dict:
-        engine.settings.auto_link_interval_minutes = interval_minutes
-        engine.settings.conflict_check_interval_minutes = interval_minutes
-        engine.settings.duplicate_check_interval_minutes = interval_minutes
-        engine.settings.consolidation_interval_minutes = interval_minutes
+    expected_offsets = {"auto_linker": 5, "conflict_detector": 15,
+                         "duplicate_merger": 30, "consolidator": 45}
+    for job_id, nominal in expected_offsets.items():
+        t = recorded[job_id]
+        assert before + timedelta(minutes=nominal) <= t <= after + timedelta(minutes=nominal)
 
-        recorded = {}
-        orig_add = BackgroundScheduler.add_job
 
-        def spy(self, func, *a, **kw):
-            recorded[kw.get("id")] = kw.get("next_run_time")
-            return orig_add(self, func, *a, **kw)
+def test_staggered_offsets_share_one_factor_across_mixed_intervals(engine, monkeypatch):
+    """Issue #90 council R3 finding 2: scaling each job by ITS OWN interval
+    let jobs with different intervals collide (e.g. auto_link=3min nominal-5
+    -> 0.25min, conflict_check=1min nominal-15 -> 0.25min: both fire at 15s
+    and re-collide every 3 minutes). All four jobs must share ONE factor
+    derived from the shortest configured interval, so distinct nominal
+    offsets (5/15/30/45) stay distinct regardless of which job has the
+    shortest interval."""
+    from datetime import datetime, timedelta, timezone
+    from ormah.background import scheduler as sched_mod
 
-        monkeypatch.setattr(BackgroundScheduler, "add_job", spy)
-        monkeypatch.setattr(BackgroundScheduler, "start", lambda self: None)
+    engine.settings.auto_link_interval_minutes = 3
+    engine.settings.conflict_check_interval_minutes = 1
+    # duplicate_check / consolidation stay at their 1440-minute default.
 
-        from datetime import datetime
-        before = datetime.now(timezone.utc)
-        sched_mod.start_scheduler(engine)
+    recorded = _spy_add_job(monkeypatch)
 
-        for job_id in llm_jobs:
-            t = recorded[job_id]
-            assert t is not None
-            assert t < before + timedelta(minutes=interval_minutes)
-        return recorded
+    before = datetime.now(timezone.utc)
+    sched_mod.start_scheduler(engine)
 
-    for interval_minutes in (1, 30):
-        recorded = run_with_interval(interval_minutes)
-        times = [recorded[j] for j in llm_jobs]
-        assert len({t.replace(microsecond=0) for t in times}) == len(times), (
-            f"offsets collapsed at interval_minutes={interval_minutes}: {times}"
-        )
+    llm_jobs_intervals = {
+        "auto_linker": engine.settings.auto_link_interval_minutes,
+        "conflict_detector": engine.settings.conflict_check_interval_minutes,
+        "duplicate_merger": engine.settings.duplicate_check_interval_minutes,
+        "consolidator": engine.settings.consolidation_interval_minutes,
+    }
+    times = []
+    for job_id, interval_minutes in llm_jobs_intervals.items():
+        t = recorded[job_id]
+        assert t is not None
+        assert t < before + timedelta(minutes=interval_minutes)
+        times.append(t)
+
+    assert len({t.replace(microsecond=0) for t in times}) == len(times), (
+        f"offsets collapsed across mixed intervals: {times}"
+    )
