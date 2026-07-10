@@ -12,15 +12,17 @@ from ormah.models.node import Connection, EdgeType
 
 logger = logging.getLogger(__name__)
 
-_LLM_CONFLICT_PROMPT = """\
-You are checking whether two memories genuinely contradict each other. False positives create noise in the graph and waste the user's time resolving non-conflicts. Be very conservative — only flag true contradictions.
+_LLM_CONFLICT_INTRO = """\
+You are checking whether two memories genuinely contradict each other. False positives create noise in the graph and waste the user's time resolving non-conflicts. Be very conservative — only flag true contradictions."""
 
+_LLM_CONFLICT_PAIR = """\
 Memory A (created: {created_a}, space: {space_a}): "{title_a}"
 {content_a}
 
 Memory B (created: {created_b}, space: {space_b}): "{title_b}"
-{content_b}
+{content_b}"""
 
+_LLM_CONFLICT_RULES = """\
 ## Decision process (stop at first "no")
 
 **1. Same space AND same specific subject?**
@@ -56,6 +58,20 @@ Return JSON only:
   "evolved_node": "a" or "b" (the NEWER view per creation dates — only if type=evolution),
   "explanation": "one sentence using actual memory titles"
 }}"""
+
+_LLM_CONFLICT_PROMPT = _LLM_CONFLICT_INTRO + "\n\n" + _LLM_CONFLICT_PAIR + "\n\n" + _LLM_CONFLICT_RULES
+_LLM_CONFLICT_INSTRUCTIONS = _LLM_CONFLICT_INTRO + "\n\n" + _LLM_CONFLICT_RULES  # sent once per batch
+
+
+def _render_conflict_pair(pair: dict) -> str:
+    """Render one candidate pair for a batched conflict prompt (#87)."""
+    a, b = pair["node_a"], pair["node_b"]
+    return _LLM_CONFLICT_PAIR.format(
+        title_a=a["title"] or "(untitled)", content_a=a["content"][:500],
+        created_a=a.get("created", "unknown"), space_a=a.get("space") or "global",
+        title_b=b["title"] or "(untitled)", content_b=b["content"][:500],
+        created_b=b.get("created", "unknown"), space_b=b.get("space") or "global",
+    )
 
 
 def _llm_check_conflict(settings, node_row, other_row) -> dict | None:
@@ -209,27 +225,47 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
 
 
 def run_conflict_detection(engine) -> dict | None:
-    """Find potentially contradicting nodes and create edges."""
+    """Find potentially contradicting nodes and create edges.
+
+    Candidate pairs from _find_conflict_candidates are judged in K-sized LLM
+    calls (#87). At K=1 the judge is a pure map — one _llm_check_conflict per
+    candidate, exactly as before — so the existing suite is the K=1 regression
+    net. The finder already collects the full candidate list, so no streaming
+    window is needed here: judge the list, then apply verdicts by index.
+    """
     t0 = time.monotonic()
     try:
+        from ormah.background.llm.pair_batch import judge_pairs
+
         settings = engine.settings
 
         if not settings.llm_enabled:
             logger.debug("Conflict detection skipped: LLM not enabled")
             return {"skipped": "llm_disabled"}
 
-        candidates = _find_conflict_candidates(engine, limit=10000)
+        # Pair-denominated cap (#87): default 10000 == the previous hardcoded limit,
+        # so out-of-the-box behavior is unchanged; now operator-configurable. The
+        # finder scans ORDER BY RANDOM(), so a lowered cap stays fair across runs.
+        max_pairs = settings.conflict_check_max_pairs_per_run
+        candidates = _find_conflict_candidates(engine, limit=max_pairs)
+        k = max(settings.conflict_check_pairs_per_call or settings.maintenance_pairs_per_call, 1)
+
+        verdicts = judge_pairs(
+            settings, _LLM_CONFLICT_INSTRUCTIONS, candidates, _render_conflict_pair,
+            judge_single=lambda c: _llm_check_conflict(settings, c["node_a"], c["node_b"]),
+            k=k,
+        )
+
         edges_created = 0
         pairs_attempted = 0
         pairs_evaluated = 0
         dirty_nodes: dict[str, list[Connection]] = {}
 
-        for candidate in candidates:
+        for candidate, llm_result in zip(candidates, verdicts):
             node_a = candidate["node_a"]
             node_b = candidate["node_b"]
 
             pairs_attempted += 1
-            llm_result = _llm_check_conflict(settings, node_a, node_b)
             if llm_result is None:
                 continue
             pairs_evaluated += 1
@@ -237,6 +273,10 @@ def run_conflict_detection(engine) -> dict | None:
                 continue
             if not llm_result.get("same_subject", True):
                 continue
+            # Batch verdicts arrive un-normalized; the single path already
+            # normalized inside _llm_check_conflict (double-normalize is idempotent).
+            if "type" in llm_result:
+                llm_result["type"] = normalize_conflict_type(llm_result["type"])
 
             explanation = llm_result.get("explanation", "")
             now = datetime.now(timezone.utc).isoformat()
@@ -291,6 +331,7 @@ def run_conflict_detection(engine) -> dict | None:
             "pairs_attempted": pairs_attempted,
             "pairs_evaluated": pairs_evaluated,
             "edges_created": edges_created,
+            "cap_hit": len(candidates) >= max_pairs,
             "duration_s": round(duration, 3),
             "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,
         }
