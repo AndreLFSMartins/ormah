@@ -84,12 +84,30 @@ async def lifespan(app: FastAPI):
     try:
         from ormah.background.session_watcher import start_session_watcher, stop_session_watcher
 
-        session_observers = start_session_watcher(engine)
-        app.state.session_watcher_observers = session_observers
+        session_watches = start_session_watcher(engine)
+        app.state.session_watcher_observers = session_watches
+        if hasattr(app.state, "scheduler"):
+            from ormah.background.scheduler import register_session_reconcile_job
+            register_session_reconcile_job(
+                app.state.scheduler, app.state.job_tracker, session_watches,
+                engine.settings.session_watcher_reconcile_interval_minutes,
+            )
     except Exception as e:
         logger.warning("Session watcher not started: %s", e)
 
     yield
+
+    # Unschedule the reconcile job before stopping the watchers, to shrink the window where
+    # a tick recreates an Observer that nothing then stops. remove_job() only cancels future
+    # triggers, not an already-running tick, so a single in-flight tick can still recreate one
+    # Observer; that leaked daemon thread dies with the process (same tradeoff as the engine
+    # connection below). Fully closing it would require shutting the scheduler down before the
+    # watchers, which the bind-sensitive shutdown order avoids.
+    if hasattr(app.state, "scheduler"):
+        try:
+            app.state.scheduler.remove_job("session_reconcile")
+        except Exception:
+            pass
 
     # Shutdown — stop session watcher first
     if hasattr(app.state, "session_watcher_observers"):
