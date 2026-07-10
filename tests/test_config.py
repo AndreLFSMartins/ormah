@@ -295,3 +295,25 @@ def test_reconcile_max_seconds_rejects_zero():
 def test_reconcile_max_seconds_rejects_negative():
     with pytest.raises(ValidationError, match="session_watcher_reconcile_max_seconds must be > 0"):
         _settings(session_watcher_reconcile_max_seconds=-1.0)
+# --- Embedding backfill / vector-store reconciliation (#32) ---
+
+def test_embedding_backfill_settings_defaults():
+    s = _settings()
+    assert s.embedding_backfill_interval_minutes == 60
+    assert s.embedding_index_max_retries == 2
+    assert s.embedding_index_retry_backoff_seconds == 0.5
+
+
+def test_embedding_backfill_interval_rejects_zero():
+    with pytest.raises(ValidationError):
+        _settings(embedding_backfill_interval_minutes=0)
+
+
+def test_embedding_index_max_retries_rejects_negative():
+    with pytest.raises(ValidationError):
+        _settings(embedding_index_max_retries=-1)
+
+
+def test_embedding_index_retry_backoff_rejects_negative():
+    with pytest.raises(ValidationError):
+        _settings(embedding_index_retry_backoff_seconds=-0.1)
