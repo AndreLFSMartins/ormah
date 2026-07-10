@@ -1544,10 +1544,32 @@ class MemoryEngine:
         if limit_per_batch is None:
             limit_per_batch = getattr(self.settings, "claude_maintenance_batch_size", 25)
 
-        link_candidates = _find_link_candidates(self, limit_per_batch)
-        conflict_candidates = _find_conflict_candidates(self, limit_per_batch)
-        merge_candidates = _find_merge_candidates(self, limit_per_batch)
-        consolidation_clusters = _find_consolidation_clusters(self, limit=4)
+        # Each finder can now raise on internal failure (issue #90 council R2
+        # finding 1 — a finder no longer swallows its own exceptions so a
+        # broken detector isn't invisible on /admin). This is the only caller
+        # outside the finders' own tracked() run_* jobs, so it must keep its
+        # pre-existing contract: one broken finder yields an empty batch for
+        # that key, not an uncaught exception for the whole batches response.
+        try:
+            link_candidates = _find_link_candidates(self, limit_per_batch)
+        except Exception as e:
+            logger.warning("_find_link_candidates failed: %s", e)
+            link_candidates = []
+        try:
+            conflict_candidates = _find_conflict_candidates(self, limit_per_batch)
+        except Exception as e:
+            logger.warning("_find_conflict_candidates failed: %s", e)
+            conflict_candidates = []
+        try:
+            merge_candidates = _find_merge_candidates(self, limit_per_batch)
+        except Exception as e:
+            logger.warning("_find_merge_candidates failed: %s", e)
+            merge_candidates = []
+        try:
+            consolidation_clusters = _find_consolidation_clusters(self, limit=4)
+        except Exception as e:
+            logger.warning("_find_consolidation_clusters failed: %s", e)
+            consolidation_clusters = []
 
         def _norm(node: dict) -> dict:
             return {

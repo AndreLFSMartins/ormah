@@ -21,8 +21,13 @@ _MISFIRE_GRACE = 120
 # Offset is relative to process start, not wall-clock — a restart loop shorter than
 # the offset (e.g. crash-looping every 2 min against a 5+ min offset) defers the first run indefinitely.
 def _staggered(minutes: int, interval_minutes: int) -> datetime:
-    """First run is offset to spread the LLM jobs, but never past one interval."""
-    return datetime.now(timezone.utc) + timedelta(minutes=min(minutes, interval_minutes))
+    """First run is offset to spread the LLM jobs, always inside one interval.
+
+    Scales (not clamps) the nominal offset so short intervals keep distinct
+    offsets instead of collapsing onto the same boundary (council R2 finding 3).
+    """
+    factor = min(1.0, interval_minutes / 60)
+    return datetime.now(timezone.utc) + timedelta(minutes=minutes * factor)
 
 
 def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTracker]:

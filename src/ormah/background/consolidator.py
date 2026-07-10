@@ -41,10 +41,7 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
     if len(rows) < min_size:
         return []
 
-    try:
-        vec_store = VectorStore(engine.db)
-    except Exception:
-        return []
+    vec_store = VectorStore(engine.db)
 
     clustered_ids: set[str] = set()
     clusters: list[list[dict]] = []
