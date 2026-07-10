@@ -142,100 +142,95 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
     Does NOT call the LLM — just applies the same pre-filters as
     ``run_duplicate_detection`` (same type, composite score threshold).
     """
-    try:
-        from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
+    from ormah.embeddings.encoder import get_encoder
+    from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
-        settings = engine.settings
-        encoder = get_encoder(settings)
-        vec_store = VectorStore(engine.db)
+    settings = engine.settings
+    encoder = get_encoder(settings)
+    vec_store = VectorStore(engine.db)
 
-        user_node_id = getattr(engine, "user_node_id", None)
-        nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes ORDER BY RANDOM()").fetchall()
-        checked: set[tuple[str, str]] = set()
-        candidates: list[dict] = []
+    user_node_id = getattr(engine, "user_node_id", None)
+    nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes ORDER BY RANDOM()").fetchall()
+    checked: set[tuple[str, str]] = set()
+    candidates: list[dict] = []
 
-        for node in nodes:
+    for node in nodes:
+        if len(candidates) >= limit:
+            break
+        if node["id"] == user_node_id:
+            continue
+
+        text = f"{node['title'] or ''} {node['content']}".strip()
+        if not text:
+            continue
+
+        query_vec = stored_or_encoded(
+            vec_store,
+            encoder,
+            node["id"],
+            node["title"],
+            node["content"],
+            settings.embedding_max_content_chars,
+        )
+        similar = vec_store.search(query_vec, limit=6)
+
+        for match in similar:
             if len(candidates) >= limit:
                 break
-            if node["id"] == user_node_id:
+            if match["id"] == node["id"]:
+                continue
+            if match["id"] == user_node_id:
                 continue
 
-            text = f"{node['title'] or ''} {node['content']}".strip()
-            if not text:
+            pair = tuple(sorted([node["id"], match["id"]]))
+            if pair in checked:
+                continue
+            checked.add(pair)
+
+            already_checked = engine.db.conn.execute(
+                "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+            ).fetchone()
+            if already_checked:
                 continue
 
-            query_vec = stored_or_encoded(
-                vec_store,
-                encoder,
-                node["id"],
-                node["title"],
-                node["content"],
-                settings.embedding_max_content_chars,
-            )
-            similar = vec_store.search(query_vec, limit=6)
+            embedding_sim = match["similarity"]
+            if embedding_sim < 0.25:
+                continue
 
-            for match in similar:
-                if len(candidates) >= limit:
-                    break
-                if match["id"] == node["id"]:
-                    continue
-                if match["id"] == user_node_id:
-                    continue
+            other = engine.db.conn.execute(
+                "SELECT id, type, title, content FROM nodes WHERE id = ?", (match["id"],)
+            ).fetchone()
+            if other is None or other["type"] != node["type"]:
+                continue
 
-                pair = tuple(sorted([node["id"], match["id"]]))
-                if pair in checked:
-                    continue
-                checked.add(pair)
+            title_sim = _title_similarity(node["title"], other["title"])
+            other_text = f"{other['title'] or ''} {other['content']}".strip()
+            token_sim = _token_overlap(text, other_text)
+            score = _composite_score(embedding_sim, title_sim, token_sim)
 
-                already_checked = engine.db.conn.execute(
-                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
-                ).fetchone()
-                if already_checked:
-                    continue
+            if score < _COMPOSITE_THRESHOLD:
+                continue
 
-                embedding_sim = match["similarity"]
-                if embedding_sim < 0.25:
-                    continue
+            def _nd(row) -> dict:
+                return {
+                    "id": row["id"],
+                    "title": row["title"] or "",
+                    "type": row["type"] or "",
+                    "space": "",
+                    "content": (row["content"] or "")[:400],
+                }
 
-                other = engine.db.conn.execute(
-                    "SELECT id, type, title, content FROM nodes WHERE id = ?", (match["id"],)
-                ).fetchone()
-                if other is None or other["type"] != node["type"]:
-                    continue
+            candidates.append({
+                "node_a": _nd(node),
+                "node_b": _nd(other),
+                "similarity": round(embedding_sim, 3),
+                "score": round(score, 3),
+                "embedding_sim": round(embedding_sim, 3),
+                "title_sim": round(title_sim, 3),
+                "token_sim": round(token_sim, 3),
+            })
 
-                title_sim = _title_similarity(node["title"], other["title"])
-                other_text = f"{other['title'] or ''} {other['content']}".strip()
-                token_sim = _token_overlap(text, other_text)
-                score = _composite_score(embedding_sim, title_sim, token_sim)
-
-                if score < _COMPOSITE_THRESHOLD:
-                    continue
-
-                def _nd(row) -> dict:
-                    return {
-                        "id": row["id"],
-                        "title": row["title"] or "",
-                        "type": row["type"] or "",
-                        "space": "",
-                        "content": (row["content"] or "")[:400],
-                    }
-
-                candidates.append({
-                    "node_a": _nd(node),
-                    "node_b": _nd(other),
-                    "similarity": round(embedding_sim, 3),
-                    "score": round(score, 3),
-                    "embedding_sim": round(embedding_sim, 3),
-                    "title_sim": round(title_sim, 3),
-                    "token_sim": round(token_sim, 3),
-                })
-
-        return candidates
-
-    except Exception as e:
-        logger.warning("_find_merge_candidates failed: %s", e)
-        return []
+    return candidates
 
 
 def run_duplicate_detection(engine) -> dict | None:

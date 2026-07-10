@@ -454,3 +454,26 @@ def test_pairs_attempted_counts_llm_unavailable_pair_but_not_evaluated(engine):
 
     assert stats["pairs_attempted"] == 1
     assert stats["pairs_evaluated"] == 0
+
+
+def test_pairs_attempted_counts_invalid_llm_output_but_not_evaluated(engine):
+    """Issue #90 council R2 finding 2: the 'error' sentinel (invalid/malformed
+    LLM output) must count as attempted but NOT as a valid evaluation — a
+    degraded provider must not report healthy pairs_per_s with zero real
+    decisions. duplicate_merger/conflict_detector already exclude their
+    equivalent None-decision case; auto_linker's sentinel is a dict, not
+    None, so it needs its own check."""
+    id_a, id_b = _create_pair(engine)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.auto_linker._llm_classify_link",
+        return_value={"relationship": "error", "reason": "invalid LLM output"},
+    ):
+        from ormah.background.auto_linker import run_auto_linker
+        stats = run_auto_linker(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 0
