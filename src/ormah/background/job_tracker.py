@@ -45,7 +45,13 @@ class JobTracker:
             status.last_duration_ms = duration_ms
             status.last_stats = stats
 
-    def record_failure(self, job_id: str, error: str, duration_ms: float) -> None:
+    def record_failure(
+        self,
+        job_id: str,
+        error: str,
+        duration_ms: float,
+        stats: dict[str, Any] | None = None,
+    ) -> None:
         now = datetime.now(timezone.utc)
         with self._lock:
             status = self._jobs.setdefault(job_id, JobStatus())
@@ -55,6 +61,7 @@ class JobTracker:
             status.run_count += 1
             status.error_count += 1
             status.last_duration_ms = duration_ms
+            status.last_stats = stats
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         """Return a JSON-serialisable snapshot of all job statuses."""
@@ -83,7 +90,13 @@ def tracked(tracker: JobTracker, job_id: str, fn: Callable, *args: Any) -> Calla
             result = fn(*args)
             duration_ms = (time.monotonic() - t0) * 1000
             stats = result if isinstance(result, dict) else None
-            tracker.record_success(job_id, duration_ms, stats=stats)
+            if stats is not None and "error" in stats:
+                tracker.record_failure(job_id, str(stats["error"]), duration_ms, stats=stats)
+                logger.warning(
+                    "Job %s reported an error after %.0fms: %s", job_id, duration_ms, stats["error"]
+                )
+            else:
+                tracker.record_success(job_id, duration_ms, stats=stats)
         except Exception as e:
             duration_ms = (time.monotonic() - t0) * 1000
             tracker.record_failure(job_id, str(e), duration_ms)

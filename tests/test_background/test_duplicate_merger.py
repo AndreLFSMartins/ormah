@@ -172,7 +172,27 @@ def test_pairs_evaluated_counts_one_candidate_pair(engine):
         from ormah.background.duplicate_merger import run_duplicate_detection
         stats = run_duplicate_detection(engine)
 
+    assert stats["pairs_attempted"] == 1
     assert stats["pairs_evaluated"] == 1
     # duration_s must have millisecond resolution — a fast mocked-LLM run
     # must not silently round down to 0.0 (issue #90 finding 2).
     assert stats["duration_s"] > 0
+
+
+def test_pairs_attempted_counts_llm_unavailable_pair_but_not_evaluated(engine):
+    """Issue #90 (council finding 2): an LLM-unavailable pair (None decision)
+    must count as attempted but NOT as evaluated."""
+    id_a, id_b = _create_pair(engine)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.duplicate_merger._llm_check_duplicate",
+        return_value=None,
+    ):
+        from ormah.background.duplicate_merger import run_duplicate_detection
+        stats = run_duplicate_detection(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 0

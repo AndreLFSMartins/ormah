@@ -432,4 +432,25 @@ def test_pairs_evaluated_counts_one_candidate_pair(engine):
         from ormah.background.auto_linker import run_auto_linker
         stats = run_auto_linker(engine)
 
+    assert stats["pairs_attempted"] == 1
     assert stats["pairs_evaluated"] == 1
+
+
+def test_pairs_attempted_counts_llm_unavailable_pair_but_not_evaluated(engine):
+    """Issue #90 (council finding 2): an LLM-unavailable pair (None decision)
+    must count as attempted but NOT as evaluated — otherwise pairs_per_s is
+    inflated by calls that never produced a decision."""
+    id_a, id_b = _create_pair(engine)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(
+        "ormah.background.auto_linker._llm_classify_link",
+        return_value=None,
+    ):
+        from ormah.background.auto_linker import run_auto_linker
+        stats = run_auto_linker(engine)
+
+    assert stats["pairs_attempted"] == 1
+    assert stats["pairs_evaluated"] == 0

@@ -225,6 +225,7 @@ def run_conflict_detection(engine) -> dict | None:
 
         candidates = _find_conflict_candidates(engine, limit=10000)
         edges_created = 0
+        pairs_attempted = 0
         pairs_evaluated = 0
         dirty_nodes: dict[str, list[Connection]] = {}
 
@@ -232,10 +233,11 @@ def run_conflict_detection(engine) -> dict | None:
             node_a = candidate["node_a"]
             node_b = candidate["node_b"]
 
-            pairs_evaluated += 1
+            pairs_attempted += 1
             llm_result = _llm_check_conflict(settings, node_a, node_b)
             if llm_result is None:
                 continue
+            pairs_evaluated += 1
             if not llm_result.get("conflict"):
                 continue
             if not llm_result.get("same_subject", True):
@@ -291,6 +293,7 @@ def run_conflict_detection(engine) -> dict | None:
         duration = time.monotonic() - t0
         stats = {
             "candidates_found": len(candidates),
+            "pairs_attempted": pairs_attempted,
             "pairs_evaluated": pairs_evaluated,
             "edges_created": edges_created,
             "duration_s": round(duration, 3),

@@ -334,6 +334,7 @@ def run_auto_linker(engine) -> dict | None:
         nodes = _select_nodes_after(conn, watermark, settings.auto_link_max_nodes_per_run)
 
         created = 0
+        pairs_attempted = 0
         pairs_evaluated = 0
         last_complete: int | None = None
 
@@ -392,7 +393,7 @@ def run_auto_linker(engine) -> dict | None:
                     if other is None:
                         continue
 
-                    pairs_evaluated += 1
+                    pairs_attempted += 1
                     llm_result = _llm_classify_link(settings, node, other)
                     if llm_result is None:
                         # LLM UNAVAILABLE (raw None) — transient. Leave node unresolved so the
@@ -400,6 +401,7 @@ def run_auto_linker(engine) -> dict | None:
                         # is unresolved, so the whole run waits — no single node blocks others.
                         node_resolved = False
                         continue
+                    pairs_evaluated += 1
                     relationship = llm_result["relationship"]  # may be 'error' (invalid output)
                     _apply_edge(
                         engine, node["id"], match["id"], relationship,
@@ -426,6 +428,7 @@ def run_auto_linker(engine) -> dict | None:
         duration = time.monotonic() - t0
         stats = {
             "nodes_scanned": len(nodes),
+            "pairs_attempted": pairs_attempted,
             "pairs_evaluated": pairs_evaluated,
             "edges_created": created,
             "backlog_nodes": backlog,
