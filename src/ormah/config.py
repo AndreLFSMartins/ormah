@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     llm_api_key_env_var: str | None = None
     llm_inherit_api_key: bool = False
 
+    # Ingest (server-side extraction) LLM override. Empty falls back to llm_provider/llm_model.
+    ingest_llm_provider: str = ""
+    ingest_llm_model: str = ""
+    claude_cli_timeout_seconds: int = 120
+    claude_cli_bin: str | None = None
+    claude_cli_max_concurrency: int = 1
+
     # Background intervals (LLM-dependent tasks default to daily to keep costs low)
     auto_link_interval_minutes: int = 1440
     decay_interval_hours: int = 24
@@ -76,7 +83,9 @@ class Settings(BaseSettings):
     session_watcher_debounce_seconds: float = 60.0
     session_watcher_min_turns: int = 5
     session_watcher_lookback_hours: int = 72
-    session_watcher_idle_threshold: float = 30.0
+    session_watcher_idle_threshold: float = 600.0  # was 30.0 — 30s flushed 1-turn batches
+    session_watcher_retry_seconds: float = 30.0    # FSEvents-miss retry — decoupled from idle
+    session_watcher_flush_bytes: int = 60000       # pending-delta bytes that close a Batch (~15-20K tok)
     session_watcher_reconcile_interval_minutes: int = 5
     session_watcher_reconcile_max_per_tick: int = 50
     session_watcher_reconcile_max_seconds: float = 30.0
@@ -155,6 +164,7 @@ class Settings(BaseSettings):
 
     # Auto-merge
     auto_merge_threshold: float = 0.85
+
 
     # Importance scoring weights (3 dynamic signals)
     importance_access_weight: float = 0.34
@@ -271,6 +281,8 @@ class Settings(BaseSettings):
 
     # Ingestion
     ingest_max_content_chars: int = 100000
+    ingest_chunk_chars: int = 40000  # timeout-safe payload per claude_cli call (~10K tokens)
+    ingest_min_confidence: float = 0.0  # drop auto-extracted memories below this confidence (0 = off)
 
     # Consolidation
     consolidation_interval_minutes: int = 1440
@@ -295,6 +307,13 @@ class Settings(BaseSettings):
             raise ValueError(f"port must be 1–65535, got {v}")
         return v
 
+    @field_validator("ingest_min_confidence")
+    @classmethod
+    def _ingest_min_confidence_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"ingest_min_confidence must be in [0, 1], got {v}")
+        return v
+
     @field_validator("log_format")
     @classmethod
     def _log_format_enum(cls, v: str) -> str:
@@ -315,9 +334,34 @@ class Settings(BaseSettings):
     @field_validator("llm_provider")
     @classmethod
     def _llm_provider_enum(cls, v: str) -> str:
-        allowed = {"ollama", "litellm", "none"}
+        allowed = {"ollama", "litellm", "claude_cli", "none"}
         if v not in allowed:
             raise ValueError(f"llm_provider must be one of {allowed}, got {v!r}")
+        return v
+
+    @field_validator("ingest_llm_provider")
+    @classmethod
+    def _ingest_llm_provider_enum(cls, v: str) -> str:
+        allowed = {"", "ollama", "litellm", "claude_cli", "none"}
+        if v not in allowed:
+            raise ValueError(f"ingest_llm_provider must be one of {allowed}, got {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def _ingest_llm_model_required_when_provider_overridden(self) -> "Settings":
+        if self.ingest_llm_provider and self.ingest_llm_provider != "none" and not self.ingest_llm_model:
+            raise ValueError(
+                "ingest_llm_model is required when ingest_llm_provider is overridden"
+            )
+        return self
+
+    @field_validator("claude_cli_timeout_seconds")
+    @classmethod
+    def _claude_cli_timeout_positive(cls, v: int) -> int:
+        # A zero/negative timeout would make subprocess.run raise/never wait — the whole
+        # extraction budget collapses to an instant failure. Reject it at config load.
+        if v < 1:
+            raise ValueError(f"claude_cli_timeout_seconds must be >= 1, got {v}")
         return v
 
     @field_validator("llm_api_key_env_var")
@@ -441,6 +485,40 @@ class Settings(BaseSettings):
         if v < 1:
             raise ValueError(f"session_watcher_catchup_concurrency must be >= 1, got {v}")
         return v
+
+    @field_validator("session_watcher_retry_seconds")
+    @classmethod
+    def _retry_seconds_min(cls, v: float) -> float:
+        if v < 1.0:
+            raise ValueError(f"session_watcher_retry_seconds must be >= 1.0, got {v}")
+        return v
+
+    @field_validator("session_watcher_flush_bytes")
+    @classmethod
+    def _flush_bytes_min(cls, v: int) -> int:
+        if v < 1000:
+            raise ValueError(f"session_watcher_flush_bytes must be >= 1000, got {v}")
+        return v
+
+    @field_validator("ingest_chunk_chars")
+    @classmethod
+    def _ingest_chunk_chars_bounds(cls, v: int) -> int:
+        if v < 1000:
+            raise ValueError(f"ingest_chunk_chars must be >= 1000, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _flush_bytes_within_cap(self) -> "Settings":
+        if self.session_watcher_flush_bytes > self.ingest_max_content_chars:
+            raise ValueError(
+                "session_watcher_flush_bytes "
+                f"({self.session_watcher_flush_bytes}) must be <= "
+                f"ingest_max_content_chars ({self.ingest_max_content_chars}); "
+                "a larger cap would let a MULTI-turn batch overshoot the extractor's "
+                "truncation limit (a single turn bigger than the cap is still truncated, "
+                "and logged, regardless of this setting)"
+            )
+        return self
 
     @field_validator("decay_interval_hours")
     @classmethod
