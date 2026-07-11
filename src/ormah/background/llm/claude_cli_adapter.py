@@ -109,7 +109,11 @@ class ClaudeCliAdapter(LLMAdapter):
         response_format: dict | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        timeout_hint_seconds: float | None = None,
     ) -> str | None:
+        # A batching caller can hint a longer budget for a fatter combined prompt; a plain
+        # call keeps the constructor default.
+        timeout = timeout_hint_seconds or self.timeout
         # Force subscription auth: strip the API key so the child never bills the paid API.
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         # Prompt on stdin (never argv) — avoids leaking transcript text to the process list and
@@ -132,10 +136,10 @@ class ClaudeCliAdapter(LLMAdapter):
             try:
                 proc = subprocess.run(
                     argv, input=prompt, capture_output=True, text=True,
-                    timeout=self.timeout, cwd=tempfile.gettempdir(), env=env,
+                    timeout=timeout, cwd=tempfile.gettempdir(), env=env,
                 )
             except subprocess.TimeoutExpired:
-                logger.warning("claude -p timed out after %ss", self.timeout)
+                logger.warning("claude -p timed out after %ss", timeout)
                 return None
             except Exception as e:  # binary missing, OSError, etc.
                 logger.warning("claude -p failed to run: %s", e)

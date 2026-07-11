@@ -95,6 +95,18 @@ def test_returns_none_on_timeout(monkeypatch):
     assert ClaudeCliAdapter(model="haiku").generate("hi") is None
 
 
+def test_generate_respects_timeout_hint(monkeypatch):
+    """timeout_hint_seconds overrides the constructor timeout for a single call; a call
+    without the hint falls back to the constructor default."""
+    run = _fake_run(stdout=json.dumps({"result": "ok"}))
+    monkeypatch.setattr(subprocess, "run", run)
+    adapter = ClaudeCliAdapter(model="haiku", timeout=120)
+    adapter.generate("hi", timeout_hint_seconds=180)
+    assert run.kwargs["timeout"] == 180
+    adapter.generate("hi")
+    assert run.kwargs["timeout"] == 120
+
+
 def test_returns_none_on_bad_json(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _fake_run(stdout="not json"))
     assert ClaudeCliAdapter(model="haiku").generate("hi") is None
