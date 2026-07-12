@@ -90,7 +90,9 @@ class FileStore:
         try:
             node = self._load_path(path)
             node.deleted_at = datetime.now(timezone.utc)
-            path.write_text(serialize_node(node), encoding="utf-8")
+            # save() writes atomically (tmp + os.replace) onto the existing
+            # path, so an interruption can never truncate the live node file.
+            self.save(node)
         except Exception:
             logger.warning(
                 "soft_delete: could not stamp deleted_at on %s; moving as-is", path

@@ -309,3 +309,86 @@ def test_auto_cluster_advances_updated(engine):
     node = engine.file_store.load(id_floating)
     assert node.space == "projx"
     assert node.updated > PAST
+
+# ---------------------------------------------------------------------------
+# Review fixes (Codex review of PR #105)
+# ---------------------------------------------------------------------------
+
+
+def test_update_node_noop_does_not_advance_updated(engine):
+    from ormah.models.node import UpdateNodeRequest
+
+    node_id = _create(engine, "Stable", "Unchanging content.")
+    _backdate(engine.file_store, node_id)
+
+    # Empty request
+    engine.update_node(node_id, UpdateNodeRequest())
+    assert _updated(engine.file_store, node_id) == PAST
+
+    # Request assigning identical values
+    node = engine.file_store.load(node_id)
+    engine.update_node(
+        node_id, UpdateNodeRequest(content=node.content, title=node.title)
+    )
+    assert _updated(engine.file_store, node_id) == PAST
+
+    # A real change still stamps
+    engine.update_node(node_id, UpdateNodeRequest(content="Actually new content."))
+    assert _updated(engine.file_store, node_id) > PAST
+
+
+def test_identity_tier_migration_stamps_updated(engine):
+    from ormah.models.node import Tier
+
+    node_id = _create(engine, "About me", "I prefer tea.", about_self=True)
+
+    # Force the pre-migration state: core tier on disk and in the index
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.core
+    node.updated = PAST
+    engine.file_store.save(node)
+    engine.db.conn.execute("UPDATE nodes SET tier = 'core' WHERE id = ?", (node_id,))
+    engine.db.conn.execute("DELETE FROM meta WHERE key = 'identity_tier_migrated'")
+    engine.db.conn.commit()
+
+    engine._migrate_identity_tiers()
+
+    migrated = engine.file_store.load(node_id)
+    assert migrated.tier == Tier.working
+    assert migrated.updated > PAST
+
+
+def test_identity_edge_repair_persists_to_markdown(engine):
+    """Phase-2 repaired defines edges must live in the self node's markdown so
+    they survive a full index rebuild (edges table is derived)."""
+    node_id = _create(engine, "Orphaned identity fact", "I am left-handed.")
+
+    # Tag as about_self without a defines edge (the orphan scenario)
+    node = engine.file_store.load(node_id)
+    node.tags.append("about_self")
+    engine.file_store.save(node)
+    engine.db.conn.execute(
+        "INSERT OR IGNORE INTO node_tags (node_id, tag) VALUES (?, 'about_self')",
+        (node_id,),
+    )
+    engine.db.conn.execute("DELETE FROM meta WHERE key = 'identity_edges_repaired'")
+    engine.db.conn.commit()
+    _backdate(engine.file_store, engine.user_node_id)
+
+    engine._migrate_identity_tiers()
+
+    # Markdown source of truth carries the edge and the stamp
+    self_node = engine.file_store.load(engine.user_node_id)
+    assert any(
+        c.target == node_id and c.edge == EdgeType.defines
+        for c in self_node.connections
+    )
+    assert self_node.updated > PAST
+
+    # And the edge survives a full rebuild
+    engine.builder.full_rebuild()
+    row = engine.db.conn.execute(
+        "SELECT 1 FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = 'defines'",
+        (engine.user_node_id, node_id),
+    ).fetchone()
+    assert row is not None

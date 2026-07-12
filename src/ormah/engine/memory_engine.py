@@ -276,6 +276,11 @@ class MemoryEngine:
                             node = self.file_store.load(nid)
                             if node and node.tier == Tier.core and node.type != NodeType.person:
                                 node.tier = Tier.working
+                                # Tier change is a content mutation; the one-time
+                                # completion flag means it never reruns, so an
+                                # unstamped save could lose permanently to a stale
+                                # remote copy under LWW sync.
+                                node.touch_updated()
                                 self.file_store.save(node)
                         logger.info("Migrated %d identity nodes from core to working tier", demoted)
 
@@ -313,6 +318,28 @@ class MemoryEngine:
                     )
                     linked += 1
 
+                # Persist repaired edges to the self node's markdown too — the
+                # edges table is derived and wiped on full_rebuild, and the
+                # completion flag means this repair never reruns.
+                if linked:
+                    self_node = self.file_store.load(self.user_node_id)
+                    if self_node:
+                        existing_targets = {c.target for c in self_node.connections}
+                        added_md = 0
+                        for row in orphaned:
+                            if row["id"] not in existing_targets:
+                                self_node.connections.append(
+                                    Connection(
+                                        target=row["id"],
+                                        edge=EdgeType.defines,
+                                        weight=1.0,
+                                    )
+                                )
+                                added_md += 1
+                        if added_md:
+                            self_node.touch_updated()
+                            self.file_store.save(self_node)
+
                 # Also demote any remaining core preferences (missed by phase 1
                 # because they had no defines edge at that time)
                 demoted = conn.execute(
@@ -341,6 +368,7 @@ class MemoryEngine:
                         node = self.file_store.load(row["id"])
                         if node and node.tier == Tier.core:
                             node.tier = Tier.working
+                            node.touch_updated()
                             self.file_store.save(node)
 
                 if linked:
@@ -849,6 +877,11 @@ class MemoryEngine:
         if req.add_connections:
             node.connections.extend(req.add_connections)
             changed_fields.append("connections")
+
+        # No-op guard: a request that changed nothing must not advance
+        # `updated`, or it could beat a real remote edit under LWW sync.
+        if node.model_dump(mode="json") == old_snapshot:
+            return f"Updated [{node.type.value}]: {node.title or node.content[:80]}\nID: {node.id}"
 
         node.touch_updated()
         path = self.file_store.save(node)
