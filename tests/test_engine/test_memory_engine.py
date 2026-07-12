@@ -1,6 +1,6 @@
 """Tests for the memory engine."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.engine.memory_engine import MemoryEngine, _embedding_text, _generate_title
@@ -229,7 +229,7 @@ def test_stats(engine):
 
     stats = engine.stats()
     # +1 for the self node created on startup
-    assert stats["total_nodes"] == 2
+    assert stats["store"]["total_nodes"] == 2
 
 
 def test_warmup_reranker_marks_unavailable_when_cache_missing(settings):
@@ -267,6 +267,85 @@ def test_get_whisper_context_uses_reranker_when_available(engine):
     assert build.call_args.kwargs["reranker_enabled"] is True
 
 
+def test_get_whisper_context_passes_user_node_id(engine):
+    """Identity protection must be active on the production call path (I3)."""
+    engine._whisper_reranker_available = True
+
+    with patch.object(engine.context_builder, "build_whisper_context", return_value="") as build:
+        engine.get_whisper_context("where do I live")
+
+    assert build.call_args.kwargs["user_node_id"] == engine.user_node_id
+    assert engine.user_node_id is not None
+
+
+def test_get_whisper_context_threads_pool_and_content_cap_settings(engine):
+    engine._whisper_reranker_available = True
+    engine.settings.whisper_candidate_pool_multiplier = 7
+    engine.settings.whisper_injected_content_max_chars = 450
+
+    with patch.object(engine.context_builder, "build_whisper_context", return_value="") as build:
+        engine.get_whisper_context("auth prompt")
+
+    assert build.call_args.kwargs["candidate_pool_multiplier"] == 7
+    assert build.call_args.kwargs["injected_content_max_chars"] == 450
+
+
+def test_get_whisper_context_threads_preference_applicability_settings(engine):
+    engine._whisper_reranker_available = True
+    engine.settings.whisper_preference_applicability_enabled = True
+    engine.settings.whisper_preference_applicability_gate = 0.42
+    engine.settings.whisper_preference_max_nodes = 1
+
+    with patch.object(engine.context_builder, "build_whisper_context", return_value="") as build:
+        engine.get_whisper_context("auth prompt")
+
+    assert build.call_args.kwargs["preference_applicability_enabled"] is True
+    assert build.call_args.kwargs["preference_applicability_gate"] == 0.42
+    assert build.call_args.kwargs["preference_max_nodes"] == 1
+
+
+def test_has_searchable_preferences_ignores_expired_and_archival(engine):
+    now = "2026-07-12T00:00:00+00:00"
+    with engine.db.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO nodes
+                (id, type, tier, source, title, content, created, updated,
+                 last_accessed, file_path, file_hash, valid_until)
+            VALUES ('expired-pref', 'preference', 'working', 'test', 'Expired',
+                    'Expired', ?, ?, ?, '/tmp/expired', 'expired',
+                    '2020-01-01T00:00:00+00:00')
+            """,
+            (now, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO nodes
+                (id, type, tier, source, title, content, created, updated,
+                 last_accessed, file_path, file_hash)
+            VALUES ('archival-pref', 'preference', 'archival', 'test', 'Archival',
+                    'Archival', ?, ?, ?, '/tmp/archival', 'archival')
+            """,
+            (now, now, now),
+        )
+
+    assert engine.has_searchable_preferences() is False
+
+    with engine.db.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO nodes
+                (id, type, tier, source, title, content, created, updated,
+                 last_accessed, file_path, file_hash)
+            VALUES ('active-pref', 'preference', 'working', 'test', 'Active',
+                    'Active', ?, ?, ?, '/tmp/active', 'active')
+            """,
+            (now, now, now),
+        )
+
+    assert engine.has_searchable_preferences() is True
+
+
 def test_startup_seeds_maintenance_grace_period(settings):
     settings.claude_maintenance_enabled = True
     engine = MemoryEngine(settings)
@@ -299,7 +378,9 @@ def test_startup_preserves_existing_maintenance_timestamp(settings):
         engine.shutdown()
 
 
-def test_get_whisper_context_returns_empty_when_reranker_required_but_unavailable(engine):
+def test_get_whisper_context_degrades_when_reranker_unavailable(engine):
+    """Reranker unavailable (fresh install, model downloading) must degrade to
+    embedding-only whisper with the raised cosine-scale gate — never go dark (I4)."""
     engine.settings.whisper_reranker_enabled = True
     engine._whisper_reranker_available = False
     engine.settings.claude_maintenance_enabled = False
@@ -308,13 +389,93 @@ def test_get_whisper_context_returns_empty_when_reranker_required_but_unavailabl
     )
     engine.db.conn.commit()
 
-    with patch.object(
-        engine.context_builder, "build_whisper_context", return_value="unused"
-    ) as build:
+    with (
+        patch.object(engine, "_refresh_whisper_reranker_if_cached", return_value=False),
+        patch.object(engine.context_builder, "build_whisper_context", return_value="degraded whisper") as build,
+    ):
         result = engine.get_whisper_context("auth prompt")
 
-    assert result == ""
-    build.assert_not_called()
+    assert result == "degraded whisper"
+    build.assert_called_once()
+    assert build.call_args.kwargs["reranker_enabled"] is False
+    assert (
+        build.call_args.kwargs["injection_gate"]
+        == engine.settings.whisper_injection_gate_no_reranker
+    )
+
+
+def test_get_whisper_context_normal_gate_when_reranker_available(engine):
+    engine._whisper_reranker_available = True
+
+    with patch.object(
+        engine.context_builder, "build_whisper_context", return_value=""
+    ) as build:
+        engine.get_whisper_context("auth prompt")
+
+    assert build.call_args.kwargs["injection_gate"] == engine.settings.whisper_injection_gate
+
+
+def test_get_whisper_context_loads_reranker_if_cached_after_startup(engine):
+    """Desktop setup may cache the reranker after the server already started.
+
+    The next whisper should notice the cached model, load it, and use the
+    normal reranker gate without requiring a server restart.
+    """
+    engine.settings.whisper_reranker_enabled = True
+    engine._whisper_reranker_available = False
+    engine.settings.claude_maintenance_enabled = False
+    engine.db.conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
+    )
+    engine.db.conn.commit()
+
+    with (
+        patch("ormah.embeddings.reranker.model_is_cached", return_value=True),
+        patch("ormah.embeddings.reranker.preload_model") as preload_model,
+        patch.object(
+            engine.context_builder,
+            "build_whisper_context",
+            return_value="reranked",
+        ) as build,
+    ):
+        result = engine.get_whisper_context("where do I live?")
+
+    assert result == "reranked"
+    assert engine._whisper_reranker_available is True
+    preload_model.assert_called_once_with(engine.settings.whisper_reranker_model)
+    assert build.call_args.kwargs["reranker_enabled"] is True
+    assert build.call_args.kwargs["injection_gate"] == engine.settings.whisper_injection_gate
+
+
+def test_get_whisper_context_does_not_download_reranker_when_not_cached(engine):
+    """Whisper may load an already-cached reranker, but must not download it."""
+    engine.settings.whisper_reranker_enabled = True
+    engine._whisper_reranker_available = False
+    engine.settings.claude_maintenance_enabled = False
+    engine.db.conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('onboarding_prompted', '1')"
+    )
+    engine.db.conn.commit()
+
+    with (
+        patch("ormah.embeddings.reranker.model_is_cached", return_value=False),
+        patch("ormah.embeddings.reranker.preload_model") as preload_model,
+        patch.object(
+            engine.context_builder,
+            "build_whisper_context",
+            return_value="degraded",
+        ) as build,
+    ):
+        result = engine.get_whisper_context("where do I live?")
+
+    assert result == "degraded"
+    assert engine._whisper_reranker_available is False
+    preload_model.assert_not_called()
+    assert build.call_args.kwargs["reranker_enabled"] is False
+    assert (
+        build.call_args.kwargs["injection_gate"]
+        == engine.settings.whisper_injection_gate_no_reranker
+    )
 
 
 def test_whisper_onboarding_works_when_reranker_unavailable(engine):
@@ -323,10 +484,170 @@ def test_whisper_onboarding_works_when_reranker_unavailable(engine):
     engine.settings.claude_maintenance_enabled = True
 
     with patch.object(
-        engine.context_builder, "build_whisper_context", return_value="unused"
+        engine.context_builder, "build_whisper_context", return_value="whisper body"
     ) as build:
         result = engine.get_whisper_context("auth prompt")
 
     assert "onboarding" in result.lower()
     assert "maintenance_due" not in result
-    build.assert_not_called()
+    build.assert_called_once()
+
+
+class TestRecallFloorAndSpaceOrdering:
+    """Deliberate recall: wider pool, space scores before the cut, relevance
+    floor instead of padding (I8)."""
+
+    def _node(self, node_id, space=None):
+        return {
+            "id": node_id, "type": "fact", "tier": "working",
+            "title": node_id, "content": f"content of {node_id}",
+            "space": space, "access_count": 0,
+            "last_accessed": "2026-01-01T00:00:00Z",
+            "created": "2026-01-01T00:00:00Z",
+        }
+
+    def _search_mock(self, engine, results):
+        mock_search = MagicMock()
+        mock_search.search.return_value = results
+        return patch.object(engine, "_get_hybrid_search", return_value=mock_search), mock_search
+
+    def test_pool_widened_and_floor_drops_cross_space_noise(self, engine):
+        """Cross-space noise penalized below the floor is dropped, not padded."""
+        query_vec = [0.1, 0.2, 0.3]
+        results = [
+            {"node": self._node("good-1", space="proj"), "score": 0.80, "source": "hybrid"},
+            {"node": self._node("good-2", space="proj"), "score": 0.62, "source": "hybrid"},
+            {"node": self._node("noise-1", space="other"), "score": 0.50, "source": "hybrid"},
+            {"node": self._node("noise-2", space="other"), "score": 0.48, "source": "hybrid"},
+        ]
+        ctx, mock_search = self._search_mock(engine, results)
+        with ctx:
+            out = engine.recall_search_structured(
+                "project question", limit=4, default_space="proj", touch_access=False,
+                query_vec=query_vec,
+            )
+
+        # Pool widened to limit*3
+        assert mock_search.search.call_args.kwargs.get("limit") == 12
+        assert mock_search.search.call_args.kwargs["query_vec"] is query_vec
+        ids = [r["node"]["id"] for r in out if r.get("source") == "hybrid"]
+        # other-space results: 0.50*0.6=0.30 and 0.48*0.6=0.288 < 0.35 floor
+        assert ids == ["good-1", "good-2"]
+        assert len(out) < 4  # returns fewer rather than padding
+
+    def test_space_penalty_decides_survival_not_just_order(self, engine):
+        """A current-space match outside the old `limit` window survives the cut."""
+        # limit=2: previously only the first 2 raw results were fetched at all.
+        results = [
+            {"node": self._node("cross-1", space="other"), "score": 0.90, "source": "hybrid"},
+            {"node": self._node("cross-2", space="other"), "score": 0.88, "source": "hybrid"},
+            {"node": self._node("local-1", space="proj"), "score": 0.60, "source": "hybrid"},
+        ]
+        ctx, _ = self._search_mock(engine, results)
+        with ctx:
+            out = engine.recall_search_structured(
+                "project question", limit=2, default_space="proj", touch_access=False,
+            )
+
+        ids = [r["node"]["id"] for r in out if r.get("source") == "hybrid"]
+        # cross-1: 0.9*0.6=0.54, cross-2: 0.88*0.6=0.528, local-1: 0.60
+        # local-1 now wins the ordering AND survives the cut.
+        assert ids[0] == "local-1"
+
+    def test_temporal_supplements_exempt_from_floor(self, engine):
+        results = [
+            {"node": self._node("recent-1", space="proj"), "score": 0.001, "source": "temporal"},
+        ]
+        ctx, _ = self._search_mock(engine, results)
+        with ctx:
+            out = engine.recall_search_structured(
+                "project question", limit=4, default_space="proj", touch_access=False,
+            )
+
+        assert any(r["node"]["id"] == "recent-1" for r in out)
+
+    def test_temporal_preprocessing_invalidates_original_query_vector(self, engine):
+        query_vec = [0.1, 0.2, 0.3]
+        ctx, mock_search = self._search_mock(engine, [])
+
+        with ctx:
+            engine.recall_search_structured(
+                "auth changes yesterday",
+                limit=4,
+                touch_access=False,
+                query_vec=query_vec,
+            )
+
+        assert mock_search.search.call_args.args[0] == "auth changes"
+        assert mock_search.search.call_args.kwargs["query_vec"] is None
+
+    def test_temporal_supplements_respect_space_priority(self, engine):
+        """A newer other-space node must NOT outrank an older current-space node."""
+        newer_other = self._node("newer-other", space="other")
+        newer_other["created"] = "2026-02-01T00:00:00Z"
+        older_current = self._node("older-current", space="proj")
+        older_current["created"] = "2026-01-01T00:00:00Z"
+
+        # No semantic hits: the supplement pulls SQL-recent nodes, which
+        # get_recent_nodes returns in recency order (newer other-space first).
+        ctx, _ = self._search_mock(engine, [])
+        with ctx, patch.object(
+            engine.graph, "get_recent_nodes",
+            return_value=[newer_other, older_current],
+        ):
+            out = engine.recall_search_structured(
+                "yesterday", limit=4, default_space="proj", touch_access=False,
+                created_after="2026-01-01T00:00:00Z",
+            )
+
+        ids = [r["node"]["id"] for r in out if r.get("source") == "temporal"]
+        # Current-space wins despite being older; the other-space node is
+        # demoted, not deleted.
+        assert ids[0] == "older-current"
+        assert set(ids) == {"older-current", "newer-other"}
+
+
+# ---------------------------------------------------------------------------
+# _get_hybrid_search concurrency (#27)
+# ---------------------------------------------------------------------------
+
+
+def test_get_hybrid_search_constructs_once_under_concurrency(engine):
+    """Concurrent recalls must not each construct a HybridSearch (#27).
+
+    Without locking, N threads all see ``_hybrid_search is None`` and each build
+    their own instance (last-write-wins). The double-checked lock must serialize
+    init so exactly one instance is constructed and every caller gets it.
+    """
+    import threading
+    import time
+
+    engine._hybrid_search = None
+    n = 8
+    construct_count = 0
+    count_lock = threading.Lock()
+
+    class FakeHybridSearch:
+        def __init__(self, db, settings):
+            nonlocal construct_count
+            with count_lock:
+                construct_count += 1
+            time.sleep(0.05)  # widen the race window deterministically
+
+    barrier = threading.Barrier(n)
+    results: list = [None] * n
+
+    def worker(i):
+        barrier.wait()  # release all threads at once
+        results[i] = engine._get_hybrid_search()
+
+    with patch("ormah.embeddings.hybrid_search.HybridSearch", FakeHybridSearch):
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert construct_count == 1
+    assert all(r is results[0] for r in results)
+    assert results[0] is engine._hybrid_search

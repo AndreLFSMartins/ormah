@@ -102,7 +102,7 @@ class TestWhisperMinScore:
 class TestWhisperCompactFormatting:
     """Whisper formatting: flat list, top 2 full, rest title-only."""
 
-    def test_top_node_content_not_truncated(self, mock_graph):
+    def test_top_node_content_within_cap_not_truncated(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
@@ -118,6 +118,60 @@ class TestWhisperCompactFormatting:
         )
 
         assert long_content in result
+
+    def test_top_node_content_capped_at_word_boundary(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        giant_content = "word " * 800  # ~4KB, far over the cap
+        node = {**_make_node_dict("node-1", "Some title"), "content": giant_content}
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.9, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="something",
+            injection_gate=0.0,
+            injected_content_max_chars=600,
+        )
+
+        assert giant_content.strip() not in result
+        injected_line = next(
+            line for line in result.splitlines() if line.startswith("  word")
+        )
+        assert len(injected_line) <= 2 + 600
+        assert injected_line.endswith("…")
+
+    def test_content_cap_holds_for_unbroken_text(self, mock_graph):
+        """An unbroken (space-free) string must not exceed the cap by one."""
+        from ormah.engine.context_builder import _truncate_at_word_boundary
+
+        unbroken = "A" * 601
+        out = _truncate_at_word_boundary(unbroken, max_len=600)
+        assert len(out) <= 600
+        assert out.endswith("…")
+
+    def test_content_cap_is_configurable(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        content = "word " * 100  # 500 chars
+        node = {**_make_node_dict("node-1", "Some title"), "content": content}
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.9, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="something",
+            injection_gate=0.0,
+            injected_content_max_chars=100,
+        )
+
+        injected_line = next(
+            line for line in result.splitlines() if line.startswith("  word")
+        )
+        assert len(injected_line) <= 2 + 100
+        assert injected_line.endswith("…")
 
 
 class TestWhisperFailSilently:
@@ -180,17 +234,36 @@ class TestWhisperNodeLimit:
             {"node": n, "score": 0.9, "source": "hybrid"} for n in nodes
         ]
 
-        builder.build_whisper_context(
+        result = builder.build_whisper_context(
             prompt="test",
             max_nodes=3,
             min_score=0.1,
+            injection_gate=0.0,
         )
 
-        # recall_search_structured called with limit=max_nodes
+        # Search fetches a deep pool (max_nodes * multiplier) for the
+        # reranker/gate, but the final output stays capped at max_nodes.
         mock_engine.recall_search_structured.assert_called_once()
         call_kwargs = mock_engine.recall_search_structured.call_args
         limit = call_kwargs.kwargs.get("limit") or call_kwargs[1].get("limit")
-        assert limit == 3  # max_nodes
+        assert limit == 3 * 5  # max_nodes * default candidate_pool_multiplier
+        injected = sum(1 for i in range(10) if f"Fact {i}" in result)
+        assert injected <= 3
+
+    def test_candidate_pool_multiplier_configurable(self, mock_graph):
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        mock_engine.recall_search_structured.return_value = []
+
+        builder.build_whisper_context(
+            prompt="test",
+            max_nodes=4,
+            candidate_pool_multiplier=3,
+        )
+
+        call_kwargs = mock_engine.recall_search_structured.call_args
+        limit = call_kwargs.kwargs.get("limit") or call_kwargs[1].get("limit")
+        assert limit == 12
 
     def test_total_budget_respected(self, mock_graph):
         """Total nodes in output should be <= max_nodes, even with identity nodes."""
@@ -706,8 +779,9 @@ class TestWhisperRerankerBlendIntegration:
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce):
             # Default alpha: should pass min_score=0.15
+            # (prompt shares the "fact" token so the topical filter keeps it)
             result_default = builder.build_whisper_context(
-                prompt="test",
+                prompt="tell me about fact a",
                 min_score=0.1,
                 injection_gate=0.1,  # low gate to isolate reranker behavior
                 reranker_enabled=True,
@@ -716,7 +790,7 @@ class TestWhisperRerankerBlendIntegration:
             )
             # High alpha: CE dominates → should fail min_score=0.15
             result_high_alpha = builder.build_whisper_context(
-                prompt="test",
+                prompt="tell me about fact a",
                 min_score=0.1,
                 injection_gate=0.1,  # low gate to isolate reranker behavior
                 reranker_enabled=True,
@@ -862,8 +936,10 @@ class TestWhisperRerankerBlendIntegration:
         mock_ce.rerank.return_value = [-3.0, 8.0]
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce):
+            # Prompt shares the "embedding" token with both titles so the
+            # topical filter keeps them.
             result = builder.build_whisper_context(
-                prompt="test query",
+                prompt="embedding order check",
                 space="proj",
                 min_score=0.1,
                 reranker_enabled=True,
@@ -1087,6 +1163,177 @@ class TestWhisperPrecisionGuards:
 
         assert "Theme system implementation" in result
 
+
+class TestPreferenceApplicability:
+    """Standing rules use a typed applicability channel without biasing facts."""
+
+    def _builder(self, mock_graph, main_results, preference_results):
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        mock_engine.settings.whisper_exploration_enabled = False
+        mock_engine.has_searchable_preferences.return_value = True
+        mock_engine.recall_search_structured.side_effect = [
+            main_results,
+            preference_results,
+        ]
+        return ContextBuilder(mock_graph, engine=mock_engine), mock_engine
+
+    def test_applicable_preference_is_merged_without_suppressing_fact(self, mock_graph):
+        factual = _make_node_dict("fact-1", "Graph component implementation")
+        preference = _make_node_dict(
+            "pref-1", "Prefer simple designs", node_type="preference"
+        )
+        builder, engine = self._builder(
+            mock_graph,
+            [{"node": factual, "score": 0.80, "source": "hybrid"}],
+            [{"node": preference, "score": 0.65, "source": "hybrid"}],
+        )
+        mock_ce = MagicMock()
+        mock_ce.rerank.side_effect = [[3.0], [0.0]]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch(
+                 "ormah.engine.context_builder.ContextBuilder._get_classifier",
+                 return_value=None,
+             ), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="build the graph component",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.45,
+                preference_applicability_enabled=True,
+                preference_applicability_gate=0.40,
+            )
+
+        assert "Prefer simple designs" in result
+        assert "Graph component implementation" in result
+        preference_call = engine.recall_search_structured.call_args_list[1]
+        assert preference_call.kwargs["types"] == ["preference"]
+        assert preference_call.kwargs["auto_temporal"] is False
+        assert preference_call.kwargs["spread_activation"] is False
+        main_query_vec = engine.recall_search_structured.call_args_list[0].kwargs["query_vec"]
+        assert preference_call.kwargs["query_vec"] is main_query_vec
+        engine._get_hybrid_search.return_value.encoder.encode_query.assert_called_once_with(
+            "build the graph component"
+        )
+        assert mock_ce.rerank.call_args_list[1].args[0].startswith(
+            "Relevant user preference for this action:"
+        )
+
+    def test_inapplicable_preference_cannot_suppress_factual_result(self, mock_graph):
+        factual = _make_node_dict("fact-1", "Graph component implementation")
+        preference = _make_node_dict(
+            "pref-1", "Prefer dark themes", node_type="preference"
+        )
+        builder, _ = self._builder(
+            mock_graph,
+            [{"node": factual, "score": 0.80, "source": "hybrid"}],
+            [{"node": preference, "score": 0.65, "source": "hybrid"}],
+        )
+        mock_ce = MagicMock()
+        mock_ce.rerank.side_effect = [[3.0], [-12.0]]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch(
+                 "ormah.engine.context_builder.ContextBuilder._get_classifier",
+                 return_value=None,
+             ), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="build the graph component",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.45,
+                preference_applicability_enabled=True,
+                preference_applicability_gate=0.40,
+            )
+
+        assert "Graph component implementation" in result
+        assert "Prefer dark themes" not in result
+
+    def test_empty_preference_store_skips_search_and_rerank(self, mock_graph):
+        factual = _make_node_dict("fact-1", "Graph component implementation")
+        builder, engine = self._builder(
+            mock_graph,
+            [{"node": factual, "score": 0.80, "source": "hybrid"}],
+            [],
+        )
+        engine.has_searchable_preferences.return_value = False
+        mock_ce = MagicMock()
+        mock_ce.rerank.return_value = [3.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), patch(
+            "ormah.engine.context_builder.ContextBuilder._get_classifier",
+            return_value=None,
+        ), patch(
+            "ormah.engine.affinity.batch_fetch_affinity", return_value={}
+        ), patch(
+            "ormah.engine.affinity.compute_affinity_boost", return_value=0.0
+        ):
+            result = builder.build_whisper_context(
+                prompt="build the graph component",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.45,
+                preference_applicability_enabled=True,
+                preference_applicability_gate=0.40,
+            )
+
+        assert "Graph component implementation" in result
+        assert engine.recall_search_structured.call_count == 1
+        assert mock_ce.rerank.call_count == 1
+        engine._get_hybrid_search.return_value.encoder.encode_query.assert_called_once()
+
+    def test_different_effective_and_preference_queries_use_distinct_vectors(
+        self, mock_graph
+    ):
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        factual = _make_node_dict("fact-1", "Graph component implementation")
+        preference = _make_node_dict(
+            "pref-1", "Prefer simple designs", node_type="preference"
+        )
+        builder, engine = self._builder(
+            mock_graph,
+            [{"node": factual, "score": 0.80, "source": "hybrid"}],
+            [{"node": preference, "score": 0.65, "source": "hybrid"}],
+        )
+        mock_classifier = MagicMock()
+        mock_classifier.classify.return_value = PromptIntent(
+            categories=["temporal"],
+            search_params={"search_query": "build the graph component"},
+            prompt_vec=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        )
+        builder._classifier = mock_classifier
+        main_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        preference_vec = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        encoder = engine._get_hybrid_search.return_value.encoder
+        encoder.encode_query.side_effect = [main_vec, preference_vec]
+        mock_ce = MagicMock()
+        mock_ce.rerank.side_effect = [[3.0], [0.0]]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce):
+            builder.build_whisper_context(
+                prompt="build the graph component yesterday",
+                min_score=0.1,
+                reranker_enabled=True,
+                injection_gate=0.45,
+                preference_applicability_enabled=True,
+                preference_applicability_gate=0.40,
+            )
+
+        main_call, preference_call = engine.recall_search_structured.call_args_list
+        assert main_call.kwargs["query"] == "build the graph component"
+        assert main_call.kwargs["query_vec"] is main_vec
+        assert preference_call.kwargs["query"] == "build the graph component yesterday"
+        assert preference_call.kwargs["query_vec"] is preference_vec
+        assert encoder.encode_query.call_count == 2
+
     def test_topical_overlap_guard_drops_unrelated_extra_result(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
@@ -1139,6 +1386,52 @@ class TestWhisperContextBuffer:
         assert "whisper quality" in query
         assert "eval results" in query
         assert "what about the metrics side?" in query
+
+    def test_reranker_judges_context_enhanced_followup_query(self, mock_graph):
+        """The reranker must score the same context-enhanced query that search
+        ran on, not the bare prompt. Its ce_absolute drives the injection gate,
+        so judging an underspecified follow-up ("and the second one?") against
+        the bare prompt gate-rejects memories that only make sense with the
+        session context."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        builder._classifier = MagicMock()
+        builder._classifier.classify.return_value = PromptIntent(categories=["continuation"])
+
+        node = _make_node_dict("node-0", "Second eval result summary")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.8, "source": "hybrid"},
+        ]
+
+        captured: dict = {}
+
+        def _capture_rerank(query, docs):
+            captured["query"] = query
+            return [5.0 for _ in docs]
+
+        mock_ce = MagicMock()
+        mock_ce.rerank.side_effect = _capture_rerank
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            builder.build_whisper_context(
+                prompt="and the second one?",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.1,
+                recent_prompts=["how's whisper quality?", "show me the eval results"],
+            )
+
+        # The reranker received the context-enhanced query (session tokens
+        # present), not the bare underspecified prompt.
+        assert "query" in captured
+        assert "whisper quality" in captured["query"]
+        assert "eval results" in captured["query"]
+        assert "and the second one?" in captured["query"]
 
     def test_explicit_prompt_with_recent_context_uses_raw_prompt(self, mock_graph):
         """Fully specified prompts should not be polluted by recent context."""
@@ -1483,6 +1776,8 @@ def _make_settings_mock(
     affinity_max_boost=0.15,
     affinity_implicit_weight=0.8,
     claude_maintenance_enabled=False,
+    whisper_no_overlap_ce_floor=0.45,
+    whisper_no_overlap_cosine_floor=0.70,
 ):
     """Create a MagicMock settings object with affinity-related float attributes."""
     settings = MagicMock()
@@ -1493,6 +1788,8 @@ def _make_settings_mock(
     settings.affinity_max_boost = affinity_max_boost
     settings.affinity_implicit_weight = affinity_implicit_weight
     settings.claude_maintenance_enabled = claude_maintenance_enabled
+    settings.whisper_no_overlap_ce_floor = whisper_no_overlap_ce_floor
+    settings.whisper_no_overlap_cosine_floor = whisper_no_overlap_cosine_floor
     return settings
 
 
@@ -1506,6 +1803,7 @@ def _make_engine_with_encoder(mock_graph, prompt_vec=None):
 
     mock_encoder = MagicMock()
     mock_encoder.encode.return_value = prompt_vec
+    mock_encoder.encode_query.return_value = prompt_vec
     mock_hybrid = MagicMock()
     mock_hybrid.encoder = mock_encoder
     mock_engine._get_hybrid_search.return_value = mock_hybrid
@@ -1630,15 +1928,17 @@ class TestAffinityBoost:
 
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
-        # Candidate at 0.60 — above gate normally; with -0.15 boost → 0.45 → below gate
+        # Candidate with marginal CE relevance — above gate normally;
+        # with -0.15 affinity boost it drops below the gate.
         node = _make_node_dict("marginal", "Marginal memory")
         mock_engine.recall_search_structured.return_value = [
             {"node": node, "score": 0.60, "source": "hybrid"},
         ]
 
         mock_ce = MagicMock()
-        # CE score producing blended ~0.60
-        mock_ce.rerank.return_value = [1.0]
+        # Raw CE -0.8 → ce_absolute (-0.8+12)/18 ≈ 0.622: clears the 0.55
+        # gate on its own, but not after the negative affinity delta.
+        mock_ce.rerank.return_value = [-0.8]
 
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
              patch("ormah.engine.affinity.batch_fetch_affinity", return_value={"marginal": []}), \
@@ -1651,7 +1951,7 @@ class TestAffinityBoost:
                 injection_gate=0.55,
             )
 
-        # After -0.15 boost: score becomes 0.45 → below gate 0.55
+        # Gate score = ce_absolute 0.622 - 0.15 = 0.472 < 0.55 → suppressed
         assert "Marginal memory" not in result
 
 
@@ -1694,7 +1994,7 @@ class TestExplorationSlot:
              patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
              patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
             result = builder.build_whisper_context(
-                prompt="test query",
+                prompt="injected exploration memory check",
                 min_score=0.1,
                 reranker_enabled=True,
                 reranker_min_score=0.40,
@@ -1702,6 +2002,8 @@ class TestExplorationSlot:
             )
 
         assert "Exploration memory" in result
+        # Exploration candidates are labeled so the agent can weigh them
+        assert "**[exploring]** Exploration memory" in result
 
     def test_exploration_skips_candidate_with_existing_affinity_signal(self, mock_graph):
         """A gated-out candidate that already has an affinity signal for a similar prompt
@@ -1882,7 +2184,7 @@ class TestExplorationCEGate:
              patch("ormah.engine.affinity.batch_fetch_affinity", return_value={"maybe-1": []}), \
              patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
             result = builder.build_whisper_context(
-                prompt="how does fastapi routing work",
+                prompt="relevant fact or maybe useful",
                 injection_gate=0.50,
                 reranker_enabled=True,
                 reranker_min_score=0.40,
@@ -1979,7 +2281,7 @@ class TestWhisperLog:
         with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
              patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
              patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
-            builder.build_whisper_context(
+            result = builder.build_whisper_context(
                 prompt="how does search work",
                 min_score=0.1,
                 reranker_enabled=True,
@@ -1994,7 +2296,20 @@ class TestWhisperLog:
         assert row["session_id"] == "test-session-abc"
         assert row["node_id"] == "node-log-1"
         assert row["was_injected"] == 1
-        assert row["prompt_text"] == "how does search work"
+        assert row["prompt_text"] is None
+        assert row["prompt_vec"] == b""
+        event = db.conn.execute(
+            "SELECT * FROM retrieval_events WHERE id = ?",
+            (row["retrieval_event_id"],),
+        ).fetchone()
+        assert event["surface"] == "whisper"
+        assert event["prompt_text"] == "how does search work"
+        assert len(event["prompt_vec"]) == 12
+        assert row["decision_stage"] == "injected"
+        assert row["retrieval_rank"] == 1
+        assert row["final_rank"] == 1
+        assert row["ce_absolute"] is not None
+        assert f"(id: node-log, whisper_log_id: {row['id']})" in result
 
     def test_whisper_log_not_written_without_session_id(self, db_graph):
         """When session_id is None, no whisper_log rows should be written."""
@@ -2125,6 +2440,90 @@ class TestWhisperLog:
         # The logged score is the pre-boost (CE blended), not boosted
         # We just verify a row was written — exact value depends on reranker mock
         assert logged_score >= 0.0
+
+    def test_whisper_log_records_candidates_rejected_before_reranking(self, db_graph):
+        db, graph = db_graph
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock()
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+        mock_engine.db = db
+
+        builder = ContextBuilder(graph, engine=mock_engine)
+        node = _make_node_dict("trimmed-node", "Unrelated candidate")
+        mock_engine.recall_search_structured.return_value = [
+            {
+                "node": node,
+                "score": 0.20,
+                "source": "hybrid",
+                "raw_cosine": 0.25,
+            }
+        ]
+
+        builder.build_whisper_context(
+            prompt="deployment pipeline",
+            min_score=0.45,
+            session_id="session-pretrim",
+        )
+
+        row = db.conn.execute(
+            "SELECT * FROM whisper_log WHERE node_id = 'trimmed-node'"
+        ).fetchone()
+        assert row is not None
+        assert row["decision_stage"] == "pre_rerank_floor"
+        assert row["retrieval_score"] == pytest.approx(0.20)
+        assert row["raw_cosine"] == pytest.approx(0.25)
+        assert row["ce_absolute"] is None
+        assert row["was_injected"] == 0
+
+    def test_whisper_log_records_topical_rejection_with_absolute_scores(self, db_graph):
+        db, graph = db_graph
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock()
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+        mock_engine.db = db
+
+        builder = ContextBuilder(graph, engine=mock_engine)
+        relevant = _make_node_dict("overlap-node", "Deployment pipeline details")
+        rejected = _make_node_dict("rejected-node", "Unrelated embedding neighbor")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": relevant, "score": 0.80, "source": "hybrid"},
+            {"node": rejected, "score": 0.75, "source": "hybrid"},
+        ]
+        mock_ce = MagicMock()
+        mock_ce.rerank.return_value = [3.0, -5.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            builder.build_whisper_context(
+                prompt="deployment pipeline problems",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.45,
+                no_overlap_ce_floor=0.45,
+                session_id="session-topical",
+            )
+
+        row = db.conn.execute(
+            "SELECT * FROM whisper_log WHERE node_id = 'rejected-node'"
+        ).fetchone()
+        assert row is not None
+        assert row["decision_stage"] == "topical_filter"
+        assert row["cross_encoder_score"] == pytest.approx(-5.0)
+        assert row["ce_absolute"] == pytest.approx(7 / 18)
+        assert row["gate_score"] == pytest.approx(7 / 18)
+        assert row["was_injected"] == 0
 
 
 class TestWhisperFlatRankedDisplay:
@@ -2271,3 +2670,599 @@ class TestWhisperFlatRankedDisplay:
 
         assert "The most relevant memories are shown in full" in result
         assert "use recall with its node ID" in result
+
+
+class TestGateScoreContract:
+    """The injection gate cuts absolute signals (ce_absolute / raw_cosine),
+    never the rank-relative blended score (I2)."""
+
+    def _builder(self, mock_graph, results, ce_scores):
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        mock_engine.recall_search_structured.return_value = results
+        mock_ce = MagicMock()
+        mock_ce.rerank.return_value = ce_scores
+        return builder, mock_ce
+
+    def test_high_blended_low_ce_is_gated_out(self, mock_graph):
+        """A weak query's least-bad match: blended ~0.9 (rank-relative top)
+        but the cross-encoder condemns it. The gate must reject."""
+        node = _make_node_dict("weak-1", "Rank-relative winner")
+        builder, mock_ce = self._builder(
+            mock_graph,
+            [{"node": node, "score": 0.90, "source": "hybrid"}],
+            [-9.0],  # ce_absolute = (-9+12)/18 ≈ 0.167
+        )
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="unrelated topic query",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.50,
+            )
+
+        assert "Rank-relative winner" not in result
+
+    def test_low_blended_high_ce_survives_gate(self, mock_graph):
+        """A genuinely relevant match under-ranked by the bi-encoder: the
+        cross-encoder vouches, the gate passes it."""
+        node = _make_node_dict("strong-1", "Under-ranked gem")
+        builder, mock_ce = self._builder(
+            mock_graph,
+            [{"node": node, "score": 0.45, "source": "hybrid"}],
+            [4.0],  # ce_absolute = (4+12)/18 ≈ 0.889
+        )
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="find the gem",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.50,
+            )
+
+        assert "Under-ranked gem" in result
+
+    def test_reranker_off_gates_on_raw_cosine(self, mock_graph):
+        """Without the reranker, the gate falls back to raw_cosine, not the
+        blended score."""
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        noise = _make_node_dict("cos-low", "Cosine-weak result")
+        real = _make_node_dict("cos-high", "Cosine-strong result")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": noise, "score": 0.95, "source": "hybrid", "raw_cosine": 0.30},
+            {"node": real, "score": 0.60, "source": "hybrid", "raw_cosine": 0.72},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="cosine strong result topic",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+        )
+
+        assert "Cosine-strong result" in result
+        assert "Cosine-weak result" not in result
+
+    def test_legacy_results_fall_back_to_blended_score(self, mock_graph):
+        """Results carrying neither absolute signal keep pre-contract gate
+        behavior (blended score) instead of being rejected outright."""
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = _make_node_dict("legacy-1", "Legacy scored result")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.80, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="legacy scored result topic",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+        )
+
+        assert "Legacy scored result" in result
+
+    def test_cross_space_memory_demoted_below_gate(self, mock_graph):
+        """The gate re-applies cross-space demotion the absolute signal drops:
+        a wrong-project memory the CE/cosine rates highly is still gated out."""
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = _make_node_dict("other-proj", "Auth in project B uses JWT", space="project-b")
+        mock_engine.recall_search_structured.return_value = [
+            # raw_cosine 0.72 clears 0.50 alone, but other-project factor 0.6
+            # → 0.72 * 0.6 = 0.432 < 0.50: cross-project leakage prevented.
+            {"node": node, "score": 0.80, "source": "hybrid",
+             "raw_cosine": 0.72, "_space_factor": 0.6},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="how do we handle auth",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+        )
+
+        assert "Auth in project B uses JWT" not in result
+
+    def test_low_confidence_memory_demoted_below_gate(self, mock_graph):
+        """The gate re-applies the confidence factor: a low-confidence memory
+        the cosine rates highly is demoted below the gate."""
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = _make_node_dict("shaky", "Auth uses session cookies", space=None)
+        node["confidence"] = 0.2  # confidence_factor 0.4 + 0.6*0.2 = 0.52
+        mock_engine.recall_search_structured.return_value = [
+            # 0.72 * 0.52 = 0.374 < 0.50: low-confidence memory gated out.
+            {"node": node, "score": 0.80, "source": "hybrid", "raw_cosine": 0.72},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="how does auth work",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+        )
+
+        assert "Auth uses session cookies" not in result
+
+
+class TestWhisperDecisions:
+    """Every whisper call writes exactly one whisper_decisions row (I10)."""
+
+    @pytest.fixture
+    def db_graph(self, tmp_path):
+        from ormah.index.db import Database
+
+        db = Database(tmp_path / "index.db")
+        db.init_schema()
+        graph = GraphIndex(db.conn)
+        return db, graph
+
+    def _builder_with_db(self, db, graph, results=None):
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock()
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+        mock_engine.db = db
+        mock_engine.recall_search_structured.return_value = results or []
+        return ContextBuilder(graph, engine=mock_engine)
+
+    def _decisions(self, db):
+        return db.conn.execute(
+            "SELECT * FROM whisper_decisions ORDER BY id"
+        ).fetchall()
+
+    def test_short_prompt_logs_silent_short(self, db_graph):
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph)
+
+        builder.build_whisper_context(prompt="ok", session_id="s1")
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "silent_short"
+        assert rows[0]["session_id"] == "s1"
+
+    def test_no_candidates_logs_silent_no_candidates(self, db_graph):
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph, results=[])
+
+        builder.build_whisper_context(
+            prompt="a topic with no memories", session_id="s2",
+        )
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "silent_no_candidates"
+        assert rows[0]["candidate_count"] == 0
+
+    def test_gate_reject_logs_silent_gate_with_score(self, db_graph):
+        db, graph = db_graph
+        node = _make_node_dict("gated-1", "Gated candidate")
+        builder = self._builder_with_db(
+            db, graph,
+            results=[{"node": node, "score": 0.80, "source": "hybrid",
+                      "raw_cosine": 0.30}],
+        )
+
+        builder.build_whisper_context(
+            prompt="gated candidate topic",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+            session_id="s3",
+        )
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "silent_gate"
+        assert rows[0]["candidate_count"] == 1
+        assert rows[0]["injected_count"] == 0
+        assert rows[0]["max_gate_score"] == pytest.approx(0.30)
+
+    def test_injection_logs_injected_with_counts(self, db_graph):
+        db, graph = db_graph
+        node = _make_node_dict("inj-1", "Injected candidate")
+        builder = self._builder_with_db(
+            db, graph,
+            results=[{"node": node, "score": 0.80, "source": "hybrid",
+                      "raw_cosine": 0.75}],
+        )
+
+        builder.build_whisper_context(
+            prompt="injected candidate topic",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.50,
+            session_id="s4",
+        )
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "injected"
+        assert rows[0]["injected_count"] == 1
+        assert rows[0]["max_gate_score"] == pytest.approx(0.75)
+
+    def test_one_row_per_call(self, db_graph):
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph)
+
+        builder.build_whisper_context(prompt="ok", session_id="s5")
+        builder.build_whisper_context(prompt="first real prompt about topics",
+                                      session_id="s5")
+
+        rows = self._decisions(db)
+        assert len(rows) == 2
+
+
+class TestExplorationRespectsSilence:
+    """Exploration piggybacks on real injections; it never breaks silence (I6)."""
+
+    def test_no_exploration_when_gate_rejected_everything(self, mock_graph):
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock(
+            whisper_exploration_enabled=True,
+            whisper_reranker_min_score=0.40,
+        )
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        # Single candidate: above the 0.40 exploration floor, below the gate.
+        node = _make_node_dict("lonely", "Lonely candidate")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.60, "source": "hybrid"},
+        ]
+
+        mock_ce = MagicMock()
+        # CE -5 → ce_absolute 0.389 < 0.50 gate; blended 0.4*0.389+0.6*0.6 = 0.516 ≥ 0.40 floor
+        mock_ce.rerank.return_value = [-5.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="lonely candidate topic",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.40,
+                injection_gate=0.50,
+            )
+
+        # Gate rejected the only candidate → silence stands, no exploration.
+        assert "Lonely candidate" not in result
+
+
+class TestTopicalFilterFailClosed:
+    """Candidates with no lexical overlap need an absolute voucher (I7)."""
+
+    def test_no_overlap_weak_ce_dropped(self, mock_graph):
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = _make_node_dict("stranger", "Unrelated embedding neighbor")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.85, "source": "hybrid"},
+        ]
+
+        mock_ce = MagicMock()
+        # CE -5.0 → ce_absolute 0.389, below the 0.45 no-overlap floor
+        mock_ce.rerank.return_value = [-5.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="deployment pipeline problems",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.10,
+            )
+
+        assert "Unrelated embedding neighbor" not in result
+
+    def test_no_overlap_strong_ce_survives(self, mock_graph):
+        """A true paraphrase match with zero shared words survives via the CE voucher."""
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        node = _make_node_dict("paraphrase", "Semantically equivalent answer")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.55, "source": "hybrid"},
+        ]
+
+        mock_ce = MagicMock()
+        # CE +3 → ce_absolute 0.833 ≥ 0.45 voucher
+        mock_ce.rerank.return_value = [3.0]
+
+        with patch("ormah.embeddings.reranker._get_model", return_value=mock_ce), \
+             patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None), \
+             patch("ormah.engine.affinity.batch_fetch_affinity", return_value={}), \
+             patch("ormah.engine.affinity.compute_affinity_boost", return_value=0.0):
+            result = builder.build_whisper_context(
+                prompt="deployment pipeline problems",
+                min_score=0.1,
+                reranker_enabled=True,
+                reranker_min_score=0.0,
+                injection_gate=0.10,
+            )
+
+        assert "Semantically equivalent answer" in result
+
+    def test_no_overlap_cosine_voucher_when_reranker_off(self, mock_graph):
+        mock_engine = _make_engine_with_encoder(mock_graph)
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        strong = _make_node_dict("cos-strong", "Semantic twin")
+        weak = _make_node_dict("cos-weak", "Embedding stranger")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": strong, "score": 0.80, "source": "hybrid", "raw_cosine": 0.78},
+            {"node": weak, "score": 0.75, "source": "hybrid", "raw_cosine": 0.55},
+        ]
+
+        result = builder.build_whisper_context(
+            prompt="deployment pipeline problems",
+            min_score=0.1,
+            reranker_enabled=False,
+            injection_gate=0.10,
+        )
+
+        assert "Semantic twin" in result
+        assert "Embedding stranger" not in result
+
+
+class TestTopicShiftServedMemory:
+    """Topic-shift suppression only fires for topics that were served (I9)."""
+
+    @pytest.fixture
+    def db_graph(self, tmp_path):
+        from ormah.index.db import Database
+
+        db = Database(tmp_path / "index.db")
+        db.init_schema()
+        graph = GraphIndex(db.conn)
+        return db, graph
+
+    def _builder(self, db, graph, prompt_vec):
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock()
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        # encode_batch: recent prompts on the same topic → same vector
+        mock_encoder.encode_batch.return_value = np.stack([prompt_vec])
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+        mock_engine.db = db
+        return mock_engine, ContextBuilder(graph, engine=mock_engine)
+
+    def _insert_whisper_log(self, db, *, session_id, prompt_vec, was_injected):
+        with db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO whisper_log "
+                "(session_id, space, prompt_hash, prompt_text, prompt_vec, "
+                "node_id, score, was_injected, logged_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                (session_id, None, "h", "p", prompt_vec.astype(np.float32).tobytes(),
+                 "n1", 0.9, was_injected),
+            )
+
+    def test_same_topic_never_served_proceeds(self, db_graph):
+        """Turn 1 was gate-rejected (logged was_injected=0); turn 2 on the
+        same topic must NOT be topic-shift-skipped — the topic is starved."""
+        db, graph = db_graph
+        vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        self._insert_whisper_log(db, session_id="sess-starved", prompt_vec=vec, was_injected=0)
+
+        mock_engine, builder = self._builder(db, graph, vec)
+        node = _make_node_dict("served-1", "Starved topic memory")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.85, "source": "hybrid", "raw_cosine": 0.80},
+        ]
+
+        with patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None):
+            result = builder.build_whisper_context(
+                prompt="starved topic memory question",
+                min_score=0.1,
+                reranker_enabled=False,
+                injection_gate=0.10,
+                topic_shift_enabled=True,
+                topic_shift_threshold=0.75,
+                recent_prompts=["starved topic memory question earlier"],
+                session_id="sess-starved",
+            )
+
+        assert "Starved topic memory" in result
+
+    def test_same_topic_already_served_skips(self, db_graph):
+        """Turn 1 injected (was_injected=1); turn 2 on the same topic is
+        correctly suppressed — no repeat spam."""
+        db, graph = db_graph
+        vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        self._insert_whisper_log(db, session_id="sess-served", prompt_vec=vec, was_injected=1)
+
+        mock_engine, builder = self._builder(db, graph, vec)
+        node = _make_node_dict("served-2", "Served topic memory")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.85, "source": "hybrid", "raw_cosine": 0.80},
+        ]
+
+        with patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None):
+            result = builder.build_whisper_context(
+                prompt="served topic memory question",
+                min_score=0.1,
+                reranker_enabled=False,
+                injection_gate=0.10,
+                topic_shift_enabled=True,
+                topic_shift_threshold=0.75,
+                recent_prompts=["served topic memory question earlier"],
+                session_id="sess-served",
+            )
+
+        assert "Served topic memory" not in result
+
+    def test_no_session_id_preserves_plain_skip(self, db_graph):
+        """Without a session_id there is no served history — the plain
+        topic-shift skip behavior is preserved."""
+        db, graph = db_graph
+        vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_engine, builder = self._builder(db, graph, vec)
+        node = _make_node_dict("served-3", "Sessionless topic memory")
+        mock_engine.recall_search_structured.return_value = [
+            {"node": node, "score": 0.85, "source": "hybrid", "raw_cosine": 0.80},
+        ]
+
+        with patch("ormah.engine.context_builder.ContextBuilder._get_classifier", return_value=None):
+            result = builder.build_whisper_context(
+                prompt="sessionless topic memory question",
+                min_score=0.1,
+                reranker_enabled=False,
+                injection_gate=0.10,
+                topic_shift_enabled=True,
+                topic_shift_threshold=0.75,
+                recent_prompts=["sessionless topic memory question earlier"],
+                session_id=None,
+            )
+
+        assert "Sessionless topic memory" not in result
+
+
+class TestSessionBufferEviction:
+    """Dead sessions are evicted from _session_buffers on access (I12)."""
+
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from ormah.api.routes_agent import router
+
+        app = FastAPI()
+        app.include_router(router)
+        engine = MagicMock()
+        engine.get_whisper_context.return_value = ""
+        app.state.engine = engine
+        return TestClient(app)
+
+    def test_dead_sessions_evicted_on_access(self, monkeypatch):
+        import time as time_mod
+        from collections import deque
+        from ormah.api.routes_agent import _session_buffers
+        from ormah.config import settings as global_settings
+
+        _session_buffers.clear()
+        gap_seconds = global_settings.whisper_session_gap_minutes * 60
+
+        now = time_mod.time()
+        stale = deque(maxlen=5)
+        stale.append(("old prompt", now - gap_seconds * 3))
+        _session_buffers["dead-session"] = stale
+
+        fresh = deque(maxlen=5)
+        fresh.append(("recent prompt", now - 5))
+        _session_buffers["live-session"] = fresh
+
+        client = self._client()
+        resp = client.post(
+            "/agent/whisper",
+            json={"prompt": "hello there world", "session_id": "another-session"},
+        )
+        assert resp.status_code == 200
+
+        assert "dead-session" not in _session_buffers
+        assert "live-session" in _session_buffers
+        assert "another-session" in _session_buffers
+
+        _session_buffers.clear()
+
+
+class TestEncodeOncePerWhisper:
+    """The prompt is embedded (encode) exactly once per whisper call (I15).
+
+    ``PromptClassifier.classify()`` encodes the raw prompt to score it
+    against archetypes; ``build_whisper_context`` reuses that same vector
+    (``intent.prompt_vec``) for topic-shift detection, the affinity boost,
+    and whisper_log instead of encoding again. The classifier must NOT be
+    mocked away here — doing so hides its internal ``encode()`` call and
+    would make the "encode once" assertion count only the *other* encodes,
+    silently passing even if classify() and the builder each encoded
+    separately (as happened before this test was fixed).
+    """
+
+    def test_classifier_and_prompt_vec_share_one_encode(self, mock_graph):
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        mock_engine = MagicMock()
+        mock_engine.settings = _make_settings_mock()
+        mock_engine.settings.whisper_intent_threshold = 0.65
+
+        mock_encoder = MagicMock()
+        mock_encoder.encode.return_value = prompt_vec
+        # Archetype vectors are orthogonal to the prompt on every category
+        # (and to the recent-prompt centroid), so intent falls back to
+        # "general" and topic-shift sees a real shift -- both real code
+        # paths, driven by the real (un-mocked) PromptClassifier.
+        mock_encoder.encode_batch.side_effect = lambda prompts: np.tile(
+            np.array([0.0, 1.0, 0.0], dtype=np.float32), (len(prompts), 1)
+        )
+        mock_hybrid = MagicMock()
+        mock_hybrid.encoder = mock_encoder
+        mock_engine._get_hybrid_search.return_value = mock_hybrid
+        mock_engine.recall_search_structured.return_value = []
+
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        builder.build_whisper_context(
+            prompt="a fresh new topic entirely",
+            topic_shift_enabled=True,
+            topic_shift_threshold=0.75,
+            recent_prompts=["something else before"],
+            session_id="enc-1",
+        )
+
+        # encode() called exactly once for the whole whisper call: by
+        # PromptClassifier.classify(). Topic-shift, the affinity boost, and
+        # whisper_log all reuse intent.prompt_vec rather than re-encoding.
+        assert mock_encoder.encode.call_count == 1

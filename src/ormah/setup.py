@@ -6,16 +6,18 @@ import contextlib
 import glob
 import json
 import os
+import re
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import webbrowser
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Callable
-import re
 
 import httpx
 
@@ -155,6 +157,182 @@ def _merge_json_file(path: str, updates: dict) -> None:
         f.write("\n")
 
 
+def _is_ormah_hook(entry: dict) -> bool:
+    """True when a hook entry is one Ormah installs (argv-aware, not substring).
+
+    Recognizes BOTH install forms:
+      - CLI (ormah setup): `<...>/ormah whisper inject|store`
+      - Plugin wrapper: `<...>/ormah-whisper-inject` | `<...>/ormah-whisper-store`
+        (see integrations/claude-plugin/hooks/hooks.json)
+    A third-party command that merely contains the substring "whisper inject"/
+    "whisper store" is never misclassified. Works for install dedup and uninstall
+    alike, and is resilient to the ormah binary path changing between runs.
+    """
+    if not isinstance(entry, dict):
+        return False
+    cmd = entry.get("command", "")
+    if not isinstance(cmd, str):
+        return False
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    name = Path(parts[0]).name
+    if name in ("ormah-whisper-inject", "ormah-whisper-store"):
+        return True  # plugin wrapper form
+    return (
+        len(parts) >= 3
+        and name == "ormah"
+        and parts[1] == "whisper"
+        and parts[2] in ("inject", "store")
+    )  # CLI form
+
+
+def _merge_hooks(existing: dict, ormah_hooks: dict) -> dict:
+    """Merge Ormah hook groups into an existing hooks dict, preserving co-tenants.
+
+    For each event Ormah claims: strip prior Ormah entries (via _is_ormah_hook),
+    keep every third-party hook, then append Ormah's matchers. Events Ormah does
+    not claim are left untouched. Idempotent. Pure (no I/O).
+
+    Matcher drop rule: a matcher is dropped only when removing Ormah hooks left it
+    completely empty (i.e. it held *only* Ormah hooks). Matchers with no "hooks" key,
+    an empty hooks list, or hooks that are all third-party are preserved verbatim.
+    """
+    merged = dict(existing)
+    for event, ormah_matchers in ormah_hooks.items():
+        current = merged.get(event)
+        if not isinstance(current, list):
+            current = []
+        cleaned = []
+        for matcher in current:
+            if not isinstance(matcher, dict):
+                cleaned.append(matcher)
+                continue
+            inner = matcher.get("hooks", [])
+            kept = [h for h in inner if not _is_ormah_hook(h)]
+            if len(kept) == len(inner):
+                cleaned.append(matcher)  # nothing removed -> preserve verbatim
+            elif kept:
+                cleaned.append({**matcher, "hooks": kept})  # removed some, others remain
+            # else: held ONLY Ormah hooks -> drop the now-empty matcher (intentional cleanup)
+        merged[event] = cleaned + list(ormah_matchers)
+    return merged
+
+
+def _strip_ormah_hooks(existing: dict) -> tuple[dict, bool]:
+    """Remove Ormah hook entries while preserving every untouched matcher.
+
+    Returns the cleaned hooks mapping and whether any Ormah hook was removed.
+    Missing, empty, or malformed inner ``hooks`` values are preserved verbatim:
+    only a matcher actually changed by removing an Ormah hook may be rewritten
+    or dropped.
+    """
+    cleaned = dict(existing)
+    changed = False
+    for event, matchers in existing.items():
+        if not isinstance(matchers, list):
+            continue
+
+        cleaned_matchers = []
+        event_changed = False
+        for matcher in matchers:
+            if not isinstance(matcher, dict):
+                cleaned_matchers.append(matcher)
+                continue
+
+            inner = matcher.get("hooks")
+            if not isinstance(inner, list):
+                cleaned_matchers.append(matcher)
+                continue
+
+            kept = [hook for hook in inner if not _is_ormah_hook(hook)]
+            if len(kept) == len(inner):
+                cleaned_matchers.append(matcher)
+                continue
+
+            event_changed = True
+            if kept:
+                cleaned_matchers.append({**matcher, "hooks": kept})
+
+        if event_changed:
+            changed = True
+            if cleaned_matchers:
+                cleaned[event] = cleaned_matchers
+            else:
+                cleaned.pop(event, None)
+
+    return cleaned, changed
+
+
+def _atomic_write(path: str, text: str, mode: int | None = None) -> None:
+    """Write text to `path` atomically (temp file in the same dir + os.replace).
+
+    Prevents a crash mid-write from leaving a truncated/corrupt config — the
+    target is either the old bytes or the full new bytes, never a partial file.
+    If ``path`` is a symlink, atomically replace its resolved target so the link
+    itself remains intact.
+    """
+    destination = os.path.realpath(path) if os.path.islink(path) else os.path.abspath(path)
+    directory = os.path.dirname(destination)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, destination)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _install_hooks(path: str, ormah_hooks: dict) -> bool:
+    """Read a JSON hooks config, merge Ormah hooks preserving co-tenants, write back.
+
+    Returns True if the merged config was written, False if it aborted without
+    writing. Fail-closed: if the file exists but does not parse OR does not hold a
+    JSON object, warn and abort (mirrors the uninstall no-op) so a hand-edited
+    config with a transient syntax error is never replaced by a hooks-only file,
+    losing theme/permissions. The write is atomic (no partial-write corruption).
+    """
+    existing: dict = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            warn(f"Could not parse {path} — leaving it unchanged; hooks not configured")
+            return False
+        if not isinstance(existing, dict):
+            warn(f"{path} is not a JSON object — leaving it unchanged; hooks not configured")
+            return False
+    current = existing.get("hooks")
+    if current is None:
+        current = {}
+    elif not isinstance(current, dict):
+        warn(f"{path} has a non-object 'hooks' section — leaving it unchanged; hooks not configured")
+        return False
+    for event in ormah_hooks:
+        value = current.get(event)
+        if value is not None and not isinstance(value, list):
+            warn(f"{path} has a non-list '{event}' hooks entry — leaving it unchanged; hooks not configured")
+            return False
+    try:
+        existing["hooks"] = _merge_hooks(current, ormah_hooks)
+    except Exception:
+        warn(f"{path} has a malformed hooks structure — leaving it unchanged; hooks not configured")
+        return False
+    _atomic_write(path, json.dumps(existing, indent=2) + "\n")
+    return True
+
+
 def configure_claude_hooks(ormah_bin: str) -> None:
     """Write Claude Code hook config to global settings using absolute paths."""
     settings_path = os.path.expanduser("~/.claude/settings.json")
@@ -196,8 +374,8 @@ def configure_claude_hooks(ormah_bin: str) -> None:
         }
     ]
 
-    _merge_json_file(settings_path, {"hooks": hooks})
-    ok("Whisper hooks installed \u2014 memories flow before every message")
+    if _install_hooks(settings_path, hooks):
+        ok("Whisper hooks installed \u2014 memories flow before every message")
 
 
 def configure_claude_code_mcp(ormah_bin: str) -> None:
@@ -305,9 +483,9 @@ def configure_codex_hooks(ormah_bin: str) -> None:
         ],
     }
 
-    _merge_json_file(str(hooks_path), {"hooks": hooks})
-    _enable_codex_feature("hooks", deprecated_feature_names=("codex_hooks",))
-    ok("Codex hooks installed — memories flow before every message")
+    if _install_hooks(str(hooks_path), hooks):
+        _enable_codex_feature("hooks", deprecated_feature_names=("codex_hooks",))
+        ok("Codex hooks installed — memories flow before every message")
 
 
 def _remove_toml_table_block(text: str, table_name: str) -> str:
@@ -869,42 +1047,14 @@ def _remove_codex_hooks() -> None:
         info("No hooks section — nothing to remove")
         return
 
-    def _is_ormah_hook(entry: dict) -> bool:
-        cmd = entry.get("command", "")
-        return "whisper inject" in cmd or "whisper store" in cmd
-
-    changed = False
-    to_delete = []
-    for event, matchers in hooks_top.items():
-        if not isinstance(matchers, list):
-            continue
-        new_matchers = []
-        for matcher in matchers:
-            if not isinstance(matcher, dict):
-                new_matchers.append(matcher)
-                continue
-            inner = matcher.get("hooks", [])
-            filtered = [h for h in inner if not _is_ormah_hook(h)]
-            if len(filtered) != len(inner):
-                changed = True
-            if filtered:
-                new_matchers.append({**matcher, "hooks": filtered})
-            else:
-                changed = True
-        if new_matchers:
-            hooks_top[event] = new_matchers
-        else:
-            to_delete.append(event)
-            changed = True
-
-    for key in to_delete:
-        del hooks_top[key]
-    if not hooks_top:
-        del data["hooks"]
-        changed = True
+    cleaned_hooks, changed = _strip_ormah_hooks(hooks_top)
 
     if changed:
-        hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+        if cleaned_hooks:
+            data["hooks"] = cleaned_hooks
+        else:
+            data.pop("hooks", None)
+        _atomic_write(str(hooks_path), json.dumps(data, indent=2) + "\n")
         ok("Removed whisper hooks from ~/.codex/hooks.json")
     else:
         info("No ormah hooks found in hooks.json")
@@ -948,13 +1098,34 @@ def _read_env_file() -> dict[str, str]:
 
 
 def _write_env_file(env: dict[str, str]) -> None:
-    """Write env dict to the global config file with secure permissions."""
-    ENV_DIR.mkdir(parents=True, exist_ok=True)
-    lines = []
+    """Write env dict to the global config file, preserving comments and ordering.
+
+    Existing KEY= lines are updated in place; keys absent from `env` are dropped;
+    full-line comments, blank lines, and ordering are kept verbatim; new keys
+    append at end.
+
+    CONTRACT: callers MUST pass the FULL env (from `_read_env_file()`) unless they
+    intentionally want absent keys removed — a partial dict deletes the missing
+    user keys. Non-goal: an inline trailing comment on a key whose VALUE this call
+    rewrites is dropped (full-line comments and untouched keys keep theirs).
+    """
+    original = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in original:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.partition("=")[0].strip()
+            if key in env and key not in seen:
+                out.append(f"{key}={env[key]}")
+                seen.add(key)
+            # key removed by caller -> drop the line
+        else:
+            out.append(line)  # comment / blank / other -> verbatim
     for key, value in env.items():
-        lines.append(f"{key}={value}")
-    ENV_PATH.write_text("\n".join(lines) + "\n")
-    os.chmod(ENV_PATH, 0o600)
+        if key not in seen:
+            out.append(f"{key}={value}")
+    _atomic_write(str(ENV_PATH), "\n".join(out) + "\n", mode=0o600)
 
 
 def generate_server_wrapper(ormah_bin: str) -> Path:
@@ -1418,42 +1589,14 @@ def _remove_claude_hooks() -> None:
         info("No hooks section — nothing to remove")
         return
 
-    def _is_ormah_hook(entry: dict) -> bool:
-        cmd = entry.get("command", "")
-        return "whisper inject" in cmd or "whisper store" in cmd
-
-    changed = False
-    to_delete = []
-    for event, matchers in hooks_top.items():
-        if not isinstance(matchers, list):
-            continue
-        new_matchers = []
-        for matcher in matchers:
-            if not isinstance(matcher, dict):
-                new_matchers.append(matcher)
-                continue
-            inner = matcher.get("hooks", [])
-            filtered = [h for h in inner if not _is_ormah_hook(h)]
-            if len(filtered) != len(inner):
-                changed = True
-            if filtered:
-                new_matchers.append({**matcher, "hooks": filtered})
-            else:
-                changed = True
-        if new_matchers:
-            hooks_top[event] = new_matchers
-        else:
-            to_delete.append(event)
-            changed = True
-
-    for k in to_delete:
-        del hooks_top[k]
-    if not hooks_top:
-        del data["hooks"]
-        changed = True
+    cleaned_hooks, changed = _strip_ormah_hooks(hooks_top)
 
     if changed:
-        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+        if cleaned_hooks:
+            data["hooks"] = cleaned_hooks
+        else:
+            data.pop("hooks", None)
+        _atomic_write(str(settings_path), json.dumps(data, indent=2) + "\n")
         ok("Removed whisper hooks from ~/.claude/settings.json")
     else:
         info("No ormah hooks found in settings.json")
@@ -1703,6 +1846,80 @@ def _remove_fastembed_cache() -> None:
         pass
 
 
+def _uv_tool_install_candidates() -> tuple[list[Path], list[Path]]:
+    """Return uv-tool paths owned by the Ormah install.
+
+    The desktop app installs the Python package with a bundled uv sidecar.
+    That creates the normal uv tool layout but does not guarantee a `uv`
+    executable is available later on the user's PATH during uninstall.
+    """
+    home = Path.home()
+
+    shims: list[Path] = [home / ".local" / "bin" / "ormah"]
+    tool_dirs: list[Path] = [home / ".local" / "share" / "uv" / "tools" / "ormah"]
+
+    uv_tool_bin_dir = os.environ.get("UV_TOOL_BIN_DIR")
+    if uv_tool_bin_dir:
+        shims.append(Path(uv_tool_bin_dir) / ("ormah.exe" if os.name == "nt" else "ormah"))
+
+    uv_tool_dir = os.environ.get("UV_TOOL_DIR")
+    if uv_tool_dir:
+        tool_dirs.append(Path(uv_tool_dir) / "ormah")
+
+    current_prefix = Path(sys.prefix).resolve(strict=False)
+    if current_prefix.name == "ormah" and current_prefix.parent.name == "tools":
+        tool_dirs.append(current_prefix)
+
+    # Preserve order while de-duplicating.
+    return list(dict.fromkeys(shims)), list(dict.fromkeys(tool_dirs))
+
+
+def _remove_uv_tool_install_files() -> bool:
+    """Best-effort cleanup for uv-installed Ormah command files.
+
+    This only removes the known Ormah shim and uv tool environment paths. It
+    intentionally does not delete arbitrary `ormah` executables discovered via
+    PATH such as Homebrew or system-managed installs. A command at the standard
+    desktop uv-tool shim path is treated as part of Ormah's managed install.
+    """
+    removed = False
+    shims, tool_dirs = _uv_tool_install_candidates()
+
+    for shim in shims:
+        try:
+            if not shim.exists() and not shim.is_symlink():
+                continue
+            if shim.name not in {"ormah", "ormah.exe"}:
+                warn(f"Refusing to delete unexpected command path: {shim}")
+                continue
+            if shim.is_dir() and not shim.is_symlink():
+                warn(f"Refusing to delete directory where command shim was expected: {shim}")
+                continue
+            shim.unlink()
+            ok(f"Deleted command shim: {shim}")
+            removed = True
+        except Exception as exc:  # noqa: BLE001
+            warn(f"Could not delete command shim {shim}: {exc}")
+
+    for tool_dir in tool_dirs:
+        try:
+            if not tool_dir.exists():
+                continue
+            if tool_dir.name != "ormah":
+                warn(f"Refusing to delete unexpected uv tool directory: {tool_dir}")
+                continue
+            if tool_dir.is_symlink() or not tool_dir.is_dir():
+                warn(f"Refusing to delete unexpected uv tool path: {tool_dir}")
+                continue
+            shutil.rmtree(tool_dir)
+            ok(f"Deleted uv tool environment: {tool_dir}")
+            removed = True
+        except Exception as exc:  # noqa: BLE001
+            warn(f"Could not delete uv tool environment {tool_dir}: {exc}")
+
+    return removed
+
+
 def run_uninstall(yes: bool = False) -> None:
     """Remove all ormah integrations, data, and optionally the package itself."""
     print("This will remove all ormah integrations and data.\n")
@@ -1800,6 +2017,7 @@ def run_uninstall(yes: bool = False) -> None:
 
     # h. Uninstall the package
     step("Uninstalling ormah package")
+    uv_uninstalled = False
     try:
         result = subprocess.run(
             ["uv", "tool", "uninstall", "ormah"],
@@ -1807,10 +2025,15 @@ def run_uninstall(yes: bool = False) -> None:
         )
         if result.returncode == 0:
             ok("Package uninstalled via uv")
+            uv_uninstalled = True
         else:
-            warn("Could not uninstall via uv — remove manually with: uv tool uninstall ormah")
+            warn("Could not uninstall via uv; checking for desktop uv tool files")
     except Exception:
-        warn("Could not uninstall via uv — remove manually with: uv tool uninstall ormah")
+        warn("Could not uninstall via uv; checking for desktop uv tool files")
+
+    removed_tool_files = _remove_uv_tool_install_files()
+    if not uv_uninstalled and not removed_tool_files:
+        warn("Could not remove package files — remove manually with: uv tool uninstall ormah")
 
     print()
     ok("Ormah has been uninstalled")
@@ -2106,19 +2329,27 @@ def run_setup_json() -> dict:
     """Non-interactive agent wiring for the Mac app's one-click setup button.
 
     Wires hooks/MCP/guidance for every detected client and returns a structured
-    result the app can render. Deliberately narrow vs. run_setup(): no LLM
-    prompts, no server start (the app owns the bundled server sidecar), no
-    browser launch, no animations.
+    result the app can render. Also preloads local retrieval models so a fresh
+    desktop install has both the embedding model and whisper reranker cached.
+    Deliberately narrow vs. run_setup(): no LLM prompts, no server start (the
+    app owns the bundled server sidecar), no browser launch, no animations.
 
-    Human-readable progress from the underlying configure_* helpers is sent to
-    stderr so stdout stays clean JSON for the caller to parse.
+    Human-readable progress from model preload and the underlying configure_*
+    helpers is sent to stderr so stdout stays clean JSON for the caller to
+    parse.
     """
     ormah_bin = get_ormah_bin_path()
     detected_ids: list[str] = []
     wired: list[str] = []
     errors: dict[str, str] = {}
+    warnings: dict[str, str] = {}
 
     with contextlib.redirect_stdout(sys.stderr):
+        try:
+            _preload_local_models()
+        except Exception as exc:  # noqa: BLE001
+            warnings["models"] = f"{type(exc).__name__}: {exc}"
+
         for agent in _detected_agents():
             detected_ids.append(agent.id)
             try:
@@ -2132,6 +2363,7 @@ def run_setup_json() -> dict:
         "detected": detected_ids,
         "wired": wired,
         "errors": errors,
+        "warnings": warnings,
     }
 
 

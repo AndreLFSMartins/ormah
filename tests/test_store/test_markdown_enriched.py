@@ -28,7 +28,7 @@ class TestLegacyParsing:
         node = _make_node()
         text = serialize_node(node)
         # Simulate a legacy file by stripping confidence line
-        lines = [l for l in text.split("\n") if not l.startswith("confidence:")]
+        lines = [ln for ln in text.split("\n") if not ln.startswith("confidence:")]
         legacy_text = "\n".join(lines)
         parsed = parse_node(legacy_text)
         assert parsed.confidence == 1.0
@@ -36,7 +36,7 @@ class TestLegacyParsing:
     def test_missing_importance_defaults_to_0_5(self):
         node = _make_node()
         text = serialize_node(node)
-        lines = [l for l in text.split("\n") if not l.startswith("importance:")]
+        lines = [ln for ln in text.split("\n") if not ln.startswith("importance:")]
         legacy_text = "\n".join(lines)
         parsed = parse_node(legacy_text)
         assert parsed.importance == 0.5

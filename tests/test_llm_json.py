@@ -92,9 +92,16 @@ def test_auto_linker_recovers_fenced_response_instead_of_dropping_it():
     assert result["relationship"] == "supports"
 
 
-def test_auto_linker_returns_none_on_unparseable_output():
+def test_auto_linker_returns_error_sentinel_on_unparseable_output():
     """Genuinely unparseable output (no JSON anywhere) still yields no link —
-    fence tolerance must not turn garbage into a spurious relationship."""
+    fence tolerance must not turn garbage into a spurious relationship.
+
+    This is distinct from the LLM being unavailable (which returns raw
+    ``None`` and leaves the node unresolved so the watermark retries it).
+    Unparseable *output* from a reachable LLM is poison content: the node
+    is marked resolved via the ``relationship: "error"`` sentinel so it
+    doesn't block the watermark forever, but no edge is created for it.
+    """
     from ormah.background import auto_linker
 
     node = {"title": "A", "type": "fact", "space": "x", "content": "ca"}
@@ -105,4 +112,5 @@ def test_auto_linker_returns_none_on_unparseable_output():
     ):
         result = auto_linker._llm_classify_link(mock.Mock(), node, other)
 
-    assert result is None
+    assert result is not None
+    assert result["relationship"] == "error"

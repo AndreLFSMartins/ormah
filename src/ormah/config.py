@@ -122,6 +122,7 @@ class Settings(BaseSettings):
     auto_link_similarity_threshold: float = 0.65
     auto_link_cross_space_penalty: float = 0.1  # subtracted from similarity for cross-space pairs
     auto_link_max_edges_per_run: int = 500
+    auto_link_max_nodes_per_run: int = 500  # cursor batch: nodes scanned per run
 
     # Auto-merge
     auto_merge_threshold: float = 0.85
@@ -150,13 +151,39 @@ class Settings(BaseSettings):
     # Whisper nudge (periodic reminder to use ormah)
     whisper_nudge_interval: int = 10  # Nudge every N prompts (0 = disabled)
 
+    # --- Score contract ------------------------------------------------
+    # Two kinds of scores flow through retrieval; every threshold below
+    # documents which kind it cuts:
+    #   RANK-RELATIVE (ordering only): the blended hybrid `score` — RRF is
+    #     min-max normalized per query, so any query's best candidate scores
+    #     ~1.0 regardless of absolute quality. Absolute thresholds on it are
+    #     meaningless across queries; use it only to order candidates.
+    #   ABSOLUTE (gating): `ce_absolute` (cross-encoder score linearly
+    #     rescaled from [-12, +6] to [0, 1]) and `raw_cosine` (pre-penalty
+    #     vector similarity). Safe to compare against fixed thresholds.
+
     # Whisper (involuntary recall)
     whisper_max_nodes: int = 6
+    # Pre-rerank noise trim: a candidate reaches the reranker if either its
+    # RANK-RELATIVE blended score or its ABSOLUTE raw cosine clears this.
+    # Its job is only to spare the cross-encoder obvious junk — the absolute
+    # injection gate does the real cutting after reranking.
     whisper_min_relevance_score: float = 0.45
+    # Candidate pool fed to the reranker/gate = whisper_max_nodes * this
+    # multiplier. Retrieve-then-rerank needs a deep pool so the cross-encoder
+    # can rescue memories the bi-encoder under-ranked; final injection is
+    # still capped at whisper_max_nodes.
+    whisper_candidate_pool_multiplier: int = 5
+    # Max characters of node content injected for the top full-content
+    # whispers; truncated at a word boundary. Full content stays one
+    # recall_node call away (the whisper framing says so).
+    whisper_injected_content_max_chars: int = 600
 
     # Whisper reranking (cross-encoder with linear-rescale blended scoring)
     whisper_reranker_enabled: bool = True
     whisper_reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+    # Post-affinity-boost floor on the RANK-RELATIVE blended score; defines
+    # which candidates enter whisper_log and the exploration pool.
     whisper_reranker_min_score: float = 0.40
     whisper_reranker_blend_alpha: float = 0.6
     whisper_reranker_max_doc_chars: int = 512
@@ -172,8 +199,40 @@ class Settings(BaseSettings):
     whisper_topic_shift_enabled: bool = True
     whisper_topic_shift_threshold: float = 0.75  # cosine sim above this = same topic
 
-    # Whisper injection gate (minimum blended score to justify injection)
-    whisper_injection_gate: float = 0.50
+    # Whisper injection gate — cuts the ABSOLUTE gate score (ce_absolute
+    # when the reranker ran, raw_cosine otherwise, plus any affinity delta).
+    # 0.45 on the ce_absolute scale ≙ raw cross-encoder score −3.9: real
+    # paraphrase matches land around raw −3 (≈0.49) while true noise sits
+    # below raw −5 (≤0.39); tuned against eval/whisper (gate sweep, 2026-07).
+    whisper_injection_gate: float = 0.45
+
+    # Topical-filter vouchers for candidates sharing NO token with the prompt
+    # (the fail-closed path): such a candidate survives only with an ABSOLUTE
+    # relevance signal. The CE floor matches the injection gate (its added
+    # value is keeping no-overlap junk out of the exploration pool); the
+    # cosine floor applies when the reranker didn't run.
+    whisper_no_overlap_ce_floor: float = 0.45
+    whisper_no_overlap_cosine_floor: float = 0.70
+
+    # Standing preferences are applicability rules, not passages that answer
+    # the prompt. A separate typed retrieval channel asks the reranker whether
+    # each preference applies to the current action, then merges at most two.
+    whisper_preference_applicability_enabled: bool = True
+    whisper_preference_applicability_gate: float = 0.40
+    whisper_preference_max_nodes: int = 2
+
+    # Injection gate when the reranker did not run (unavailable, still
+    # downloading, or disabled): the gate then cuts raw_cosine, a weaker
+    # absolute signal, so demand a higher bar — degraded mode is more
+    # conservative, never noisier. COSINE scale (bge noise floor ~0.5).
+    whisper_injection_gate_no_reranker: float = 0.60
+
+    # Deliberate recall floor: results below this are dropped rather than
+    # padding to `limit` (recency-vouched temporal supplements exempt).
+    # Cuts the RANK-RELATIVE blended score — pragmatic: observed cross-space
+    # padding noise scores ~0.30 while relevant results score 0.6+. More
+    # permissive than whisper's gate by design; recall is a deliberate act.
+    recall_min_relevance_score: float = 0.35
 
     # Affinity boost (adaptive feedback loop)
     affinity_similarity_threshold: float = 0.70
@@ -184,6 +243,14 @@ class Settings(BaseSettings):
     feedback_llm_judge_enabled: bool = False
     feedback_llm_judge_min_confidence: float = 0.75
 
+    # Candidate diagnostics are high-volume. Prompt payloads are normalized
+    # separately, while stale rejected rows with no feedback references are
+    # pruned in bounded background batches. Injected rows are retained for
+    # all-time whisper health and exact feedback history.
+    whisper_log_rejected_retention_days: int = 30
+    whisper_log_cleanup_interval_hours: int = 24
+    whisper_log_cleanup_batch_size: int = 1000
+
     # Space prioritization
     space_boost_global: float = 1.0
     space_boost_other: float = 0.6
@@ -193,6 +260,12 @@ class Settings(BaseSettings):
 
     # Consolidation
     consolidation_interval_minutes: int = 1440
+    # Consolidator per-run limits (#89) — defaults preserve the previous
+    # hardcoded behavior exactly.
+    consolidation_max_clusters_per_run: int = 10
+    consolidation_min_cluster_size: int = 2
+    consolidation_cluster_threshold: float = 0.6
+    consolidation_max_cluster_nodes: int = 5
 
     # Claude-in-the-loop maintenance
     claude_maintenance_enabled: bool = False
@@ -327,6 +400,17 @@ class Settings(BaseSettings):
             raise ValueError(f"backup_retention_count must be >= 1, got {v}")
         return v
 
+    @field_validator(
+        "whisper_log_rejected_retention_days",
+        "whisper_log_cleanup_interval_hours",
+        "whisper_log_cleanup_batch_size",
+    )
+    @classmethod
+    def _whisper_log_cleanup_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"whisper log cleanup settings must be >= 1, got {v}")
+        return v
+
     @field_validator("core_memory_cap")
     @classmethod
     def _core_cap_positive(cls, v: int) -> int:
@@ -360,11 +444,41 @@ class Settings(BaseSettings):
         "auto_link_similarity_threshold",
         "auto_merge_threshold",
         "feedback_llm_judge_min_confidence",
+        "consolidation_cluster_threshold",
+        "whisper_preference_applicability_gate",
     )
     @classmethod
     def _threshold_range(cls, v: float) -> float:
+        # `not 0 <= v <= 1` also rejects NaN/inf.
         if not 0 <= v <= 1:
             raise ValueError(f"threshold must be 0–1, got {v}")
+        return v
+
+    @field_validator("consolidation_max_clusters_per_run")
+    @classmethod
+    def _consolidation_max_clusters_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"consolidation_max_clusters_per_run must be >= 0, got {v}")
+        return v
+
+    @field_validator("consolidation_min_cluster_size")
+    @classmethod
+    def _consolidation_min_cluster_size_range(cls, v: int) -> int:
+        if v < 2:
+            raise ValueError(f"consolidation_min_cluster_size must be >= 2, got {v}")
+        return v
+
+    @field_validator("consolidation_max_cluster_nodes")
+    @classmethod
+    def _consolidation_max_cluster_nodes_range(cls, v: int, info) -> int:
+        # Below min_cluster_size, no cluster can ever be emitted; at/above it the
+        # runtime guard still applies. Reject the impossible config up front.
+        min_size = info.data.get("consolidation_min_cluster_size", 2)
+        if v < min_size:
+            raise ValueError(
+                f"consolidation_max_cluster_nodes ({v}) must be >= "
+                f"consolidation_min_cluster_size ({min_size})"
+            )
         return v
 
     @field_validator("activation_decay")

@@ -4,38 +4,40 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
-
-# Maximum number of clusters to consolidate per run.
-_MAX_CLUSTERS_PER_RUN = 10
-
-# Minimum cluster size to justify consolidation.
-_MIN_CLUSTER_SIZE = 2
-
-# Cosine similarity threshold for clustering.
-_CLUSTER_THRESHOLD = 0.6
 
 
 def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
     """Find clusters of similar working-tier nodes for consolidation.
 
-    Returns up to *limit* clusters, each a list of node dicts (max 5 nodes).
+    Returns up to *limit* clusters, each a list of node dicts (max
+    ``engine.settings.consolidation_max_cluster_nodes`` nodes).
     Does NOT call the LLM — pure similarity-based clustering.
     """
     try:
-        from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore
     except ImportError:
         return []
 
     conn = engine.db.conn
+    s = engine.settings
+    min_size = s.consolidation_min_cluster_size
+    max_nodes = s.consolidation_max_cluster_nodes
+    threshold = s.consolidation_cluster_threshold
+
+    if max_nodes < min_size:
+        logger.warning(
+            "consolidation_max_cluster_nodes (%d) < consolidation_min_cluster_size (%d); "
+            "no cluster can ever be emitted",
+            max_nodes, min_size,
+        )
+        return []
 
     rows = conn.execute(
         "SELECT id, title, content, space FROM nodes WHERE tier = 'working'"
     ).fetchall()
-    if len(rows) < _MIN_CLUSTER_SIZE:
+    if len(rows) < min_size:
         return []
 
     try:
@@ -63,12 +65,12 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
         clustered_ids.add(nid)
 
         for match in similar:
-            if len(cluster) >= 5:  # cap at 5 nodes per cluster
+            if len(cluster) >= max_nodes:
                 break
             mid = match["id"]
             if mid == nid or mid in clustered_ids:
                 continue
-            if match["similarity"] < _CLUSTER_THRESHOLD:
+            if match["similarity"] < threshold:
                 continue
             m_row = conn.execute(
                 "SELECT id, title, content, space, tier FROM nodes WHERE id = ?",
@@ -79,7 +81,7 @@ def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
             cluster.append(dict(m_row))
             clustered_ids.add(mid)
 
-        if len(cluster) >= _MIN_CLUSTER_SIZE:
+        if len(cluster) >= min_size:
             clusters.append(cluster)
 
     return clusters
@@ -180,7 +182,9 @@ def run_consolidation(engine) -> None:
     if not settings.llm_enabled:
         return
 
-    clusters = _find_consolidation_clusters(engine, limit=_MAX_CLUSTERS_PER_RUN)
+    clusters = _find_consolidation_clusters(
+        engine, limit=settings.consolidation_max_clusters_per_run
+    )
     if not clusters:
         return
 

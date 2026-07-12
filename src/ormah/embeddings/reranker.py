@@ -84,6 +84,10 @@ def rerank(
                 **r,
                 "score": blended,
                 "cross_encoder_score": float(ce_score),
+                # Absolute relevance in [0, 1], independent of the candidate
+                # set — the only score here safe to compare against a fixed
+                # threshold (blended/embedding scores are rank-relative).
+                "ce_absolute": ce_rescaled,
                 "embedding_score": emb_score,
             })
 

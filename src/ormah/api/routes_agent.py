@@ -146,6 +146,17 @@ async def whisper(request: Request):
         gap_seconds = settings.whisper_session_gap_minutes * 60
         buf_size = settings.whisper_context_buffer_size
 
+        # Evict dead sessions: a session whose newest prompt is older than
+        # the session gap will never contribute recent_prompts again, but
+        # previously stayed in the dict forever (slow leak on long-running
+        # servers). Runs on the event loop, so no lock is needed.
+        dead = [
+            sid for sid, b in _session_buffers.items()
+            if sid != session_id and (not b or (now - b[-1][1]) > gap_seconds)
+        ]
+        for sid in dead:
+            del _session_buffers[sid]
+
         buf = _session_buffers.get(session_id)
         if buf is None:
             buf = deque(maxlen=buf_size)
@@ -175,6 +186,7 @@ class FeedbackRequest(BaseModel):
     node_id: str
     signal: Literal[1, -1]
     source: Literal["explicit", "implicit"] = "explicit"
+    whisper_log_id: int | None = None
 
 
 @router.post("/feedback", response_model=TextResponse)
@@ -185,6 +197,7 @@ def submit_feedback(request: Request, body: FeedbackRequest):
         node_id=body.node_id,
         signal=body.signal,
         source=body.source,
+        whisper_log_id=body.whisper_log_id,
     )
     return TextResponse(text=text)
 
@@ -220,7 +233,7 @@ def get_clients():
 def run_setup():
     """Wire ormah hooks/MCP for every detected agent on this machine.
 
-    Runs non-interactively and returns {wired, errors} so the UI can
+    Runs non-interactively and returns {wired, errors, warnings} so the UI can
     show which agents were connected and surface any failures.
     """
     from ormah.setup import run_setup_json
@@ -248,16 +261,6 @@ def unwire_one(agent_id: str):
         return unwire_agent(agent_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-
-
-@router.get("/stats")
-def get_stats(
-    request: Request,
-    days: int = Query(7, ge=1, le=365, description="Rolling window in days for the *_this_week counts"),
-):
-    """Ambient usage counts for the menubar/CLI surface (F09 counter)."""
-    engine = request.app.state.engine
-    return engine.get_stats(days=days)
 
 
 @router.get("/insights")

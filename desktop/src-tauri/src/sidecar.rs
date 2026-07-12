@@ -13,8 +13,9 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_shell::ShellExt;
 
-// Must stay in sync with the Python package version — update on each release.
-const ORMAH_VERSION: &str = "0.13.0";
+// Injected by build.rs from the repo's pyproject.toml, so the pinned Python
+// package version can never drift from the released one.
+const ORMAH_VERSION: &str = env!("ORMAH_PY_VERSION");
 
 /// Phase emitted on the "ormah://status" event so the UI can show progress.
 #[derive(Clone, serde::Serialize)]
