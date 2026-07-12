@@ -144,6 +144,19 @@ def rotate_key(key_path: Path | None = None) -> str:
 # --- store_id (E08 §1) ---
 
 
+def _validate_store_id(value: str) -> str:
+    """Strict store-id validator: RFC 4122 UUIDv4 only (E08 §1)."""
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as e:
+        raise CloudKeyError(f"Invalid store id (not a UUID): {value!r}") from e
+    if parsed.version != 4 or parsed.variant != uuid.RFC_4122:
+        raise CloudKeyError(
+            f"Invalid store id (must be an RFC 4122 UUIDv4): {value!r}"
+        )
+    return str(parsed)
+
+
 def get_or_create_store_id(memory_dir: Path) -> str:
     """UUIDv4 per memory store, persisted at <memory_dir>/.store_id."""
     memory_dir = memory_dir.expanduser()
@@ -151,8 +164,8 @@ def get_or_create_store_id(memory_dir: Path) -> str:
     if store_path.is_file():
         value = store_path.read_text(encoding="utf-8").strip()
         try:
-            return str(uuid.UUID(value))
-        except ValueError as e:
+            return _validate_store_id(value)
+        except CloudKeyError as e:
             raise CloudKeyError(f"Corrupt store id at {store_path}: {value!r}") from e
     memory_dir.mkdir(parents=True, exist_ok=True)
     store_id = str(uuid.uuid4())
@@ -163,8 +176,10 @@ def get_or_create_store_id(memory_dir: Path) -> str:
 def extract_store_id(source: str) -> str | None:
     """Pull the store id out of recovery-kit material (path or raw text).
 
-    Looks for the ``store_id: <uuid>`` line the kit writes; returns None for
-    key material that carries no store id (e.g. a bare key file).
+    Fails closed: an explicit ``store_id:`` line that does not carry a valid
+    UUIDv4 raises — a damaged kit must abort the import, not silently mint a
+    new namespace. Returns None only when the material genuinely contains no
+    store identifier (e.g. a bare key file).
     """
     source_path = Path(source).expanduser()
     try:
@@ -176,17 +191,22 @@ def extract_store_id(source: str) -> str | None:
         if stripped.startswith("store_id:"):
             candidate = stripped.split(":", 1)[1].strip()
             try:
-                return str(uuid.UUID(candidate))
-            except ValueError:
-                continue
+                return _validate_store_id(candidate)
+            except CloudKeyError as e:
+                raise CloudKeyError(
+                    f"Recovery kit carries a malformed store id ({candidate!r}). "
+                    "Refusing to import — continuing would mint a new namespace "
+                    "and orphan the existing backups. Fix the kit's store_id line "
+                    "(or restore an undamaged copy of the kit) and retry."
+                ) from e
     # Older kits carried the store id as a bare UUID line.
     for line in text.splitlines():
         stripped = line.strip()
         if len(stripped) == 36:
             try:
-                return str(uuid.UUID(stripped))
-            except ValueError:
-                continue
+                return _validate_store_id(stripped)
+            except CloudKeyError:
+                continue  # arbitrary 36-char line, not a store id claim
     return None
 
 
@@ -197,7 +217,7 @@ def install_store_id(memory_dir: Path, store_id: str) -> str:
     a new one would orphan every existing backup. Fails if a *different* id
     is already installed; installing the same id is a no-op.
     """
-    store_id = str(uuid.UUID(store_id))  # validate
+    store_id = _validate_store_id(store_id)
     memory_dir = memory_dir.expanduser()
     store_path = memory_dir / STORE_ID_NAME
     if store_path.is_file():

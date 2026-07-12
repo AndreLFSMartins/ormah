@@ -160,3 +160,24 @@ def test_import_key_refuses_store_id_conflict(cloud_paths, tmp_path, capsys):
     assert "orphan" in err
     # Key material untouched by the aborted import
     assert not key_path.exists()
+
+
+def test_import_key_aborts_on_damaged_kit_store_id(cloud_paths, tmp_path, capsys):
+    """A damaged store_id line must abort the whole import before any key
+    material is written — never silently mint a new namespace."""
+    key_path, kit_path, memory_dir = cloud_paths
+    _run(["cloud", "init", "--json"])
+    damaged = tmp_path / "damaged-kit.md"
+    damaged.write_text(kit_path.read_text().replace(
+        "store_id: ", "store_id: corrupted-"
+    ))
+    key_path.rename(key_path.with_suffix(".bak"))
+    (memory_dir / ".store_id").unlink()
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit):
+        _run(["cloud", "init", "--import-key", str(damaged)])
+
+    assert "malformed store id" in capsys.readouterr().err
+    assert not key_path.exists()  # no key material written
+    assert not (memory_dir / ".store_id").exists()  # no new namespace minted

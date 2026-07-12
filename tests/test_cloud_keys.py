@@ -194,15 +194,15 @@ def test_extract_store_id_from_kit(tmp_path, key_path):
     init_key(key_path)
     from ormah.cloud.keys import extract_store_id
 
-    kit = write_recovery_kit("33333333-4444-5555-6666-777777777777", key_path, tmp_path / "kit.md")
-    assert extract_store_id(str(kit)) == "33333333-4444-5555-6666-777777777777"
+    kit = write_recovery_kit("33333333-4444-4555-8666-777777777777", key_path, tmp_path / "kit.md")
+    assert extract_store_id(str(kit)) == "33333333-4444-4555-8666-777777777777"
 
 
 def test_extract_store_id_legacy_bare_uuid(tmp_path):
     from ormah.cloud.keys import extract_store_id
 
-    legacy = "## Your store id\n\n```\n44444444-5555-6666-7777-888888888888\n```\n"
-    assert extract_store_id(legacy) == "44444444-5555-6666-7777-888888888888"
+    legacy = "## Your store id\n\n```\n44444444-5555-4666-8777-888888888888\n```\n"
+    assert extract_store_id(legacy) == "44444444-5555-4666-8777-888888888888"
 
 
 def test_extract_store_id_absent(tmp_path):
@@ -215,7 +215,7 @@ def test_install_store_id_fresh_and_idempotent(tmp_path):
     from ormah.cloud.keys import install_store_id
 
     memory_dir = tmp_path / "memory"
-    sid = "55555555-6666-7777-8888-999999999999"
+    sid = "55555555-6666-4777-8888-999999999999"
     assert install_store_id(memory_dir, sid) == sid
     assert (memory_dir / ".store_id").read_text().strip() == sid
     assert install_store_id(memory_dir, sid) == sid  # same id: no-op
@@ -225,6 +225,30 @@ def test_install_store_id_refuses_mismatch(tmp_path):
     from ormah.cloud.keys import install_store_id
 
     memory_dir = tmp_path / "memory"
-    install_store_id(memory_dir, "55555555-6666-7777-8888-999999999999")
+    install_store_id(memory_dir, "55555555-6666-4777-8888-999999999999")
     with pytest.raises(CloudKeyError, match="orphan"):
-        install_store_id(memory_dir, "66666666-7777-8888-9999-aaaaaaaaaaaa")
+        install_store_id(memory_dir, "66666666-7777-4888-9999-aaaaaaaaaaaa")
+
+
+def test_extract_store_id_fails_closed_on_malformed(tmp_path):
+    """A kit whose store_id line is damaged must abort, not fall through to
+    minting a fresh namespace."""
+    from ormah.cloud.keys import extract_store_id
+
+    with pytest.raises(CloudKeyError, match="malformed store id"):
+        extract_store_id("store_id: not-a-uuid-at-all")
+
+
+def test_extract_store_id_fails_closed_on_non_v4(tmp_path):
+    from ormah.cloud.keys import extract_store_id
+
+    # Valid UUID, wrong version (v7) — E08 requires UUIDv4
+    with pytest.raises(CloudKeyError, match="malformed store id"):
+        extract_store_id("store_id: 018f4b2c-7a00-7000-8000-000000000000")
+
+
+def test_install_store_id_rejects_non_v4(tmp_path):
+    from ormah.cloud.keys import install_store_id
+
+    with pytest.raises(CloudKeyError, match="UUIDv4"):
+        install_store_id(tmp_path / "memory", "018f4b2c-7a00-7000-8000-000000000000")
