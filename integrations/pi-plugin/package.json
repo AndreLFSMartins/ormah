@@ -1,6 +1,6 @@
 {
   "name": "ormah-pi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Ormah local memory layer integration for the Pi coding agent — whisper recall, memory tools, transcript capture, self-maintenance.",
   "main": "ormah-pi.ts",
