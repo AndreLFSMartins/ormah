@@ -9,6 +9,7 @@ Usage:
     ormah backup create     Create a local memory backup
     ormah backup restore    Restore a local memory backup
     ormah claude-md install Install shared Ormah guidance into CLAUDE.md
+    ormah pi-md install     Install shared Ormah guidance into Pi AGENTS.md
     ormah uninstall         Remove all ormah integrations and data
     ormah mcp               Run MCP stdio server
     ormah recall <query>    Search memories
@@ -198,6 +199,12 @@ def _cmd_claude_md_install(args):
     from ormah.setup import install_claude_md
 
     install_claude_md(scope=args.scope, cwd=Path.cwd())
+
+
+def _cmd_pi_md_install(args):
+    from ormah.setup import install_pi_md
+
+    install_pi_md(scope=args.scope, cwd=Path.cwd())
 
 
 def _format_bytes(size_bytes: int) -> str:
@@ -441,6 +448,22 @@ def main():
         help="Install into the CLAUDE.md target that matches plugin scope, or override it explicitly",
     )
     claude_md_install.set_defaults(func=_cmd_claude_md_install)
+
+    # --- pi-md ---
+    pi_md_p = sub.add_parser("pi-md", help="Manage Ormah guidance in the Pi agent AGENTS.md")
+    pi_md_sub = pi_md_p.add_subparsers(dest="pi_md_cmd", required=True)
+
+    pi_md_install = pi_md_sub.add_parser(
+        "install",
+        help="Install the Ormah guidance block into a Pi AGENTS.md file",
+    )
+    pi_md_install.add_argument(
+        "--scope",
+        choices=["user", "project"],
+        default="user",
+        help="user = ~/.pi/agent/AGENTS.md (default), project = ./AGENTS.md",
+    )
+    pi_md_install.set_defaults(func=_cmd_pi_md_install)
 
     # --- mcp ---
     mcp_p = sub.add_parser("mcp", help="Run MCP stdio server")

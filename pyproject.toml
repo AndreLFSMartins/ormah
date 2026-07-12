@@ -76,8 +76,16 @@ only-include = [
     "src/ormah",
     "ui",
     "integrations/claude-plugin",
+    "integrations/pi-plugin",
     ".claude-plugin",
     "install.sh",
+]
+# The Pi extension ships as its own npm package (ormah-pi); keep its source
+# in the sdist for parity with integrations/claude-plugin, but never bundle
+# node_modules (dev-only, regenerated via npm install).
+exclude = [
+    "integrations/pi-plugin/node_modules",
+    "integrations/pi-plugin/node_modules/**",
 ]
 
 [tool.hatch.build.targets.wheel]

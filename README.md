@@ -65,10 +65,12 @@ One command gets you a working local Ormah runtime with setup for supported clie
 ### Claude Code Plugin
 
 1. Add the marketplace and install the plugin:
+
    ```
    /plugin marketplace add r-spade/ormah
    /plugin install ormah@ormah
    ```
+
 2. Reload: `/reload-plugins`
 3. Run `/ormah:setup`
 4. Check that the Ormah MCP server is enabled via `/mcp` — if not, enable it there
@@ -80,7 +82,7 @@ Ormah is agent-agnostic by design. It can be wired into any agent that exposes t
 1. Start the Ormah server and install auto-start
 2. Preload the local models used for search and whisper retrieval
 3. Detect supported clients and wire them up automatically
-4. Offer agent-backed maintenance when Claude Code or Codex are available
+4. Offer agent-backed maintenance when Claude Code, Codex, or Pi are available
 5. Offer transcript backfill to help bootstrap memory from earlier sessions
 
 Today, setup can wire up:
@@ -88,6 +90,7 @@ Today, setup can wire up:
 - Claude Code
 - Codex
 - Claude Desktop (MCP)
+- Pi
 
 Local search, embeddings, storage, the graph UI, and whisper retrieval do not require an API key. If you want Ormah's LLM-backed features to run independently of your agent, setup can opt into a provider explicitly. Ormah stores only provider policy in `~/.config/ormah/.env`; it does not copy API key values into its config. Local Ollama generation uses a configurable `ORMAH_LLM_NUM_PREDICT` token budget.
 
@@ -160,6 +163,7 @@ Ormah is agent-agnostic, but it already has first-class integrations for:
 - Claude Code — whisper hooks, MCP, transcript backfill, maintenance agent
 - Codex — whisper hooks, MCP, maintenance agent
 - Claude Desktop (macOS) — MCP
+- Pi — whisper inject, memory tools, transcript capture, maintenance agent (install with `pi install npm:ormah-pi`)
 
 It can also be used through:
 

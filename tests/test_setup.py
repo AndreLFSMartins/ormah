@@ -25,10 +25,14 @@ from ormah.setup import (
     CODEX_AGENTS_SENTINEL_START,
     CLAUDE_MD_SENTINEL_END,
     CLAUDE_MD_SENTINEL_START,
+    PI_AGENTS_MD_SENTINEL_END,
+    PI_AGENTS_MD_SENTINEL_START,
+    _get_agent,
     _atomic_write,
     _is_ormah_hook,
     _merge_hooks,
     _merge_json_file,
+    _pi_is_wired,
     _preload_local_models,
     _print_setup_summary,
     _remove_codex_hooks,
@@ -40,6 +44,9 @@ from ormah.setup import (
     _remove_claude_md_block,
     _remove_fastembed_cache,
     _remove_mcp_from_json,
+    _remove_pi_agents,
+    _remove_pi_extension,
+    _remove_pi_md_block,
     _strip_ormah_hooks,
     _write_env_file,
     configure_claude_hooks,
@@ -49,10 +56,13 @@ from ormah.setup import (
     configure_codex_hooks,
     configure_codex_mcp,
     configure_llm,
+    configure_pi_extension,
     generate_server_wrapper,
     install_claude_md,
     install_codex_agents,
     install_codex_md,
+    install_pi_agents,
+    install_pi_md,
     run_setup,
     run_uninstall,
 )
@@ -669,6 +679,9 @@ class TestRunSetup:
             mock_codex_md = stack.enter_context(patch("ormah.setup.install_codex_md"))
             mock_codex_agents = stack.enter_context(patch("ormah.setup.install_codex_agents"))
             mock_claude_desktop = stack.enter_context(patch("ormah.setup.configure_claude_desktop"))
+            mock_pi_extension = stack.enter_context(patch("ormah.setup.configure_pi_extension"))
+            mock_pi_md = stack.enter_context(patch("ormah.setup.install_pi_md"))
+            mock_pi_agents = stack.enter_context(patch("ormah.setup.install_pi_agents"))
             stack.enter_context(patch("ormah.setup.backfill_transcripts"))
             stack.enter_context(patch("ormah.setup.play_finale"))
             stack.enter_context(patch("ormah.setup._print_setup_summary"))
@@ -687,6 +700,9 @@ class TestRunSetup:
         mock_codex_md.assert_not_called()
         mock_codex_agents.assert_not_called()
         mock_claude_desktop.assert_not_called()
+        mock_pi_extension.assert_not_called()
+        mock_pi_md.assert_not_called()
+        mock_pi_agents.assert_not_called()
 
     def test_update_restarts_existing_server(self, tmp_path, capsys):
         from ormah.server_manager import _StopServerResult
@@ -732,6 +748,23 @@ class TestClaudePluginManifest:
         )
 
         assert plugin_manifest["version"] == pyproject["project"]["version"]
+
+
+class TestPiPluginPackage:
+    def test_package_json_declares_pi_extension(self):
+        root = Path(__file__).resolve().parents[1]
+        pkg = json.loads((root / "integrations" / "pi-plugin" / "package.json").read_text())
+        assert pkg["name"] == "ormah-pi"
+        assert "./ormah-pi.ts" in pkg["pi"]["extensions"]
+
+    def test_pi_resources_shipped(self):
+        root = Path(__file__).resolve().parents[1]
+        assert (root / "src" / "ormah" / "pi_instructions.md").exists()
+        assert (root / "src" / "ormah" / "agents" / "ormah-pi-maintenance.md").exists()
+
+    def test_entry_file_exists(self):
+        root = Path(__file__).resolve().parents[1]
+        assert (root / "integrations" / "pi-plugin" / "ormah-pi.ts").exists()
 
 
 class TestClaudePluginDocs:
@@ -896,6 +929,26 @@ class TestCliEntryPoint:
         ):
             main()
             mock_install.assert_called_once_with(scope="user", cwd=Path.cwd())
+
+    def test_pi_md_install_defaults_to_user_scope(self):
+        from ormah.cli import main
+
+        with (
+            patch("sys.argv", ["ormah", "pi-md", "install"]),
+            patch("ormah.setup.install_pi_md") as mock_install,
+        ):
+            main()
+            mock_install.assert_called_once_with(scope="user", cwd=Path.cwd())
+
+    def test_pi_md_install_project_scope(self):
+        from ormah.cli import main
+
+        with (
+            patch("sys.argv", ["ormah", "pi-md", "install", "--scope", "project"]),
+            patch("ormah.setup.install_pi_md") as mock_install,
+        ):
+            main()
+            mock_install.assert_called_once_with(scope="project", cwd=Path.cwd())
 
     def test_server_status_when_not_running(self):
         from ormah.cli import main
@@ -1565,7 +1618,7 @@ class TestConfigureAgentMaintenance:
             patch("ormah.setup.ENV_DIR", tmp_path),
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
-            result = configure_agent_maintenance(has_claude_code=True, has_codex=False)
+            result = configure_agent_maintenance([_get_agent("claude_code")])
 
         assert result is True
         assert "ORMAH_CLAUDE_MAINTENANCE_ENABLED=true" in env_path.read_text()
@@ -1593,7 +1646,7 @@ class TestConfigureAgentMaintenance:
             patch("ormah.setup.ENV_DIR", tmp_path),
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
-            result = configure_agent_maintenance(has_claude_code=False, has_codex=True)
+            result = configure_agent_maintenance([_get_agent("codex")])
 
         assert result is True
         assert "ORMAH_CLAUDE_MAINTENANCE_ENABLED=true" in env_path.read_text()
@@ -1613,7 +1666,9 @@ class TestConfigureAgentMaintenance:
             patch("ormah.setup.ENV_DIR", tmp_path),
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
-            result = configure_agent_maintenance(has_claude_code=True, has_codex=True)
+            result = configure_agent_maintenance(
+                [_get_agent("claude_code"), _get_agent("codex")]
+            )
 
         assert result is False
         assert not env_path.exists()
@@ -1621,6 +1676,192 @@ class TestConfigureAgentMaintenance:
         captured = capsys.readouterr()
         assert "Claude Code or Codex" in captured.out
         assert "Skipped automatic maintenance" in captured.out
+
+    def test_enables_pi_maintenance(self, tmp_path, monkeypatch, capsys):
+        env_path = tmp_path / ".env"
+        monkeypatch.setattr("builtins.input", lambda _: "")
+
+        with (
+            patch("ormah.setup.ENV_PATH", env_path),
+            patch("ormah.setup.ENV_DIR", tmp_path),
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+        ):
+            result = configure_agent_maintenance([_get_agent("pi")])
+
+        assert result is True
+        env = env_path.read_text()
+        assert "ORMAH_CLAUDE_MAINTENANCE_ENABLED=true" in env
+        assert "ORMAH_PI_MAINTENANCE_ENABLED" not in env
+
+        captured = capsys.readouterr()
+        assert "Pi" in captured.out
+
+
+class TestInstallPiMd:
+    def test_respects_pi_agent_dir_override(self, tmp_path, monkeypatch):
+        pi_dir = tmp_path / "custom-pi-agent"
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(pi_dir))
+
+        install_pi_md()
+        install_pi_agents()
+
+        assert (pi_dir / "AGENTS.md").exists()
+        assert (pi_dir / "agents" / "ormah-maintenance.md").exists()
+
+    def test_creates_new_file(self, tmp_path, capsys):
+        agents_md = tmp_path / ".pi" / "agent" / "AGENTS.md"
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_pi_md()
+
+        content = agents_md.read_text()
+        assert PI_AGENTS_MD_SENTINEL_START in content
+        assert PI_AGENTS_MD_SENTINEL_END in content
+        assert "# Ormah Memory System" in content
+        assert "ormah_remember" in content
+
+        captured = capsys.readouterr()
+        assert "Instructions added to ~/.pi/agent/AGENTS.md" in captured.out
+
+    def test_appends_to_existing_content(self, tmp_path):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        agents_md = pi_dir / "AGENTS.md"
+        agents_md.write_text("# My existing instructions\n\nDo things my way.\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_pi_md()
+
+        content = agents_md.read_text()
+        assert content.startswith("# My existing instructions\n\nDo things my way.\n")
+        assert PI_AGENTS_MD_SENTINEL_START in content
+        assert "# Ormah Memory System" in content
+
+    def test_idempotent_replace(self, tmp_path):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        agents_md = pi_dir / "AGENTS.md"
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_pi_md()
+            first = agents_md.read_text()
+            install_pi_md()
+            second = agents_md.read_text()
+
+        assert first == second
+
+    def test_project_scope_writes_to_project_agents_md(self, tmp_path, capsys):
+        with patch("ormah.setup.Path.cwd", return_value=tmp_path):
+            install_pi_md(scope="project")
+
+        project_agents_md = tmp_path / "AGENTS.md"
+        content = project_agents_md.read_text()
+        assert PI_AGENTS_MD_SENTINEL_START in content
+        assert PI_AGENTS_MD_SENTINEL_END in content
+        assert "# Ormah Memory System" in content
+
+        captured = capsys.readouterr()
+        assert "Instructions added to ./AGENTS.md" in captured.out
+
+
+class TestInstallPiAgents:
+    def test_creates_agent_file(self, tmp_path, capsys):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_pi_agents()
+
+        agent_file = tmp_path / ".pi" / "agent" / "agents" / "ormah-maintenance.md"
+        content = agent_file.read_text()
+        assert "ormah_run_maintenance" in content
+        assert "name: ormah-maintenance" in content
+
+        captured = capsys.readouterr()
+        assert "Pi" in captured.out
+
+    def test_overwrites_existing_agent_file(self, tmp_path):
+        agent_dir = tmp_path / ".pi" / "agent" / "agents"
+        agent_dir.mkdir(parents=True)
+        agent_file = agent_dir / "ormah-maintenance.md"
+        agent_file.write_text("# old\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_pi_agents()
+
+        content = agent_file.read_text()
+        assert "ormah_run_maintenance" in content
+        assert "# old" not in content
+
+
+class TestConfigurePiExtension:
+    def test_partial_wiring_never_reports_connected(self, tmp_path):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        (pi_dir / "settings.json").write_text(
+            json.dumps({"packages": ["npm:ormah-pi"]})
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _pi_is_wired() is False
+
+            (pi_dir / "AGENTS.md").write_text(
+                f"{PI_AGENTS_MD_SENTINEL_START}\n{PI_AGENTS_MD_SENTINEL_END}\n"
+            )
+            assert _pi_is_wired() is False
+
+            agents_dir = pi_dir / "agents"
+            agents_dir.mkdir()
+            (agents_dir / "ormah-maintenance.md").write_text(
+                "Use ormah_run_maintenance."
+            )
+            assert _pi_is_wired() is True
+
+    def test_detects_extension_via_settings_packages(self, tmp_path, capsys):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        (pi_dir / "settings.json").write_text(json.dumps({"packages": ["npm:ormah-pi"]}))
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            configure_pi_extension("/abs/path/ormah")
+
+        captured = capsys.readouterr()
+        assert "ormah-pi extension detected" in captured.out
+
+    def test_installs_extension_when_missing(self, tmp_path, capsys):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+
+        def install(*_args, **_kwargs):
+            (pi_dir / "settings.json").write_text(
+                json.dumps({"packages": ["npm:ormah-pi"]})
+            )
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._find_binary", return_value="/usr/bin/pi"),
+            patch("ormah.setup.subprocess.run", side_effect=install) as mock_run,
+        ):
+            configure_pi_extension("/abs/path/ormah")
+
+        captured = capsys.readouterr()
+        assert "ormah-pi extension installed" in captured.out
+        mock_run.assert_called_once_with(
+            ["/usr/bin/pi", "install", "npm:ormah-pi"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def test_install_failure_is_reported(self, tmp_path):
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._find_binary", return_value="/usr/bin/pi"),
+            patch(
+                "ormah.setup.subprocess.run",
+                return_value=MagicMock(returncode=1, stdout="", stderr="not found"),
+            ),
+            pytest.raises(RuntimeError, match="not found"),
+        ):
+            configure_pi_extension("/abs/path/ormah")
 
 
 # --- Uninstall tests ---
@@ -1989,6 +2230,125 @@ class TestRemoveClaudeMdBlock:
         assert "skipping" in captured.out.lower()
 
 
+class TestRemovePiMdBlock:
+    def test_removes_sentinel_block(self, tmp_path):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        agents_md = pi_dir / "AGENTS.md"
+        agents_md.write_text(
+            "# Before\n\n"
+            f"{PI_AGENTS_MD_SENTINEL_START}\normah instructions\n{PI_AGENTS_MD_SENTINEL_END}\n"
+            "\n# After\n"
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_pi_md_block()
+
+        content = agents_md.read_text()
+        assert PI_AGENTS_MD_SENTINEL_START not in content
+        assert PI_AGENTS_MD_SENTINEL_END not in content
+        assert "ormah instructions" not in content
+        assert "# Before" in content
+        assert "# After" in content
+
+    def test_noop_when_file_missing(self, tmp_path, capsys):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_pi_md_block()
+
+        captured = capsys.readouterr()
+        assert "skipping" in captured.out.lower()
+
+    def test_noop_when_no_sentinels(self, tmp_path, capsys):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        agents_md = pi_dir / "AGENTS.md"
+        agents_md.write_text("# Just some content\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_pi_md_block()
+
+        assert agents_md.read_text() == "# Just some content\n"
+        captured = capsys.readouterr()
+        assert "skipping" in captured.out.lower()
+
+
+class TestRemovePiAgents:
+    def test_removes_agent_file(self, tmp_path, capsys):
+        agent_dir = tmp_path / ".pi" / "agent" / "agents"
+        agent_dir.mkdir(parents=True)
+        agent_file = agent_dir / "ormah-maintenance.md"
+        agent_file.write_text("# old\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_pi_agents()
+
+        assert not agent_file.exists()
+        captured = capsys.readouterr()
+        assert "Removed" in captured.out
+
+    def test_noop_when_missing(self, tmp_path, capsys):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_pi_agents()
+
+        captured = capsys.readouterr()
+        assert "Removed" not in captured.out
+
+
+class TestRemovePiExtension:
+    def test_removes_only_ormah_entries(self, tmp_path):
+        settings_path = tmp_path / ".pi" / "agent" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "packages": ["npm:ormah-pi", "npm:other-package"],
+                    "extensions": [{"source": "/tmp/custom-extension.ts"}],
+                    "theme": "dark",
+                }
+            )
+        )
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._find_binary", return_value="/usr/bin/pi"),
+            patch(
+                "ormah.setup.subprocess.run",
+                return_value=MagicMock(returncode=0, stdout="", stderr=""),
+            ) as mock_run,
+        ):
+            _remove_pi_extension()
+
+        assert json.loads(settings_path.read_text()) == {
+            "packages": ["npm:other-package"],
+            "extensions": [{"source": "/tmp/custom-extension.ts"}],
+            "theme": "dark",
+        }
+        mock_run.assert_called_once_with(
+            ["/usr/bin/pi", "remove", "npm:ormah-pi"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def test_scrubs_settings_when_pi_binary_is_missing(self, tmp_path):
+        settings_path = tmp_path / ".pi" / "agent" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(
+            json.dumps({"extensions": ["/checkout/integrations/pi-plugin/ormah-pi.ts"]})
+        )
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._find_binary", return_value=None),
+        ):
+            _remove_pi_extension()
+
+        assert json.loads(settings_path.read_text()) == {}
+
+
 class TestRunUninstall:
     @pytest.fixture(autouse=True)
     def _isolate_uninstall_from_real_home(self, tmp_path):
@@ -2035,11 +2395,14 @@ class TestRunUninstall:
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_codex_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
             patch("ormah.setup._remove_claude_md_block"),
             patch("ormah.setup._remove_codex_md_block"),
             patch("ormah.setup._remove_codex_agents"),
             patch("ormah.setup._remove_claude_agents"),
             patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_pi_md_block"),
+            patch("ormah.setup._remove_pi_agents"),
             patch("shutil.rmtree"),
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
         ):
@@ -2068,11 +2431,14 @@ class TestRunUninstall:
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_codex_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
             patch("ormah.setup._remove_claude_md_block"),
             patch("ormah.setup._remove_codex_md_block"),
             patch("ormah.setup._remove_codex_agents"),
             patch("ormah.setup._remove_claude_agents"),
             patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_pi_md_block"),
+            patch("ormah.setup._remove_pi_agents"),
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
         ):
             run_uninstall(yes=True)
@@ -2087,11 +2453,14 @@ class TestRunUninstall:
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_codex_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
             patch("ormah.setup._remove_claude_md_block"),
             patch("ormah.setup._remove_codex_md_block"),
             patch("ormah.setup._remove_codex_agents"),
             patch("ormah.setup._remove_claude_agents"),
             patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_pi_md_block"),
+            patch("ormah.setup._remove_pi_agents"),
             patch("shutil.rmtree"),
             patch("ormah.setup._remove_uv_tool_install_files", return_value=False),
             patch("subprocess.run", side_effect=Exception("uv not found")),
@@ -2323,6 +2692,7 @@ class TestUninstallMemoryDirResolution:
             patch("ormah.server_manager.uninstall_autostart"),
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
             patch("ormah.setup._remove_claude_md_block"),
             patch("ormah.setup._remove_fastembed_cache"),
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
