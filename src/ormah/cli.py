@@ -343,6 +343,96 @@ def _cmd_backup_restore(args):
         info(f"Rebuilt search index from {result.rebuilt_nodes} nodes")
 
 
+def _cmd_cloud_init(args):
+    from ormah.cloud.crypto import CloudCryptoError
+    from ormah.cloud.keys import (
+        KEY_PATH,
+        CloudKeyError,
+        get_or_create_store_id,
+        import_key,
+        init_key,
+        load_identity_strings,
+        write_recovery_kit,
+    )
+    from ormah.config import settings
+    from ormah.console import info, ok, warn
+
+    try:
+        if args.import_key:
+            import_key(args.import_key)
+        else:
+            init_key()
+        store_id = get_or_create_store_id(settings.memory_dir)
+        kit_path = write_recovery_kit(store_id)
+        identity_count = len(load_identity_strings())
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        _print_backup_error(str(exc))
+
+    if args.json:
+        print(json.dumps({
+            "key_path": str(KEY_PATH),
+            "identity_count": identity_count,
+            "imported": bool(args.import_key),
+            "store_id": store_id,
+            "recovery_kit": str(kit_path),
+        }, indent=2, sort_keys=True))
+        return
+
+    if args.import_key:
+        ok(f"Imported {identity_count} encryption identit{'y' if identity_count == 1 else 'ies'} to {KEY_PATH}")
+    else:
+        ok(f"Generated encryption key: {KEY_PATH}")
+    info(f"Store id: {store_id}")
+    ok(f"Recovery kit written: {kit_path}")
+    warn(
+        "Store the recovery kit somewhere safe and OFFLINE. Anyone with it can "
+        "read your backups; without it, nobody can — including us."
+    )
+
+
+def _cmd_cloud_rotate_key(args):
+    from ormah.cloud.crypto import CloudCryptoError
+    from ormah.cloud.keys import (
+        CloudKeyError,
+        get_or_create_store_id,
+        load_identity_strings,
+        rotate_key,
+        write_recovery_kit,
+    )
+    from ormah.config import settings
+    from ormah.console import info, ok, warn
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            _print_backup_error("Key rotation needs confirmation. Re-run with --yes in non-interactive shells.")
+        warn("Rotation generates a new encryption key. Old keys are retained so existing backups stay readable.")
+        answer = input("Rotate the cloud encryption key? (y/N) ").strip().lower()
+        if answer not in {"y", "yes"}:
+            info("Rotation cancelled")
+            return
+
+    try:
+        rotate_key()
+        store_id = get_or_create_store_id(settings.memory_dir)
+        kit_path = write_recovery_kit(store_id)
+        identity_count = len(load_identity_strings())
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        _print_backup_error(str(exc))
+
+    if args.json:
+        print(json.dumps({
+            "identity_count": identity_count,
+            "recovery_kit": str(kit_path),
+            "rotated": True,
+        }, indent=2, sort_keys=True))
+        return
+
+    ok("Rotated encryption key; new bundles use the new key.")
+    info(f"Identities on file: {identity_count} (all retained — older backups still decrypt)")
+    ok(f"Recovery kit regenerated: {kit_path}")
+    warn("Replace any stored copies of the old recovery kit with the new one.")
+
+
 def _cmd_mcp(args):
     from ormah.adapters.mcp_adapter import main as mcp_main
 
@@ -404,6 +494,23 @@ def main():
     backup_restore.add_argument("--yes", action="store_true", help="Skip interactive restore confirmation")
     backup_restore.add_argument("--no-rebuild", action="store_true", help="Skip search index rebuild")
     backup_restore.set_defaults(func=_cmd_backup_restore)
+
+    # --- cloud ---
+    cloud_p = sub.add_parser("cloud", help="Encrypted cloud backup keys and store identity")
+    cloud_sub = cloud_p.add_subparsers(dest="cloud_cmd", required=True)
+
+    cloud_init = cloud_sub.add_parser("init", help="Generate encryption key, store id, and recovery kit")
+    cloud_init.add_argument("--json", action="store_true", help="Output result as JSON")
+    cloud_init.add_argument(
+        "--import-key", metavar="PATH",
+        help="Install identities from a recovery kit or key file (fresh machine)",
+    )
+    cloud_init.set_defaults(func=_cmd_cloud_init)
+
+    cloud_rotate = cloud_sub.add_parser("rotate-key", help="Rotate the encryption key (old keys are retained)")
+    cloud_rotate.add_argument("--yes", action="store_true", help="Skip interactive confirmation")
+    cloud_rotate.add_argument("--json", action="store_true", help="Output result as JSON")
+    cloud_rotate.set_defaults(func=_cmd_cloud_rotate_key)
 
     # --- setup ---
     setup_p = sub.add_parser("setup", help="One-shot setup (hooks, MCP, server)")

@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     backup_interval_hours: int = 24
     backup_retention_count: int = 10
 
+    # Encrypted cloud backups (paid tier). Client-side keys; nothing readable
+    # ever leaves the machine. Off by default until an account is configured.
+    cloud_backup_enabled: bool = False
+    cloud_api_url: str = "https://api.ormah.dev"
+
     # Embeddings
     embedding_provider: str = "local"  # "local", "ollama", "litellm"
     embedding_model: str = "BAAI/bge-base-en-v1.5"

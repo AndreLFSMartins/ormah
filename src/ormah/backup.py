@@ -177,6 +177,7 @@ class BackupService:
                     "index.db-shm",
                     "index.db-wal",
                     ".env",
+                    ".store_id",
                     "logs",
                     "model_cache",
                 ],
