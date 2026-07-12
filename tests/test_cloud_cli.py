@@ -123,3 +123,40 @@ def test_cloud_kit_without_key_fails(cloud_paths, capsys):
     with pytest.raises(SystemExit):
         _run(["cloud", "kit", "--json"])
     assert "cloud init" in capsys.readouterr().err
+
+
+def test_import_key_preserves_store_id(cloud_paths, tmp_path, capsys):
+    """Fresh-machine import must adopt the kit's store id, not mint a new one
+    — the store id is the remote namespace for all existing backups."""
+    key_path, kit_path, memory_dir = cloud_paths
+    _run(["cloud", "init", "--json"])
+    original_store_id = json.loads(capsys.readouterr().out)["store_id"]
+    kit_copy = tmp_path / "kit-copy.md"
+    kit_copy.write_text(kit_path.read_text())
+
+    # Fresh machine: no key, no store id
+    key_path.rename(key_path.with_suffix(".bak"))
+    (memory_dir / ".store_id").unlink()
+
+    _run(["cloud", "init", "--import-key", str(kit_copy), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["store_id"] == original_store_id
+    assert (memory_dir / ".store_id").read_text().strip() == original_store_id
+
+
+def test_import_key_refuses_store_id_conflict(cloud_paths, tmp_path, capsys):
+    key_path, kit_path, memory_dir = cloud_paths
+    _run(["cloud", "init", "--json"])
+    kit_copy = tmp_path / "kit-copy.md"
+    kit_copy.write_text(kit_path.read_text())
+
+    key_path.rename(key_path.with_suffix(".bak"))
+    (memory_dir / ".store_id").write_text("99999999-8888-7777-6666-555555555555\n")
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit):
+        _run(["cloud", "init", "--import-key", str(kit_copy)])
+    err = capsys.readouterr().err
+    assert "orphan" in err
+    # Key material untouched by the aborted import
+    assert not key_path.exists()

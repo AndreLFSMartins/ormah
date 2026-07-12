@@ -428,3 +428,26 @@ def test_failed_open_leaves_no_staging_debris(tmp_path, backup_dir, keypair):
     leftovers = [p for p in parent.iterdir() if p.name.startswith(".ormah_extract_")]
     assert leftovers == []
     assert not dest.exists() or not any(dest.iterdir())
+
+
+def test_rejects_symlinked_destination(tmp_path, backup_dir, keypair):
+    """An empty dir behind a symlink must be rejected, not followed."""
+    identity, recipient = keypair
+    bundle = build_bundle(backup_dir, tmp_path / "out.age", [recipient], store_id=STORE_ID)
+
+    real_target = tmp_path / "elsewhere"
+    real_target.mkdir()
+    dest = tmp_path / "restored"
+    dest.symlink_to(real_target)
+
+    with pytest.raises(BundleError, match="symlink"):
+        open_bundle(bundle, dest, [identity])
+    assert not any(real_target.iterdir())
+
+
+def test_rejects_oversized_encrypted_bundle(tmp_path, backup_dir, keypair):
+    """The encrypted input itself is capped before being read into memory."""
+    identity, recipient = keypair
+    bundle = build_bundle(backup_dir, tmp_path / "out.age", [recipient], store_id=STORE_ID)
+    with pytest.raises(BundleError, match="size limit"):
+        open_bundle(bundle, tmp_path / "restored", [identity], max_bundle_bytes=64)

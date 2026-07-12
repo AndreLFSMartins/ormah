@@ -160,6 +160,61 @@ def get_or_create_store_id(memory_dir: Path) -> str:
     return store_id
 
 
+def extract_store_id(source: str) -> str | None:
+    """Pull the store id out of recovery-kit material (path or raw text).
+
+    Looks for the ``store_id: <uuid>`` line the kit writes; returns None for
+    key material that carries no store id (e.g. a bare key file).
+    """
+    source_path = Path(source).expanduser()
+    try:
+        text = source_path.read_text(encoding="utf-8") if source_path.is_file() else source
+    except OSError:
+        text = source
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("store_id:"):
+            candidate = stripped.split(":", 1)[1].strip()
+            try:
+                return str(uuid.UUID(candidate))
+            except ValueError:
+                continue
+    # Older kits carried the store id as a bare UUID line.
+    for line in text.splitlines():
+        stripped = line.strip()
+        if len(stripped) == 36:
+            try:
+                return str(uuid.UUID(stripped))
+            except ValueError:
+                continue
+    return None
+
+
+def install_store_id(memory_dir: Path, store_id: str) -> str:
+    """Install a store id from a recovery kit on a fresh machine.
+
+    The store id is the remote namespace (E08 §1) — a restore that generates
+    a new one would orphan every existing backup. Fails if a *different* id
+    is already installed; installing the same id is a no-op.
+    """
+    store_id = str(uuid.UUID(store_id))  # validate
+    memory_dir = memory_dir.expanduser()
+    store_path = memory_dir / STORE_ID_NAME
+    if store_path.is_file():
+        existing = store_path.read_text(encoding="utf-8").strip()
+        if existing == store_id:
+            return store_id
+        raise CloudKeyError(
+            f"This memory store already has store id {existing}, but the recovery "
+            f"kit carries {store_id}. Refusing to overwrite — restoring into a "
+            "store that belongs to a different remote namespace would orphan its "
+            "backups. Use a fresh ORMAH_MEMORY_DIR or remove .store_id deliberately."
+        )
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    store_path.write_text(store_id + "\n", encoding="utf-8")
+    return store_id
+
+
 # --- Recovery kit ---
 
 
@@ -195,7 +250,7 @@ Generated: {now}
 ## Your store id
 
 ```
-{store_id}
+store_id: {store_id}
 ```
 
 ## Account

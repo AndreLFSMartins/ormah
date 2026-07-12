@@ -348,9 +348,11 @@ def _cmd_cloud_init(args):
     from ormah.cloud.keys import (
         KEY_PATH,
         CloudKeyError,
+        extract_store_id,
         get_or_create_store_id,
         import_key,
         init_key,
+        install_store_id,
         load_identity_strings,
         write_recovery_kit,
     )
@@ -359,6 +361,13 @@ def _cmd_cloud_init(args):
 
     try:
         if args.import_key:
+            # The kit's store id is the remote namespace — it must be
+            # installed too, or the restored machine would point at a brand
+            # new store and orphan every existing backup. Installed first so
+            # a store-id conflict aborts before any key material is written.
+            imported_store_id = extract_store_id(args.import_key)
+            if imported_store_id:
+                install_store_id(settings.memory_dir, imported_store_id)
             import_key(args.import_key)
         else:
             init_key()

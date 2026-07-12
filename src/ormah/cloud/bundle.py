@@ -33,6 +33,10 @@ BACKUP_MANIFEST_NAME = "backup.json"
 # Extraction hardening limits (E08 §2)
 MAX_MEMBERS = 100_000
 MAX_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+# Accepted constraint: ciphertext + decrypted compressed tar are held in
+# memory (graphs are MBs; streaming decryption is not worth the complexity
+# yet), so the encrypted input itself is capped.
+MAX_BUNDLE_BYTES = 512 * 1024 * 1024  # 512 MB
 
 
 class BundleError(RuntimeError):
@@ -232,6 +236,19 @@ def _member_allowed(name: str) -> bool:
 _STREAM_CHUNK = 1024 * 1024
 
 
+def _check_dest(dest_dir: Path) -> None:
+    """The destination must be absent, or an empty real directory.
+
+    ``is_symlink`` uses lstat, so a symlink pointing at an (empty) directory
+    elsewhere is rejected rather than silently followed.
+    """
+    if dest_dir.is_symlink():
+        raise BundleError(f"Destination {dest_dir} is a symlink; refusing to follow it.")
+    if dest_dir.exists():
+        if not dest_dir.is_dir() or any(dest_dir.iterdir()):
+            raise BundleError(f"Destination {dest_dir} must be a new or empty directory.")
+
+
 def open_bundle(
     bundle_path: Path,
     dest_dir: Path,
@@ -239,6 +256,7 @@ def open_bundle(
     *,
     max_members: int = MAX_MEMBERS,
     max_expanded_bytes: int = MAX_EXPANDED_BYTES,
+    max_bundle_bytes: int = MAX_BUNDLE_BYTES,
 ) -> BundleInfo:
     """Decrypt, safely extract, and hash-verify a bundle into dest_dir.
 
@@ -253,13 +271,14 @@ def open_bundle(
     bundle_path = bundle_path.expanduser()
     if not bundle_path.is_file():
         raise BundleError(f"Bundle not found: {bundle_path}")
+    if bundle_path.stat().st_size > max_bundle_bytes:
+        raise BundleError(
+            f"Bundle exceeds size limit ({max_bundle_bytes} bytes); "
+            "refusing to load it into memory."
+        )
 
     dest_dir = dest_dir.expanduser()
-    if dest_dir.exists():
-        if not dest_dir.is_dir() or any(dest_dir.iterdir()):
-            raise BundleError(
-                f"Destination {dest_dir} must be a new or empty directory."
-            )
+    _check_dest(dest_dir)
 
     plaintext = decrypt_bytes(bundle_path.read_bytes(), identities)
 
@@ -304,6 +323,9 @@ def open_bundle(
                 )
 
         # Everything verified — move staged files into the (empty) destination.
+        # Re-check right before commit so a symlink swapped in after the
+        # initial validation cannot redirect the writes.
+        _check_dest(dest_dir)
         for name in sorted(hashes):
             target = dest_dir / name
             target.parent.mkdir(parents=True, exist_ok=True)

@@ -185,3 +185,46 @@ def test_kit_keys_open_real_bundle(tmp_path, key_path):
     info = open_bundle(bundle, tmp_path / "restored", load_identities(fresh_key))
     assert info.store_id == store_id
     assert (tmp_path / "restored" / "nodes" / "fact_x_aaa111.md").read_text().endswith("X.\n")
+
+
+# --- store_id preservation on import (Codex re-review) ---
+
+
+def test_extract_store_id_from_kit(tmp_path, key_path):
+    init_key(key_path)
+    from ormah.cloud.keys import extract_store_id
+
+    kit = write_recovery_kit("33333333-4444-5555-6666-777777777777", key_path, tmp_path / "kit.md")
+    assert extract_store_id(str(kit)) == "33333333-4444-5555-6666-777777777777"
+
+
+def test_extract_store_id_legacy_bare_uuid(tmp_path):
+    from ormah.cloud.keys import extract_store_id
+
+    legacy = "## Your store id\n\n```\n44444444-5555-6666-7777-888888888888\n```\n"
+    assert extract_store_id(legacy) == "44444444-5555-6666-7777-888888888888"
+
+
+def test_extract_store_id_absent(tmp_path):
+    from ormah.cloud.keys import extract_store_id
+
+    assert extract_store_id("AGE-SECRET-KEY-1FOO\nno uuid here") is None
+
+
+def test_install_store_id_fresh_and_idempotent(tmp_path):
+    from ormah.cloud.keys import install_store_id
+
+    memory_dir = tmp_path / "memory"
+    sid = "55555555-6666-7777-8888-999999999999"
+    assert install_store_id(memory_dir, sid) == sid
+    assert (memory_dir / ".store_id").read_text().strip() == sid
+    assert install_store_id(memory_dir, sid) == sid  # same id: no-op
+
+
+def test_install_store_id_refuses_mismatch(tmp_path):
+    from ormah.cloud.keys import install_store_id
+
+    memory_dir = tmp_path / "memory"
+    install_store_id(memory_dir, "55555555-6666-7777-8888-999999999999")
+    with pytest.raises(CloudKeyError, match="orphan"):
+        install_store_id(memory_dir, "66666666-7777-8888-9999-aaaaaaaaaaaa")
