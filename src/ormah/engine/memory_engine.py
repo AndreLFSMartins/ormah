@@ -850,7 +850,7 @@ class MemoryEngine:
             node.connections.extend(req.add_connections)
             changed_fields.append("connections")
 
-        node.updated = datetime.now(timezone.utc)
+        node.touch_updated()
         path = self.file_store.save(node)
         self.builder.index_single(path)
         self._index_embedding(node)
@@ -944,6 +944,7 @@ class MemoryEngine:
             source_node.connections.append(
                 Connection(target=req.target_id, edge=req.edge, weight=req.weight)
             )
+            source_node.touch_updated()
             self.file_store.save(source_node)
 
         return f"Connected {req.source_id[:8]}... →[{req.edge.value}]→ {req.target_id[:8]}..."
@@ -1056,7 +1057,7 @@ class MemoryEngine:
         node.valid_until = datetime.now(timezone.utc)
         if reason:
             node.content = node.content.rstrip() + f"\n\n[Outdated: {reason}]"
-        node.updated = datetime.now(timezone.utc)
+        node.touch_updated()
 
         path = self.file_store.save(node)
         self.builder.index_single(path)
@@ -1300,7 +1301,7 @@ class MemoryEngine:
         # Save kept node, re-index, re-embed
         # NOTE: index_single calls _remove_node internally which wipes edges,
         # so we must remap edges and restore incoming edges AFTER this step.
-        kept.updated = datetime.now(timezone.utc)
+        kept.touch_updated()
         path = self.file_store.save(kept)
         self.builder.index_single(path)
         self._index_embedding(kept)
@@ -1397,15 +1398,17 @@ class MemoryEngine:
                     c.target = kept.id
                     updated = True
             if updated:
+                neighbor.touch_updated()
                 self.file_store.save(neighbor)
 
         # Also fix the kept node's own connections that pointed to removed
         reload_kept = self.file_store.load(kept.id)
         if reload_kept:
-            reload_kept.connections = [
-                c for c in reload_kept.connections if c.target != removed.id
-            ]
-            self.file_store.save(reload_kept)
+            pruned = [c for c in reload_kept.connections if c.target != removed.id]
+            if len(pruned) != len(reload_kept.connections):
+                reload_kept.connections = pruned
+                reload_kept.touch_updated()
+                self.file_store.save(reload_kept)
 
         kept_title = kept.title or kept.content[:60]
         removed_title = removed.title or removed.content[:60]
@@ -1433,6 +1436,10 @@ class MemoryEngine:
         # Reconstruct removed node from snapshot
         snapshot = json.loads(row["removed_node_snapshot"])
         node = MemoryNode.model_validate(snapshot)
+        # Restoration is a new mutation event: stamping `updated` lets the live
+        # node outrank the tombstone left in deleted/ during sync merges.
+        node.deleted_at = None
+        node.touch_updated()
         path = self.file_store.save(node)
         self.builder.index_single(path)
         self._index_embedding(node)
@@ -1751,6 +1758,7 @@ class MemoryEngine:
             self_node.connections.append(
                 Connection(target=node.id, edge=EdgeType.defines, weight=1.0)
             )
+            self_node.touch_updated()
             self.file_store.save(self_node)
 
     def _touch_access(self, node_id: str) -> None:
@@ -2060,6 +2068,7 @@ class MemoryEngine:
                             Connection(target=match_id, edge=EdgeType.related_to,
                                        weight=round(similarity, 2))
                         )
+                node.touch_updated()
                 self.file_store.save(node)  # persist auto-linked connections
 
             return links
