@@ -347,3 +347,84 @@ def test_rejects_unknown_format_version(tmp_path, keypair):
     evil = _encrypted_tar(tmp_path, recipient, add)
     with pytest.raises(BundleError, match="format_version"):
         open_bundle(evil, tmp_path / "restored", [identity])
+
+
+# --- Review fixes (Codex review of PR #108) ---
+
+
+def test_rejects_nonempty_destination(tmp_path, backup_dir, keypair):
+    """A pre-populated destination (e.g. containing a planted symlink) is
+    refused outright — extraction only ever targets fresh directories."""
+    identity, recipient = keypair
+    bundle = build_bundle(backup_dir, tmp_path / "out.age", [recipient], store_id=STORE_ID)
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not touch")
+    dest = tmp_path / "restored"
+    (dest / "nodes").mkdir(parents=True)
+    (dest / "nodes" / "fact_alpha_abc123.md").symlink_to(victim)
+
+    with pytest.raises(BundleError, match="new or empty"):
+        open_bundle(bundle, dest, [identity])
+    assert victim.read_text() == "do not touch"
+
+
+def test_rejects_destination_that_is_a_file(tmp_path, backup_dir, keypair):
+    identity, recipient = keypair
+    bundle = build_bundle(backup_dir, tmp_path / "out.age", [recipient], store_id=STORE_ID)
+    dest = tmp_path / "not-a-dir"
+    dest.write_text("occupied")
+    with pytest.raises(BundleError, match="new or empty"):
+        open_bundle(bundle, dest, [identity])
+
+
+def test_empty_existing_destination_is_fine(tmp_path, backup_dir, keypair):
+    identity, recipient = keypair
+    bundle = build_bundle(backup_dir, tmp_path / "out.age", [recipient], store_id=STORE_ID)
+    dest = tmp_path / "restored"
+    dest.mkdir()
+    info = open_bundle(bundle, dest, [identity])
+    assert info.file_count == 4
+
+
+def test_rejects_unicode_normalization_collision(tmp_path, keypair):
+    """Composed vs decomposed forms of the same name must collide."""
+    identity, recipient = keypair
+    composed = "nodes/café_abc.md"          # é as single codepoint
+    decomposed = "nodes/café_abc.md"       # e + combining acute
+
+    def add(tar):
+        _reg(tar, composed, b"one")
+        _reg(tar, decomposed, b"two")
+
+    evil = _encrypted_tar(tmp_path, recipient, add)
+    with pytest.raises(BundleError, match="case-colliding"):
+        open_bundle(evil, tmp_path / "restored", [identity])
+
+
+def test_expansion_limit_enforced_on_actual_bytes(tmp_path, keypair):
+    """A member lying about its size cannot bypass the streamed-bytes cap."""
+    identity, recipient = keypair
+
+    def add(tar):
+        _reg(tar, "nodes/big_abc.md", b"a" * 2048)
+
+    evil = _encrypted_tar(tmp_path, recipient, add)
+    with pytest.raises(BundleError, match="expansion limit"):
+        open_bundle(evil, tmp_path / "restored", [identity], max_expanded_bytes=1024)
+
+
+def test_failed_open_leaves_no_staging_debris(tmp_path, backup_dir, keypair):
+    identity, recipient = keypair
+    bundle = build_bundle(backup_dir, tmp_path / "out.age", [recipient], store_id=STORE_ID)
+
+    tampered = _rebuild_tampered(
+        bundle, identity, recipient, lambda m: m.pop("nodes/fact_beta_def456.md")
+    )
+    dest = tmp_path / "cleanup-check" / "restored"
+    with pytest.raises(BundleError):
+        open_bundle(tampered, dest, [identity])
+    parent = dest.parent
+    leftovers = [p for p in parent.iterdir() if p.name.startswith(".ormah_extract_")]
+    assert leftovers == []
+    assert not dest.exists() or not any(dest.iterdir())

@@ -362,11 +362,18 @@ def _cmd_cloud_init(args):
             import_key(args.import_key)
         else:
             init_key()
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        _print_backup_error(str(exc))
+
+    try:
         store_id = get_or_create_store_id(settings.memory_dir)
         kit_path = write_recovery_kit(store_id)
         identity_count = len(load_identity_strings())
     except (CloudKeyError, CloudCryptoError, OSError) as exc:
-        _print_backup_error(str(exc))
+        _print_backup_error(
+            f"Encryption key was written to {KEY_PATH}, but finishing setup failed: {exc}\n"
+            "Complete it with: ormah cloud kit"
+        )
 
     if args.json:
         print(json.dumps({
@@ -388,6 +395,37 @@ def _cmd_cloud_init(args):
         "Store the recovery kit somewhere safe and OFFLINE. Anyone with it can "
         "read your backups; without it, nobody can — including us."
     )
+
+
+def _cmd_cloud_kit(args):
+    """Regenerate the recovery kit from the existing key file (idempotent)."""
+    from ormah.cloud.crypto import CloudCryptoError
+    from ormah.cloud.keys import (
+        CloudKeyError,
+        get_or_create_store_id,
+        load_identity_strings,
+        write_recovery_kit,
+    )
+    from ormah.config import settings
+    from ormah.console import ok, warn
+
+    try:
+        store_id = get_or_create_store_id(settings.memory_dir)
+        kit_path = write_recovery_kit(store_id)
+        identity_count = len(load_identity_strings())
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        _print_backup_error(str(exc))
+
+    if args.json:
+        print(json.dumps({
+            "identity_count": identity_count,
+            "recovery_kit": str(kit_path),
+            "store_id": store_id,
+        }, indent=2, sort_keys=True))
+        return
+
+    ok(f"Recovery kit regenerated: {kit_path} ({identity_count} identities)")
+    warn("Replace any stored copies of the old kit with this one.")
 
 
 def _cmd_cloud_rotate_key(args):
@@ -413,11 +451,18 @@ def _cmd_cloud_rotate_key(args):
 
     try:
         rotate_key()
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        _print_backup_error(str(exc))
+
+    try:
         store_id = get_or_create_store_id(settings.memory_dir)
         kit_path = write_recovery_kit(store_id)
         identity_count = len(load_identity_strings())
     except (CloudKeyError, CloudCryptoError, OSError) as exc:
-        _print_backup_error(str(exc))
+        _print_backup_error(
+            f"Key was rotated, but recovery-kit regeneration failed: {exc}\n"
+            "Your stored kit is now MISSING the new key — run `ormah cloud kit` immediately."
+        )
 
     if args.json:
         print(json.dumps({
@@ -511,6 +556,10 @@ def main():
     cloud_rotate.add_argument("--yes", action="store_true", help="Skip interactive confirmation")
     cloud_rotate.add_argument("--json", action="store_true", help="Output result as JSON")
     cloud_rotate.set_defaults(func=_cmd_cloud_rotate_key)
+
+    cloud_kit = cloud_sub.add_parser("kit", help="Regenerate the recovery kit from the existing key")
+    cloud_kit.add_argument("--json", action="store_true", help="Output result as JSON")
+    cloud_kit.set_defaults(func=_cmd_cloud_kit)
 
     # --- setup ---
     setup_p = sub.add_parser("setup", help="One-shot setup (hooks, MCP, server)")

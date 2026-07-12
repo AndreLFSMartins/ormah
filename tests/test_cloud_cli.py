@@ -99,3 +99,27 @@ def test_cloud_rotate_key_without_init_fails(cloud_paths, capsys):
     with pytest.raises(SystemExit):
         _run(["cloud", "rotate-key", "--yes"])
     assert "cloud init" in capsys.readouterr().err
+
+
+def test_cloud_kit_regenerates_after_loss(cloud_paths, capsys):
+    """`ormah cloud kit` is the recovery path when init/rotate is interrupted
+    between key commit and kit generation."""
+    key_path, kit_path, memory_dir = cloud_paths
+    _run(["cloud", "init", "--json"])
+    kit_path.unlink()  # simulate the stranded state
+    capsys.readouterr()
+
+    _run(["cloud", "kit", "--json"])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["recovery_kit"] == str(kit_path)
+    assert out["identity_count"] == 1
+    assert kit_path.is_file()
+    current = cloud_keys.load_identity_strings(key_path)[0]
+    assert current in kit_path.read_text()
+
+
+def test_cloud_kit_without_key_fails(cloud_paths, capsys):
+    with pytest.raises(SystemExit):
+        _run(["cloud", "kit", "--json"])
+    assert "cloud init" in capsys.readouterr().err

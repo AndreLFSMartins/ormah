@@ -14,8 +14,10 @@ import io
 import json
 import logging
 import os
+import shutil
 import tarfile
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -150,40 +152,23 @@ def _add_member(tar: tarfile.TarFile, name: str, data: bytes) -> None:
     tar.addfile(info, io.BytesIO(data))
 
 
-def _member_allowed(name: str) -> bool:
-    """Strict allowlist: exactly nodes/*.md, deleted/*.md, and the two json files."""
-    if name in (BACKUP_MANIFEST_NAME, MANIFEST_NAME):
-        return True
-    for prefix in ("nodes/", "deleted/"):
-        if name.startswith(prefix):
-            rest = name[len(prefix):]
-            return bool(rest) and "/" not in rest and rest.endswith(".md")
-    return False
-
-
-def open_bundle(
-    bundle_path: Path,
-    dest_dir: Path,
-    identities: list,
+def _stream_members_to(
+    staging: Path,
+    plaintext: bytes,
     *,
-    max_members: int = MAX_MEMBERS,
-    max_expanded_bytes: int = MAX_EXPANDED_BYTES,
-) -> BundleInfo:
-    """Decrypt, safely extract, and hash-verify a bundle into dest_dir.
+    max_members: int,
+    max_expanded_bytes: int,
+) -> tuple[dict[str, str], dict[str, int]]:
+    """Validate and stream every tar member into the staging dir in chunks,
+    hashing while writing. Returns ({name: sha256}, {name: actual_size}).
 
-    Any manifest mismatch (hash, size, missing, or extra file) is a hard
-    failure. Members are validated against a strict allowlist and written
-    manually from ``extractfile`` bytes — tar metadata is never applied, which
-    is strictly stronger than ``filter="data"``.
+    The staging dir is freshly created by the caller, so there is nothing
+    pre-existing (symlinks included) for a write to follow. Limits are
+    enforced on actual streamed bytes, not tar-declared sizes.
     """
-    bundle_path = bundle_path.expanduser()
-    if not bundle_path.is_file():
-        raise BundleError(f"Bundle not found: {bundle_path}")
-
-    plaintext = decrypt_bytes(bundle_path.read_bytes(), identities)
-
-    extracted: dict[str, bytes] = {}
-    seen_casefold: set[str] = set()
+    hashes: dict[str, str] = {}
+    sizes: dict[str, int] = {}
+    seen_folded: set[str] = set()
     expanded = 0
     try:
         tar = tarfile.open(fileobj=io.BytesIO(plaintext), mode="r:gz")
@@ -202,57 +187,129 @@ def open_bundle(
                 raise BundleError(f"Bundle contains unsafe path: {name!r}")
             if not _member_allowed(name):
                 raise BundleError(f"Bundle contains disallowed member: {name!r}")
-            if name in extracted:
+            if name in hashes:
                 raise BundleError(f"Bundle contains duplicate member: {name!r}")
-            if name.casefold() in seen_casefold:
+            # Unicode-normalize before casefolding so canonically equivalent
+            # names (composed vs decomposed) also count as collisions.
+            folded = unicodedata.normalize("NFKC", name).casefold()
+            if folded in seen_folded:
                 raise BundleError(f"Bundle contains case-colliding member: {name!r}")
-            expanded += member.size
-            if expanded > max_expanded_bytes:
-                raise BundleError(
-                    f"Bundle exceeds expansion limit ({max_expanded_bytes} bytes)."
-                )
             fileobj = tar.extractfile(member)
             if fileobj is None:
                 raise BundleError(f"Bundle member unreadable: {name!r}")
-            extracted[name] = fileobj.read()
-            seen_casefold.add(name.casefold())
 
-    if MANIFEST_NAME not in extracted:
-        raise BundleError(f"Bundle is missing {MANIFEST_NAME}.")
-    try:
-        manifest = json.loads(extracted[MANIFEST_NAME].decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
-        raise BundleError(f"Bundle manifest is not valid JSON: {e}") from e
-    if manifest.get("format_version") != BUNDLE_FORMAT_VERSION:
-        raise BundleError(
-            f"Unsupported bundle format_version: {manifest.get('format_version')!r}"
-        )
+            target = staging / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256()
+            written = 0
+            with open(target, "wb") as out:
+                while chunk := fileobj.read(_STREAM_CHUNK):
+                    written += len(chunk)
+                    expanded += len(chunk)
+                    if expanded > max_expanded_bytes:
+                        raise BundleError(
+                            f"Bundle exceeds expansion limit ({max_expanded_bytes} bytes)."
+                        )
+                    digest.update(chunk)
+                    out.write(chunk)
+            hashes[name] = digest.hexdigest()
+            sizes[name] = written
+            seen_folded.add(folded)
+    return hashes, sizes
 
-    manifest_files = {entry["path"]: entry for entry in manifest.get("files", [])}
-    content_files = {n: d for n, d in extracted.items() if n != MANIFEST_NAME}
 
-    missing = sorted(set(manifest_files) - set(content_files))
-    extra = sorted(set(content_files) - set(manifest_files))
-    if missing:
-        raise BundleError(f"Bundle is missing manifest-listed files: {missing}")
-    if extra:
-        raise BundleError(f"Bundle contains files not in the manifest: {extra}")
+def _member_allowed(name: str) -> bool:
+    """Strict allowlist: exactly nodes/*.md, deleted/*.md, and the two json files."""
+    if name in (BACKUP_MANIFEST_NAME, MANIFEST_NAME):
+        return True
+    for prefix in ("nodes/", "deleted/"):
+        if name.startswith(prefix):
+            rest = name[len(prefix):]
+            return bool(rest) and "/" not in rest and rest.endswith(".md")
+    return False
 
-    for name, data in content_files.items():
-        entry = manifest_files[name]
-        if len(data) != entry["size"]:
-            raise BundleError(
-                f"Size mismatch for {name!r}: manifest {entry['size']}, got {len(data)}."
-            )
-        if _sha256(data) != entry["sha256"]:
-            raise BundleError(f"Hash mismatch for {name!r} — bundle is corrupt or tampered.")
+
+_STREAM_CHUNK = 1024 * 1024
+
+
+def open_bundle(
+    bundle_path: Path,
+    dest_dir: Path,
+    identities: list,
+    *,
+    max_members: int = MAX_MEMBERS,
+    max_expanded_bytes: int = MAX_EXPANDED_BYTES,
+) -> BundleInfo:
+    """Decrypt, safely extract, and hash-verify a bundle into dest_dir.
+
+    Any manifest mismatch (hash, size, missing, or extra file) is a hard
+    failure. Members are validated against a strict allowlist and streamed
+    into a fresh staging directory created by us — tar metadata is never
+    applied (strictly stronger than ``filter="data"``), nothing pre-existing
+    can be followed, and memory stays bounded regardless of expanded size.
+    dest_dir must not exist or must be empty; files land there only after
+    every hash has verified.
+    """
+    bundle_path = bundle_path.expanduser()
+    if not bundle_path.is_file():
+        raise BundleError(f"Bundle not found: {bundle_path}")
 
     dest_dir = dest_dir.expanduser()
-    for name, data in content_files.items():
-        target = dest_dir / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-    (dest_dir / MANIFEST_NAME).write_bytes(extracted[MANIFEST_NAME])
+    if dest_dir.exists():
+        if not dest_dir.is_dir() or any(dest_dir.iterdir()):
+            raise BundleError(
+                f"Destination {dest_dir} must be a new or empty directory."
+            )
+
+    plaintext = decrypt_bytes(bundle_path.read_bytes(), identities)
+
+    dest_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".ormah_extract_", dir=str(dest_dir.parent)))
+    try:
+        hashes, sizes = _stream_members_to(
+            staging, plaintext, max_members=max_members,
+            max_expanded_bytes=max_expanded_bytes,
+        )
+
+        if MANIFEST_NAME not in hashes:
+            raise BundleError(f"Bundle is missing {MANIFEST_NAME}.")
+        try:
+            manifest = json.loads((staging / MANIFEST_NAME).read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise BundleError(f"Bundle manifest is not valid JSON: {e}") from e
+        if manifest.get("format_version") != BUNDLE_FORMAT_VERSION:
+            raise BundleError(
+                f"Unsupported bundle format_version: {manifest.get('format_version')!r}"
+            )
+
+        manifest_files = {entry["path"]: entry for entry in manifest.get("files", [])}
+        content_names = set(hashes) - {MANIFEST_NAME}
+
+        missing = sorted(set(manifest_files) - content_names)
+        extra = sorted(content_names - set(manifest_files))
+        if missing:
+            raise BundleError(f"Bundle is missing manifest-listed files: {missing}")
+        if extra:
+            raise BundleError(f"Bundle contains files not in the manifest: {extra}")
+
+        for name in content_names:
+            entry = manifest_files[name]
+            if sizes[name] != entry["size"]:
+                raise BundleError(
+                    f"Size mismatch for {name!r}: manifest {entry['size']}, got {sizes[name]}."
+                )
+            if hashes[name] != entry["sha256"]:
+                raise BundleError(
+                    f"Hash mismatch for {name!r} — bundle is corrupt or tampered."
+                )
+
+        # Everything verified — move staged files into the (empty) destination.
+        for name in sorted(hashes):
+            target = dest_dir / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(str(staging / name), str(target))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
     sync = manifest.get("sync") or {}
     return BundleInfo(
@@ -262,7 +319,7 @@ def open_bundle(
         node_count=manifest.get("node_count", 0),
         deleted_count=manifest.get("deleted_count", 0),
         total_bytes=manifest.get("total_bytes", 0),
-        file_count=len(content_files),
+        file_count=len(content_names),
         sync_base_snapshot_id=sync.get("base_snapshot_id"),
         device_id=sync.get("device_id"),
     )
