@@ -21,6 +21,7 @@ from ormah.server_manager import (
     is_server_running,
 )
 from ormah.setup import (
+    CloudRecoveryPreflightError,
     CODEX_AGENTS_SENTINEL_END,
     CODEX_AGENTS_SENTINEL_START,
     CLAUDE_MD_SENTINEL_END,
@@ -35,9 +36,11 @@ from ormah.setup import (
     _pi_is_wired,
     _preload_local_models,
     _print_setup_summary,
+    _prepare_cloud_recovery,
     _remove_codex_hooks,
     _remove_codex_md_block,
     _remove_codex_mcp_config,
+    _remove_config_preserving_cloud_recovery,
     _read_env_file,
     _remove_codex_agents,
     _remove_claude_hooks,
@@ -2446,6 +2449,218 @@ class TestRunUninstall:
         assert not share_dir.exists()
         assert not cache_dir.exists()
         assert not config_dir.exists()
+
+    @pytest.mark.parametrize("filename", ["cloud.key", "ormah-recovery-kit.md"])
+    def test_config_cleanup_preserves_each_cloud_recovery_file(self, tmp_path, filename):
+        config_dir = tmp_path / ".config" / "ormah"
+        config_dir.mkdir(parents=True)
+        recovery_file = config_dir / filename
+        recovery_file.write_text("recovery material\n")
+        recovery_file.chmod(0o600)
+        (config_dir / ".env").write_text("ORMAH_ACCOUNT_TOKEN=secret\n")
+        nested = config_dir / "generated"
+        nested.mkdir()
+        (nested / "state.json").write_text("{}\n")
+
+        preserved = _remove_config_preserving_cloud_recovery(config_dir)
+
+        assert preserved == (recovery_file,)
+        assert recovery_file.read_text() == "recovery material\n"
+        assert stat.S_IMODE(recovery_file.stat().st_mode) == 0o600
+        assert list(config_dir.iterdir()) == [recovery_file]
+
+    def test_uninstall_preserves_cloud_recovery_material_with_yes(self, tmp_path, capsys):
+        share_dir = tmp_path / ".local" / "share" / "ormah"
+        cache_dir = tmp_path / ".cache" / "ormah"
+        config_dir = tmp_path / ".config" / "ormah"
+        for directory in (share_dir, cache_dir, config_dir):
+            directory.mkdir(parents=True)
+
+        from ormah.cloud.keys import get_or_create_store_id, init_key, write_recovery_kit
+
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        memory_dir = share_dir / "memory"
+        init_key(key_path)
+        store_id = get_or_create_store_id(memory_dir)
+        write_recovery_kit(store_id, key_path=key_path, kit_path=kit_path)
+        key_content = key_path.read_text()
+        kit_content = kit_path.read_text()
+        (config_dir / ".env").write_text("ORMAH_ACCOUNT_TOKEN=secret\n")
+
+        with (
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_codex_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_codex_md_block"),
+            patch("ormah.setup._remove_codex_agents"),
+            patch("ormah.setup._remove_claude_agents"),
+            patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_pi_md_block"),
+            patch("ormah.setup._remove_pi_agents"),
+            patch("ormah.setup._remove_fastembed_cache"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            run_uninstall(yes=True)
+
+        assert not share_dir.exists()
+        assert not cache_dir.exists()
+        assert key_path.read_text() == key_content
+        assert kit_path.read_text() == kit_content
+        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(kit_path.stat().st_mode) == 0o600
+        assert {path.name for path in config_dir.iterdir()} == {
+            "cloud.key",
+            "ormah-recovery-kit.md",
+        }
+        output = capsys.readouterr().out.lower()
+        assert "preserved cloud recovery material" in output
+        assert "permanently unreadable" in output
+
+    def test_recovery_preflight_regenerates_missing_kit(self, tmp_path):
+        from ormah.cloud.keys import (
+            extract_store_id,
+            get_or_create_store_id,
+            init_key,
+            load_identity_strings,
+        )
+
+        config_dir = tmp_path / ".config" / "ormah"
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        memory_dir = tmp_path / "memory"
+        init_key(key_path)
+        store_id = get_or_create_store_id(memory_dir)
+
+        result = _prepare_cloud_recovery(config_dir, [memory_dir])
+
+        assert result.kit_regenerated is True
+        assert result.paths == (key_path, kit_path)
+        assert load_identity_strings(kit_path) == load_identity_strings(key_path)
+        assert extract_store_id(str(kit_path)) == store_id
+        assert stat.S_IMODE(kit_path.stat().st_mode) == 0o600
+
+    def test_recovery_preflight_refreshes_stale_kit_after_rotation(self, tmp_path):
+        from ormah.cloud.keys import (
+            get_or_create_store_id,
+            init_key,
+            load_identity_strings,
+            rotate_key,
+            write_recovery_kit,
+        )
+
+        config_dir = tmp_path / ".config" / "ormah"
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        memory_dir = tmp_path / "memory"
+        init_key(key_path)
+        store_id = get_or_create_store_id(memory_dir)
+        write_recovery_kit(store_id, key_path=key_path, kit_path=kit_path)
+        rotate_key(key_path)
+
+        result = _prepare_cloud_recovery(config_dir, [memory_dir])
+
+        assert result.kit_regenerated is True
+        assert load_identity_strings(kit_path) == load_identity_strings(key_path)
+
+    def test_recovery_preflight_accepts_complete_kit_without_key_file(self, tmp_path):
+        from ormah.cloud.keys import get_or_create_store_id, init_key, write_recovery_kit
+
+        config_dir = tmp_path / ".config" / "ormah"
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        memory_dir = tmp_path / "memory"
+        init_key(key_path)
+        store_id = get_or_create_store_id(memory_dir)
+        write_recovery_kit(store_id, key_path=key_path, kit_path=kit_path)
+        original = kit_path.read_bytes()
+        key_path.unlink()
+
+        result = _prepare_cloud_recovery(config_dir, [memory_dir])
+
+        assert result.paths == (kit_path,)
+        assert result.kit_regenerated is False
+        assert kit_path.read_bytes() == original
+
+    def test_recovery_preflight_refuses_key_without_store_id(self, tmp_path):
+        from ormah.cloud.keys import init_key
+
+        config_dir = tmp_path / ".config" / "ormah"
+        init_key(config_dir / "cloud.key")
+
+        with pytest.raises(CloudRecoveryPreflightError, match="no store ID"):
+            _prepare_cloud_recovery(config_dir, [tmp_path / "memory"])
+
+    def test_recovery_preflight_refuses_mismatched_store(self, tmp_path):
+        from ormah.cloud.keys import get_or_create_store_id, init_key, write_recovery_kit
+
+        config_dir = tmp_path / ".config" / "ormah"
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        memory_a = tmp_path / "memory-a"
+        memory_b = tmp_path / "memory-b"
+        init_key(key_path)
+        store_a = get_or_create_store_id(memory_a)
+        store_b = get_or_create_store_id(memory_b)
+        write_recovery_kit(store_b, key_path=key_path, kit_path=kit_path)
+        original = kit_path.read_bytes()
+
+        with pytest.raises(CloudRecoveryPreflightError, match="does not match"):
+            _prepare_cloud_recovery(config_dir, [memory_a])
+
+        assert store_a != store_b
+        assert kit_path.read_bytes() == original
+
+    def test_recovery_preflight_refuses_multiple_store_ids(self, tmp_path):
+        from ormah.cloud.keys import get_or_create_store_id, init_key
+
+        config_dir = tmp_path / ".config" / "ormah"
+        init_key(config_dir / "cloud.key")
+        memory_a = tmp_path / "memory-a"
+        memory_b = tmp_path / "memory-b"
+        get_or_create_store_id(memory_a)
+        get_or_create_store_id(memory_b)
+
+        with pytest.raises(CloudRecoveryPreflightError, match="Multiple cloud store IDs"):
+            _prepare_cloud_recovery(config_dir, [memory_a, memory_b])
+
+    def test_uninstall_aborts_before_changes_when_recovery_is_incomplete(
+        self, tmp_path, capsys
+    ):
+        from ormah.cloud.keys import init_key
+
+        config_dir = tmp_path / ".config" / "ormah"
+        key_path = config_dir / "cloud.key"
+        init_key(key_path)
+
+        with patch("ormah.server_manager.uninstall_autostart") as mock_daemon:
+            run_uninstall(yes=True)
+
+        mock_daemon.assert_not_called()
+        assert key_path.is_file()
+        output = capsys.readouterr().out
+        assert "Uninstall cancelled before removing any data or integrations" in output
+
+    def test_warns_about_cloud_key_before_interactive_confirmation(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        config_dir = tmp_path / ".config" / "ormah"
+        config_dir.mkdir(parents=True)
+        key_path = config_dir / "cloud.key"
+        key_path.write_text("AGE-SECRET-KEY-TEST\n")
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        with patch("ormah.server_manager.uninstall_autostart") as mock_daemon:
+            run_uninstall(yes=False)
+
+        mock_daemon.assert_not_called()
+        assert key_path.exists()
+        output = capsys.readouterr().out.lower()
+        assert "uninstall will not delete it" in output
+        assert "permanently unreadable" in output
 
     def test_graceful_uv_failure(self, capsys):
         with (

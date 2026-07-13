@@ -159,6 +159,15 @@ them. Keep it offline and separate from the machine and cloud account it
 protects. Anyone with the kit can read the backups; without it, nobody can,
 including Ormah.
 
+`ormah uninstall` removes local data and account configuration, but it always
+preserves `~/.config/ormah/cloud.key` and
+`~/.config/ormah/ormah-recovery-kit.md`. Before deleting anything, uninstall
+verifies that the kit contains the current encryption identities and store ID,
+and safely refreshes a missing or stale kit when the local key and store ID are
+available. If complete recovery cannot be guaranteed, uninstall stops without
+removing data or integrations. Deleting the preserved files manually can make
+encrypted cloud backups permanently unreadable.
+
 Restore on a new machine with:
 
 ```bash

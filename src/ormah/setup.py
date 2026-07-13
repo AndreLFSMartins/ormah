@@ -68,6 +68,7 @@ def _find_binary(name: str) -> str | None:
     return None
 ENV_PATH = ENV_DIR / ".env"
 WRAPPER_PATH = ENV_DIR / "ormah-server"
+CLOUD_RECOVERY_FILENAMES = frozenset({"cloud.key", "ormah-recovery-kit.md"})
 
 CLAUDE_MD_SENTINEL_START = "<!-- ormah:start -->"
 CLAUDE_MD_SENTINEL_END = "<!-- ormah:end -->"
@@ -1924,9 +1925,209 @@ def _remove_uv_tool_install_files() -> bool:
     return removed
 
 
+def _cloud_recovery_paths(config_dir: Path) -> tuple[Path, ...]:
+    """Return recovery artifacts that uninstall must never delete."""
+    return tuple(
+        path
+        for name in sorted(CLOUD_RECOVERY_FILENAMES)
+        if (path := config_dir / name).exists() or path.is_symlink()
+    )
+
+
+class CloudRecoveryPreflightError(RuntimeError):
+    """Raised when uninstall cannot prove cloud backups remain recoverable."""
+
+
+@dataclass(frozen=True)
+class CloudRecoveryPreflight:
+    """Recovery artifacts verified before destructive uninstall work begins."""
+
+    paths: tuple[Path, ...]
+    kit_regenerated: bool = False
+
+
+def _store_id_for_uninstall(memory_dirs: list[Path]) -> str | None:
+    """Return the single store id uninstall is about to remove, if present."""
+    from ormah.cloud.keys import CloudKeyError, extract_store_id
+
+    store_ids: dict[str, list[Path]] = {}
+    for memory_dir in dict.fromkeys(memory_dirs):
+        store_path = memory_dir / ".store_id"
+        if not store_path.is_file():
+            continue
+        try:
+            value = store_path.read_text(encoding="utf-8").strip()
+            store_id = extract_store_id(f"store_id: {value}")
+        except (CloudKeyError, OSError) as exc:
+            raise CloudRecoveryPreflightError(
+                f"Cannot validate cloud store identity at {store_path}: {exc}"
+            ) from exc
+        if store_id is None:  # Defensive: an explicit store_id line must parse or raise.
+            raise CloudRecoveryPreflightError(
+                f"Cannot validate cloud store identity at {store_path}."
+            )
+        store_ids.setdefault(store_id, []).append(store_path)
+
+    if len(store_ids) > 1:
+        paths = ", ".join(str(path) for found in store_ids.values() for path in found)
+        raise CloudRecoveryPreflightError(
+            "Multiple cloud store IDs would be deleted, but one recovery kit can only "
+            f"represent one store: {paths}"
+        )
+    return next(iter(store_ids), None)
+
+
+def _validated_identity_strings(path: Path) -> list[str]:
+    """Read and cryptographically validate every age identity in a file."""
+    from ormah.cloud.keys import load_identities, load_identity_strings
+
+    strings = load_identity_strings(path)
+    load_identities(path)
+    return strings
+
+
+def _prepare_cloud_recovery(
+    config_dir: Path,
+    memory_dirs: list[Path],
+) -> CloudRecoveryPreflight:
+    """Ensure uninstall leaves a complete key + store-id recovery path.
+
+    A valid kit is left byte-for-byte untouched. A missing or stale kit is
+    regenerated only when the current key and one authoritative store id are
+    both available. Valid mismatched store ids fail closed because overwriting
+    that kit could orphan a different store.
+    """
+    from ormah.cloud.crypto import CloudCryptoError
+    from ormah.cloud.keys import CloudKeyError, extract_store_id, write_recovery_kit
+
+    paths = _cloud_recovery_paths(config_dir)
+    if not paths:
+        return CloudRecoveryPreflight(())
+
+    key_path = config_dir / "cloud.key"
+    kit_path = config_dir / "ormah-recovery-kit.md"
+    expected_store_id = _store_id_for_uninstall(memory_dirs)
+
+    key_identities: list[str] | None = None
+    if key_path.exists() or key_path.is_symlink():
+        if not key_path.is_file():
+            raise CloudRecoveryPreflightError(
+                f"Cloud key is not a readable file: {key_path}"
+            )
+        try:
+            key_identities = _validated_identity_strings(key_path)
+        except (CloudKeyError, CloudCryptoError, OSError) as exc:
+            raise CloudRecoveryPreflightError(
+                f"Cloud key validation failed at {key_path}: {exc}"
+            ) from exc
+
+    kit_identities: list[str] | None = None
+    kit_store_id: str | None = None
+    kit_error: Exception | None = None
+    if kit_path.exists() or kit_path.is_symlink():
+        if not kit_path.is_file():
+            kit_error = CloudRecoveryPreflightError(
+                f"Recovery kit is not a readable file: {kit_path}"
+            )
+        else:
+            try:
+                kit_identities = _validated_identity_strings(kit_path)
+            except (CloudKeyError, CloudCryptoError, OSError) as exc:
+                kit_error = exc
+            try:
+                kit_store_id = extract_store_id(str(kit_path))
+            except (CloudKeyError, OSError) as exc:
+                kit_error = exc
+
+    if (
+        kit_identities
+        and kit_store_id
+        and (key_identities is None or kit_identities == key_identities)
+        and (expected_store_id is None or kit_store_id == expected_store_id)
+    ):
+        return CloudRecoveryPreflight(_cloud_recovery_paths(config_dir))
+
+    if key_identities is None:
+        detail = f": {kit_error}" if kit_error else ""
+        raise CloudRecoveryPreflightError(
+            "No valid cloud key is available to repair the incomplete recovery "
+            f"kit at {kit_path}{detail}"
+        )
+    if (
+        expected_store_id is not None
+        and kit_store_id is not None
+        and kit_store_id != expected_store_id
+    ):
+        raise CloudRecoveryPreflightError(
+            f"Recovery kit store ID {kit_store_id} does not match the store being "
+            f"removed ({expected_store_id}); refusing to overwrite either store's kit."
+        )
+    target_store_id = expected_store_id or kit_store_id
+    if target_store_id is None:
+        raise CloudRecoveryPreflightError(
+            "The cloud key exists, but no store ID is available in either the "
+            "recovery kit or the memory store. Uninstall cannot guarantee recovery."
+        )
+
+    try:
+        write_recovery_kit(
+            target_store_id,
+            key_path=key_path,
+            kit_path=kit_path,
+        )
+        regenerated_identities = _validated_identity_strings(kit_path)
+        regenerated_store_id = extract_store_id(str(kit_path))
+    except (CloudKeyError, CloudCryptoError, OSError) as exc:
+        raise CloudRecoveryPreflightError(
+            f"Could not create a complete recovery kit at {kit_path}: {exc}"
+        ) from exc
+    if regenerated_identities != key_identities or regenerated_store_id != target_store_id:
+        raise CloudRecoveryPreflightError(
+            f"Recovery-kit verification failed after writing {kit_path}."
+        )
+    return CloudRecoveryPreflight(_cloud_recovery_paths(config_dir), kit_regenerated=True)
+
+
+def _remove_config_preserving_cloud_recovery(config_dir: Path) -> tuple[Path, ...]:
+    """Delete Ormah config while retaining zero-knowledge recovery material."""
+    preserved = _cloud_recovery_paths(config_dir)
+    if not preserved:
+        shutil.rmtree(config_dir)
+        return ()
+
+    preserved_names = {path.name for path in preserved}
+    for child in config_dir.iterdir():
+        if child.name in preserved_names:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+    ok(f"Deleted Ormah config from {config_dir}")
+    for path in preserved:
+        warn(f"Preserved cloud recovery material: {path}")
+    return preserved
+
+
 def run_uninstall(yes: bool = False) -> None:
-    """Remove all ormah integrations, data, and optionally the package itself."""
-    print("This will remove all ormah integrations and data.\n")
+    """Remove Ormah while preserving zero-knowledge cloud recovery material."""
+    print(
+        "This will remove Ormah integrations, local memory, caches, and account "
+        "configuration. Cloud recovery files are preserved.\n"
+    )
+
+    config_dir = Path.home() / ".config" / "ormah"
+    recovery_paths = _cloud_recovery_paths(config_dir)
+    if recovery_paths:
+        warn("Cloud recovery material detected; uninstall will not delete it:")
+        for path in recovery_paths:
+            warn(f"  {path}")
+        warn(
+            "Keep these files safe. Deleting them can make encrypted cloud backups "
+            "permanently unreadable."
+        )
+        print()
 
     if not yes:
         try:
@@ -1952,6 +2153,29 @@ def run_uninstall(yes: bool = False) -> None:
     # version of ormah is installed (older releases used a relative Path("memory")
     # that resolves differently depending on the invoking binary's config).
     live_data_dir = _get_running_server_data_dir()
+
+    from ormah.config import settings as _settings
+
+    config_mem_dir = _settings.memory_dir
+    if not config_mem_dir.is_absolute():
+        config_mem_dir = Path.home() / config_mem_dir
+    config_mem_dir = config_mem_dir.resolve()
+
+    if recovery_paths:
+        step("Verifying cloud recovery")
+        try:
+            recovery = _prepare_cloud_recovery(
+                config_dir,
+                list(filter(None, [live_data_dir, config_mem_dir])),
+            )
+        except CloudRecoveryPreflightError as exc:
+            warn(str(exc))
+            warn("Uninstall cancelled before removing any data or integrations.")
+            return
+        if recovery.kit_regenerated:
+            ok(f"Recovery kit refreshed and verified: {config_dir / 'ormah-recovery-kit.md'}")
+        else:
+            ok("Cloud recovery material is complete and verified")
 
     # a. Stop daemon
     step("Stopping server")
@@ -1990,18 +2214,12 @@ def run_uninstall(yes: bool = False) -> None:
     xdg_dirs = [
         Path.home() / ".local" / "share" / "ormah",
         Path.home() / ".cache" / "ormah",
-        Path.home() / ".config" / "ormah",
+        config_dir,
     ]
     data_dirs: list[Path] = list(xdg_dirs)
 
     # Add the live server's actual data dir if it falls outside the XDG tree.
     # Also add the config-derived path as a safety net (handles custom ORMAH_MEMORY_DIR).
-    from ormah.config import settings as _settings
-    config_mem_dir = _settings.memory_dir
-    if not config_mem_dir.is_absolute():
-        config_mem_dir = Path.home() / config_mem_dir
-    config_mem_dir = config_mem_dir.resolve()
-
     for candidate in filter(None, [live_data_dir, config_mem_dir]):
         if not any(candidate == d or str(candidate).startswith(str(d) + "/")
                    for d in xdg_dirs):
@@ -2010,8 +2228,13 @@ def run_uninstall(yes: bool = False) -> None:
 
     for d in data_dirs:
         if d.exists():
-            shutil.rmtree(d)
-            ok(f"Deleted {d}")
+            if d == config_dir:
+                preserved = _remove_config_preserving_cloud_recovery(d)
+                if not preserved:
+                    ok(f"Deleted {d}")
+            else:
+                shutil.rmtree(d)
+                ok(f"Deleted {d}")
         else:
             info(f"{d} not found — skipping")
 
