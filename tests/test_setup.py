@@ -38,6 +38,7 @@ from ormah.setup import (
     _remove_codex_hooks,
     _remove_codex_md_block,
     _remove_codex_mcp_config,
+    _remove_config_preserving_cloud_recovery,
     _read_env_file,
     _remove_codex_agents,
     _remove_claude_hooks,
@@ -2446,6 +2447,92 @@ class TestRunUninstall:
         assert not share_dir.exists()
         assert not cache_dir.exists()
         assert not config_dir.exists()
+
+    @pytest.mark.parametrize("filename", ["cloud.key", "ormah-recovery-kit.md"])
+    def test_config_cleanup_preserves_each_cloud_recovery_file(self, tmp_path, filename):
+        config_dir = tmp_path / ".config" / "ormah"
+        config_dir.mkdir(parents=True)
+        recovery_file = config_dir / filename
+        recovery_file.write_text("recovery material\n")
+        recovery_file.chmod(0o600)
+        (config_dir / ".env").write_text("ORMAH_ACCOUNT_TOKEN=secret\n")
+        nested = config_dir / "generated"
+        nested.mkdir()
+        (nested / "state.json").write_text("{}\n")
+
+        preserved = _remove_config_preserving_cloud_recovery(config_dir)
+
+        assert preserved == (recovery_file,)
+        assert recovery_file.read_text() == "recovery material\n"
+        assert stat.S_IMODE(recovery_file.stat().st_mode) == 0o600
+        assert list(config_dir.iterdir()) == [recovery_file]
+
+    def test_uninstall_preserves_cloud_recovery_material_with_yes(self, tmp_path, capsys):
+        share_dir = tmp_path / ".local" / "share" / "ormah"
+        cache_dir = tmp_path / ".cache" / "ormah"
+        config_dir = tmp_path / ".config" / "ormah"
+        for directory in (share_dir, cache_dir, config_dir):
+            directory.mkdir(parents=True)
+
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        key_content = "AGE-SECRET-KEY-TEST\n"
+        kit_content = "# Ormah Recovery Kit\nstore_id: test\n"
+        key_path.write_text(key_content)
+        kit_path.write_text(kit_content)
+        key_path.chmod(0o600)
+        kit_path.chmod(0o600)
+        (config_dir / ".env").write_text("ORMAH_ACCOUNT_TOKEN=secret\n")
+
+        with (
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_codex_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_codex_md_block"),
+            patch("ormah.setup._remove_codex_agents"),
+            patch("ormah.setup._remove_claude_agents"),
+            patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_pi_md_block"),
+            patch("ormah.setup._remove_pi_agents"),
+            patch("ormah.setup._remove_fastembed_cache"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            run_uninstall(yes=True)
+
+        assert not share_dir.exists()
+        assert not cache_dir.exists()
+        assert key_path.read_text() == key_content
+        assert kit_path.read_text() == kit_content
+        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(kit_path.stat().st_mode) == 0o600
+        assert {path.name for path in config_dir.iterdir()} == {
+            "cloud.key",
+            "ormah-recovery-kit.md",
+        }
+        output = capsys.readouterr().out.lower()
+        assert "preserved cloud recovery material" in output
+        assert "permanently unreadable" in output
+
+    def test_warns_about_cloud_key_before_interactive_confirmation(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        config_dir = tmp_path / ".config" / "ormah"
+        config_dir.mkdir(parents=True)
+        key_path = config_dir / "cloud.key"
+        key_path.write_text("AGE-SECRET-KEY-TEST\n")
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        with patch("ormah.server_manager.uninstall_autostart") as mock_daemon:
+            run_uninstall(yes=False)
+
+        mock_daemon.assert_not_called()
+        assert key_path.exists()
+        output = capsys.readouterr().out.lower()
+        assert "uninstall will not delete it" in output
+        assert "permanently unreadable" in output
 
     def test_graceful_uv_failure(self, capsys):
         with (

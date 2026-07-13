@@ -68,6 +68,7 @@ def _find_binary(name: str) -> str | None:
     return None
 ENV_PATH = ENV_DIR / ".env"
 WRAPPER_PATH = ENV_DIR / "ormah-server"
+CLOUD_RECOVERY_FILENAMES = frozenset({"cloud.key", "ormah-recovery-kit.md"})
 
 CLAUDE_MD_SENTINEL_START = "<!-- ormah:start -->"
 CLAUDE_MD_SENTINEL_END = "<!-- ormah:end -->"
@@ -1924,9 +1925,55 @@ def _remove_uv_tool_install_files() -> bool:
     return removed
 
 
+def _cloud_recovery_paths(config_dir: Path) -> tuple[Path, ...]:
+    """Return recovery artifacts that uninstall must never delete."""
+    return tuple(
+        path
+        for name in sorted(CLOUD_RECOVERY_FILENAMES)
+        if (path := config_dir / name).exists() or path.is_symlink()
+    )
+
+
+def _remove_config_preserving_cloud_recovery(config_dir: Path) -> tuple[Path, ...]:
+    """Delete Ormah config while retaining zero-knowledge recovery material."""
+    preserved = _cloud_recovery_paths(config_dir)
+    if not preserved:
+        shutil.rmtree(config_dir)
+        return ()
+
+    preserved_names = {path.name for path in preserved}
+    for child in config_dir.iterdir():
+        if child.name in preserved_names:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+    ok(f"Deleted Ormah config from {config_dir}")
+    for path in preserved:
+        warn(f"Preserved cloud recovery material: {path}")
+    return preserved
+
+
 def run_uninstall(yes: bool = False) -> None:
-    """Remove all ormah integrations, data, and optionally the package itself."""
-    print("This will remove all ormah integrations and data.\n")
+    """Remove Ormah while preserving zero-knowledge cloud recovery material."""
+    print(
+        "This will remove Ormah integrations, local memory, caches, and account "
+        "configuration. Cloud recovery files are preserved.\n"
+    )
+
+    config_dir = Path.home() / ".config" / "ormah"
+    recovery_paths = _cloud_recovery_paths(config_dir)
+    if recovery_paths:
+        warn("Cloud recovery material detected; uninstall will not delete it:")
+        for path in recovery_paths:
+            warn(f"  {path}")
+        warn(
+            "Keep these files safe. Deleting them can make encrypted cloud backups "
+            "permanently unreadable."
+        )
+        print()
 
     if not yes:
         try:
@@ -1990,7 +2037,7 @@ def run_uninstall(yes: bool = False) -> None:
     xdg_dirs = [
         Path.home() / ".local" / "share" / "ormah",
         Path.home() / ".cache" / "ormah",
-        Path.home() / ".config" / "ormah",
+        config_dir,
     ]
     data_dirs: list[Path] = list(xdg_dirs)
 
@@ -2010,8 +2057,13 @@ def run_uninstall(yes: bool = False) -> None:
 
     for d in data_dirs:
         if d.exists():
-            shutil.rmtree(d)
-            ok(f"Deleted {d}")
+            if d == config_dir:
+                preserved = _remove_config_preserving_cloud_recovery(d)
+                if not preserved:
+                    ok(f"Deleted {d}")
+            else:
+                shutil.rmtree(d)
+                ok(f"Deleted {d}")
         else:
             info(f"{d} not found — skipping")
 

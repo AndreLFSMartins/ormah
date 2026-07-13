@@ -13,7 +13,7 @@ Usage:
     ormah account logout    Revoke this device token and sign out
     ormah claude-md install Install shared Ormah guidance into CLAUDE.md
     ormah pi-md install     Install shared Ormah guidance into Pi AGENTS.md
-    ormah uninstall         Remove all ormah integrations and data
+    ormah uninstall         Remove integrations and local data; preserve cloud recovery files
     ormah mcp               Run MCP stdio server
     ormah recall <query>    Search memories
     ormah remember <text>   Store a memory
@@ -799,7 +799,10 @@ def main():
     setup_p.set_defaults(func=_cmd_setup)
 
     # --- uninstall ---
-    uninstall_p = sub.add_parser("uninstall", help="Remove all ormah integrations and data")
+    uninstall_p = sub.add_parser(
+        "uninstall",
+        help="Remove integrations and local data; preserve cloud recovery files",
+    )
     uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts")
     uninstall_p.set_defaults(func=_cmd_uninstall)
 
