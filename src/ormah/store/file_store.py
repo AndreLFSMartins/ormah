@@ -83,9 +83,13 @@ class FileStore:
     def soft_delete(self, node_id: str) -> bool:
         """Move a node file to the deleted/ directory, stamping deleted_at atomically.
 
-        The deleted_at tombstone in the moved file's frontmatter is the purge
-        clock (#28): self-contained, so it survives backup/restore and mtime resets.
-        Written via tmp + fsync + os.replace so a crash never leaves a partial tombstone.
+        The deleted_at tombstone in the moved file's frontmatter is both the purge
+        clock (#28) and the deletion timestamp sync merge ordering depends on:
+        self-contained, so it survives backup/restore and mtime resets. Written
+        straight to the destination via tmp + fsync + os.replace, so a crash never
+        leaves a partial tombstone — and never leaves a still-live node file in
+        nodes/ already carrying deleted_at. `updated` is deliberately untouched:
+        deletion ordering uses deleted_at, never updated.
         """
         path = self._find_file(node_id)
         if path is None:

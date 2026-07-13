@@ -27,6 +27,9 @@ def parse_node(text: str) -> MemoryNode:
     valid_until_raw = meta.get("valid_until")
     valid_until = _parse_dt(valid_until_raw) if valid_until_raw else None
 
+    deleted_at_raw = meta.get("deleted_at")
+    deleted_at = _parse_dt(deleted_at_raw) if deleted_at_raw else None
+
     return MemoryNode(
         id=meta["id"],
         type=NodeType(meta["type"]),
@@ -42,6 +45,7 @@ def parse_node(text: str) -> MemoryNode:
         last_review=_parse_dt(meta["last_review"]) if meta.get("last_review") else None,
         archived_at=_parse_dt(meta["archived_at"]) if meta.get("archived_at") else None,
         valid_until=valid_until,
+        deleted_at=deleted_at,
         space=meta.get("space"),
         space_locked=meta.get("space_locked", False),
         tags=meta.get("tags", []),
@@ -73,6 +77,8 @@ def serialize_node(node: MemoryNode) -> str:
         meta["archived_at"] = _format_dt(node.archived_at)
     if node.valid_until is not None:
         meta["valid_until"] = _format_dt(node.valid_until)
+    if node.deleted_at is not None:
+        meta["deleted_at"] = _format_dt(node.deleted_at)
     if node.title:
         meta["title"] = node.title
     if node.space:
