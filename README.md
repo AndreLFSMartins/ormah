@@ -132,6 +132,14 @@ Ormah can create timestamped local backups of the source-of-truth memory files a
 
 Read more: [Configuration Reference](https://www.ormah.me/docs/operations/configuration-reference)
 
+### Cloud Account
+
+Sign in with an emailed one-time code using `ormah account login`. Use
+`ormah account status` to inspect the cached paid-tier entitlement and
+`ormah account logout` to revoke this device token and remove local account
+credentials. Cloud entitlement checks tolerate temporary outages; they never
+gate local backups or cloud downloads.
+
 ### Agent-Agnostic Surfaces
 
 Ormah is not tied to a single agent.

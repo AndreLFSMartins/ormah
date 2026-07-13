@@ -1117,7 +1117,11 @@ def _write_env_file(env: dict[str, str]) -> None:
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.partition("=")[0].strip()
             if key in env and key not in seen:
-                out.append(f"{key}={env[key]}")
+                original_value = stripped.partition("=")[2].strip()
+                if env[key] == original_value:
+                    out.append(line)
+                else:
+                    out.append(f"{key}={env[key]}")
                 seen.add(key)
             # key removed by caller -> drop the line
         else:
