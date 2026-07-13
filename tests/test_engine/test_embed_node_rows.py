@@ -118,11 +118,22 @@ def test_persistence_failure_propagates_not_marked_failed(engine, monkeypatch):
     """An upsert_batch error is a JOB failure, not a per-node encode failure: it
     must propagate (tracked() records it) and the node must NOT enter failed_ids
     — a wrong failed_ids entry would get its vector deleted by the schema-mode
-    failed-node cleanup. (council r3, codex high)"""
+    failed-node cleanup. (council r3, codex high)
+
+    Uses >100 nodes so the in-loop chunk-boundary flush actually fires during
+    the loop (with <=100 nodes only the post-loop flush runs, which is
+    structurally outside any try regardless of where the in-loop call sits —
+    that would make this test pass even if _flush() were wrongly moved inside
+    the encode try). Asserts upsert_batch was called exactly once: if the
+    first flush's error were swallowed into failed_ids instead of propagating,
+    the loop would continue and a second (post-loop) flush would call
+    upsert_batch again, catching the exact regression this test guards
+    against."""
     import sqlite3
 
     dim = engine.settings.embedding_dim
-    nid, _ = engine.remember(CreateNodeRequest(title="pf", content="persist fail"))
+    for i in range(101):
+        engine.remember(CreateNodeRequest(title=f"pf{i}", content=f"persist fail {i}"))
     with engine.db.transaction() as conn:
         conn.execute("DELETE FROM node_vectors")
 
@@ -132,15 +143,18 @@ def test_persistence_failure_propagates_not_marked_failed(engine, monkeypatch):
 
     monkeypatch.setattr("ormah.embeddings.encoder.get_encoder", lambda s: _OkEncoder())
 
+    calls = {"n": 0}
+
     def _boom(self, items):
+        calls["n"] += 1
         raise sqlite3.OperationalError("disk I/O error")
 
     monkeypatch.setattr(
         "ormah.embeddings.vector_store.VectorStore.upsert_batch", _boom
     )
-    rows = engine.db.conn.execute(
-        "SELECT id, title, content FROM nodes WHERE id = ?", (nid,)
-    ).fetchall()
+    rows = engine.db.conn.execute("SELECT id, title, content FROM nodes").fetchall()
 
     with pytest.raises(sqlite3.OperationalError):
         engine._embed_node_rows(rows)
+
+    assert calls["n"] == 1  # propagated immediately; no second (post-loop) flush attempt
