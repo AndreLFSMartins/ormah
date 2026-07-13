@@ -136,6 +136,27 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
         misfire_grace_time=_MISFIRE_GRACE,
     )
 
+    from ormah.cloud.jobs import run_cloud_backup, run_restore_verification
+
+    scheduler.add_job(
+        tracked(tracker, "cloud_backup", run_cloud_backup, engine),
+        "interval",
+        hours=s.cloud_backup_interval_hours,
+        id="cloud_backup",
+        name="Encrypted cloud backup",
+        next_run_time=datetime.now(timezone.utc),
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
+    scheduler.add_job(
+        tracked(tracker, "restore_verification", run_restore_verification, engine),
+        "interval",
+        hours=168,
+        id="restore_verification",
+        name="Cloud restore verification",
+        misfire_grace_time=_MISFIRE_GRACE,
+    )
+
     scheduler.start()
     logger.info("Background scheduler started with %d jobs", len(scheduler.get_jobs()))
     return scheduler, tracker

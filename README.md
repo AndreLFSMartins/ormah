@@ -140,6 +140,44 @@ Sign in with an emailed one-time code using `ormah account login`. Use
 credentials. Cloud entitlement checks tolerate temporary outages; they never
 gate local backups or cloud downloads.
 
+### Cloud Backup (Paid)
+
+Ormah can encrypt local memory backups on your machine and upload only the
+ciphertext to Ormah Cloud. Sign in, initialize the store key, and enable the
+scheduled uploader:
+
+```bash
+ormah account login
+ormah cloud init
+# Add ORMAH_CLOUD_BACKUP_ENABLED=true to ~/.config/ormah/.env
+ormah backup status
+```
+
+The recovery kit written by `ormah cloud init` contains every identity needed
+to decrypt current and pre-rotation snapshots, plus the store ID that locates
+them. Keep it offline and separate from the machine and cloud account it
+protects. Anyone with the kit can read the backups; without it, nobody can,
+including Ormah.
+
+Restore on a new machine with:
+
+```bash
+ormah account login
+ormah cloud init --import-key /path/to/ormah-recovery-kit.md
+ormah backup restore --cloud --yes
+```
+
+Cloud downloads remain available when a paid entitlement expires. The restore
+command verifies the encrypted bundle manifest and every file hash before it
+delegates to the normal local restore path. A weekly background job also
+downloads the latest committed snapshot, rebuilds a scratch index, and probes
+search without touching the live memory directory. `ormah backup status` and
+the admin panel report the last snapshot proven restorable.
+
+The hosted service never receives key material, plaintext, or blob bytes. It
+stores account and snapshot metadata and issues short-lived object-store URLs;
+encryption, decryption, hashing, upload, and restore all happen on the client.
+
 ### Agent-Agnostic Surfaces
 
 Ormah is not tied to a single agent.
