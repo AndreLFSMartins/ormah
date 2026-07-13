@@ -1,6 +1,9 @@
 """Tests for MemoryEngine._embed_node_rows (extracted embedding core, #32)."""
 from __future__ import annotations
 
+import numpy as np
+import pytest
+
 from ormah.models.node import CreateNodeRequest
 
 
@@ -45,3 +48,99 @@ def test_embed_node_rows_empty_list_is_noop(engine):
     embedded_ids, failed_ids = engine._embed_node_rows([])
     assert embedded_ids == []
     assert failed_ids == []
+
+
+def test_embed_node_rows_persists_incrementally(engine, monkeypatch):
+    """A hard interrupt mid-encode must leave already-encoded chunks persisted,
+    not lose everything. Simulate the kill with a BaseException on encode #101."""
+    dim = engine.settings.embedding_dim
+    for i in range(150):
+        engine.remember(CreateNodeRequest(title=f"n{i}", content=f"content {i}"))
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors")
+
+    calls = {"n": 0}
+
+    class _KillAt101:
+        def encode(self, text):
+            calls["n"] += 1
+            if calls["n"] == 101:
+                raise KeyboardInterrupt("hard kill mid-encode")
+            return np.ones(dim, dtype=np.float32)
+
+    monkeypatch.setattr("ormah.embeddings.encoder.get_encoder", lambda s: _KillAt101())
+    rows = engine.db.conn.execute("SELECT id, title, content FROM nodes").fetchall()
+
+    with pytest.raises(KeyboardInterrupt):
+        engine._embed_node_rows(rows)
+
+    persisted = engine.db.conn.execute(
+        "SELECT count(*) FROM node_vectors_rowids"
+    ).fetchone()[0]
+    assert persisted == 100  # first full chunk landed before the kill
+
+
+def test_embed_node_rows_flushes_pending_on_cooperative_cancel(engine, monkeypatch):
+    """stop_event set mid-run: everything encoded so far is persisted (the final
+    flush runs on the cooperative-cancel path too)."""
+    import threading
+
+    dim = engine.settings.embedding_dim
+    for i in range(120):
+        engine.remember(CreateNodeRequest(title=f"c{i}", content=f"cancel {i}"))
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors")
+
+    stop = threading.Event()
+    calls = {"n": 0}
+
+    class _StopAt105:
+        def encode(self, text):
+            calls["n"] += 1
+            if calls["n"] == 105:
+                stop.set()  # cancellation arrives after this encode returns
+            return np.ones(dim, dtype=np.float32)
+
+    monkeypatch.setattr("ormah.embeddings.encoder.get_encoder", lambda s: _StopAt105())
+    rows = engine.db.conn.execute("SELECT id, title, content FROM nodes").fetchall()
+
+    embedded_ids, failed_ids = engine._embed_node_rows(rows, stop_event=stop)
+
+    assert len(embedded_ids) == 105  # 100 flushed at the boundary + 5 pending flushed on exit
+    assert failed_ids == []
+    persisted = engine.db.conn.execute(
+        "SELECT count(*) FROM node_vectors_rowids"
+    ).fetchone()[0]
+    assert persisted == 105
+
+
+def test_persistence_failure_propagates_not_marked_failed(engine, monkeypatch):
+    """An upsert_batch error is a JOB failure, not a per-node encode failure: it
+    must propagate (tracked() records it) and the node must NOT enter failed_ids
+    — a wrong failed_ids entry would get its vector deleted by the schema-mode
+    failed-node cleanup. (council r3, codex high)"""
+    import sqlite3
+
+    dim = engine.settings.embedding_dim
+    nid, _ = engine.remember(CreateNodeRequest(title="pf", content="persist fail"))
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors")
+
+    class _OkEncoder:
+        def encode(self, text):
+            return np.ones(dim, dtype=np.float32)
+
+    monkeypatch.setattr("ormah.embeddings.encoder.get_encoder", lambda s: _OkEncoder())
+
+    def _boom(self, items):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(
+        "ormah.embeddings.vector_store.VectorStore.upsert_batch", _boom
+    )
+    rows = engine.db.conn.execute(
+        "SELECT id, title, content FROM nodes WHERE id = ?", (nid,)
+    ).fetchall()
+
+    with pytest.raises(sqlite3.OperationalError):
+        engine._embed_node_rows(rows)

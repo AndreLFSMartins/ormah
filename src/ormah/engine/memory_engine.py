@@ -1197,15 +1197,34 @@ class MemoryEngine:
     def _embed_node_rows(self, nodes, stop_event=None) -> tuple[list[str], list[str]]:
         """Embed the given node rows into the vector store.
 
-        Builds embeddings, then upserts in chunks of 100 with a WAL checkpoint
-        between chunks (sqlite-vec vec0 can silently drop rows in large
-        transactions). Returns (embedded_ids, failed_ids). Nodes whose embedding
-        text is empty are skipped (in neither list). Logs a warning if the final
+        Encode and upsert are interleaved: every 100 encoded rows are flushed
+        to the vector store immediately, with a WAL checkpoint after each
+        flush (sqlite-vec vec0 can silently drop rows in large transactions).
+        Returns (embedded_ids, failed_ids). Nodes whose embedding text is
+        empty are skipped (in neither list). Logs a warning if the final
         vec_count is below the number upserted (possible silent vec0 drop).
 
-        If ``stop_event`` is provided and becomes set, the encode loop and the
-        upsert loop both exit early (cooperative cancellation). Only ids that
-        were actually written to the DB are returned as ``embedded_ids``.
+        Durability contract: persistence is atomic per chunk of 100 — a hard
+        kill mid-``upsert_batch`` rolls back at most the current chunk, and
+        every earlier chunk stays on disk. DELTA mode is restart-resumable
+        (the anti-join that selects rows to embed skips already-persisted
+        ones). SCHEMA mode still re-encodes every row until the schema
+        version advances at the end — the upserts are idempotent, so a
+        restart wastes compute but loses no data (schema-progress tracking
+        to skip already-migrated rows is a deferred follow-up).
+
+        A DB error raised while flushing a chunk (e.g. from ``upsert_batch``)
+        is NOT treated as a per-node encode failure: it propagates out of
+        this function so the caller's job tracking records it as an
+        aborted job, instead of being caught and misattributed to whichever
+        node happened to be encoding next (which would wrongly enter
+        ``failed_ids`` and, in schema mode, get its persisted vector deleted
+        by the failed-node cleanup).
+
+        If ``stop_event`` is provided and becomes set, the encode loop exits
+        early (cooperative cancellation) but pending encoded rows are still
+        flushed before returning. Only ids that were actually written to the
+        DB are returned as ``embedded_ids``.
         """
         from ormah.embeddings.vector_store import VectorStore
         from ormah.embeddings.encoder import get_encoder
@@ -1219,33 +1238,42 @@ class MemoryEngine:
         max_chars = self.settings.embedding_max_content_chars
         log_every = max(1, total // 10)
 
-        all_items: list[tuple[str, Any]] = []
+        chunk_size = 100
+        pending: list[tuple[str, Any]] = []
+        upserted_ids: list[str] = []
         failed_ids: list[str] = []
+
+        def _flush() -> None:
+            # Persistence errors are NOT per-node failures: they propagate so the
+            # job aborts loudly (tracked() records it) instead of polluting
+            # failed_ids — a failed_ids entry here would be wrong AND, in schema
+            # mode, would get its (possibly persisted) vector deleted by the
+            # failed-node cleanup.
+            if not pending:
+                return
+            vec_store.upsert_batch(pending)
+            self.db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            upserted_ids.extend(item[0] for item in pending)
+            pending.clear()
+
         for idx, n in enumerate(nodes):
             if stop_event is not None and stop_event.is_set():
-                break  # cooperative cancel — stop accumulating work
+                break  # cooperative cancel — the final _flush() below persists pending
             text = _embedding_text(n["title"], n["content"], max_chars)
             if text:
                 try:
                     embedding = encoder.encode(text)
-                    all_items.append((n["id"], embedding))
                 except Exception as e:
                     logger.warning("Failed to embed node %s: %s", n["id"][:8], e)
                     failed_ids.append(n["id"])
+                else:
+                    pending.append((n["id"], embedding))
+                    if len(pending) >= chunk_size:
+                        _flush()  # outside the encode try — DB errors propagate
             done = idx + 1
             if done % log_every == 0 or done == total:
                 logger.info("Embedding memories: %d/%d", done, total)
-
-        # Upsert in small chunks with WAL checkpoint after each.
-        chunk_size = 100
-        upserted_ids: list[str] = []
-        for i in range(0, len(all_items), chunk_size):
-            if stop_event is not None and stop_event.is_set():
-                break  # cooperative cancel — stop before this DB write
-            chunk = all_items[i : i + chunk_size]
-            vec_store.upsert_batch(chunk)
-            self.db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            upserted_ids.extend(item[0] for item in chunk)
+        _flush()  # final partial chunk — runs on natural end AND cooperative cancel
 
         embedded_ids = upserted_ids
         vec_count = self.db.conn.execute("SELECT count(*) FROM node_vectors").fetchone()[0]
