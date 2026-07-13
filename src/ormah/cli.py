@@ -261,6 +261,16 @@ def _format_cache_age(seconds: int | None) -> str:
     return f"{seconds // 86400}d"
 
 
+def _format_iso_time(value: str | None) -> str:
+    if value is None:
+        return "never"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return _format_backup_time(parsed)
+
+
 def _cmd_account_login(args):
     from ormah.cloud.client import (
         CloudError,
@@ -418,12 +428,14 @@ def _cmd_backup_list(args):
 
 
 def _cmd_backup_status(args):
+    from ormah.cloud.state import cloud_status_payload
     from ormah.config import settings
 
     service = _backup_service()
     latest = service.latest()
     has_memory = service.has_backupable_memory()
     due = has_memory and service.backup_due(interval_hours=settings.backup_interval_hours)
+    cloud = cloud_status_payload(settings)
     status = {
         "enabled": settings.backup_enabled,
         "backup_dir": str(settings.backup_dir),
@@ -432,6 +444,7 @@ def _cmd_backup_status(args):
         "has_backupable_memory": has_memory,
         "due": due,
         "latest": _backup_to_dict(latest) if latest else None,
+        "cloud": cloud,
     }
 
     if args.json:
@@ -450,27 +463,65 @@ def _cmd_backup_status(args):
     else:
         print(f"Backup due now: {'yes' if due else 'no'}")
 
+    print("\nCloud backup:")
+    print(f"  Automatic uploads: {'enabled' if cloud['enabled'] else 'disabled'}")
+    print(f"  Entitlement: {cloud['entitlement']}")
+    if cloud["last_upload_snapshot_id"]:
+        age = _format_cache_age(cloud["last_upload_age_seconds"])
+        print(f"  Last upload: {cloud['last_upload_snapshot_id']} ({age} ago)")
+    else:
+        print("  Last upload: never")
+    if cloud["last_verify_ok"] is True:
+        print(f"  Last verified restorable: ✓ {_format_iso_time(cloud['last_verify_at'])}")
+    elif cloud["last_verify_ok"] is False:
+        reason = f" — {cloud['last_verify_error']}" if cloud["last_verify_error"] else ""
+        print(f"  Last verified restorable: ✗ {_format_iso_time(cloud['last_verify_at'])}{reason}")
+    else:
+        print("  Last verified restorable: not yet verified")
+    for warning in cloud["warnings"]:
+        print(f"  WARNING: {warning}")
+
 
 def _cmd_backup_restore(args):
     from ormah.backup import BackupError
+    from ormah.cloud.restore import CloudRestoreError, restore_cloud_snapshot
+    from ormah.config import settings
     from ormah.console import info, ok, warn
     from ormah.server_manager import is_server_running
 
     if is_server_running():
         _print_backup_error("Stop the Ormah server before restoring: ormah server stop")
 
+    cloud_requested = args.cloud is not None
+    if cloud_requested and args.backup:
+        _print_backup_error("Choose either a local backup name or --cloud, not both.")
+    if not cloud_requested and not args.backup:
+        _print_backup_error("Provide a local backup name or use --cloud [SNAPSHOT_ID].")
+
+    restore_label = (
+        f"cloud snapshot {args.cloud}" if args.cloud else "latest committed cloud snapshot"
+    ) if cloud_requested else f"backup {args.backup}"
+
     if not args.yes:
         if not sys.stdin.isatty():
             _print_backup_error("Restore needs confirmation. Re-run with --yes in non-interactive shells.")
         warn("Restore overwrites current memory files.")
-        answer = input(f"Restore backup {args.backup}? (y/N) ").strip().lower()
+        answer = input(f"Restore {restore_label}? (y/N) ").strip().lower()
         if answer not in {"y", "yes"}:
             info("Restore cancelled")
             return
 
     try:
-        result = _backup_service().restore(args.backup, rebuild_index=not args.no_rebuild)
-    except BackupError as exc:
+        if cloud_requested:
+            cloud_result = restore_cloud_snapshot(
+                settings,
+                args.cloud or None,
+                rebuild_index=not args.no_rebuild,
+            )
+            result = cloud_result.restore
+        else:
+            result = _backup_service().restore(args.backup, rebuild_index=not args.no_rebuild)
+    except (BackupError, CloudRestoreError) as exc:
         _print_backup_error(str(exc))
 
     ok(f"Restored backup: {result.restored.name}")
@@ -680,8 +731,15 @@ def main():
     backup_status.add_argument("--json", action="store_true", help="Output backup status as JSON")
     backup_status.set_defaults(func=_cmd_backup_status)
 
-    backup_restore = backup_sub.add_parser("restore", help="Restore memory files from a local backup")
-    backup_restore.add_argument("backup", help="Backup name from `ormah backup list`")
+    backup_restore = backup_sub.add_parser("restore", help="Restore memory files from a backup")
+    backup_restore.add_argument("backup", nargs="?", help="Backup name from `ormah backup list`")
+    backup_restore.add_argument(
+        "--cloud",
+        nargs="?",
+        const="",
+        metavar="SNAPSHOT_ID",
+        help="Restore the latest committed cloud snapshot, or the specified snapshot",
+    )
     backup_restore.add_argument("--yes", action="store_true", help="Skip interactive restore confirmation")
     backup_restore.add_argument("--no-rebuild", action="store_true", help="Skip search index rebuild")
     backup_restore.set_defaults(func=_cmd_backup_restore)

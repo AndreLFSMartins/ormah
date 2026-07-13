@@ -114,6 +114,11 @@ def test_backup_interval_zero():
         _settings(backup_interval_hours=0)
 
 
+def test_cloud_backup_interval_zero():
+    with pytest.raises(ValidationError, match="cloud_backup_interval_hours must be >= 1"):
+        _settings(cloud_backup_interval_hours=0)
+
+
 def test_backup_retention_zero():
     with pytest.raises(ValidationError, match="backup_retention_count must be >= 1"):
         _settings(backup_retention_count=0)

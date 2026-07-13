@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     # Encrypted cloud backups (paid tier). Client-side keys; nothing readable
     # ever leaves the machine. Off by default until an account is configured.
     cloud_backup_enabled: bool = False
+    cloud_backup_interval_hours: int = 24
     cloud_api_url: str = "https://api.ormah.dev"
     account_token: str | None = None
     account_email: str | None = None
@@ -398,6 +399,13 @@ class Settings(BaseSettings):
     def _backup_interval_hours_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"backup_interval_hours must be >= 1, got {v}")
+        return v
+
+    @field_validator("cloud_backup_interval_hours")
+    @classmethod
+    def _cloud_backup_interval_hours_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"cloud_backup_interval_hours must be >= 1, got {v}")
         return v
 
     @field_validator("backup_retention_count")
