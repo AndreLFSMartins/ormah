@@ -10,26 +10,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Free runner disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      - name: Free runner disk space
-        run: |
-          echo "Disk before cleanup:"
-          df -h
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          docker system prune --all --force || true
-
-          echo "Disk after cleanup:"
-          df -h
       - name: Install
         run: uv sync --extra dev
       - name: Run tests
-        run: uv run pytest tests/ -q --durations=25
+        run: |
+          monitor_disk() {
+            while true; do
+              echo "::group::Disk usage $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              df -h
+              df -i
+              (du -x -h -d 2 \
+                "$GITHUB_WORKSPACE" \
+                "$RUNNER_TEMP" \
+                "$UV_CACHE_DIR" \
+                "$HOME/.local/share/ormah" \
+                "$HOME/.cache" \
+                /tmp \
+                .venv 2>/dev/null || true) | sort -hr | head -100
+              echo "::endgroup::"
+              sleep 120
+            done
+          }
+
+          monitor_disk &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
+
+          uv run pytest tests/ -vv --durations=25
       - name: Report disk usage
         if: always()
         run: |
