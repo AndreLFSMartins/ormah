@@ -2599,7 +2599,8 @@ class TestRemoveFastembedCache:
         # cache_dir itself is removed when empty
         assert not tmp_path.exists()
 
-    def test_uses_default_fastembed_cache_dir(self, tmp_path):
+    def test_uses_default_fastembed_cache_dir(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FASTEMBED_CACHE_PATH")
         cache_dir = tmp_path / ".local" / "share" / "ormah" / "models"
         model_dir = cache_dir / "models--qdrant--bge-base-en-v1.5-onnx-q"
         model_dir.mkdir(parents=True)
