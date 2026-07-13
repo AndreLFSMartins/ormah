@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     # ever leaves the machine. Off by default until an account is configured.
     cloud_backup_enabled: bool = False
     cloud_api_url: str = "https://api.ormah.dev"
+    account_token: str | None = None
+    account_email: str | None = None
 
     # Embeddings
     embedding_provider: str = "local"  # "local", "ollama", "litellm"

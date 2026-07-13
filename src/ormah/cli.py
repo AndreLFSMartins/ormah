@@ -8,6 +8,9 @@ Usage:
     ormah setup             One-shot setup (hooks, MCP, server)
     ormah backup create     Create a local memory backup
     ormah backup restore    Restore a local memory backup
+    ormah account login     Sign in to Ormah Cloud
+    ormah account status    Show cached account entitlement status
+    ormah account logout    Revoke this device token and sign out
     ormah claude-md install Install shared Ormah guidance into CLAUDE.md
     ormah pi-md install     Install shared Ormah guidance into Pi AGENTS.md
     ormah uninstall         Remove all ormah integrations and data
@@ -230,6 +233,133 @@ def _backup_service():
     from ormah.config import settings
 
     return service_from_settings(settings)
+
+
+def _cloud_client():
+    from ormah.cloud.client import client_from_settings
+    from ormah.config import settings
+
+    return client_from_settings(settings)
+
+
+def _print_account_error(message: str) -> None:
+    from ormah.console import fail
+
+    fail(message)
+    sys.exit(1)
+
+
+def _format_cache_age(seconds: int | None) -> str:
+    if seconds is None:
+        return "none"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _cmd_account_login(args):
+    from ormah.cloud.client import (
+        CloudError,
+        get_device_name,
+        get_or_create_device_id,
+        persist_account_credentials,
+    )
+    from ormah.cloud.entitlements import refresh_entitlements, status_from_cache
+    from ormah.config import settings
+    from ormah.console import info, ok, warn
+
+    email = (args.email or input("Email: ")).strip().lower()
+    if not email:
+        _print_account_error("Email is required.")
+
+    client = None
+    try:
+        client = _cloud_client()
+        client.request_code(email)
+        info(f"Sign-in code requested for {email}")
+        code = (args.code or input("Sign-in code: ")).strip()
+        device_id = get_or_create_device_id()
+        device_name = get_device_name()
+        token = client.verify_code(email, code, device_id, device_name)
+        persist_account_credentials(token, email)
+        try:
+            cache = refresh_entitlements(settings, client=client)
+        except Exception:
+            cache = None
+    except (CloudError, OSError) as exc:
+        _print_account_error(str(exc))
+    finally:
+        close = getattr(client, "close", None) if client is not None else None
+        if close:
+            close()
+
+    ok(f"Signed in as {email}")
+    if cache is None:
+        warn("Entitlement status is unavailable while offline; it will refresh later.")
+        return
+    print(f"Plan status: {cache.plan_status or 'unknown'}")
+    print(f"Cloud backup entitlement: {status_from_cache(cache).value}")
+
+
+def _cmd_account_status(args):
+    from ormah.cloud.client import get_device_name
+    from ormah.cloud.entitlements import check_entitlement, load_entitlement_cache
+    from ormah.config import settings
+
+    state = check_entitlement(settings)
+    cache = load_entitlement_cache()
+    age_seconds = int(cache.age().total_seconds()) if cache is not None else None
+    result = {
+        "cache_age_seconds": age_seconds,
+        "device_name": get_device_name(),
+        "email": settings.account_email,
+        "entitlement": state.value,
+        "plan_status": cache.plan_status if cache is not None else None,
+    }
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+
+    print(f"Account: {settings.account_email or 'not signed in'}")
+    print(f"Entitlement: {state.value}")
+    print(f"Plan status: {result['plan_status'] or 'unknown'}")
+    print(f"Cache age: {_format_cache_age(age_seconds)}")
+    print(f"Device: {result['device_name']}")
+
+
+def _cmd_account_logout(args):
+    from ormah.cloud.client import remove_account_credentials
+    from ormah.cloud.entitlements import clear_entitlement_cache
+    from ormah.config import settings
+    from ormah.console import info, ok, warn
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            _print_account_error("Logout needs confirmation. Re-run with --yes in non-interactive shells.")
+        answer = input("Revoke this device token and sign out? (y/N) ").strip().lower()
+        if answer not in {"y", "yes"}:
+            info("Logout cancelled")
+            return
+
+    if settings.account_token:
+        client = None
+        try:
+            client = _cloud_client()
+            client.revoke_token()
+        except Exception as exc:
+            warn(f"Could not revoke the server token while offline: {exc}")
+        finally:
+            close = getattr(client, "close", None) if client is not None else None
+            if close:
+                close()
+
+    remove_account_credentials()
+    clear_entitlement_cache()
+    ok("Signed out locally")
 
 
 def _print_backup_error(message: str) -> None:
@@ -555,6 +685,23 @@ def main():
     backup_restore.add_argument("--yes", action="store_true", help="Skip interactive restore confirmation")
     backup_restore.add_argument("--no-rebuild", action="store_true", help="Skip search index rebuild")
     backup_restore.set_defaults(func=_cmd_backup_restore)
+
+    # --- account ---
+    account_p = sub.add_parser("account", help="Manage the Ormah Cloud account")
+    account_sub = account_p.add_subparsers(dest="account_cmd", required=True)
+
+    account_login = account_sub.add_parser("login", help="Sign in with an emailed one-time code")
+    account_login.add_argument("--email", help="Account email (otherwise prompted)")
+    account_login.add_argument("--code", help="One-time code (otherwise prompted)")
+    account_login.set_defaults(func=_cmd_account_login)
+
+    account_status = account_sub.add_parser("status", help="Show account and entitlement status")
+    account_status.add_argument("--json", action="store_true", help="Output status as JSON")
+    account_status.set_defaults(func=_cmd_account_status)
+
+    account_logout = account_sub.add_parser("logout", help="Revoke this device token and sign out")
+    account_logout.add_argument("--yes", action="store_true", help="Skip interactive confirmation")
+    account_logout.set_defaults(func=_cmd_account_logout)
 
     # --- cloud ---
     cloud_p = sub.add_parser("cloud", help="Encrypted cloud backup keys and store identity")
