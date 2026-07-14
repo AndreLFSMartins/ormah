@@ -275,3 +275,55 @@ def test_full_rebuild_allocates_new_seq(engine):
         "SELECT value FROM meta WHERE key = 'auto_link_watermark'"
     ).fetchone()
     assert watermark is None, "full_rebuild must clear the watermark"
+
+
+def test_full_rebuild_invalidates_pairs_only_for_changed_content(engine):
+    """A rebuild over CHANGED content must drop that node's cached verdicts.
+
+    full_rebuild clears the watermark so everything is requeued — but auto_linker skips any
+    pair already in auto_link_checked, so without invalidation the old content's link
+    decisions silently carry over to the restored/edited content. Unchanged nodes must keep
+    their verdicts: re-judging an untouched store with the LLM would be a huge pointless cost.
+    """
+    changed = _make_node(engine, title="Python", content="Python is a language.")
+    untouched = _make_node(engine, title="Ruby", content="Ruby is a language.")
+    pair_changed = tuple(sorted([changed, untouched]))
+
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO auto_link_checked (node_a, node_b, result, checked_at) "
+            "VALUES (?, ?, 'none', '2026-07-14T00:00:00+00:00')",
+            pair_changed,
+        )
+
+    # edit one node's content on disk, leave the other alone
+    node = engine.file_store.load(changed)
+    node.content = "Totally different subject: baking sourdough bread."
+    engine.file_store.save(node)
+
+    engine.builder.full_rebuild()
+
+    left = engine.db.conn.execute(
+        "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair_changed
+    ).fetchone()
+    assert left is None, "a rebuild over changed content must drop that node's cached verdicts"
+
+
+def test_full_rebuild_keeps_pairs_when_content_is_unchanged(engine):
+    """The converse: rebuilding an untouched store must NOT re-judge it with the LLM."""
+    id_a = _make_node(engine, title="Python", content="Python is a language.")
+    id_b = _make_node(engine, title="Ruby", content="Ruby is a language.")
+    pair = tuple(sorted([id_a, id_b]))
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO auto_link_checked (node_a, node_b, result, checked_at) "
+            "VALUES (?, ?, 'related_to', '2026-07-14T00:00:00+00:00')",
+            pair,
+        )
+
+    engine.builder.full_rebuild()   # nothing on disk changed
+
+    left = engine.db.conn.execute(
+        "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+    ).fetchone()
+    assert left is not None, "an unchanged rebuild must not purge the pair cache"

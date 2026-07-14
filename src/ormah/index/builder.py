@@ -24,6 +24,16 @@ class IndexBuilder:
     def full_rebuild(self) -> int:
         """Drop and rebuild the entire index from markdown files. Returns node count."""
         with self.db.transaction() as conn:
+            # #126: capture the fingerprints BEFORE the wipe. A rebuild over CHANGED content
+            # (a restore from an older/newer backup, an edited file) must drop that node's
+            # cached pair verdicts, or the fresh seq is useless — auto_linker skips any pair
+            # already in auto_link_checked, so the old content's link decisions would silently
+            # carry over to the new content. Unchanged nodes keep their verdicts: re-judging an
+            # untouched store with the LLM would be an enormous, pointless cost.
+            prior_fps = {
+                row["id"]: row["content_fingerprint"]
+                for row in conn.execute("SELECT id, content_fingerprint FROM nodes")
+            }
             conn.execute("DELETE FROM node_tags")
             conn.execute("DELETE FROM edges")
             conn.execute("DELETE FROM nodes_fts")
@@ -43,7 +53,7 @@ class IndexBuilder:
         with self.db.transaction():
             for path in paths:
                 try:
-                    self._index_file_nodes_only(path)
+                    self._index_file_nodes_only(path, prior_fingerprints=prior_fps)
                     count += 1
                 except Exception as e:
                     logger.warning("Failed to index %s: %s", path, e)
@@ -126,8 +136,18 @@ class IndexBuilder:
         self._index_file_nodes_only(path, prior)
         self._index_file_edges(path)
 
-    def _index_file_nodes_only(self, path: Path, prior: sqlite3.Row | None = None) -> None:
-        """Index node, tags, and FTS from a markdown file (no edges)."""
+    def _index_file_nodes_only(
+        self,
+        path: Path,
+        prior: sqlite3.Row | None = None,
+        prior_fingerprints: dict[str, str | None] | None = None,
+    ) -> None:
+        """Index node, tags, and FTS from a markdown file (no edges).
+
+        ``prior_fingerprints`` is full_rebuild's own invalidation path (#126): prior=None there
+        so every node gets a fresh seq, but a node whose content actually changed (a restore
+        from a stale/edited backup) must still drop its cached pair verdicts.
+        """
         text = path.read_text(encoding="utf-8")
         node = parse_node(text)
         file_hash = self.file_store.file_hash(path)
@@ -188,12 +208,16 @@ class IndexBuilder:
                 (str(next_seq + 1),),
             )
             if prior is not None:
-                # Only an INCREMENTAL reindex of an existing node invalidates its cached
-                # verdicts. full_rebuild passes prior=None for every node: calling this there
-                # would fire ~15k `WHERE node_a = ? OR node_b = ?` deletes against a table whose
-                # PK is (node_a, node_b) with no index on node_b — a partial scan per node, on
-                # an operation that is already heavy. It would also silently make a rebuild
-                # re-judge the entire store with the LLM, a large new cost nobody asked for.
+                # An INCREMENTAL reindex of an existing node always invalidates its cached
+                # verdicts (the seq only bumped here because the fingerprint changed).
+                self._invalidate_checked_pairs(conn, node.id)
+            elif prior_fingerprints is not None and prior_fingerprints.get(node.id) is not None \
+                    and prior_fingerprints[node.id] != new_fp:
+                # full_rebuild path (#126): prior is None so every node lands a fresh seq, but
+                # a node whose PERSISTED fingerprint actually changed (restore over an
+                # edited/older backup) must still drop its cached pair verdicts, or the old
+                # content's link decisions silently carry over. Unchanged nodes are left alone
+                # — re-judging an untouched store with the LLM would be a huge pointless cost.
                 self._invalidate_checked_pairs(conn, node.id)
 
         # Tags
