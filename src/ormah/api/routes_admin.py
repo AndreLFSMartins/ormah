@@ -290,18 +290,23 @@ def _run_and_report(task_id: str, runner, engine) -> dict:
     The route used to return {"status": "completed"} unconditionally: a run that
     raised, or that returned {"error": ...}, was reported to the caller as a success.
     """
+    from ormah.background.job_tracker import failure_reason
+
     try:
         result = runner(engine)
     except Exception as e:
         logger.warning("Manual run of %s failed: %s", task_id, e)
         raise HTTPException(status_code=500, detail=str(e)) from e
 
-    stats = result if isinstance(result, dict) else None
-    if stats is not None and "error" in stats:
-        raise HTTPException(status_code=500, detail=str(stats["error"]))
+    # Same classifier the tracker uses: runners do not raise, they signal failure in the
+    # return value, and not all of them use the same shape (dict with "error", or False).
+    reason = failure_reason(result)
+    if reason is not None:
+        raise HTTPException(status_code=500, detail=reason)
+
     payload = {"status": "completed", "task": task_id}
-    if stats is not None:
-        payload["stats"] = stats
+    if isinstance(result, dict):
+        payload["stats"] = result
     return payload
 
 
@@ -326,6 +331,8 @@ def run_all_tasks(request: Request):
     """Run all background tasks sequentially in sleep-cycle order."""
     import importlib
 
+    from ormah.background.job_tracker import failure_reason
+
     engine = request.app.state.engine
     tracker = getattr(request.app.state, "job_tracker", None)
     results: dict[str, str] = {}
@@ -345,9 +352,9 @@ def run_all_tasks(request: Request):
                     module_path, func_name = _TASK_RUNNERS[task_id]
                     module = importlib.import_module(module_path)
                     runner = getattr(module, func_name)
-                    result = runner(engine)
-                    if isinstance(result, dict) and "error" in result:
-                        results[task_id] = f"error: {result['error']}"
+                    reason = failure_reason(runner(engine))
+                    if reason is not None:
+                        results[task_id] = f"error: {reason}"
                         continue
                 results[task_id] = "ok"
             except Exception as exc:
@@ -356,4 +363,9 @@ def run_all_tasks(request: Request):
     has_errors = any(v.startswith("error:") for v in results.values())
     if has_errors:
         return JSONResponse(status_code=503, content={"status": "degraded", "results": results})
+    # A skipped task is not an error, but the cycle did NOT run everything it was asked
+    # to. Reporting "completed" would tell a cron/script that the sleep cycle ran in full
+    # when part of it never started.
+    if any(v.startswith("skipped:") for v in results.values()):
+        return {"status": "partial", "results": results}
     return {"status": "completed", "results": results}

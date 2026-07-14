@@ -81,6 +81,7 @@ def test_run_all_skips_a_task_that_is_already_running(app_and_client, monkeypatc
 
     assert calls == []                                  # never started a second run
     assert resp.json()["results"]["auto_linker"] == "skipped: already running"
+    assert resp.json()["status"] == "partial"   # skipped work is not a completed cycle
 
 
 def test_lifespan_always_creates_a_job_tracker_even_if_the_scheduler_fails(tmp_memory_dir, monkeypatch):

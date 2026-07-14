@@ -157,3 +157,28 @@ def test_tracked_records_a_failure_when_the_job_returns_an_error_dict():
     assert snap["last_error"] == "watermark exploded"
     assert snap["error_count"] == 1
     assert snap["last_success"] is None
+
+
+def test_tracked_records_a_failure_when_the_job_returns_false():
+    """run_restore_verification returns a bool — False means the restore could NOT be
+    verified. Treating every non-error-dict as success left a failed restore check green
+    in /admin/health (Codex, PR B round 2)."""
+    from ormah.background.job_tracker import JobTracker, tracked
+
+    tracker = JobTracker()
+    tracked(tracker, "restore_verification", lambda: False)()
+
+    snap = tracker.snapshot()["restore_verification"]
+    assert snap["error_count"] == 1
+    assert snap["last_success"] is None
+
+
+def test_tracked_still_treats_true_and_none_as_success():
+    from ormah.background.job_tracker import JobTracker, tracked
+
+    tracker = JobTracker()
+    tracked(tracker, "ok_bool", lambda: True)()
+    tracked(tracker, "ok_none", lambda: None)()
+
+    assert tracker.snapshot()["ok_bool"]["error_count"] == 0
+    assert tracker.snapshot()["ok_none"]["error_count"] == 0

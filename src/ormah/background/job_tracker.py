@@ -96,6 +96,25 @@ class JobTracker:
             return result
 
 
+def failure_reason(result: Any) -> str | None:
+    """Return why a runner's result means failure, or None if it succeeded.
+
+    Runners do not raise on failure — they signal it in the return value, and they do
+    not all use the same shape:
+      * the background jobs return ``{"error": ...}``
+      * ``run_restore_verification`` returns a plain ``False``
+
+    Treating everything that is not an error dict as a success recorded a failed run as
+    healthy, which is how the #117 outage stayed invisible for a day. ``None`` and
+    ``True`` stay successes: most runners return nothing at all.
+    """
+    if result is False:
+        return "run reported failure"
+    if isinstance(result, dict) and "error" in result:
+        return str(result["error"])
+    return None
+
+
 def tracked(tracker: JobTracker, job_id: str, fn: Callable, *args: Any) -> Callable:
     """Wrap a job function with tracking. Returns a no-arg callable for the scheduler."""
 
@@ -108,14 +127,14 @@ def tracked(tracker: JobTracker, job_id: str, fn: Callable, *args: Any) -> Calla
             try:
                 result = fn(*args)
                 duration_ms = (time.monotonic() - t0) * 1000
-                # The runners catch their own exceptions and signal a fatal error by
-                # RETURNING {"error": ...}. Discarding the return value recorded a dead
-                # run as a success, so /admin/health kept reporting ok (#117).
-                if isinstance(result, dict) and "error" in result:
-                    tracker.record_failure(job_id, str(result["error"]), duration_ms)
+                # The runners catch their own exceptions and signal failure in the RETURN
+                # value. Discarding it recorded a dead run as a success, so /admin/health
+                # kept reporting ok (#117).
+                reason = failure_reason(result)
+                if reason is not None:
+                    tracker.record_failure(job_id, reason, duration_ms)
                     logger.warning(
-                        "Job %s reported an error after %.0fms: %s",
-                        job_id, duration_ms, result["error"],
+                        "Job %s reported an error after %.0fms: %s", job_id, duration_ms, reason
                     )
                 else:
                     tracker.record_success(job_id, duration_ms)
