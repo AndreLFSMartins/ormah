@@ -16,12 +16,18 @@ def parse_node(text: str) -> MemoryNode:
 
     connections = []
     for conn in meta.get("connections", []):
+        # Coerce, don't trust: YAML happily yields ints, bools and lists here, and
+        # Connection.reason is a typed str|None. A stray `reason: 123` would raise, so
+        # parse_node would fail and the WHOLE node become unreadable — and
+        # incremental_update can mistake a parse failure for a deleted file and drop the
+        # node and its edges from the index. Mirrors the coercion the writers do.
+        raw_reason = conn.get("reason")
         connections.append(
             Connection(
                 target=conn["target"],
                 edge=EdgeType(conn.get("edge", "related_to")),
                 weight=conn.get("weight", 0.5),
-                reason=conn.get("reason"),
+                reason=str(raw_reason) if raw_reason is not None else None,
             )
         )
 

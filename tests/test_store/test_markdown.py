@@ -120,3 +120,33 @@ Old file.
 """
     node = parse_node(text)
     assert node.connections[0].reason is None
+
+
+def test_a_non_string_reason_in_the_yaml_does_not_make_the_whole_node_unparsable():
+    """The parser feeds `reason` straight into a typed pydantic field. A hand-edited or
+    stray `reason: 123` would raise ValidationError, so parse_node fails and the WHOLE
+    node becomes unreadable — incremental_update can then take the parse failure for a
+    deleted file and drop the node and its edges from the index (Codex, PR C round 2)."""
+    from ormah.store.markdown import parse_node
+
+    text = """---
+id: 44444444-4444-4444-4444-444444444444
+type: fact
+created: 2026-01-01T00:00:00+00:00
+updated: 2026-01-01T00:00:00+00:00
+connections:
+  - target: 55555555-5555-5555-5555-555555555555
+    edge: supports
+    weight: 0.7
+    reason: 123
+  - target: 66666666-6666-6666-6666-666666666666
+    edge: related_to
+    weight: 0.5
+    reason: false
+---
+Node with non-string reasons.
+"""
+    node = parse_node(text)   # must not raise
+
+    assert node.connections[0].reason == "123"
+    assert node.connections[1].reason == "False"
