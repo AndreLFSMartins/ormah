@@ -418,3 +418,4 @@ def run_auto_linker(engine) -> None:
 
     except Exception as e:
         logger.warning("Auto-linker failed: %s", e)
+        return {"error": str(e)}

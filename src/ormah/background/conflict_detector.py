@@ -290,3 +290,4 @@ def run_conflict_detection(engine) -> None:
 
     except Exception as e:
         logger.warning("Conflict detection failed: %s", e)
+        return {"error": str(e)}
