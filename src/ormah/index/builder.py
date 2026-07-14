@@ -79,8 +79,9 @@ class IndexBuilder:
                         self._index_file(path)
                         added += 1
                     elif indexed[node.id] != file_hash:
+                        prior = self._prior_row(node.id)  # read BEFORE the delete (#126)
                         self._remove_node(node.id, keep_vectors=True)
-                        self._index_file(path)
+                        self._index_file(path, prior)
                         updated += 1
                 except Exception as e:
                     logger.warning("Failed to process %s: %s", path, e)
@@ -96,20 +97,34 @@ class IndexBuilder:
         """Index or re-index a single file."""
         node = parse_node(path.read_text(encoding="utf-8"))
         with self.db.transaction():
+            prior = self._prior_row(node.id)  # read BEFORE the delete (#126)
             self._remove_node(node.id)
-            self._index_file(path)
+            self._index_file(path, prior)
 
-    def _index_file(self, path: Path) -> None:
+    def _prior_row(self, node_id: str):
+        """The stored fingerprint + seq, read BEFORE _remove_node deletes the row.
+
+        The fingerprint — not the row's live columns — is the baseline: auto_cluster writes
+        `space` straight into SQLite (auto_cluster.py:64-86), so the row's own columns may
+        already hold the new value while the fingerprint still reflects the last indexed
+        content. Comparing against the fingerprint is what keeps that node getting requeued.
+        """
+        return self.db.conn.execute(
+            "SELECT seq, content_fingerprint FROM nodes WHERE id = ?", (node_id,)
+        ).fetchone()
+
+    def _index_file(self, path: Path, prior=None) -> None:
         """Index a single markdown file into the database (nodes + edges)."""
-        self._index_file_nodes_only(path)
+        self._index_file_nodes_only(path, prior)
         self._index_file_edges(path)
 
-    def _index_file_nodes_only(self, path: Path) -> None:
+    def _index_file_nodes_only(self, path: Path, prior=None) -> None:
         """Index node, tags, and FTS from a markdown file (no edges)."""
         text = path.read_text(encoding="utf-8")
         node = parse_node(text)
         file_hash = self.file_store.file_hash(path)
         conn = self.db.conn
+        new_fp = content_fingerprint(node.title, node.content, node.type.value, node.space)
 
         conn.execute(
             """
@@ -140,22 +155,38 @@ class IndexBuilder:
                 node.last_review.isoformat() if node.last_review else None,
                 str(path),
                 file_hash,
-                content_fingerprint(node.title, node.content, node.type.value, node.space),
+                new_fp,
             ),
         )
 
-        # Durable monotonic change-sequence (council v2 crit#1): allocate the next seq from
-        # meta.node_seq_next — never decreases, independent of current rows, unlike MAX(seq)+1
-        # which is non-monotonic across INSERT OR REPLACE. Every content (re)write lands the node
-        # at the head, so reindex/import/restore re-enter the delta regardless of frontmatter
-        # timestamps. Metadata-only UPDATEs elsewhere do not pass through here.
-        row = conn.execute("SELECT value FROM meta WHERE key = 'node_seq_next'").fetchone()
-        next_seq = int(row[0]) if row else 1
-        conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (next_seq, node.id))
-        conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
-            (str(next_seq + 1),),
-        )
+        # Durable monotonic change-sequence (council v2 crit#1): allocate from meta.node_seq_next
+        # — never decreases, unlike MAX(seq)+1 which is non-monotonic across INSERT OR REPLACE.
+        #
+        # #126: only a CONTENT change requeues. A reindex whose only delta is the connection
+        # block (an edge write by auto_linker/conflict_detector) is not a content change —
+        # requeueing it sent the node back to the end of the queue with nothing to learn, which
+        # pinned the backlog at ~the size of the store. Compare against the PERSISTED fingerprint,
+        # never against the row's live columns: auto_cluster writes `space` directly into SQLite,
+        # so the row can already hold the new value while the fingerprint still reflects the last
+        # indexed content — comparing rows would freeze that node out of relinking for good.
+        if prior is not None and prior["content_fingerprint"] == new_fp:
+            conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (prior["seq"], node.id))
+        else:
+            row = conn.execute("SELECT value FROM meta WHERE key = 'node_seq_next'").fetchone()
+            next_seq = int(row[0]) if row else 1
+            conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (next_seq, node.id))
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
+                (str(next_seq + 1),),
+            )
+            if prior is not None:
+                # Only an INCREMENTAL reindex of an existing node invalidates its cached
+                # verdicts. full_rebuild passes prior=None for every node: calling this there
+                # would fire ~15k `WHERE node_a = ? OR node_b = ?` deletes against a table whose
+                # PK is (node_a, node_b) with no index on node_b — a partial scan per node, on
+                # an operation that is already heavy. It would also silently make a rebuild
+                # re-judge the entire store with the LLM, a large new cost nobody asked for.
+                self._invalidate_checked_pairs(conn, node.id)
 
         # Tags
         for tag in node.tags:
@@ -169,6 +200,23 @@ class IndexBuilder:
         conn.execute(
             "INSERT INTO nodes_fts (id, title, content, tags) VALUES (?, ?, ?, ?)",
             (node.id, node.title or "", node.content, tags_str),
+        )
+
+    def _invalidate_checked_pairs(self, conn, node_id: str) -> None:
+        """Drop cached pair verdicts for a node whose content fingerprint changed (#126).
+
+        The auto_linker skips any pair already in `auto_link_checked` BEFORE it looks at the
+        edge, so a fresh `seq` alone changes nothing: the node is re-scanned and every one of
+        its pairs is skipped. memory_engine.update_node clears this table only for
+        content/title edits (a type/space edit clears nothing today) — doing it here covers
+        every path into the index, including disk edits and sync.
+
+        Only `auto_link_checked` exists (schema.sql) — duplicate_merger and conflict_detector
+        share this same table (distinguished by the `result` column), there are no separate
+        duplicate_checked / conflict_checked tables.
+        """
+        conn.execute(
+            "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?", (node_id, node_id)
         )
 
     def _index_file_edges(self, path: Path) -> None:

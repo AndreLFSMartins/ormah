@@ -31,3 +31,25 @@ def test_indexing_persists_a_content_fingerprint(engine):
     fp = _row(engine, node_id)["content_fingerprint"]
     assert fp, "builder must persist a content fingerprint"
     assert len(fp) == 64, "expected a sha256 hex digest"
+
+
+def test_edge_write_does_not_bump_seq(engine):
+    """Persisting a connection must not requeue the node (#126).
+
+    _apply_edge appends a Connection, touches `updated`, and saves the markdown. That
+    rewrite used to bump `seq`, sending the node back to the end of the auto_linker queue
+    with nothing new to learn — the pairs are already in auto_link_checked. That is what
+    pinned the backlog at ~the size of the store.
+    """
+    id_a = _make_node(engine)
+    id_b = _make_node(engine, title="Ruby language", content="Ruby is a programming language.")
+    seq_before = _seq(engine, id_a)
+
+    node = engine.file_store.load(id_a)
+    node.connections.append(
+        Connection(target=id_b, edge=EdgeType.related_to, weight=0.9, reason="both languages")
+    )
+    node.touch_updated()
+    engine.builder.index_single(engine.file_store.save(node))
+
+    assert _seq(engine, id_a) == seq_before, "an edge write must not requeue the node"
