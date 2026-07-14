@@ -423,3 +423,20 @@ def test_apply_edge_writes_the_reason_into_the_markdown(engine):
     node = engine.file_store.load(id_a)
     conn = next(c for c in node.connections if c.target == id_b)
     assert conn.reason == "they agree about Python"
+
+
+def test_a_non_string_llm_reason_does_not_cost_us_the_markdown_connection(engine):
+    """The LLM can return JSON-valid garbage like {"reason": 123}. SQLite accepts the int
+    and commits the edge + auto_link_checked, but Connection.reason is typed str|None, so
+    building it raises — and the broad except swallows it, leaving the edge in the index
+    with NO markdown connection. The next reindex then deletes the edge while the checked
+    pair blocks reevaluation: the link is lost for good (Codex, PR C)."""
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+
+    _apply_edge(engine, id_a, id_b, "supports", 123, 0.8)   # non-string reason
+
+    conns = [c for c in engine.file_store.load(id_a).connections if c.target == id_b]
+    assert len(conns) == 1, "the edge was committed but the markdown connection was lost"
+    assert conns[0].reason == "123"
