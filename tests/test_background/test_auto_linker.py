@@ -530,7 +530,6 @@ def test_a_failing_pair_does_not_block_progress_on_earlier_nodes(engine, monkeyp
     this, the fix would only be swapping one kind of total stall for another."""
     import json
     from unittest.mock import patch
-    from ormah.models.node import CreateNodeRequest, NodeType
     from ormah.background import auto_linker as al
 
     # A first pair that links cleanly, then a second pair whose apply always fails.
