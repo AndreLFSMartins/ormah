@@ -21,6 +21,7 @@ def parse_node(text: str) -> MemoryNode:
                 target=conn["target"],
                 edge=EdgeType(conn.get("edge", "related_to")),
                 weight=conn.get("weight", 0.5),
+                reason=conn.get("reason"),
             )
         )
 
@@ -83,7 +84,12 @@ def serialize_node(node: MemoryNode) -> str:
         meta["tags"] = node.tags
     if node.connections:
         meta["connections"] = [
-            {"target": c.target, "edge": c.edge.value, "weight": c.weight}
+            {
+                "target": c.target,
+                "edge": c.edge.value,
+                "weight": c.weight,
+                **({"reason": c.reason} if c.reason else {}),
+            }
             for c in node.connections
         ]
 

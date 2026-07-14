@@ -74,3 +74,49 @@ def test_deleted_at_omitted_when_none():
     node = MemoryNode(type=NodeType.fact, source="agent:test", content="Live fact.")
     text = serialize_node(node)
     assert "deleted_at" not in text
+
+
+def test_connection_reason_round_trips():
+    """The reason an edge exists must survive a save/load cycle — the index is
+    rebuilt from markdown every minute, so anything not in the file is lost."""
+    from ormah.models.node import Connection, EdgeType, MemoryNode, NodeType
+    from ormah.store.markdown import parse_node, serialize_node
+
+    node = MemoryNode(
+        type=NodeType.fact,
+        content="Python is a programming language.",
+        connections=[
+            Connection(
+                target="11111111-1111-1111-1111-111111111111",
+                edge=EdgeType.supports,
+                weight=0.8,
+                reason="Both describe Python as a language.",
+            )
+        ],
+    )
+
+    reloaded = parse_node(serialize_node(node))
+
+    assert reloaded.connections[0].reason == "Both describe Python as a language."
+    assert reloaded.connections[0].edge == EdgeType.supports
+    assert reloaded.connections[0].weight == 0.8
+
+
+def test_connection_without_reason_still_parses():
+    """Files written before this change have no `reason` key — they must still load."""
+    from ormah.store.markdown import parse_node
+
+    text = """---
+id: 22222222-2222-2222-2222-222222222222
+type: fact
+created: 2026-01-01T00:00:00+00:00
+updated: 2026-01-01T00:00:00+00:00
+connections:
+  - target: 33333333-3333-3333-3333-333333333333
+    edge: related_to
+    weight: 0.7
+---
+Old file.
+"""
+    node = parse_node(text)
+    assert node.connections[0].reason is None
