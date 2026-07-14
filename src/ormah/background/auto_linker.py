@@ -416,10 +416,23 @@ def run_auto_linker(engine) -> None:
                         node_resolved = False
                         continue
                     relationship = llm_result["relationship"]  # may be 'error' (invalid output)
-                    _apply_edge(
-                        engine, node["id"], match["id"], relationship,
-                        llm_result.get("reason", ""), similarity,
-                    )
+                    try:
+                        _apply_edge(
+                            engine, node["id"], match["id"], relationship,
+                            llm_result.get("reason", ""), similarity,
+                        )
+                    except Exception as e:
+                        # A single unwritable pair must never abort the run. It used to:
+                        # the exception reached the top-level handler, killed the run and
+                        # froze the watermark for the whole store (#117). Log the pair —
+                        # the old failure logged nothing, so the colliding edge was
+                        # unknowable after the fact.
+                        logger.warning(
+                            "auto_linker: edge apply failed for %s -> %s (%s): %s",
+                            node["id"][:8], match["id"][:8], relationship, e,
+                        )
+                        node_resolved = False   # fail closed: watermark stays behind this node
+                        continue
                     # 'error' (poison content) is recorded in auto_link_checked by _apply_edge
                     # and the node still counts as resolved → watermark advances (council v2 crit#2).
                     if relationship not in ("none", "error"):

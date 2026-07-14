@@ -495,3 +495,73 @@ def test_apply_edge_repairs_a_markdown_connection_the_winner_failed_to_save(engi
     conns = [c for c in engine.file_store.load(id_a).connections if c.target == id_b]
     assert len(conns) == 1
     assert conns[0].edge.value == "supports"
+
+
+def test_run_survives_an_edge_apply_failure(engine, monkeypatch):
+    """A pair whose edge write blows up must not abort the whole run."""
+    import json
+    from unittest.mock import patch
+    from ormah.background import auto_linker as al
+
+    _create_pair(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("FOREIGN KEY constraint failed")
+
+    monkeypatch.setattr(al, "_apply_edge", boom)
+
+    llm_response = json.dumps({"relationship": "supports", "reason": "r"})
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=llm_response):
+        al.run_auto_linker(engine)   # must return normally, not raise
+
+    # Fail closed: the watermark must NOT have advanced past the unresolved node.
+    watermark = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'auto_link_watermark'"
+    ).fetchone()
+    assert watermark is None or int(watermark["value"]) == 0
+
+
+def test_a_failing_pair_does_not_block_progress_on_earlier_nodes(engine, monkeypatch):
+    """Progress, not just survival (Codex R1, critical #2): the failing pair parks the
+    cursor AT that node, but every node before it still advances the watermark. Without
+    this, the fix would only be swapping one kind of total stall for another."""
+    import json
+    from unittest.mock import patch
+    from ormah.models.node import CreateNodeRequest, NodeType
+    from ormah.background import auto_linker as al
+
+    # A first pair that links cleanly, then a second pair whose apply always fails.
+    good_a, good_b = _create_pair(engine)
+    bad_a, bad_b = _create_pair(
+        engine, title_a="Rust language", content_a="Rust is a systems language.",
+        title_b="Rust lang", content_b="Rust is a popular systems language.",
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_link_similarity_threshold = 0.0
+
+    real_apply = al._apply_edge
+
+    def apply_or_boom(eng, a_id, b_id, *args, **kwargs):
+        if a_id in (bad_a, bad_b):
+            raise RuntimeError("FOREIGN KEY constraint failed")
+        return real_apply(eng, a_id, b_id, *args, **kwargs)
+
+    monkeypatch.setattr(al, "_apply_edge", apply_or_boom)
+
+    good_seq = engine.db.conn.execute(
+        "SELECT seq FROM nodes WHERE id = ?", (good_b,)
+    ).fetchone()["seq"]
+
+    llm_response = json.dumps({"relationship": "supports", "reason": "r"})
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=llm_response):
+        al.run_auto_linker(engine)
+
+    row = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'auto_link_watermark'"
+    ).fetchone()
+    assert row is not None, "the run made no progress at all — the failing pair stalled everything"
+    assert int(row["value"]) >= good_seq, "the clean nodes before the failing pair must advance"
