@@ -146,6 +146,16 @@ class Database:
                 if col_name not in node_cols:
                     conn.execute(ddl)
 
+            if "content_fingerprint" not in node_cols:
+                conn.execute("ALTER TABLE nodes ADD COLUMN content_fingerprint TEXT")
+            # Runs every startup (idempotent: scoped to content_fingerprint IS NULL) so a
+            # row left NULL because it had a pending reindex at migration time still gets
+            # backfilled once its file_hash catches up, without waiting for a reindex pass.
+            # Guarded on file_path/file_hash existing: a legacy/test nodes table that
+            # predates those columns has nothing to backfill from yet.
+            if "file_path" in node_cols and "file_hash" in node_cols:
+                self._backfill_content_fingerprint(conn)
+
             if "seq" not in node_cols:
                 conn.execute("ALTER TABLE nodes ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
                 # Backfill existing rows: oldest (created ASC) gets the lowest seq,
@@ -237,6 +247,40 @@ class Database:
 
         # Migrate FTS table to porter stemmer if needed
         self._migrate_fts_tokenizer()
+
+    def _backfill_content_fingerprint(self, conn: sqlite3.Connection) -> None:
+        """Backfill content_fingerprint for rows whose file on disk hasn't changed.
+
+        A row whose stored file_hash no longer matches the file on disk has a pending
+        reindex (e.g. auto_cluster wrote a new space straight into the DB row and the
+        markdown, bypassing the builder — see src/ormah/background/auto_cluster.py).
+        Backfilling such a row from the stale DB row would bake the new value into the
+        fingerprint, the next reindex would then see "no change", and that node's pending
+        relink would be lost silently. Leave those rows NULL: a NULL fingerprint never
+        equals the incoming one, so the first reindex requeues them, which is what they
+        are owed (#126).
+        """
+        from ormah.index.fingerprint import content_fingerprint
+        from ormah.store.file_store import FileStore
+
+        rows = conn.execute(
+            "SELECT id, type, space, title, content, file_path, file_hash "
+            "FROM nodes WHERE content_fingerprint IS NULL"
+        ).fetchall()
+        if not rows:
+            return
+        # file_hash() doesn't use FileStore's instance state, only the given path — a
+        # throwaway instance here reuses that exact digest algorithm instead of
+        # reimplementing it (a mismatched algorithm would mark every row stale).
+        file_store = FileStore(self.db_path.parent / "nodes")
+        for row in rows:
+            path = Path(row["file_path"])
+            if not path.exists() or file_store.file_hash(path) != row["file_hash"]:
+                continue  # pending reindex — leave NULL so it gets requeued
+            fp = content_fingerprint(row["title"], row["content"], row["type"], row["space"])
+            conn.execute(
+                "UPDATE nodes SET content_fingerprint = ? WHERE id = ?", (fp, row["id"])
+            )
 
     def _migrate_whisper_log_schema(self, conn: sqlite3.Connection) -> None:
         """Add candidate-stage diagnostics without rebuilding feedback history."""

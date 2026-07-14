@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from ormah.index.db import Database
+from ormah.index.fingerprint import content_fingerprint
 from ormah.store.file_store import FileStore
 from ormah.store.markdown import parse_node
 
@@ -115,9 +116,10 @@ class IndexBuilder:
             INSERT OR REPLACE INTO nodes
             (id, type, tier, source, space, title, content, created, updated,
              last_accessed, access_count, confidence, importance,
-             valid_until, stability, last_review, file_path, file_hash)
+             valid_until, stability, last_review, file_path, file_hash,
+             content_fingerprint)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?)
             """,
             (
                 node.id,
@@ -138,6 +140,7 @@ class IndexBuilder:
                 node.last_review.isoformat() if node.last_review else None,
                 str(path),
                 file_hash,
+                content_fingerprint(node.title, node.content, node.type.value, node.space),
             ),
         )
 

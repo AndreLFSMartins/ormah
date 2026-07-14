@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     last_review TEXT,
     file_path TEXT NOT NULL,
     file_hash TEXT NOT NULL,
-    seq INTEGER NOT NULL DEFAULT 0
+    seq INTEGER NOT NULL DEFAULT 0,
+    content_fingerprint TEXT
 );
 
 CREATE TABLE IF NOT EXISTS edges (
