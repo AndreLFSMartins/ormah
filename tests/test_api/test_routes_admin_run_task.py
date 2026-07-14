@@ -81,3 +81,34 @@ def test_run_all_skips_a_task_that_is_already_running(app_and_client, monkeypatc
 
     assert calls == []                                  # never started a second run
     assert resp.json()["results"]["auto_linker"] == "skipped: already running"
+
+
+def test_lifespan_always_creates_a_job_tracker_even_if_the_scheduler_fails(tmp_memory_dir, monkeypatch):
+    """The guard is only atomic against a SHARED tracker. It was created inside the
+    scheduler's try block, so a failed scheduler startup left app.state without one and
+    _guard degraded to a no-op — two concurrent triggers could then run the same
+    edge-writing job at once (Codex, PR B)."""
+    import asyncio
+
+    from fastapi import FastAPI
+
+    import ormah.background.scheduler as sched
+    from ormah.main import lifespan
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("scheduler is down")
+
+    monkeypatch.setattr(sched, "start_scheduler", boom)
+    monkeypatch.setenv("ORMAH_MEMORY_DIR", str(tmp_memory_dir))
+    monkeypatch.setenv("ORMAH_SESSION_WATCHER_ENABLED", "false")
+
+    app = FastAPI()
+
+    async def drive():
+        async with lifespan(app):
+            return getattr(app.state, "job_tracker", None)
+
+    tracker = asyncio.run(drive())
+
+    assert tracker is not None, "no tracker -> the single-flight guard silently degrades to a no-op"
+    assert tracker.is_running("auto_linker") is False
