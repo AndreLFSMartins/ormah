@@ -142,3 +142,18 @@ def test_tracked_skips_a_run_when_the_job_is_already_running():
         tracked(tracker, "demo", lambda: calls.append(1))()
 
     assert calls == []   # the wrapped function never ran
+
+
+def test_tracked_records_a_failure_when_the_job_returns_an_error_dict():
+    """A runner that dies signals it by RETURNING {'error': ...} (it catches its own
+    exceptions), so tracked() must inspect the return value. Ignoring it made the job
+    tracker — and therefore /admin/health — report a dead run as a success (#117)."""
+    from ormah.background.job_tracker import JobTracker, tracked
+
+    tracker = JobTracker()
+    tracked(tracker, "demo", lambda: {"error": "watermark exploded"})()
+
+    snap = tracker.snapshot()["demo"]
+    assert snap["last_error"] == "watermark exploded"
+    assert snap["error_count"] == 1
+    assert snap["last_success"] is None

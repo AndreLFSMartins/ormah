@@ -106,9 +106,19 @@ def tracked(tracker: JobTracker, job_id: str, fn: Callable, *args: Any) -> Calla
                 logger.warning("Job %s is already running; skipping this trigger", job_id)
                 return
             try:
-                fn(*args)
+                result = fn(*args)
                 duration_ms = (time.monotonic() - t0) * 1000
-                tracker.record_success(job_id, duration_ms)
+                # The runners catch their own exceptions and signal a fatal error by
+                # RETURNING {"error": ...}. Discarding the return value recorded a dead
+                # run as a success, so /admin/health kept reporting ok (#117).
+                if isinstance(result, dict) and "error" in result:
+                    tracker.record_failure(job_id, str(result["error"]), duration_ms)
+                    logger.warning(
+                        "Job %s reported an error after %.0fms: %s",
+                        job_id, duration_ms, result["error"],
+                    )
+                else:
+                    tracker.record_success(job_id, duration_ms)
             except Exception as e:
                 duration_ms = (time.monotonic() - t0) * 1000
                 tracker.record_failure(job_id, str(e), duration_ms)
