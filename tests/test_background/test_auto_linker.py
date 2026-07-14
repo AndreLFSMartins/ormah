@@ -564,3 +564,27 @@ def test_a_failing_pair_does_not_block_progress_on_earlier_nodes(engine, monkeyp
     ).fetchone()
     assert row is not None, "the run made no progress at all — the failing pair stalled everything"
     assert int(row["value"]) >= good_seq, "the clean nodes before the failing pair must advance"
+
+
+def test_apply_edge_reports_whether_it_actually_created_the_edge(engine):
+    """An INSERT OR IGNORE that inserted nothing is not a creation. Counting it as one
+    burns the run's edge budget on a link someone else already made, and logs a
+    creation that never happened (Codex R2, medium)."""
+    from datetime import datetime, timezone
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+
+    assert _apply_edge(engine, id_a, id_b, "supports", "r", 0.8) is True   # new edge
+
+    # Same edge again: a concurrent writer already has it -> ignored, not created.
+    now = datetime.now(timezone.utc).isoformat()
+    assert now  # keep the import honest
+    assert _apply_edge(engine, id_a, id_b, "supports", "r", 0.8) is False
+
+    # 'none' records the pair as checked without ever creating an edge.
+    id_c, id_d = _create_pair(
+        engine, title_a="Go language", content_a="Go is a systems language.",
+        title_b="Go lang", content_b="Go is a popular systems language.",
+    )
+    assert _apply_edge(engine, id_c, id_d, "none", "", 0.0) is False

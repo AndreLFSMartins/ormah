@@ -272,15 +272,22 @@ def _apply_edge(
     edge_type: str,
     reason: str,
     similarity: float = 0.0,
-) -> None:
+) -> bool:
     """Record a link decision: write to auto_link_checked and optionally create an edge.
 
     ``edge_type="none"`` records the pair as checked without creating an edge.
+
+    Returns True only when this call actually inserted a NEW edge row. An
+    ``INSERT OR IGNORE`` that hit an existing edge inserted nothing — counting that as
+    a creation would burn the run's edge budget on a link a concurrent writer had
+    already made, and log an edge that was never created.
     """
     from ormah.models.node import Connection, EdgeType
 
     pair = tuple(sorted([node_a_id, node_b_id]))
     now = datetime.now(timezone.utc).isoformat()
+
+    edge_created = False
 
     with engine.db.transaction() as conn:
         conn.execute(
@@ -297,11 +304,12 @@ def _apply_edge(
             # already exists — the outcome we wanted. A raw INSERT turned it into an
             # IntegrityError that rolled back the auto_link_checked row above and
             # aborted the entire run (#117).
-            conn.execute(
+            cur = conn.execute(
                 "INSERT OR IGNORE INTO edges (source_id, target_id, edge_type, weight, created, reason) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (node_a_id, node_b_id, edge_type, round(similarity, 3), now, reason),
             )
+            edge_created = cur.rowcount > 0
 
     if edge_type not in ("none", "error"):
         try:
@@ -328,6 +336,8 @@ def _apply_edge(
                 engine.file_store.save(mem_node)
         except Exception as e:
             logger.debug("Failed to persist connection to markdown for %s: %s", node_a_id[:8], e)
+
+    return edge_created
 
 
 def run_auto_linker(engine) -> None:
@@ -417,7 +427,7 @@ def run_auto_linker(engine) -> None:
                         continue
                     relationship = llm_result["relationship"]  # may be 'error' (invalid output)
                     try:
-                        _apply_edge(
+                        edge_created = _apply_edge(
                             engine, node["id"], match["id"], relationship,
                             llm_result.get("reason", ""), similarity,
                         )
@@ -435,7 +445,11 @@ def run_auto_linker(engine) -> None:
                         continue
                     # 'error' (poison content) is recorded in auto_link_checked by _apply_edge
                     # and the node still counts as resolved → watermark advances (council v2 crit#2).
-                    if relationship not in ("none", "error"):
+                    # Only a real insert counts: an INSERT OR IGNORE that hit an edge a
+                    # concurrent writer had already created inserted nothing, and charging it
+                    # to max_edges would spend the run's budget on work it did not do, cutting
+                    # the run short for unrelated candidates.
+                    if edge_created:
                         created += 1
 
             if not node_resolved:
