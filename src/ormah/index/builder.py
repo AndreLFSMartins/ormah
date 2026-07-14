@@ -99,7 +99,16 @@ class IndexBuilder:
         node = parse_node(path.read_text(encoding="utf-8"))
         with self.db.transaction():
             prior = self._prior_row(node.id)  # read BEFORE the delete (#126)
-            self._remove_node(node.id)
+            # The vector is still valid exactly when the content fingerprint is: title and
+            # content are what feed the embedding. Dropping it on an unchanged-content
+            # reindex is permanent loss — nothing re-embeds it — and the node would sit
+            # behind the watermark with no vector, invisible to the linker and unable to be
+            # anyone else's semantic candidate. mark_outdated() (valid_until only) walks
+            # exactly this path.
+            unchanged = prior is not None and prior["content_fingerprint"] == content_fingerprint(
+                node.title, node.content, node.type.value, node.space
+            )
+            self._remove_node(node.id, keep_vectors=unchanged)
             self._index_file(path, prior)
 
     def _prior_row(self, node_id: str) -> sqlite3.Row | None:

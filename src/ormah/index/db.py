@@ -177,6 +177,14 @@ class Database:
             # (which skips the block above) still gets the index.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_seq ON nodes(seq)")
 
+            # auto_link_checked's PK only covers node_a; _invalidate_checked_pairs deletes
+            # on `node_a = ? OR node_b = ?`, so every invalidation was a partial scan on
+            # node_b. Unconditional (idempotent) so an existing DB gets it too.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_auto_link_checked_node_b "
+                "ON auto_link_checked(node_b)"
+            )
+
             # Create new feedback/logging tables if missing
             existing_tables = {
                 row[0]

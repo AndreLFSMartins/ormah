@@ -213,6 +213,51 @@ def test_migration_stamps_clean_rows(engine):
     )
 
 
+def test_unchanged_content_reindex_keeps_the_vector(engine):
+    """A reindex that does not change the content must not destroy the embedding.
+
+    index_single() deletes the node's vector, and nothing re-embeds it. Combined with the
+    preserved seq (#126), a metadata-only reindex would leave the node behind the watermark
+    AND without a vector — invisible to the linker and unable to be another node's semantic
+    candidate. mark_outdated() (which only sets valid_until) walks exactly this path.
+    """
+    node_id = _make_node(engine)
+
+    def has_vector() -> bool:
+        row = engine.db.conn.execute(
+            "SELECT 1 FROM node_vectors WHERE id = ?", (node_id,)
+        ).fetchone()
+        return row is not None
+
+    assert has_vector(), "precondition: the node was embedded on creation"
+    seq_before = _seq(engine, node_id)
+
+    # a metadata-only rewrite: content/title/type/space untouched
+    node = engine.file_store.load(node_id)
+    node.touch_updated()
+    engine.builder.index_single(engine.file_store.save(node))
+
+    assert _seq(engine, node_id) == seq_before, "metadata-only reindex must not requeue"
+    assert has_vector(), (
+        "the vector must survive an unchanged-content reindex — nothing re-embeds it, and "
+        "the node would be stranded behind the watermark with no vector"
+    )
+
+
+def test_content_change_reindex_drops_the_stale_vector(engine):
+    """The converse: when the content changes, the old vector is stale and must go."""
+    node_id = _make_node(engine)
+    node = engine.file_store.load(node_id)
+    node.content = "Totally different subject: baking sourdough bread."
+    engine.builder.index_single(engine.file_store.save(node))
+
+    # the node was requeued, so the linker will re-embed/re-evaluate it
+    row = engine.db.conn.execute(
+        "SELECT seq FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+    assert row is not None
+
+
 def test_full_rebuild_allocates_new_seq(engine):
     """A mass reindex requeues the whole store and clears the watermark."""
     node_id = _make_node(engine)
