@@ -588,3 +588,33 @@ def test_apply_edge_reports_whether_it_actually_created_the_edge(engine):
         title_b="Go lang", content_b="Go is a popular systems language.",
     )
     assert _apply_edge(engine, id_c, id_d, "none", "", 0.0) is False
+
+
+def test_a_failed_markdown_save_does_not_leave_the_pair_marked_checked(engine, monkeypatch):
+    """The markdown is the source of truth: a rebuild recreates the edge table from it.
+    If the connection cannot be persisted, the pair must NOT stay marked as checked —
+    otherwise the rebuild drops the DB-only edge and the checked row stops the pair from
+    ever being judged again. The link would be lost for good (Codex, PR A round 2)."""
+    import pytest
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+
+    def boom(_node):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(engine.file_store, "save", boom)
+
+    with pytest.raises(OSError):
+        _apply_edge(engine, id_a, id_b, "supports", "r", 0.8)
+
+    pair = tuple(sorted([id_a, id_b]))
+    assert engine.db.conn.execute(
+        "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+    ).fetchone() is None, "the pair stayed checked, so it will never be judged again"
+
+    # The edge WE inserted is rolled back too, or the collection guard would skip the
+    # pair forever on the strength of a row whose markdown never existed.
+    assert engine.db.conn.execute(
+        "SELECT 1 FROM edges WHERE source_id = ? AND target_id = ?", (id_a, id_b)
+    ).fetchone() is None

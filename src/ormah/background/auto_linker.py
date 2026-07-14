@@ -335,7 +335,33 @@ def _apply_edge(
                 mem_node.touch_updated()
                 engine.file_store.save(mem_node)
         except Exception as e:
-            logger.debug("Failed to persist connection to markdown for %s: %s", node_a_id[:8], e)
+            # Compensate. The markdown is the source of truth — a rebuild recreates the
+            # edge table from it. Swallowing this (as the code used to) left the pair
+            # marked as checked with the connection missing from the file: the rebuild
+            # then dropped the DB-only edge, and the checked row stopped the pair from
+            # ever being judged again. The link was lost for good.
+            #
+            # Undo the marker, and undo the edge only if WE inserted it — a row a
+            # concurrent writer created is not ours to delete, and its own markdown is
+            # its own responsibility. Then propagate: the caller leaves the node
+            # unresolved, so the watermark fails closed and the pair is retried.
+            logger.warning(
+                "auto_linker: markdown persist failed for %s -> %s; undoing the checked "
+                "mark%s so the pair is retried: %s",
+                node_a_id[:8], node_b_id[:8],
+                " and the edge we inserted" if edge_created else "", e,
+            )
+            with engine.db.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+                )
+                if edge_created:
+                    conn.execute(
+                        "DELETE FROM edges WHERE source_id = ? AND target_id = ? "
+                        "AND edge_type = ?",
+                        (node_a_id, node_b_id, edge_type),
+                    )
+            raise
 
     return edge_created
 
