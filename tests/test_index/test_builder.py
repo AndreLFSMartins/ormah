@@ -184,3 +184,30 @@ def test_full_rebuild_edge_failure_does_not_abort_but_is_surfaced(db, file_store
     assert count == 3  # all nodes committed despite the edge failure
     assert db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 3
     assert any("failed edge indexing" in r.message for r in caplog.records)  # surfaced, not silent
+def test_reindex_preserves_the_edge_reason(engine):
+    """Reindexing a node must not wipe why its edges exist."""
+    from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
+
+    id_a, _ = engine.remember(
+        CreateNodeRequest(content="A fact.", type=NodeType.fact), agent_id="t")
+    id_b, _ = engine.remember(
+        CreateNodeRequest(content="Another fact.", type=NodeType.fact), agent_id="t")
+
+    node = engine.file_store.load(id_a)
+    node.connections.append(
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.9, reason="because X")
+    )
+    engine.file_store.save(node)
+
+    # index_single takes a Path, not an id (builder.py:124) - passing the id raises
+    # before the assertion is ever reached (Codex R2, critical #4). The only helper that
+    # maps a node to its file is FileStore._path_for(node) (file_store.py:192), which
+    # takes the MemoryNode, not the id.
+    engine.builder.index_single(engine.file_store._path_for(node))
+
+    row = engine.db.conn.execute(
+        "SELECT reason FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = 'supports'",
+        (id_a, id_b),
+    ).fetchone()
+    assert row is not None
+    assert row["reason"] == "because X"

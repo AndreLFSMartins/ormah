@@ -318,6 +318,9 @@ def run_conflict_detection(engine) -> dict | None:
                 target=target_id,
                 edge=EdgeType(edge_type_str),
                 weight=0.9,
+                # Coerce for the same reason as auto_linker: a non-string LLM explanation
+                # would raise on Connection and cost us the markdown connection.
+                reason=str(explanation) if explanation else None,
             )
             dirty_nodes.setdefault(source_id, []).append(md_conn)
             if cur.rowcount > 0:

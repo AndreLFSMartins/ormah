@@ -349,6 +349,12 @@ def _apply_edge(
                         target=node_b_id,
                         edge=EdgeType(edge_type),
                         weight=round(similarity, 2),
+                        # Coerce: the LLM can return JSON-valid non-strings (reason: 123).
+                        # SQLite takes them, but Connection.reason is typed — a
+                        # ValidationError here would be compensated below (the checked mark
+                        # and the edge are undone), so the pair would be retried forever
+                        # instead of ever being linked.
+                        reason=str(reason) if reason else None,
                     )
                 )
                 mem_node.touch_updated()
