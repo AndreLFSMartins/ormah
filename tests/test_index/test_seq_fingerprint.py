@@ -170,6 +170,49 @@ def test_tags_only_change_does_not_bump_seq(engine):
     assert tags == {"one", "two"}, "the tag edit must still land in the index"
 
 
+def test_migration_leaves_stale_rows_unstamped(engine):
+    """A row whose file on disk no longer matches its file_hash has a pending reindex.
+
+    Backfilling its fingerprint from the row would bake in a change that was never indexed
+    (auto_cluster writes `space` to the DB and the markdown without going through the
+    builder), so the next reindex would see no change and the relink would be lost. Those
+    rows must be left NULL, which forces a mismatch and a requeue.
+    """
+    node_id = _make_node(engine)
+
+    # simulate the pending-reindex window: the DB's file_hash no longer matches the file,
+    # and the fingerprint was never stamped (as the migration would leave it)
+    with engine.db.transaction() as conn:
+        conn.execute("UPDATE nodes SET file_hash = ? WHERE id = ?", ("stale-hash", node_id))
+        conn.execute("UPDATE nodes SET content_fingerprint = NULL WHERE id = ?", (node_id,))
+
+    # re-running the migration must NOT stamp this row
+    engine.db._migrate()
+
+    assert _row(engine, node_id)["content_fingerprint"] is None, (
+        "a row with a pending reindex must be left unstamped, or its relink is lost"
+    )
+
+    # ...and the first reindex requeues it
+    seq_before = _seq(engine, node_id)
+    node = engine.file_store.load(node_id)
+    engine.builder.index_single(engine.file_store.save(node))
+    assert _seq(engine, node_id) > seq_before, "a NULL fingerprint must requeue on first reindex"
+
+
+def test_migration_stamps_clean_rows(engine):
+    """A row whose file matches its hash is stamped, so the upgrade does not requeue the store."""
+    node_id = _make_node(engine)
+    with engine.db.transaction() as conn:
+        conn.execute("UPDATE nodes SET content_fingerprint = NULL WHERE id = ?", (node_id,))
+
+    engine.db._migrate()
+
+    assert _row(engine, node_id)["content_fingerprint"] is not None, (
+        "a clean row must be backfilled, or the whole store gets requeued on upgrade"
+    )
+
+
 def test_full_rebuild_allocates_new_seq(engine):
     """A mass reindex requeues the whole store and clears the watermark."""
     node_id = _make_node(engine)
