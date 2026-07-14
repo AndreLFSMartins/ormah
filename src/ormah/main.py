@@ -216,6 +216,17 @@ async def lifespan(app: FastAPI):
     if not hasattr(app.state, "scheduler"):
         _start_backfill_fallback(engine)
 
+    if not hasattr(app.state, "job_tracker"):
+        # The manual admin routes use the tracker for single-flight exclusion. It was only
+        # created inside the scheduler's try block, so a failed scheduler startup left the
+        # guard with nothing to claim against and it silently degraded to a no-op — two
+        # concurrent HTTP triggers could then run the same edge-writing job at once (#117).
+        # No scheduler means no scheduled job to collide with, but concurrent requests
+        # still collide, so the tracker must always exist.
+        from ormah.background.job_tracker import JobTracker
+
+        app.state.job_tracker = JobTracker()
+
     if not hasattr(app.state, "maintenance_manager"):
         app.state.maintenance_manager = MaintenanceManager(engine)
 

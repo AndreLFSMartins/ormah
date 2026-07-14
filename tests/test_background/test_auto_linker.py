@@ -811,3 +811,19 @@ def test_a_failed_markdown_save_does_not_leave_the_pair_marked_checked(engine, m
     assert engine.db.conn.execute(
         "SELECT 1 FROM edges WHERE source_id = ? AND target_id = ?", (id_a, id_b)
     ).fetchone() is None
+def test_run_auto_linker_reports_a_fatal_error_instead_of_returning_none(engine, monkeypatch):
+    """A run that dies must say so in its return value — the job tracker and the admin
+    route both read it. Returning None made a dead run look like a clean one (#117)."""
+    from ormah.background import auto_linker as al
+
+    engine.settings.llm_provider = "ollama"  # llm_enabled is derived from this
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("vector store exploded")
+
+    monkeypatch.setattr(al, "_get_watermark", boom)
+
+    result = al.run_auto_linker(engine)
+
+    assert isinstance(result, dict)
+    assert "vector store exploded" in result["error"]
