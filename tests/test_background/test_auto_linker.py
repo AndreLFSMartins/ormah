@@ -411,3 +411,15 @@ def test_checked_pairs_invalidated_on_update(engine):
         run_auto_linker(engine)
 
     assert mock_llm.call_count >= 1  # LLM was called again for this pair
+
+
+def test_apply_edge_writes_the_reason_into_the_markdown(engine):
+    """The reason must reach the file, otherwise the next reindex erases it."""
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+    _apply_edge(engine, id_a, id_b, "supports", "they agree about Python", 0.8)
+
+    node = engine.file_store.load(id_a)
+    conn = next(c for c in node.connections if c.target == id_b)
+    assert conn.reason == "they agree about Python"

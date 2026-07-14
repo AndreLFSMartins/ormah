@@ -304,6 +304,7 @@ def _apply_edge(
                     target=node_b_id,
                     edge=EdgeType(edge_type),
                     weight=round(similarity, 2),
+                    reason=reason or None,
                 )
                 mem_node.connections.append(md_conn)
                 mem_node.touch_updated()

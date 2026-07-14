@@ -269,6 +269,7 @@ def run_conflict_detection(engine) -> None:
                 target=target_id,
                 edge=EdgeType(edge_type_str),
                 weight=0.9,
+                reason=explanation or None,
             )
             dirty_nodes.setdefault(source_id, []).append(md_conn)
             edges_created += 1
