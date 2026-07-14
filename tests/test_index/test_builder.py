@@ -73,7 +73,7 @@ def test_full_rebuild_aborts_and_preserves_data_on_total_failure(db, file_store,
     before = db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
     assert before == 3
 
-    def boom(_path):
+    def boom(_path, prior=None, prior_fingerprints=None):
         raise OSError(24, "Too many open files")
 
     monkeypatch.setattr(builder, "_index_file_nodes_only", boom)
@@ -106,7 +106,7 @@ def test_full_rebuild_aborts_and_preserves_data_on_partial_failure(db, file_stor
     original = builder._index_file_nodes_only
     calls = {"n": 0}
 
-    def flaky(path):
+    def flaky(path, prior=None, prior_fingerprints=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return original(path)
@@ -138,7 +138,7 @@ def test_full_rebuild_allow_partial_accepts_incomplete_pass(db, file_store, monk
     original = builder._index_file_nodes_only
     calls = {"n": 0}
 
-    def flaky(path):
+    def flaky(path, prior=None, prior_fingerprints=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return original(path)

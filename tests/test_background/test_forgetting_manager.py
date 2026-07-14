@@ -132,6 +132,12 @@ def test_guard_reads_file_over_stale_index(engine):
 
 def _make_archival_recent(engine, content, archived_days, importance=0.1):
     """Archival node NOT gate-stale (recent access), eligible in BOTH file and index."""
+    # These cap tests exercise eviction of UNPROTECTED nodes; a node is protected only by its
+    # explicit gates (importance, feedback, an explicit strong edge). Disable inline auto-link
+    # so incidental content similarity (e.g. "n0".."n4", cos 0.76 > the 0.65 default) can't
+    # connect the fixture nodes into a clique and shield them by connectivity (#126 keep_vectors
+    # preserves embeddings across reindex, which surfaces this confound the old bug hid).
+    engine.settings.auto_link_similarity_threshold = 1.1
     node_id, _ = engine.remember(CreateNodeRequest(
         content=content, type=NodeType.fact, tier=Tier.archival, title=content))
     recent = datetime.now(timezone.utc) - timedelta(days=3)
