@@ -290,8 +290,15 @@ def _apply_edge(
         )
 
         if edge_type not in ("none", "error"):
+            # OR IGNORE, not a raw INSERT: the "edge exists?" guard ran at collection
+            # time, before the LLM call. Any concurrent writer (ingest auto-link,
+            # conflict_detector, a reindex) may have created this same
+            # (source, target, type) in the meantime. Losing that race means the link
+            # already exists — the outcome we wanted. A raw INSERT turned it into an
+            # IntegrityError that rolled back the auto_link_checked row above and
+            # aborted the entire run (#117).
             conn.execute(
-                "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+                "INSERT OR IGNORE INTO edges (source_id, target_id, edge_type, weight, created, reason) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (node_a_id, node_b_id, edge_type, round(similarity, 3), now, reason),
             )
@@ -299,13 +306,24 @@ def _apply_edge(
     if edge_type not in ("none", "error"):
         try:
             mem_node = engine.file_store.load(node_a_id)
-            if mem_node is not None:
-                md_conn = Connection(
-                    target=node_b_id,
-                    edge=EdgeType(edge_type),
-                    weight=round(similarity, 2),
+            # Ensure the connection is in the file, whether or not WE won the insert.
+            # The markdown is the source of truth (a reindex rebuilds edges from it) and
+            # the winner's own save is best-effort. If the winner committed the row but
+            # failed to save its file, skipping this append would let the next reindex
+            # delete the edge, while the auto_link_checked row committed above would stop
+            # the pair from ever being reconsidered — the link would be lost for good.
+            # Idempotent: adds nothing when the connection is already there.
+            if mem_node is not None and not any(
+                c.target == node_b_id and c.edge.value == edge_type
+                for c in mem_node.connections
+            ):
+                mem_node.connections.append(
+                    Connection(
+                        target=node_b_id,
+                        edge=EdgeType(edge_type),
+                        weight=round(similarity, 2),
+                    )
                 )
-                mem_node.connections.append(md_conn)
                 mem_node.touch_updated()
                 engine.file_store.save(mem_node)
         except Exception as e:

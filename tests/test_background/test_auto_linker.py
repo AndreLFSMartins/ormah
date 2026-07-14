@@ -411,3 +411,87 @@ def test_checked_pairs_invalidated_on_update(engine):
         run_auto_linker(engine)
 
     assert mock_llm.call_count >= 1  # LLM was called again for this pair
+
+
+def test_apply_edge_is_idempotent_when_edge_already_exists(engine):
+    """A concurrent writer created the same edge between collection and apply.
+    _apply_edge must not raise, and must still record the pair as checked."""
+    from datetime import datetime, timezone
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+            "VALUES (?, ?, 'supports', 0.9, ?, 'created by someone else')",
+            (id_a, id_b, now),
+        )
+
+    _apply_edge(engine, id_a, id_b, "supports", "auto-linker reason", 0.8)
+
+    # The pre-existing edge survives untouched; no duplicate was created.
+    rows = engine.db.conn.execute(
+        "SELECT reason FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = 'supports'",
+        (id_a, id_b),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "created by someone else"
+
+    # The pair is marked checked -> it will never be re-judged. This is exactly what
+    # the rollback used to erase, which is why the pair poisoned every future run.
+    pair = tuple(sorted([id_a, id_b]))
+    assert engine.db.conn.execute(
+        "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+    ).fetchone() is not None
+
+
+def test_apply_edge_does_not_duplicate_the_markdown_connection(engine):
+    """The winner of the race already wrote its Connection to the file. We must not
+    append a second one for the same (target, edge)."""
+    from datetime import datetime, timezone
+    from ormah.models.node import Connection, EdgeType
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+            "VALUES (?, ?, 'supports', 0.9, ?, 'x')",
+            (id_a, id_b, now),
+        )
+    node = engine.file_store.load(id_a)          # the winner persisted its markdown
+    node.connections.append(Connection(target=id_b, edge=EdgeType.supports, weight=0.9))
+    engine.file_store.save(node)
+
+    _apply_edge(engine, id_a, id_b, "supports", "reason", 0.8)
+
+    node = engine.file_store.load(id_a)
+    assert len([c for c in node.connections if c.target == id_b]) == 1
+
+
+def test_apply_edge_repairs_a_markdown_connection_the_winner_failed_to_save(engine):
+    """The winner committed the DB row but crashed before saving its markdown. The
+    file is the source of truth and a reindex rebuilds edges from it — so if we skip
+    the append just because we lost the race, the next reindex deletes the edge while
+    auto_link_checked stops the pair from ever being reconsidered. The link would be
+    lost forever. We must repair the file instead. (Codex R1, critical #1.)"""
+    from datetime import datetime, timezone
+    from ormah.background.auto_linker import _apply_edge
+
+    id_a, id_b = _create_pair(engine)
+    now = datetime.now(timezone.utc).isoformat()
+    with engine.db.transaction() as conn:        # DB row exists, markdown does NOT
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, edge_type, weight, created, reason) "
+            "VALUES (?, ?, 'supports', 0.9, ?, 'winner crashed before saving md')",
+            (id_a, id_b, now),
+        )
+    assert [c for c in engine.file_store.load(id_a).connections if c.target == id_b] == []
+
+    _apply_edge(engine, id_a, id_b, "supports", "reason", 0.8)
+
+    conns = [c for c in engine.file_store.load(id_a).connections if c.target == id_b]
+    assert len(conns) == 1
+    assert conns[0].edge.value == "supports"
