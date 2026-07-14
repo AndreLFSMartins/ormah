@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 
 from ormah.index.db import Database
@@ -101,24 +102,22 @@ class IndexBuilder:
             self._remove_node(node.id)
             self._index_file(path, prior)
 
-    def _prior_row(self, node_id: str):
+    def _prior_row(self, node_id: str) -> sqlite3.Row | None:
         """The stored fingerprint + seq, read BEFORE _remove_node deletes the row.
 
-        The fingerprint — not the row's live columns — is the baseline: auto_cluster writes
-        `space` straight into SQLite (auto_cluster.py:64-86), so the row's own columns may
-        already hold the new value while the fingerprint still reflects the last indexed
-        content. Comparing against the fingerprint is what keeps that node getting requeued.
+        Only the persisted fingerprint may serve as the baseline — see the comparison in
+        _index_file_nodes_only for why the row's live columns must not.
         """
         return self.db.conn.execute(
             "SELECT seq, content_fingerprint FROM nodes WHERE id = ?", (node_id,)
         ).fetchone()
 
-    def _index_file(self, path: Path, prior=None) -> None:
+    def _index_file(self, path: Path, prior: sqlite3.Row | None = None) -> None:
         """Index a single markdown file into the database (nodes + edges)."""
         self._index_file_nodes_only(path, prior)
         self._index_file_edges(path)
 
-    def _index_file_nodes_only(self, path: Path, prior=None) -> None:
+    def _index_file_nodes_only(self, path: Path, prior: sqlite3.Row | None = None) -> None:
         """Index node, tags, and FTS from a markdown file (no edges)."""
         text = path.read_text(encoding="utf-8")
         node = parse_node(text)
@@ -202,7 +201,7 @@ class IndexBuilder:
             (node.id, node.title or "", node.content, tags_str),
         )
 
-    def _invalidate_checked_pairs(self, conn, node_id: str) -> None:
+    def _invalidate_checked_pairs(self, conn: sqlite3.Connection, node_id: str) -> None:
         """Drop cached pair verdicts for a node whose content fingerprint changed (#126).
 
         The auto_linker skips any pair already in `auto_link_checked` BEFORE it looks at the
