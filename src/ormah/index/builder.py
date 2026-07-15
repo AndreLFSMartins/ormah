@@ -33,7 +33,10 @@ class IndexBuilder:
 
         # Mass reindex re-allocates seq from the durable counter; clear the watermark so the
         # rebuilt store is reprocessed even if the counter was also reset (wiped meta).
-        self.db.conn.execute("DELETE FROM meta WHERE key = 'auto_link_watermark'")
+        self.db.conn.execute(
+            "DELETE FROM meta WHERE key IN "
+            "('auto_link_watermark', 'duplicate_check_watermark', 'conflict_check_watermark')"
+        )
 
         # Two-pass: nodes first, then edges (to satisfy FK constraints)
         paths = list(self.file_store.list_paths())
