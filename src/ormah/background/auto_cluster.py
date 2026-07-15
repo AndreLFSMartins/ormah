@@ -66,6 +66,7 @@ def run_auto_cluster(engine) -> None:
                     )
                 continue
             node.space = most_common
+            node.touch_updated()   # real edit -> advance `updated` for LWW sync ordering
             # ponytail: a concurrent lock landing between this recheck and save() loses to
             # last-writer here (the index UPDATE below is still guarded). Bounded: hourly job,
             # microsecond window, single-user, self-heals next run. A cross-store file<->SQLite
