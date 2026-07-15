@@ -348,6 +348,32 @@ def test_dedup_run_llm_disabled_does_not_advance_watermark(engine):
     assert get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY) == 0
 
 
+def test_dedup_run_vectorless_seed_blocks_watermark(engine):
+    """A vectorless seed must be a barrier: no later seed may drain past it,
+    or the watermark jumps a hole and the vectorless seed's pairs are never
+    re-checked once vectors are restored (#81 regression)."""
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+    id_a, seq_a = _make_fact(engine, "Vectorless note", "A note whose vector went missing.")
+    id_b, seq_b = _make_fact(engine, "Second note", "A second, unrelated note.")
+    assert seq_a < seq_b
+
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors WHERE id = ?", (id_a,))  # only the LOWER-seq seed loses its vector
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=_duplicate_response()):
+        run_duplicate_detection(engine)
+
+    # With the `break` fix the finder stops at the vectorless barrier
+    # (seq_a): the cursor may advance past legitimately-drained seeds before
+    # it (e.g. the engine's own user_node), but must never reach seq_a or
+    # jump the hole to seq_b.
+    assert get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY) < seq_a
+
+
 def test_auto_merge_survivor_requeues_into_delta(engine):
     """When a pair auto-merges mid-run, the survivor's content rewrite
     allocates a fresh seq (see test_seq_bumped_on_rewrite), so it re-enters

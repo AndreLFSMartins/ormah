@@ -489,6 +489,31 @@ def test_conflict_run_llm_disabled_does_not_advance_watermark(engine):
     assert get_watermark(engine.db.conn, CONFLICT_WATERMARK_KEY) == 0
 
 
+def test_conflict_run_vectorless_seed_blocks_watermark(engine):
+    """A vectorless seed must be a barrier: no later seed may drain past it,
+    or the watermark jumps a hole and the vectorless seed's pairs are never
+    re-checked once vectors are restored (#81 regression)."""
+    from ormah.background.conflict_detector import run_conflict_detection
+    from ormah.background.watermark import CONFLICT_WATERMARK_KEY, get_watermark
+
+    id_a, seq_a = _make_belief(engine, "Vectorless claim", "A statement whose vector went missing.")
+    id_b, seq_b = _make_belief(engine, "Second claim", "A second, unrelated statement.")
+    assert seq_a < seq_b
+
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors WHERE id = ?", (id_a,))  # only the LOWER-seq seed loses its vector
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=_conflict_response()):
+        run_conflict_detection(engine)
+
+    # The vectorless seed (seq_a) is the lowest-seq selected node: with the
+    # `break` fix the finder stops there and drains nothing, so the
+    # watermark must stay at 0 (never jump the hole to seq_b).
+    assert get_watermark(engine.db.conn, CONFLICT_WATERMARK_KEY) == 0
+
+
 def test_run_with_no_new_nodes_is_a_noop(engine):
     from ormah.background.conflict_detector import run_conflict_detection
     from ormah.background.watermark import CONFLICT_WATERMARK_KEY, get_watermark, set_watermark

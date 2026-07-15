@@ -182,12 +182,13 @@ def _find_conflict_candidates(
                 drained_seeds.append((node["id"], node["seq"]))
                 continue
 
-            # FAIL-CLOSED (overview invariant, mirrors upstream auto_linker.py):
-            # a seed with text but no persisted vector must NOT drain — an
-            # empty/backfilling index would return zero neighbors and the
-            # cursor would pass pairs that were never derived.
+            # FAIL-CLOSED BARRIER (overview invariant, mirrors upstream
+            # auto_linker.py): a seed with text but no persisted vector stops
+            # the batch here. `break`, not `continue` — a later seed must not
+            # drain and advance the watermark past this hole, or this seed's
+            # pairs are permanently skipped once its vector is backfilled.
             if delta and vec_store.get(node["id"]) is None:
-                continue  # NOT appended to drained_seeds
+                break
 
             query_vec = stored_or_encoded(
                 vec_store,
