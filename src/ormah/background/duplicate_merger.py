@@ -132,15 +132,29 @@ def _llm_check_duplicate(settings, node_row, other_row) -> dict | None:
         return None
 
 
-def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
+def _find_merge_candidates(
+    engine,
+    limit: int = 8,
+    *,
+    max_seeds: int | None = None,
+    delta: bool = False,
+):
     """Find node pairs that might be duplicates.
 
-    Returns up to *limit* pairs as
-    ``[{"node_a": {...}, "node_b": {...}, "similarity": float, "score": float,
-        "embedding_sim": float, "title_sim": float, "token_sim": float}]``.
+    ``delta=False`` (default — agent path): today's ``ORDER BY RANDOM()``
+    selection, unchanged; returns a candidate list.
+
+    ``delta=True`` (background run only, #81): seeds are nodes with ``seq``
+    above the ``duplicate_check_watermark``, oldest-first, bounded by
+    *max_seeds* (default: ``duplicate_check_max_nodes_per_run``). Vector
+    neighbors are NOT age-filtered. Returns ``(candidates, drained_seeds)``;
+    candidates carry ``seed_seq``. Only ``run_duplicate_detection`` advances
+    the watermark. ``limit`` stays pair-denominated in both modes.
+
     Does NOT call the LLM — just applies the same pre-filters as
     ``run_duplicate_detection`` (same type, composite score threshold).
     """
+    drained_seeds: list[tuple[str, int]] = []
     try:
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
@@ -148,21 +162,46 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
         settings = engine.settings
         encoder = get_encoder(settings)
         vec_store = VectorStore(engine.db)
-
         user_node_id = getattr(engine, "user_node_id", None)
-        nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes ORDER BY RANDOM()").fetchall()
+
+        if delta:
+            from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+            if max_seeds is None:
+                max_seeds = settings.duplicate_check_max_nodes_per_run
+            watermark = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
+            nodes = engine.db.conn.execute(
+                "SELECT id, content, title, type, seq FROM nodes "
+                "WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+                (watermark, max_seeds),
+            ).fetchall()
+        else:
+            # Legacy selection — byte-for-byte today's query (agent path).
+            nodes = engine.db.conn.execute(
+                "SELECT id, content, title, type, seq FROM nodes ORDER BY RANDOM()"
+            ).fetchall()
+
         checked: set[tuple[str, str]] = set()
         candidates: list[dict] = []
 
         for node in nodes:
             if len(candidates) >= limit:
-                break
+                break  # pair budget hit before this seed: not drained
             if node["id"] == user_node_id:
+                drained_seeds.append((node["id"], node["seq"]))
                 continue
 
             text = f"{node['title'] or ''} {node['content']}".strip()
             if not text:
+                drained_seeds.append((node["id"], node["seq"]))
                 continue
+
+            # FAIL-CLOSED (overview invariant, mirrors upstream auto_linker.py):
+            # a seed with text but no persisted vector must NOT drain — an
+            # empty/backfilling index would return zero neighbors and the
+            # cursor would pass pairs that were never derived.
+            if delta and vec_store.get(node["id"]) is None:
+                continue  # NOT appended to drained_seeds
 
             query_vec = stored_or_encoded(
                 vec_store,
@@ -228,13 +267,20 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
                     "embedding_sim": round(embedding_sim, 3),
                     "title_sim": round(title_sim, 3),
                     "token_sim": round(token_sim, 3),
+                    "seed_seq": node["seq"],
                 })
 
+            if len(candidates) >= limit:
+                break  # pair budget hit mid-seed: possibly partial, not drained
+            drained_seeds.append((node["id"], node["seq"]))
+
+        if delta:
+            return candidates, drained_seeds
         return candidates
 
     except Exception as e:
         logger.warning("_find_merge_candidates failed: %s", e)
-        return []
+        return ([], []) if delta else []
 
 
 def run_duplicate_detection(engine) -> None:

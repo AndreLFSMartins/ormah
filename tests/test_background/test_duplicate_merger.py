@@ -156,3 +156,75 @@ def test_merged_content_stored_in_proposal(engine):
     assert "Python Programming Language" in proposal["proposed_action"]
     assert "Python is a popular programming language used widely." in proposal["proposed_action"]
     assert "Both describe Python" in proposal["reason"]
+
+
+# --- #81 delta-selection ---
+
+def _make_fact(engine, title, content):
+    """Create a node without auto-linking; return (id, seq)."""
+    original = engine.settings.auto_link_similarity_threshold
+    engine.settings.auto_link_similarity_threshold = 999.0
+    try:
+        node_id, _ = engine.remember(
+            CreateNodeRequest(content=content, type=NodeType.fact, title=title, tags=["test"]),
+            agent_id="test",
+        )
+    finally:
+        engine.settings.auto_link_similarity_threshold = original
+    seq = engine.db.conn.execute("SELECT seq FROM nodes WHERE id = ?", (node_id,)).fetchone()["seq"]
+    return node_id, seq
+
+
+def test_dedup_finder_skips_seeds_at_or_below_watermark(engine):
+    from ormah.background.duplicate_merger import _find_merge_candidates
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, set_watermark
+
+    _make_fact(engine, "Python is dynamic", "Python is a dynamically typed language.")
+    _make_fact(engine, "Python typing", "Python is a dynamically typed programming language.")
+
+    max_seq = engine.db.conn.execute("SELECT MAX(seq) m FROM nodes").fetchone()["m"]
+    set_watermark(engine, DUPLICATE_WATERMARK_KEY, max_seq)
+    candidates, seeds = _find_merge_candidates(engine, limit=100, delta=True)
+    assert candidates == [] and seeds == []
+    # legacy mode (agent path) ignores the watermark entirely
+    legacy = _find_merge_candidates(engine, limit=100)
+    assert isinstance(legacy, list) and len(legacy) >= 1
+
+
+def test_dedup_new_seed_pairs_with_old_neighbor(engine):
+    from ormah.background.duplicate_merger import _find_merge_candidates
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, set_watermark
+
+    old_id, old_seq = _make_fact(engine, "Server port", "The ormah server listens on port 8787.")
+    set_watermark(engine, DUPLICATE_WATERMARK_KEY, old_seq)
+
+    new_id, _ = _make_fact(engine, "Ormah port", "The ormah server runs on port 8787.")
+
+    candidates, _ = _find_merge_candidates(engine, limit=100, delta=True)
+    pair_ids = {(c["node_a"]["id"], c["node_b"]["id"]) for c in candidates}
+    assert any(old_id in p and new_id in p for p in pair_ids)
+
+
+def test_empty_vector_index_does_not_drain_dedup_seeds(engine):
+    """Fail-closed (overview invariant): seed with text but no persisted
+    vector must not drain (empty/backfilling node_vectors window)."""
+    from ormah.background.duplicate_merger import _find_merge_candidates
+
+    node_id, seq = _make_fact(engine, "Vectorless note", "A note whose vector is missing.")
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors")
+
+    _, seeds = _find_merge_candidates(engine, limit=100, delta=True)
+    assert (node_id, seq) not in seeds
+
+
+def test_dedup_finder_delta_reports_drained_in_seq_order(engine):
+    from ormah.background.duplicate_merger import _find_merge_candidates
+
+    made = [_make_fact(engine, f"Note {i}", f"Unrelated singleton note number {i}.")
+            for i in range(3)]
+    _, seeds = _find_merge_candidates(engine, limit=100, delta=True)
+    seed_ids = [s[0] for s in seeds]
+    for node_id, _seq in made:
+        assert node_id in seed_ids  # zero-candidate seeds still drained
+    assert [s[1] for s in seeds] == sorted(s[1] for s in seeds)
