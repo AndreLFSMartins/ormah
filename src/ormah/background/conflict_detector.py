@@ -276,7 +276,14 @@ def run_conflict_detection(engine) -> None:
             logger.debug("Conflict detection skipped: LLM not enabled")
             return
 
-        candidates = _find_conflict_candidates(engine, limit=10000)
+        from ormah.background.watermark import (
+            CONFLICT_WATERMARK_KEY, get_watermark, set_watermark,
+        )
+
+        candidates, drained_seeds = _find_conflict_candidates(
+            engine, limit=10_000, delta=True,
+        )
+        failed_seed_seqs: set[int] = set()
         edges_created = 0
         dirty_nodes: dict[str, list[Connection]] = {}
 
@@ -286,6 +293,7 @@ def run_conflict_detection(engine) -> None:
 
             llm_result = _llm_check_conflict(settings, node_a, node_b)
             if llm_result is None:
+                failed_seed_seqs.add(candidate["seed_seq"])
                 continue
             if not llm_result.get("conflict"):
                 continue
@@ -342,6 +350,21 @@ def run_conflict_detection(engine) -> None:
 
         if edges_created:
             logger.info("Conflict detector created %d edges", edges_created)
+
+        # ponytail: contiguous-prefix advance; a deterministically failing seed
+        # parks the cursor — dead-letter escape hatch is upstream #122.
+        new_watermark = get_watermark(engine.db.conn, CONFLICT_WATERMARK_KEY)
+        for _seed_id, seed_seq in drained_seeds:  # ascending seq
+            if seed_seq in failed_seed_seqs:
+                break
+            new_watermark = seed_seq
+        set_watermark(engine, CONFLICT_WATERMARK_KEY, new_watermark)
+        # Stamp the scope this cursor was advanced under (finder resets on mismatch)
+        with engine.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (CONFLICT_SCOPE_STAMP_KEY, _conflict_scope_value(settings)),
+            )
 
     except Exception as e:
         logger.warning("Conflict detection failed: %s", e)
