@@ -422,6 +422,41 @@ def test_scope_toggle_resets_delta_selection(engine):
     assert (node_id, seq) in seeds  # stamp mismatch -> watermark treated as 0
 
 
+def test_scope_toggle_run_persists_watermark_reset_on_vectorless_barrier(engine):
+    """A scope flip must persist the watermark reset during THIS run, even if
+    the run itself drains nothing (vectorless barrier) — otherwise the reset
+    is lost and the next run's stamp already matches (#81 regression)."""
+    from ormah.background.conflict_detector import (
+        CONFLICT_SCOPE_STAMP_KEY, run_conflict_detection,
+    )
+    from ormah.background.watermark import CONFLICT_WATERMARK_KEY, get_watermark, set_watermark
+
+    engine.settings.conflict_check_all_spaces = False
+    lowest_id, lowest_seq = _make_belief(engine, "Global claim", "A plain global-space statement.")
+    _make_belief(engine, "Another global claim", "A second plain global-space statement.")
+    max_seq = engine.db.conn.execute("SELECT MAX(seq) m FROM nodes").fetchone()["m"]
+    # Simulate: already advanced under scope=global
+    set_watermark(engine, CONFLICT_WATERMARK_KEY, max_seq)
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (CONFLICT_SCOPE_STAMP_KEY, "global"),
+        )
+
+    engine.settings.conflict_check_all_spaces = True  # operator flips the flag
+    # Vectorless barrier: the first newly-eligible seed has no vector
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors WHERE id = ?", (lowest_id,))
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=_conflict_response()):
+        run_conflict_detection(engine)
+
+    # Nothing drained this run, but the reset must persist for next run.
+    assert get_watermark(engine.db.conn, CONFLICT_WATERMARK_KEY) == 0
+
+
 def _conflict_response():
     return json.dumps({
         "conflict": True, "same_subject": True, "relationship": "tension",

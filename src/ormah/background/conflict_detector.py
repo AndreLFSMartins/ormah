@@ -281,6 +281,18 @@ def run_conflict_detection(engine) -> None:
             CONFLICT_WATERMARK_KEY, get_watermark, set_watermark,
         )
 
+        # Durably reset the cursor on a scope change BEFORE selection — so an
+        # expanded scope re-examines older nodes even if THIS run cannot
+        # drain the first seed (vectorless barrier) or the finder returns
+        # empty on a transient error. Persisting here (not just ephemerally
+        # in the finder) is what makes the reset survive to the next run:
+        # the advance loop below reloads the persisted watermark.
+        _stamp = engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (CONFLICT_SCOPE_STAMP_KEY,)
+        ).fetchone()
+        if _stamp is not None and _stamp["value"] != _conflict_scope_value(settings):
+            set_watermark(engine, CONFLICT_WATERMARK_KEY, 0)
+
         candidates, drained_seeds = _find_conflict_candidates(
             engine, limit=10_000, delta=True,
         )
