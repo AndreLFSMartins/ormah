@@ -52,9 +52,15 @@ class IndexBuilder:
             except Exception:
                 pass  # table may not exist
 
-            # Mass reindex re-allocates seq from the durable counter; clear the watermark so
+            # Mass reindex re-allocates seq from the durable counter; clear the watermarks so
             # the rebuilt store is reprocessed even if the counter was also reset (wiped meta).
-            conn.execute("DELETE FROM meta WHERE key = 'auto_link_watermark'")
+            # Also clear the conflict scope-stamp so post-rebuild state is fully coherent
+            # (the stamp would otherwise linger and describe a scope for a watermark of 0).
+            conn.execute(
+                "DELETE FROM meta WHERE key IN "
+                "('auto_link_watermark', 'duplicate_check_watermark', 'conflict_check_watermark', "
+                "'conflict_check_watermark_scope')"
+            )
 
             # Two-pass: nodes first, then edges (to satisfy FK constraints)
             for path in paths:

@@ -117,15 +117,39 @@ def _llm_check_conflict(settings, node_row, other_row) -> dict | None:
 
 _BELIEF_TYPES = ('preference', 'fact', 'observation', 'goal')
 
+CONFLICT_SCOPE_STAMP_KEY = "conflict_check_watermark_scope"
 
-def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
+
+def _conflict_scope_value(settings) -> str:
+    return "all" if settings.conflict_check_all_spaces else "global"
+
+
+def _find_conflict_candidates(
+    engine,
+    limit: int = 8,
+    *,
+    max_seeds: int | None = None,
+    delta: bool = False,
+):
     """Find node pairs that might contradict each other.
 
-    Returns up to *limit* pairs as
-    ``[{"node_a": {...}, "node_b": {...}, "similarity": float}]``.
-    Node dicts include ``created`` so they can be passed directly to the
-    LLM conflict-check prompt.  Does NOT call the LLM.
+    ``delta=False`` (default — the agent/two-call path): today's selection,
+    unchanged: full ``ORDER BY RANDOM()`` fetch, returns a candidate list.
+
+    ``delta=True`` (background run only, #81): seeds are nodes with ``seq``
+    above the ``conflict_check_watermark``, oldest-first, bounded by
+    *max_seeds* (default: ``conflict_check_max_nodes_per_run``). Vector
+    neighbors are NOT filtered by age — a new seed pairs against neighbors of
+    any age. Returns ``(candidates, drained_seeds)``; ``drained_seeds`` is
+    ``[(node_id, seq), ...]`` ascending, containing only seeds whose neighbor
+    loop completed (a seed cut short by the pair *limit* is excluded so the
+    cursor never passes it). Candidates each carry ``seed_seq``. A scope-stamp
+    mismatch (``conflict_check_all_spaces`` changed since the last advance)
+    treats the watermark as 0. Only ``run_conflict_detection`` advances the
+    watermark; this function never writes it. ``limit`` stays pair-denominated
+    in both modes.
     """
+    drained_seeds: list[tuple[str, int]] = []
     from ormah.embeddings.encoder import get_encoder
     from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
@@ -133,28 +157,63 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
     encoder = get_encoder(settings)
     vec_store = VectorStore(engine.db)
 
-    if settings.conflict_check_all_spaces:
+    space_filter = "" if settings.conflict_check_all_spaces else \
+        "AND (space IS NULL OR space = 'null') "
+
+    if delta:
+        from ormah.background.watermark import CONFLICT_WATERMARK_KEY, get_watermark
+
+        if max_seeds is None:
+            max_seeds = settings.conflict_check_max_nodes_per_run
+        watermark = get_watermark(engine.db.conn, CONFLICT_WATERMARK_KEY)
+        stamp = engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (CONFLICT_SCOPE_STAMP_KEY,)
+        ).fetchone()
+        if stamp is not None and stamp["value"] != _conflict_scope_value(settings):
+            watermark = 0  # scope changed: older nodes are newly in scope
+
         nodes = engine.db.conn.execute(
-            "SELECT id, content, title, type, created, space FROM nodes "
-            "WHERE type IN (?, ?, ?, ?) ORDER BY RANDOM()",
-            _BELIEF_TYPES,
+            "SELECT id, content, title, type, created, space, seq FROM nodes "
+            f"WHERE type IN (?, ?, ?, ?) {space_filter}AND seq > ? "
+            "ORDER BY seq ASC LIMIT ?",
+            (*_BELIEF_TYPES, watermark, max_seeds),
         ).fetchall()
     else:
+        # Legacy selection — byte-for-byte today's queries (agent path).
         nodes = engine.db.conn.execute(
-            "SELECT id, content, title, type, created, space FROM nodes "
-            "WHERE type IN (?, ?, ?, ?) AND (space IS NULL OR space = 'null') ORDER BY RANDOM()",
+            "SELECT id, content, title, type, created, space, seq FROM nodes "
+            f"WHERE type IN (?, ?, ?, ?) {space_filter}ORDER BY RANDOM()",
             _BELIEF_TYPES,
         ).fetchall()
 
     checked: set[tuple[str, str]] = set()
     candidates: list[dict] = []
+    barrier_hit = False
 
     for node in nodes:
         if len(candidates) >= limit:
-            break
+            break  # pair budget hit before this seed: not drained
 
         text = f"{node['title'] or ''} {node['content']}".strip()
         if not text:
+            if not barrier_hit:
+                drained_seeds.append((node["id"], node["seq"]))
+            continue
+
+        # DRAIN BARRIER (overview invariant, mirrors upstream
+        # auto_linker.py): a seed with text but no persisted vector must
+        # not let the cursor advance past it — its pairs would be
+        # permanently skipped once the vector is backfilled. `continue`,
+        # not `break`: later seeds are still PROCESSED (liveness, mirrors
+        # auto_linker) but no further seed drains once the barrier is hit.
+        if delta and vec_store.get(node["id"]) is None:
+            if not barrier_hit:
+                logger.warning(
+                    "conflict delta stalled: node %s has no persisted vector (embedding "
+                    "backfill pending?); cursor parked at seq %s until it embeds",
+                    node["id"][:8], node["seq"],
+                )
+            barrier_hit = True
             continue
 
         query_vec = stored_or_encoded(
@@ -219,23 +278,36 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
                 "node_a": _nd(node),
                 "node_b": _nd(other),
                 "similarity": round(similarity, 3),
+                "seed_seq": node["seq"],
             })
 
+        if len(candidates) >= limit:
+            break  # pair budget hit mid-seed: possibly partial, not drained
+        if not barrier_hit:
+            drained_seeds.append((node["id"], node["seq"]))
+
+    if delta:
+        return candidates, drained_seeds
     return candidates
 
 
 def run_conflict_detection(engine) -> dict | None:
     """Find potentially contradicting nodes and create edges.
 
-    Candidate pairs from _find_conflict_candidates are judged in K-sized LLM
+    Seeds are delta-selected via a seq watermark (#81): only nodes newer than
+    the last successfully-drained seed are scanned each run, so coverage
+    converges instead of re-scanning the whole store every time. Candidate
+    pairs from _find_conflict_candidates are then judged in K-sized LLM
     calls (#87). At K=1 the judge is a pure map — one _llm_check_conflict per
     candidate, exactly as before — so the existing suite is the K=1 regression
-    net. The finder already collects the full candidate list, so no streaming
-    window is needed here: judge the list, then apply verdicts by index.
+    net.
     """
     t0 = time.monotonic()
     try:
         from ormah.background.llm.pair_batch import judge_pairs
+        from ormah.background.watermark import (
+            CONFLICT_WATERMARK_KEY, get_watermark, set_watermark,
+        )
 
         settings = engine.settings
 
@@ -243,11 +315,26 @@ def run_conflict_detection(engine) -> dict | None:
             logger.debug("Conflict detection skipped: LLM not enabled")
             return {"skipped": "llm_disabled"}
 
-        # Pair-denominated cap (#87): default 10000 == the previous hardcoded limit,
-        # so out-of-the-box behavior is unchanged; now operator-configurable. The
-        # finder scans ORDER BY RANDOM(), so a lowered cap stays fair across runs.
+        # Durably reset the cursor on a scope change BEFORE selection (#81) —
+        # so an expanded scope re-examines older nodes even if THIS run cannot
+        # drain the first seed (vectorless barrier) or the finder returns
+        # empty on a transient error. Persisting here (not just ephemerally in
+        # the finder) is what makes the reset survive to the next run: the
+        # advance loop below reloads the persisted watermark.
+        _stamp = engine.db.conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (CONFLICT_SCOPE_STAMP_KEY,)
+        ).fetchone()
+        if _stamp is not None and _stamp["value"] != _conflict_scope_value(settings):
+            set_watermark(engine, CONFLICT_WATERMARK_KEY, 0)
+
+        # Pair-denominated cap (#87): default 10000 == the previous hardcoded
+        # limit, so out-of-the-box behavior is unchanged; now operator-
+        # configurable. Seed selection (which nodes are scanned) is bounded
+        # separately by conflict_check_max_nodes_per_run (#81).
         max_pairs = settings.conflict_check_max_pairs_per_run
-        candidates = _find_conflict_candidates(engine, limit=max_pairs)
+        candidates, drained_seeds = _find_conflict_candidates(
+            engine, limit=max_pairs, delta=True,
+        )
         k = max(settings.conflict_check_pairs_per_call or settings.maintenance_pairs_per_call, 1)
 
         verdicts = judge_pairs(
@@ -259,6 +346,7 @@ def run_conflict_detection(engine) -> dict | None:
         edges_created = 0
         pairs_attempted = 0
         pairs_evaluated = 0
+        failed_seed_seqs: set[int] = set()
         dirty_nodes: dict[str, list[Connection]] = {}
 
         for candidate, llm_result in zip(candidates, verdicts):
@@ -267,6 +355,7 @@ def run_conflict_detection(engine) -> dict | None:
 
             pairs_attempted += 1
             if llm_result is None:
+                failed_seed_seqs.add(candidate["seed_seq"])
                 continue
             pairs_evaluated += 1
             if not llm_result.get("conflict"):
@@ -343,6 +432,21 @@ def run_conflict_detection(engine) -> dict | None:
                 engine.file_store.save(mem_node)
             except Exception as e:
                 logger.debug("Failed to persist conflict edge to markdown for %s: %s", nid[:8], e)
+
+        # ponytail: contiguous-prefix advance; a deterministically failing seed
+        # parks the cursor — dead-letter escape hatch is upstream #122.
+        new_watermark = get_watermark(engine.db.conn, CONFLICT_WATERMARK_KEY)
+        for _seed_id, seed_seq in drained_seeds:  # ascending seq
+            if seed_seq in failed_seed_seqs:
+                break
+            new_watermark = seed_seq
+        set_watermark(engine, CONFLICT_WATERMARK_KEY, new_watermark)
+        # Stamp the scope this cursor was advanced under (finder resets on mismatch)
+        with engine.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (CONFLICT_SCOPE_STAMP_KEY, _conflict_scope_value(settings)),
+            )
 
         duration = time.monotonic() - t0
         stats = {

@@ -149,35 +149,93 @@ def _llm_check_duplicate(settings, node_row, other_row) -> dict | None:
         return None
 
 
-def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
+def _find_merge_candidates(
+    engine,
+    limit: int = 8,
+    *,
+    max_seeds: int | None = None,
+    delta: bool = False,
+    respect_checked: bool = True,
+):
     """Find node pairs that might be duplicates.
 
-    Returns up to *limit* pairs as
-    ``[{"node_a": {...}, "node_b": {...}, "similarity": float, "score": float,
-        "embedding_sim": float, "title_sim": float, "token_sim": float}]``.
+    ``delta=False`` (default — agent path): today's ``ORDER BY RANDOM()``
+    selection, unchanged; returns a candidate list.
+
+    ``delta=True`` (background run only, #81): seeds are nodes with ``seq``
+    above the ``duplicate_check_watermark``, oldest-first, bounded by
+    *max_seeds* (default: ``duplicate_check_max_nodes_per_run``). Vector
+    neighbors are NOT age-filtered. Returns ``(candidates, drained_seeds)``;
+    candidates carry ``seed_seq``. Only ``run_duplicate_detection`` advances
+    the watermark. ``limit`` stays pair-denominated in both modes.
+
+    ``respect_checked`` (default ``True``): skip pairs already present in
+    ``auto_link_checked``. Background dedup (``run_duplicate_detection``)
+    never consults this table at all (see its own docstring) — this flag
+    exists for the standalone caller (the agent path), which keeps today's
+    behavior.
+
     Does NOT call the LLM — just applies the same pre-filters as
     ``run_duplicate_detection`` (same type, composite score threshold).
     """
+    drained_seeds: list[tuple[str, int]] = []
     from ormah.embeddings.encoder import get_encoder
     from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
     settings = engine.settings
     encoder = get_encoder(settings)
     vec_store = VectorStore(engine.db)
-
     user_node_id = getattr(engine, "user_node_id", None)
-    nodes = engine.db.conn.execute("SELECT id, content, title, type FROM nodes ORDER BY RANDOM()").fetchall()
+
+    if delta:
+        from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+        if max_seeds is None:
+            max_seeds = settings.duplicate_check_max_nodes_per_run
+        watermark = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
+        nodes = engine.db.conn.execute(
+            "SELECT id, content, title, type, seq FROM nodes "
+            "WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+            (watermark, max_seeds),
+        ).fetchall()
+    else:
+        # Legacy selection — byte-for-byte today's query (agent path).
+        nodes = engine.db.conn.execute(
+            "SELECT id, content, title, type, seq FROM nodes ORDER BY RANDOM()"
+        ).fetchall()
+
     checked: set[tuple[str, str]] = set()
     candidates: list[dict] = []
+    barrier_hit = False
 
     for node in nodes:
         if len(candidates) >= limit:
-            break
+            break  # pair budget hit before this seed: not drained
         if node["id"] == user_node_id:
+            if not barrier_hit:
+                drained_seeds.append((node["id"], node["seq"]))
             continue
 
         text = f"{node['title'] or ''} {node['content']}".strip()
         if not text:
+            if not barrier_hit:
+                drained_seeds.append((node["id"], node["seq"]))
+            continue
+
+        # DRAIN BARRIER (overview invariant, mirrors upstream
+        # auto_linker.py): a seed with text but no persisted vector must
+        # not let the cursor advance past it — its pairs would be
+        # permanently skipped once the vector is backfilled. `continue`,
+        # not `break`: later seeds are still PROCESSED (liveness, mirrors
+        # auto_linker) but no further seed drains once the barrier is hit.
+        if delta and vec_store.get(node["id"]) is None:
+            if not barrier_hit:
+                logger.warning(
+                    "duplicate delta stalled: node %s has no persisted vector (embedding "
+                    "backfill pending?); cursor parked at seq %s until it embeds",
+                    node["id"][:8], node["seq"],
+                )
+            barrier_hit = True
             continue
 
         query_vec = stored_or_encoded(
@@ -203,11 +261,12 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
                 continue
             checked.add(pair)
 
-            already_checked = engine.db.conn.execute(
-                "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
-            ).fetchone()
-            if already_checked:
-                continue
+            if respect_checked:
+                already_checked = engine.db.conn.execute(
+                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+                ).fetchone()
+                if already_checked:
+                    continue
 
             embedding_sim = match["similarity"]
             if embedding_sim < 0.25:
@@ -244,8 +303,16 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
                 "embedding_sim": round(embedding_sim, 3),
                 "title_sim": round(title_sim, 3),
                 "token_sim": round(token_sim, 3),
+                "seed_seq": node["seq"],
             })
 
+        if len(candidates) >= limit:
+            break  # pair budget hit mid-seed: possibly partial, not drained
+        if not barrier_hit:
+            drained_seeds.append((node["id"], node["seq"]))
+
+    if delta:
+        return candidates, drained_seeds
     return candidates
 
 
@@ -256,10 +323,24 @@ def run_duplicate_detection(engine) -> dict | None:
     title similarity, and token overlap for candidate generation.
     LLM confirmation is mandatory — no merges happen without LLM
     saying ``is_duplicate: true``.
+
+    Seeds are delta-selected via a seq watermark (#81): only nodes newer than
+    the last successfully-drained seed are scanned each run (bounded by
+    ``duplicate_check_max_nodes_per_run``), so coverage converges instead of
+    re-scanning the whole store every time. This scan never consults
+    ``auto_link_checked`` — that table records auto_linker's LINK decisions
+    (including "no link"), not dedup verdicts, so background dedup relies on
+    its own seq-watermark for convergence instead. Candidate pairs are judged
+    in K-sized LLM calls (#87); at K=1 the judge is a pure map — one
+    _llm_check_duplicate per candidate, exactly as before — so the existing
+    suite is the K=1 regression net.
     """
     t0 = time.monotonic()
     try:
         from ormah.background.llm.pair_batch import judge_pairs
+        from ormah.background.watermark import (
+            DUPLICATE_WATERMARK_KEY, get_watermark, set_watermark,
+        )
         from ormah.embeddings.encoder import get_encoder
         from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
@@ -274,17 +355,15 @@ def run_duplicate_detection(engine) -> dict | None:
         conn = engine.db.conn
         user_node_id = getattr(engine, "user_node_id", None)
         max_pairs = settings.duplicate_check_max_pairs_per_run   # 0 = unbounded (default)
+        max_seeds = settings.duplicate_check_max_nodes_per_run   # seed batch per run (#81)
         k = max(settings.duplicate_check_pairs_per_call or settings.maintenance_pairs_per_call, 1)
 
-        # #87: candidate pairs are collected across nodes into a window of size K,
-        # judged in one pair_batch call, then applied. At K=1 the window is one
-        # pair, so each is confirmed and applied before the next is collected —
-        # the existing suite is the K=1 regression net. Council C2: randomize the
-        # scan only when capped, so a capped run doesn't re-judge the same
-        # deterministic front every time (negative verdicts aren't persisted
-        # until #81).
+        watermark = get_watermark(conn, DUPLICATE_WATERMARK_KEY)
         nodes = conn.execute(
-            "SELECT id, content, title, type FROM nodes" + _scan_order(max_pairs)).fetchall()
+            "SELECT id, content, title, type, seq FROM nodes WHERE seq > ? "
+            "ORDER BY seq ASC LIMIT ?",
+            (watermark, max_seeds),
+        ).fetchall()
 
         checked: set[tuple[str, str]] = set()
         window: list[dict] = []          # pending candidate pairs, at most K, across nodes
@@ -292,6 +371,9 @@ def run_duplicate_detection(engine) -> dict | None:
         pairs_attempted = 0
         pairs_evaluated = 0
         cap_hit = False
+        drained_seeds: list[tuple[str, int]] = []
+        failed_seed_seqs: set[int] = set()
+        barrier_hit = False
 
         def _flush() -> None:
             """Judge the windowed pairs (one K-chunk) and apply merges/proposals."""
@@ -304,6 +386,7 @@ def run_duplicate_detection(engine) -> dict | None:
             for pair, llm_result in zip(window, verdicts):
                 pairs_attempted += 1
                 if llm_result is None:          # LLM unavailable for this pair — skip
+                    failed_seed_seqs.add(pair["seed_seq"])
                     continue
                 pairs_evaluated += 1
                 if not llm_result.get("is_duplicate"):
@@ -315,7 +398,8 @@ def run_duplicate_detection(engine) -> dict | None:
                 # nodes (execute_merge picks the keeper by quality, not arg order, and
                 # silently no-ops on a missing node — which would miscount it as a
                 # merge). Skip stale pairs; they are re-collected next run against
-                # fresh state. (#87 council: overlapping in-flight pairs.)
+                # fresh state — the survivor's rewrite bumps seq (#81), so it
+                # re-enters the delta. (#87 council: overlapping in-flight pairs.)
                 if (conn.execute("SELECT 1 FROM nodes WHERE id = ?",
                                  (pair["node"]["id"],)).fetchone() is None
                         or conn.execute("SELECT 1 FROM nodes WHERE id = ?",
@@ -361,10 +445,41 @@ def run_duplicate_detection(engine) -> dict | None:
             if cap_hit:
                 break
             if node["id"] == user_node_id:
+                if not barrier_hit:
+                    drained_seeds.append((node["id"], node["seq"]))
                 continue
+
+            # A node consumed by an earlier auto-merge THIS run (execute_merge
+            # deletes both the row and its vector) is gone — nothing left to
+            # find for it, and the watermark will never re-select a deleted id
+            # anyway. Treat as drained, not a vectorless barrier: its vector is
+            # missing because the node is gone, not because embedding is pending.
+            if conn.execute("SELECT 1 FROM nodes WHERE id = ?", (node["id"],)).fetchone() is None:
+                if not barrier_hit:
+                    drained_seeds.append((node["id"], node["seq"]))
+                continue
+
             text = f"{node['title'] or ''} {node['content']}".strip()
             if not text:
+                if not barrier_hit:
+                    drained_seeds.append((node["id"], node["seq"]))
                 continue
+
+            # DRAIN BARRIER (mirrors upstream auto_linker.py, #81): a seed with
+            # text but no persisted vector must not let the cursor advance past
+            # it — its pairs would be permanently skipped once the vector is
+            # backfilled. Later seeds are still PROCESSED (liveness) but no
+            # further seed drains once the barrier is hit.
+            if vec_store.get(node["id"]) is None:
+                if not barrier_hit:
+                    logger.warning(
+                        "duplicate delta stalled: node %s has no persisted vector "
+                        "(embedding backfill pending?); cursor parked at seq %s until it embeds",
+                        node["id"][:8], node["seq"],
+                    )
+                barrier_hit = True
+                continue
+
             node_vec = stored_or_encoded(
                 vec_store, encoder, node["id"], node["title"], node["content"],
                 settings.embedding_max_content_chars,
@@ -395,12 +510,26 @@ def run_duplicate_detection(engine) -> dict | None:
                     break
                 window.append({"node": node, "other": other, "score": score,
                                "embedding_sim": embedding_sim, "title_sim": title_sim,
-                               "token_sim": token_sim})
+                               "token_sim": token_sim, "seed_seq": node["seq"]})
                 if len(window) >= k:
                     _flush()
 
+            if cap_hit:
+                break  # pair budget hit mid-seed: possibly partial, not drained
+            if not barrier_hit:
+                drained_seeds.append((node["id"], node["seq"]))
+
         if window:
             _flush()
+
+        # ponytail: contiguous-prefix advance; deterministic failure parks the
+        # cursor — dead-letter escape hatch is upstream #122.
+        new_watermark = get_watermark(conn, DUPLICATE_WATERMARK_KEY)
+        for _seed_id, seed_seq in drained_seeds:  # ascending seq
+            if seed_seq in failed_seed_seqs:
+                break
+            new_watermark = seed_seq
+        set_watermark(engine, DUPLICATE_WATERMARK_KEY, new_watermark)
 
         duration = time.monotonic() - t0
         stats = {
@@ -418,10 +547,3 @@ def run_duplicate_detection(engine) -> dict | None:
     except Exception as e:
         logger.warning("Duplicate detection failed: %s", e)
         return {"error": str(e)}
-
-
-def _scan_order(max_pairs: int) -> str:
-    """Council C2 (#87): randomize the node scan only when a per-run cap is set,
-    so a capped run doesn't re-judge the same deterministic front every time
-    (negative verdicts aren't persisted until #81). Uncapped == today's order."""
-    return " ORDER BY RANDOM()" if max_pairs else ""
