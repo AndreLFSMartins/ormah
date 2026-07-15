@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import patch, MagicMock
 
 from ormah.models.node import CreateNodeRequest, NodeType
@@ -228,6 +229,22 @@ def test_dedup_finder_delta_reports_drained_in_seq_order(engine):
     for node_id, _seq in made:
         assert node_id in seed_ids  # zero-candidate seeds still drained
     assert [s[1] for s in seeds] == sorted(s[1] for s in seeds)
+
+
+def test_dedup_barrier_logs_once_per_run(engine, caplog):
+    """The vectorless drain barrier warns once per run, not once per seed."""
+    from ormah.background.duplicate_merger import _find_merge_candidates
+
+    id_a, _ = _make_fact(engine, "Vectorless note A", "First note whose vector is missing.")
+    id_b, _ = _make_fact(engine, "Vectorless note B", "Second note whose vector is missing.")
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors WHERE id IN (?, ?)", (id_a, id_b))
+
+    with caplog.at_level(logging.WARNING):
+        _find_merge_candidates(engine, limit=100, delta=True)
+
+    matches = [r for r in caplog.records if "no persisted vector" in r.message]
+    assert len(matches) == 1
 
 
 def _duplicate_response():

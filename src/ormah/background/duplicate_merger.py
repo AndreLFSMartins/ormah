@@ -213,6 +213,12 @@ def _find_merge_candidates(
             # not `break`: later seeds are still PROCESSED (liveness, mirrors
             # auto_linker) but no further seed drains once the barrier is hit.
             if delta and vec_store.get(node["id"]) is None:
+                if not barrier_hit:
+                    logger.warning(
+                        "duplicate delta stalled: node %s has no persisted vector (embedding "
+                        "backfill pending?); cursor parked at seq %s until it embeds",
+                        node["id"][:8], node["seq"],
+                    )
                 barrier_hit = True
                 continue
 
