@@ -172,6 +172,7 @@ def _find_conflict_candidates(
 
         checked: set[tuple[str, str]] = set()
         candidates: list[dict] = []
+        barrier_hit = False
 
         for node in nodes:
             if len(candidates) >= limit:
@@ -179,16 +180,19 @@ def _find_conflict_candidates(
 
             text = f"{node['title'] or ''} {node['content']}".strip()
             if not text:
-                drained_seeds.append((node["id"], node["seq"]))
+                if not barrier_hit:
+                    drained_seeds.append((node["id"], node["seq"]))
                 continue
 
-            # FAIL-CLOSED BARRIER (overview invariant, mirrors upstream
-            # auto_linker.py): a seed with text but no persisted vector stops
-            # the batch here. `break`, not `continue` — a later seed must not
-            # drain and advance the watermark past this hole, or this seed's
-            # pairs are permanently skipped once its vector is backfilled.
+            # DRAIN BARRIER (overview invariant, mirrors upstream
+            # auto_linker.py): a seed with text but no persisted vector must
+            # not let the cursor advance past it — its pairs would be
+            # permanently skipped once the vector is backfilled. `continue`,
+            # not `break`: later seeds are still PROCESSED (liveness, mirrors
+            # auto_linker) but no further seed drains once the barrier is hit.
             if delta and vec_store.get(node["id"]) is None:
-                break
+                barrier_hit = True
+                continue
 
             query_vec = stored_or_encoded(
                 vec_store,
@@ -257,7 +261,8 @@ def _find_conflict_candidates(
 
             if len(candidates) >= limit:
                 break  # pair budget hit mid-seed: possibly partial, not drained
-            drained_seeds.append((node["id"], node["seq"]))
+            if not barrier_hit:
+                drained_seeds.append((node["id"], node["seq"]))
 
         if delta:
             return candidates, drained_seeds

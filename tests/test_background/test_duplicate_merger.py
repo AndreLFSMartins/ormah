@@ -374,6 +374,65 @@ def test_dedup_run_vectorless_seed_blocks_watermark(engine):
     assert get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY) < seq_a
 
 
+def test_dedup_run_judges_pair_already_in_auto_link_checked(engine):
+    """Background dedup must not skip a pair merely because auto_linker
+    already recorded a link decision for it (#81 regression: auto_link_checked
+    is a LINK-decision log, not a dedup-skip list)."""
+    from datetime import datetime, timezone
+
+    from ormah.background.duplicate_merger import run_duplicate_detection
+
+    engine.settings.auto_merge_threshold = 999.0  # force proposal path
+    id_a, _ = _make_fact(engine, "Editor choice", "The user edits everything in neovim.")
+    id_b, _ = _make_fact(engine, "Editor pick", "The user does all editing in neovim.")
+
+    pair = tuple(sorted([id_a, id_b]))
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO auto_link_checked (node_a, node_b, result, checked_at) "
+            "VALUES (?, ?, ?, ?)",
+            (*pair, "none", datetime.now(timezone.utc).isoformat()),
+        )
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=_duplicate_response()):
+        run_duplicate_detection(engine)
+
+    proposals = engine.db.conn.execute(
+        "SELECT 1 FROM proposals WHERE type = 'merge' AND status = 'pending'"
+    ).fetchall()
+    assert len(proposals) >= 1
+
+
+def test_dedup_run_processes_seeds_after_vectorless_barrier(engine):
+    """A vectorless barrier parks the cursor but must not stop later seeds
+    from being judged (liveness, mirrors upstream auto_linker)."""
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+    engine.settings.auto_merge_threshold = 999.0  # force proposal path
+    barrier_id, barrier_seq = _make_fact(engine, "Vectorless note", "A note whose vector went missing.")
+    with engine.db.transaction() as conn:
+        conn.execute("DELETE FROM node_vectors WHERE id = ?", (barrier_id,))
+
+    id_a, _ = _make_fact(engine, "Editor choice", "The user edits everything in neovim.")
+    id_b, _ = _make_fact(engine, "Editor pick", "The user does all editing in neovim.")
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=_duplicate_response()):
+        run_duplicate_detection(engine)
+
+    proposals = engine.db.conn.execute(
+        "SELECT 1 FROM proposals WHERE type = 'merge' AND status = 'pending'"
+    ).fetchall()
+    assert len(proposals) >= 1, "later seeds past the barrier must still be judged"
+
+    wm = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
+    assert wm < barrier_seq  # cursor still parked before the barrier
+
+
 def test_auto_merge_survivor_requeues_into_delta(engine):
     """When a pair auto-merges mid-run, the survivor's content rewrite
     allocates a fresh seq (see test_seq_bumped_on_rewrite), so it re-enters

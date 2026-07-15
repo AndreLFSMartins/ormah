@@ -138,6 +138,7 @@ def _find_merge_candidates(
     *,
     max_seeds: int | None = None,
     delta: bool = False,
+    respect_checked: bool = True,
 ):
     """Find node pairs that might be duplicates.
 
@@ -150,6 +151,12 @@ def _find_merge_candidates(
     neighbors are NOT age-filtered. Returns ``(candidates, drained_seeds)``;
     candidates carry ``seed_seq``. Only ``run_duplicate_detection`` advances
     the watermark. ``limit`` stays pair-denominated in both modes.
+
+    ``respect_checked`` (default ``True``): skip pairs already present in
+    ``auto_link_checked``. Background dedup (``run_duplicate_detection``)
+    passes ``False`` — that table records auto_linker's LINK decisions
+    (including "no link"), not dedup verdicts, and relies on its own
+    seq-watermark for convergence instead.
 
     Does NOT call the LLM — just applies the same pre-filters as
     ``run_duplicate_detection`` (same type, composite score threshold).
@@ -183,26 +190,31 @@ def _find_merge_candidates(
 
         checked: set[tuple[str, str]] = set()
         candidates: list[dict] = []
+        barrier_hit = False
 
         for node in nodes:
             if len(candidates) >= limit:
                 break  # pair budget hit before this seed: not drained
             if node["id"] == user_node_id:
-                drained_seeds.append((node["id"], node["seq"]))
+                if not barrier_hit:
+                    drained_seeds.append((node["id"], node["seq"]))
                 continue
 
             text = f"{node['title'] or ''} {node['content']}".strip()
             if not text:
-                drained_seeds.append((node["id"], node["seq"]))
+                if not barrier_hit:
+                    drained_seeds.append((node["id"], node["seq"]))
                 continue
 
-            # FAIL-CLOSED BARRIER (overview invariant, mirrors upstream
-            # auto_linker.py): a seed with text but no persisted vector stops
-            # the batch here. `break`, not `continue` — a later seed must not
-            # drain and advance the watermark past this hole, or this seed's
-            # pairs are permanently skipped once its vector is backfilled.
+            # DRAIN BARRIER (overview invariant, mirrors upstream
+            # auto_linker.py): a seed with text but no persisted vector must
+            # not let the cursor advance past it — its pairs would be
+            # permanently skipped once the vector is backfilled. `continue`,
+            # not `break`: later seeds are still PROCESSED (liveness, mirrors
+            # auto_linker) but no further seed drains once the barrier is hit.
             if delta and vec_store.get(node["id"]) is None:
-                break
+                barrier_hit = True
+                continue
 
             query_vec = stored_or_encoded(
                 vec_store,
@@ -227,11 +239,12 @@ def _find_merge_candidates(
                     continue
                 checked.add(pair)
 
-                already_checked = engine.db.conn.execute(
-                    "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
-                ).fetchone()
-                if already_checked:
-                    continue
+                if respect_checked:
+                    already_checked = engine.db.conn.execute(
+                        "SELECT 1 FROM auto_link_checked WHERE node_a = ? AND node_b = ?", pair
+                    ).fetchone()
+                    if already_checked:
+                        continue
 
                 embedding_sim = match["similarity"]
                 if embedding_sim < 0.25:
@@ -273,7 +286,8 @@ def _find_merge_candidates(
 
             if len(candidates) >= limit:
                 break  # pair budget hit mid-seed: possibly partial, not drained
-            drained_seeds.append((node["id"], node["seq"]))
+            if not barrier_hit:
+                drained_seeds.append((node["id"], node["seq"]))
 
         if delta:
             return candidates, drained_seeds
@@ -304,7 +318,7 @@ def run_duplicate_detection(engine) -> None:
         )
 
         candidates, drained_seeds = _find_merge_candidates(
-            engine, limit=10_000, delta=True,
+            engine, limit=10_000, delta=True, respect_checked=False,
         )
         failed_seed_seqs: set[int] = set()
         proposals_created = 0
