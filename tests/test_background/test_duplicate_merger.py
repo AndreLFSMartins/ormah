@@ -228,3 +228,146 @@ def test_dedup_finder_delta_reports_drained_in_seq_order(engine):
     for node_id, _seq in made:
         assert node_id in seed_ids  # zero-candidate seeds still drained
     assert [s[1] for s in seeds] == sorted(s[1] for s in seeds)
+
+
+def _duplicate_response():
+    return json.dumps({
+        "is_duplicate": True,
+        "merged_title": "Merged fact",
+        "merged_content": "The merged content.",
+        "reason": "Same statement.",
+    })
+
+
+def test_run_does_not_rejudge_pair_below_watermark(engine):
+    """Reproduces #81: with the cursor past both nodes, a run must not spend
+    LLM calls on them again."""
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark, set_watermark
+
+    _make_fact(engine, "Editor choice", "The user edits everything in neovim.")
+    _make_fact(engine, "Editor pick", "The user does all editing in neovim.")
+    max_seq = engine.db.conn.execute("SELECT MAX(seq) m FROM nodes").fetchone()["m"]
+    set_watermark(engine, DUPLICATE_WATERMARK_KEY, max_seq)
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+    llm = MagicMock(return_value=_duplicate_response())
+    with patch(_LLM_PATCH, llm):
+        run_duplicate_detection(engine)
+
+    llm.assert_not_called()
+    assert get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY) == max_seq
+
+
+def test_run_creates_proposal_for_delta_pair_and_advances(engine):
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+    engine.settings.auto_merge_threshold = 999.0  # force proposal path, not auto-merge
+    _make_fact(engine, "Backup time", "Backups run every night at 2am.")
+    _make_fact(engine, "Backup schedule", "The backup runs nightly at 2am.")
+    max_seq = engine.db.conn.execute("SELECT MAX(seq) m FROM nodes").fetchone()["m"]
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=_duplicate_response()):
+        run_duplicate_detection(engine)
+
+    proposals = engine.db.conn.execute(
+        "SELECT 1 FROM proposals WHERE type = 'merge' AND status = 'pending'"
+    ).fetchall()
+    assert len(proposals) >= 1
+    assert get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY) == max_seq
+
+
+def test_run_judges_full_content_not_400_char_preview(engine):
+    """The LLM must receive the node's untruncated row (merge safety, parity
+    with today's run), not the finder's 400-char preview. The marker sits
+    beyond 400 chars but under _llm_check_duplicate's own pre-existing
+    2000-char ceiling."""
+    from ormah.background.duplicate_merger import run_duplicate_detection
+
+    marker = "UNIQUE-TAIL-MARKER-9137"
+    long_content = "The deploy procedure is documented step by step. " * 12 + marker
+    _make_fact(engine, "Deploy procedure", long_content)
+    _make_fact(engine, "Deployment steps", long_content.replace("documented", "written"))
+    assert len(long_content) > 400
+
+    seen_prompts: list[str] = []
+
+    # NOTE: _llm_check_duplicate calls llm_generate(settings, prompt, json_mode=True),
+    # so the mock MUST take `settings` FIRST — otherwise settings lands in `prompt`
+    # and `marker in p` silently reads False (bug caught in Task 3's analogous mock).
+    def capture(settings, prompt, *args, **kwargs):
+        seen_prompts.append(prompt)
+        return json.dumps({"is_duplicate": False, "reason": "distinct"})
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+    with patch(_LLM_PATCH, side_effect=capture):
+        run_duplicate_detection(engine)
+
+    assert seen_prompts, "expected at least one LLM call for the near-duplicate pair"
+    assert any(marker in p for p in seen_prompts)
+
+
+def test_run_llm_failure_parks_dedup_watermark_exactly(engine):
+    """A clean seed batch BEFORE the failing pair advances; the cursor stops
+    exactly at the last clean seed before the failure (no `or wm == 0`
+    escape hatch — the advance must be exact)."""
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+    # unrelated singleton first: a clean, candidate-less seed with low seq
+    _, clean_seq = _make_fact(engine, "Lone note", "A singleton note about nothing similar.")
+    # then the near-duplicate pair whose LLM check will fail
+    _, pair_seq_a = _make_fact(engine, "Coffee dose", "The user drinks two espressos daily.")
+    _make_fact(engine, "Espresso habit", "The user has two espressos every day.")
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=None):  # LLM unavailable for every pair
+        run_duplicate_detection(engine)
+
+    wm = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
+    assert wm >= clean_seq      # clean prefix advanced
+    assert wm < pair_seq_a      # cursor parked before the failed seed
+
+
+def test_dedup_run_llm_disabled_does_not_advance_watermark(engine):
+    """Guard order: `if not settings.llm_enabled: return` fires BEFORE any
+    selection or advance."""
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+    _make_fact(engine, "Any note", "A note that would otherwise be a seed.")
+    engine.settings.llm_provider = "none"
+    _reset_adapter()
+    run_duplicate_detection(engine)
+    assert get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY) == 0
+
+
+def test_auto_merge_survivor_requeues_into_delta(engine):
+    """When a pair auto-merges mid-run, the survivor's content rewrite
+    allocates a fresh seq (see test_seq_bumped_on_rewrite), so it re-enters
+    the delta on the next run — skipping its stale pairs loses no work."""
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+    engine.settings.auto_merge_threshold = 0.0  # force the auto-merge path
+    id_a, _ = _make_fact(engine, "Deploy cmd", "Deploy with make release every Friday.")
+    id_b, _ = _make_fact(engine, "Release cmd", "Release with make release every Friday.")
+
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+    with patch(_LLM_PATCH, return_value=_duplicate_response()):
+        run_duplicate_detection(engine)
+
+    survivors = [r["id"] for r in engine.db.conn.execute(
+        "SELECT id FROM nodes WHERE id IN (?, ?)", (id_a, id_b)).fetchall()]
+    assert len(survivors) == 1  # one node merged away
+    surv_seq = engine.db.conn.execute(
+        "SELECT seq FROM nodes WHERE id = ?", (survivors[0],)).fetchone()["seq"]
+    wm = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
+    assert surv_seq > wm  # survivor sits ABOVE the cursor: re-selected next run
