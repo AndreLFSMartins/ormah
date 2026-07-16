@@ -2856,18 +2856,26 @@ class TestWhisperDecisions:
     def test_note_synthetic_whisper_skip_writes_the_decision_row(self, db_graph):
         # The skip itself happens at the /agent/whisper boundary (see
         # TestSyntheticPromptEndpoint); the engine only records it, so
-        # whisper_decisions stays one-row-per-call.
+        # whisper_decisions stays one-row-per-call. Goes through the real
+        # MemoryEngine method to cover the endpoint -> engine wiring.
+        from ormah.engine.memory_engine import MemoryEngine
+
         db, graph = db_graph
         builder = self._builder_with_db(db, graph)
-        builder._log_decision(
-            session_id="s-synth", space="proj", prompt="<task-notification>\n<task-id>x</task-id>",
-            intent=None, outcome="silent_synthetic",
+        engine = MagicMock(spec=MemoryEngine)
+        engine.context_builder = builder
+        MemoryEngine.note_synthetic_whisper_skip(
+            engine,
+            prompt="<task-notification>\n<task-id>x</task-id>",
+            space="proj",
+            session_id="s-synth",
         )
 
         rows = self._decisions(db)
         assert len(rows) == 1
         assert rows[0]["outcome"] == "silent_synthetic"
         assert rows[0]["session_id"] == "s-synth"
+        assert rows[0]["space"] == "proj"
 
     def test_short_prompt_logs_silent_short(self, db_graph):
         db, graph = db_graph
@@ -3288,6 +3296,45 @@ class TestSyntheticPromptEndpoint:
         assert resp.status_code == 200
         engine.get_whisper_context.assert_called_once()
         assert "s-ide" in _session_buffers
+        _session_buffers.clear()
+
+    def test_kill_switch_lets_synthetic_prompts_through(self, monkeypatch):
+        from ormah.api.routes_agent import _session_buffers
+        from ormah.config import settings as global_settings
+
+        monkeypatch.setattr(global_settings, "whisper_synthetic_filter_enabled", False)
+        _session_buffers.clear()
+        client, engine = self._client()
+
+        client.post(
+            "/agent/whisper",
+            json={"prompt": "<task-notification>\n<task-id>x</task-id>",
+                  "session_id": "s-killswitch"},
+        )
+
+        engine.get_whisper_context.assert_called_once()
+        engine.note_synthetic_whisper_skip.assert_not_called()
+        _session_buffers.clear()
+
+    def test_extra_patterns_from_settings_apply_at_the_boundary(self, monkeypatch):
+        from ormah.api.routes_agent import _session_buffers
+        from ormah.config import settings as global_settings
+
+        monkeypatch.setattr(
+            global_settings, "whisper_synthetic_prompt_patterns",
+            [r"You are classifying the relationship"],
+        )
+        _session_buffers.clear()
+        client, engine = self._client()
+
+        resp = client.post(
+            "/agent/whisper",
+            json={"prompt": "You are classifying the relationship between two memories",
+                  "session_id": "s-extra"},
+        )
+
+        assert resp.json()["text"] == ""
+        engine.get_whisper_context.assert_not_called()
         _session_buffers.clear()
 
 
