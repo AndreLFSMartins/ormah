@@ -2853,52 +2853,21 @@ class TestWhisperDecisions:
             "SELECT * FROM whisper_decisions ORDER BY id"
         ).fetchall()
 
-    def test_synthetic_prompt_logs_silent_synthetic(self, db_graph):
+    def test_note_synthetic_whisper_skip_writes_the_decision_row(self, db_graph):
+        # The skip itself happens at the /agent/whisper boundary (see
+        # TestSyntheticPromptEndpoint); the engine only records it, so
+        # whisper_decisions stays one-row-per-call.
         db, graph = db_graph
         builder = self._builder_with_db(db, graph)
-
-        out = builder.build_whisper_context(
-            prompt="<task-notification>\n<task-id>x</task-id>\n<status>done</status>",
-            session_id="s-synth",
+        builder._log_decision(
+            session_id="s-synth", space="proj", prompt="<task-notification>\n<task-id>x</task-id>",
+            intent=None, outcome="silent_synthetic",
         )
 
-        assert out == ""
         rows = self._decisions(db)
         assert len(rows) == 1
         assert rows[0]["outcome"] == "silent_synthetic"
         assert rows[0]["session_id"] == "s-synth"
-
-    def test_ide_wrapped_human_prompt_is_not_skipped(self, db_graph):
-        # REGRESSION GUARD (issue #134): must NOT log silent_synthetic — this is a
-        # real human prompt the IDE merely prefixed. 46/46 live events carried
-        # human text after the tag, so filtering it would silence the whisper
-        # whenever a file is open in the IDE.
-        db, graph = db_graph
-        builder = self._builder_with_db(db, graph, results=[])
-
-        builder.build_whisper_context(
-            prompt=("<ide_opened_file>The user opened /x/a.md in the IDE."
-                    "</ide_opened_file>\nrevisa o portfólio de segurança"),
-            session_id="s-ide",
-        )
-
-        rows = self._decisions(db)
-        assert len(rows) == 1
-        assert rows[0]["outcome"] != "silent_synthetic"
-
-    def test_filter_disabled_does_not_skip(self, db_graph):
-        db, graph = db_graph
-        builder = self._builder_with_db(db, graph, results=[])
-        builder.engine.settings = _make_settings_mock(
-            whisper_synthetic_filter_enabled=False,
-        )
-
-        builder.build_whisper_context(
-            prompt="<task-notification>\n<task-id>x</task-id>", session_id="s-off",
-        )
-
-        rows = self._decisions(db)
-        assert rows[0]["outcome"] != "silent_synthetic"
 
     def test_short_prompt_logs_silent_short(self, db_graph):
         db, graph = db_graph
@@ -3221,6 +3190,105 @@ class TestTopicShiftServedMemory:
             )
 
         assert "Sessionless topic memory" not in result
+
+
+class TestSyntheticPromptEndpoint:
+    """A machine-generated turn is skipped at the /agent/whisper boundary,
+    BEFORE any per-turn state mutation (#134).
+
+    The guard must sit above the session buffer and above the engine, because
+    both carry irreversible per-turn side effects: the ring buffer feeds
+    topic-shift/continuation for the NEXT human turn, and the engine's first
+    statement consumes the one-time onboarding nudge (meta.onboarding_prompted).
+    """
+
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from ormah.api.routes_agent import router
+
+        app = FastAPI()
+        app.include_router(router)
+        engine = MagicMock()
+        engine.get_whisper_context.return_value = ""
+        app.state.engine = engine
+        return TestClient(app), engine
+
+    def test_synthetic_prompt_never_reaches_the_engine(self):
+        # REGRESSION GUARD (#134, council/codex R1): the engine's first statement is
+        # _maybe_get_onboarding_nudge, which INSERTs meta.onboarding_prompted and
+        # returns the nudge exactly once. If a machine turn reaches the engine, it
+        # burns the onboarding and the first human never sees it.
+        from ormah.api.routes_agent import _session_buffers
+
+        _session_buffers.clear()
+        client, engine = self._client()
+
+        resp = client.post(
+            "/agent/whisper",
+            json={"prompt": "<task-notification>\n<task-id>x</task-id>",
+                  "session_id": "s-synth"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["text"] == ""
+        engine.get_whisper_context.assert_not_called()
+        _session_buffers.clear()
+
+    def test_synthetic_prompt_does_not_enter_the_session_buffer(self):
+        # A machine turn must not pollute recent_prompts: the buffer feeds the
+        # topic-shift centroid for the next HUMAN turn.
+        from ormah.api.routes_agent import _session_buffers
+
+        _session_buffers.clear()
+        client, _ = self._client()
+
+        client.post(
+            "/agent/whisper",
+            json={"prompt": "<scheduled-task name=\"drive-watch\" file=\"/x/S.md\">",
+                  "session_id": "s-buf"},
+        )
+
+        assert "s-buf" not in _session_buffers
+        _session_buffers.clear()
+
+    def test_synthetic_prompt_records_telemetry(self):
+        from ormah.api.routes_agent import _session_buffers
+
+        _session_buffers.clear()
+        client, engine = self._client()
+
+        client.post(
+            "/agent/whisper",
+            json={"prompt": "<task-notification>\n<task-id>x</task-id>",
+                  "session_id": "s-tel", "space": "proj"},
+        )
+
+        engine.note_synthetic_whisper_skip.assert_called_once()
+        kwargs = engine.note_synthetic_whisper_skip.call_args.kwargs
+        assert kwargs["session_id"] == "s-tel"
+        assert kwargs["space"] == "proj"
+        _session_buffers.clear()
+
+    def test_ide_wrapped_human_prompt_reaches_the_engine(self):
+        # REGRESSION GUARD (#134): <ide_opened_file> merely PREFIXES a real human
+        # prompt (46/46 on a live 30d corpus) — it must flow through untouched.
+        from ormah.api.routes_agent import _session_buffers
+
+        _session_buffers.clear()
+        client, engine = self._client()
+
+        resp = client.post(
+            "/agent/whisper",
+            json={"prompt": ("<ide_opened_file>The user opened /x/a.md in the IDE."
+                             "</ide_opened_file>\nrevisa o portfólio de segurança"),
+                  "session_id": "s-ide"},
+        )
+
+        assert resp.status_code == 200
+        engine.get_whisper_context.assert_called_once()
+        assert "s-ide" in _session_buffers
+        _session_buffers.clear()
 
 
 class TestSessionBufferEviction:

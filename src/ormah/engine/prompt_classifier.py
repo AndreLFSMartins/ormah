@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 # Deliberately excluded: wrapper tags like <ide_opened_file> and <system-reminder>,
 # which PREFIX a real human prompt rather than replace it (issue #134).
 _SYNTHETIC_PATTERNS = (
-    re.compile(r"<task-notification>"),
-    re.compile(r"<scheduled-task\b"),
-    re.compile(r"#\s*Autonomous loop check\b"),
+    re.compile(r"<task-notification>", re.IGNORECASE),
+    re.compile(r"<scheduled-task\b", re.IGNORECASE),
+    re.compile(r"#\s*Autonomous loop check\b", re.IGNORECASE),
 )
 
 
