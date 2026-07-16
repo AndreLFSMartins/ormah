@@ -157,6 +157,7 @@ def run_synthetic_pattern_monitor(
     rotted = find_rotted_patterns(engine.db.conn, settings, now)
 
     created = 0
+    refreshed = 0
     for entry in rotted:
         action = _proposed_action(entry)
         reason = (
@@ -166,27 +167,42 @@ def run_synthetic_pattern_monitor(
         )
         # Dedup has two rules, both needed:
         #
-        # - A `pending` proposal always blocks. If the user never resolves it and
-        #   the pattern later rots again, `created > last_seen` alone would stop
-        #   blocking once last_seen moves past the old `created`, filing a SECOND
-        #   pending proposal for the same action with a contradictory reason
-        #   (council-pr A1). There is never a reason to queue two identical
-        #   pending proposals at once.
+        # - A `pending` proposal always blocks a second INSERT. If the user never
+        #   resolves it and the pattern later rots again, `created > last_seen`
+        #   alone would stop blocking once last_seen moves past the old `created`,
+        #   filing a SECOND pending proposal for the same action with a
+        #   contradictory reason (council-pr A1). There is never a reason to queue
+        #   two identical pending proposals at once.
         # - A resolved proposal (approved/rejected) only blocks if it postdates
         #   the pattern's last match (council I2): filed BEFORE that match, it is
         #   about an episode that has since ended and must not block a fresh
         #   rot episode after a repair.
         #
-        # The SELECT and INSERT run inside one transaction so the scheduler and
-        # a manual `/admin` trigger can't both observe "not found" and insert two
-        # rows for the same identity (council-pr A2, TOCTOU).
+        # Blocking is not the same as staying silent. A pending proposal filed
+        # BEFORE the pattern's last match describes an episode that has since
+        # ended — the marker came back and rotted a second time. Skipping it
+        # would leave the queue quoting the FIRST episode's evidence while a new
+        # regression went unreported (council-pr B1). Refresh it in place: one
+        # row per action, and the evidence stops lying.
+        #
+        # The SELECT and the write run inside one transaction so the scheduler
+        # and a manual `/admin` trigger can't both observe "not found" and insert
+        # two rows for the same identity (council-pr A2, TOCTOU).
         with engine.db.transaction() as conn:
             existing = conn.execute(
-                "SELECT 1 FROM proposals WHERE type = ? AND proposed_action = ? "
-                "AND (status = 'pending' OR created > ?) LIMIT 1",
+                "SELECT id, status, created FROM proposals "
+                "WHERE type = ? AND proposed_action = ? "
+                "AND (status = 'pending' OR created > ?) "
+                "ORDER BY created DESC LIMIT 1",
                 (ProposalType.pattern.value, action, entry.last_seen),
             ).fetchone()
             if existing is not None:
+                if existing["status"] == "pending" and existing["created"] <= entry.last_seen:
+                    conn.execute(
+                        "UPDATE proposals SET reason = ?, created = ? WHERE id = ?",
+                        (reason, now.isoformat(), existing["id"]),
+                    )
+                    refreshed += 1
                 continue
             conn.execute(
                 "INSERT INTO proposals (id, type, status, source_nodes, "
@@ -197,6 +213,10 @@ def run_synthetic_pattern_monitor(
             )
         created += 1
 
-    if created:
-        logger.info("synthetic_pattern_monitor: filed %d pattern proposal(s)", created)
-    return {"rotted": len(rotted), "proposals_created": created}
+    if created or refreshed:
+        logger.info(
+            "synthetic_pattern_monitor: filed %d, refreshed %d pattern proposal(s)",
+            created, refreshed,
+        )
+    return {"rotted": len(rotted), "proposals_created": created,
+            "proposals_refreshed": refreshed}

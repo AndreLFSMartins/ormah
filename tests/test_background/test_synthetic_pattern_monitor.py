@@ -203,7 +203,7 @@ def test_rotted_pattern_creates_one_pending_proposal(engine):
 
     result = run_synthetic_pattern_monitor(engine, now=NOW)
 
-    assert result == {"rotted": 1, "proposals_created": 1}
+    assert result == {"rotted": 1, "proposals_created": 1, "proposals_refreshed": 0}
     row = engine.db.conn.execute(
         "SELECT type, status, source_nodes, proposed_action, reason FROM proposals"
     ).fetchone()
@@ -332,6 +332,10 @@ def test_abandoned_pending_proposal_is_not_duplicated(engine):
         _decision(engine, outcome="injected", matched_pattern=None,
                   logged_at=much_later - timedelta(minutes=i + 1))
 
+    before = engine.db.conn.execute(
+        "SELECT reason FROM proposals WHERE type = 'pattern'"
+    ).fetchone()["reason"]
+
     second = run_synthetic_pattern_monitor(engine, now=much_later)
 
     assert second["proposals_created"] == 0
@@ -339,6 +343,16 @@ def test_abandoned_pending_proposal_is_not_duplicated(engine):
         "SELECT COUNT(*) FROM proposals WHERE type = 'pattern' AND status = 'pending'"
     ).fetchone()[0]
     assert total == 1
+
+    # Not duplicating is only half of it: the surviving row must describe the
+    # SECOND episode, not keep quoting the first (council-pr B1).
+    assert second["proposals_refreshed"] == 1
+    row = engine.db.conn.execute(
+        "SELECT reason, created FROM proposals WHERE type = 'pattern'"
+    ).fetchone()
+    assert row["reason"] != before
+    assert (later + timedelta(days=1)).isoformat() in row["reason"]
+    assert row["created"] == much_later.isoformat()
 
 
 def test_proposed_action_says_the_action_is_manual(engine):
@@ -359,7 +373,7 @@ def test_no_rot_creates_nothing(engine):
               matched_pattern=TASK_NOTIFICATION, logged_at=NOW - timedelta(days=1))
 
     assert run_synthetic_pattern_monitor(engine, now=NOW) == {
-        "rotted": 0, "proposals_created": 0,
+        "rotted": 0, "proposals_created": 0, "proposals_refreshed": 0,
     }
 
 
