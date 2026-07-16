@@ -4,7 +4,29 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 import ormah.setup as setup
+
+
+@pytest.fixture(autouse=True)
+def _isolate_claude_home(tmp_path, monkeypatch):
+    """Structurally block every test in this file from touching the real
+    ~/.claude — regardless of what the test under it does or forgets to do.
+
+    _claude_code_wire()'s plugin-guard branch calls Path.home() directly, but
+    its plain-wiring branch (configure_claude_hooks / configure_claude_code_mcp)
+    calls os.path.expanduser("~/...") instead — patching Path.home alone leaves
+    that path unguarded. Both resolve "~" via the HOME env var (pathlib.Path.home
+    delegates to os.path.expanduser internally), so pinning HOME structurally
+    blocks every call site in one move, regardless of which one a test reaches.
+    A test that reaches either without this fixture would rewrite the
+    developer's real ~/.claude/settings.json and ~/.claude.json. conftest.py's
+    guard does not cover this (it only intercepts unlink/rmtree, and
+    _REAL_ORMAH_PATHS does not list these files), so this file provides its
+    own blanket isolation.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 def set_detected(monkeypatch, *agent_ids: str) -> None:
@@ -61,8 +83,7 @@ def test_run_setup_json_wires_detected(monkeypatch, tmp_path):
     ):
         monkeypatch.setattr(setup, name, lambda *a, _n=name: calls.append(_n))
 
-    with patch("ormah.setup.Path.home", return_value=tmp_path):
-        result = setup.run_setup_json()
+    result = setup.run_setup_json()
 
     assert result["detected"] == ["claude_code"]
     assert result["wired"] == ["claude_code"]
@@ -86,8 +107,7 @@ def test_run_setup_json_captures_errors(monkeypatch, tmp_path):
     ):
         monkeypatch.setattr(setup, name, lambda *a: None)
 
-    with patch("ormah.setup.Path.home", return_value=tmp_path):
-        result = setup.run_setup_json()
+    result = setup.run_setup_json()
 
     assert result["wired"] == []
     assert "claude_code" in result["errors"]
