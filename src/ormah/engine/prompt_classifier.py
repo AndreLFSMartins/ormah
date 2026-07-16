@@ -26,25 +26,32 @@ _SYNTHETIC_PATTERNS = (
 )
 
 
-def is_synthetic_prompt(prompt: str, extra_patterns: Sequence[str] = ()) -> bool:
-    """True when the prompt was authored by a machine, not a human.
+def match_synthetic_pattern(prompt: str, extra_patterns: Sequence[str] = ()) -> str | None:
+    """The source of the pattern that matched, or None when the prompt is human.
+
+    Returns the regex source rather than a bool so callers can record WHICH
+    pattern fired — a pattern that stops firing is a rotted pattern (#143).
 
     ``extra_patterns`` carries install-specific regexes from settings; the
     defaults stay generic to Claude Code. An invalid pattern is logged and
     ignored — a config typo must never take the whisper down.
+
+    An operator can configure the empty pattern "", which matches everything and
+    returns "" — falsy but a real match. Callers MUST test ``is not None``.
     """
     text = prompt.lstrip()
     if not text:
-        return False
-    if any(p.match(text) for p in _SYNTHETIC_PATTERNS):
-        return True
+        return None
+    for compiled in _SYNTHETIC_PATTERNS:
+        if compiled.match(text):
+            return compiled.pattern
     for raw in extra_patterns or ():
         try:
             if re.match(raw, text):
-                return True
+                return raw
         except (re.error, TypeError) as e:
             logger.warning("Ignoring invalid synthetic-prompt pattern %r: %s", raw, e)
-    return False
+    return None
 
 
 # Archetype prompts per intent category.  More examples = better embedding

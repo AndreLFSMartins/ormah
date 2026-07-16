@@ -3337,6 +3337,35 @@ class TestSyntheticPromptEndpoint:
         engine.get_whisper_context.assert_not_called()
         _session_buffers.clear()
 
+    def test_empty_operator_pattern_still_skips_the_whisper(self, monkeypatch):
+        """"" matches everything and is falsy — the guard must test `is not None`.
+
+        Truthiness here would silently disable filtering for this operator.
+        """
+        from ormah.config import settings
+
+        monkeypatch.setattr(settings, "whisper_synthetic_prompt_patterns", [""])
+        client, engine = self._client()  # reuse this class's existing helper
+        resp = client.post(
+            "/agent/whisper",
+            json={"prompt": "an ordinary human prompt", "session_id": "s-empty"},
+        )
+        assert resp.status_code == 200
+        engine.get_whisper_context.assert_not_called()
+
+    def test_filter_disabled_lets_a_synthetic_prompt_through(self, monkeypatch):
+        """Kill-switch coverage: it was dropped in 566fe3a when the guard moved."""
+        from ormah.config import settings
+
+        monkeypatch.setattr(settings, "whisper_synthetic_filter_enabled", False)
+        client, engine = self._client()
+        resp = client.post(
+            "/agent/whisper",
+            json={"prompt": "<task-notification>done", "session_id": "s-off"},
+        )
+        assert resp.status_code == 200
+        engine.get_whisper_context.assert_called_once()
+
 
 class TestSessionBufferEviction:
     """Dead sessions are evicted from _session_buffers on access (I12)."""

@@ -11,7 +11,7 @@ from ormah.engine.prompt_classifier import (
     PromptClassifier,
     PromptIntent,
     extract_time_params,
-    is_synthetic_prompt,
+    match_synthetic_pattern,
     strip_temporal_phrases,
 )
 
@@ -520,42 +520,53 @@ class TestContinuationIntent:
 # ---------------------------------------------------------------------------
 
 
-class TestIsSyntheticPrompt:
-    def test_task_notification_is_synthetic(self):
-        assert is_synthetic_prompt("<task-notification>\n<task-id>abc</task-id>") is True
+class TestMatchSyntheticPattern:
+    """Which pattern fired — the signal rot detection needs (#143)."""
 
-    def test_scheduled_task_is_synthetic(self):
-        assert is_synthetic_prompt('<scheduled-task name="drive-watch" file="/x/S.md">') is True
+    def test_task_notification_returns_its_pattern_source(self):
+        assert match_synthetic_pattern("<task-notification>done</task-notification>") == (
+            r"<task-notification>"
+        )
 
-    def test_autonomous_loop_is_synthetic(self):
-        assert is_synthetic_prompt("# Autonomous loop check\n\nYou're being invoked") is True
+    def test_scheduled_task_returns_its_pattern_source(self):
+        assert match_synthetic_pattern("<scheduled-task id=3>") == r"<scheduled-task\b"
+
+    def test_autonomous_loop_returns_its_pattern_source(self):
+        assert match_synthetic_pattern("# Autonomous loop check") == (
+            r"#\s*Autonomous loop check\b"
+        )
 
     def test_leading_whitespace_still_matches(self):
-        assert is_synthetic_prompt("\n  <task-notification>\n<task-id>a</task-id>") is True
+        assert match_synthetic_pattern("\n  <task-notification>x") == r"<task-notification>"
 
-    def test_ide_wrapper_with_human_prompt_is_not_synthetic(self):
-        # REGRESSION GUARD (issue #134): the IDE prefixes this tag to a REAL human
-        # prompt — 46/46 such events on the live DB carried human text. Filtering it
-        # would silence the whisper for every prompt sent with a file open in the IDE.
-        prompt = (
-            "<ide_opened_file>The user opened the file /x/notes.md in the IDE."
-            "</ide_opened_file>\nnão, isso fica em estratégia — revisa o portfólio"
-        )
-        assert is_synthetic_prompt(prompt) is False
+    def test_operator_pattern_returns_the_raw_string(self):
+        assert match_synthetic_pattern("BATCH JOB 12 done", [r"BATCH JOB"]) == r"BATCH JOB"
 
-    def test_human_asking_about_a_marker_is_not_synthetic(self):
-        # The anchor is deliberate and fail-open: when in doubt, whisper.
-        assert is_synthetic_prompt("what is a <task-notification> block?") is False
+    def test_ide_wrapped_human_prompt_returns_none(self):
+        # <ide_opened_file> PREFIXES a real human prompt (#134 regression guard).
+        assert match_synthetic_pattern("<ide_opened_file>/a/b.py</ide_opened_file>fix this") is None
 
-    def test_extra_pattern_from_settings_matches(self):
-        assert is_synthetic_prompt(
-            "You are classifying the relationship between two memories",
-            extra_patterns=[r"You are classifying the relationship"],
-        ) is True
+    def test_human_asking_about_a_marker_returns_none(self):
+        # Anchored .match(), not .search() — a human discussing a marker is human.
+        assert match_synthetic_pattern("what is a <task-notification> block?") is None
 
-    def test_invalid_extra_pattern_fails_open(self):
-        # A config typo must degrade to "filters less", never kill the whisper.
-        assert is_synthetic_prompt("hello there", extra_patterns=["[unclosed"]) is False
+    def test_plain_human_prompt_returns_none(self):
+        assert match_synthetic_pattern("fix the parser") is None
 
-    def test_empty_prompt_is_not_synthetic(self):
-        assert is_synthetic_prompt("") is False
+    def test_empty_prompt_returns_none(self):
+        assert match_synthetic_pattern("") is None
+
+    def test_invalid_operator_regex_is_skipped_not_fatal(self):
+        # A config typo must never take the whisper down (fail-open).
+        assert match_synthetic_pattern("hello", ["[unclosed"]) is None
+
+    def test_invalid_regex_does_not_hide_a_later_valid_one(self):
+        assert match_synthetic_pattern("BATCH x", ["[unclosed", r"BATCH"]) == r"BATCH"
+
+    def test_empty_operator_pattern_returns_empty_string_not_none(self):
+        """The empty regex matches everything and returns "" — falsy but REAL.
+
+        Callers MUST test `is not None`. If this ever returns None, an operator
+        who configured "" silently loses all filtering.
+        """
+        assert match_synthetic_pattern("anything at all", [""]) == ""
