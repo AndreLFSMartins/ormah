@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+from pydantic import ValidationError
+
 from ormah.background.synthetic_pattern_monitor import (
     BUILTIN,
     OPERATOR,
@@ -11,6 +14,7 @@ from ormah.background.synthetic_pattern_monitor import (
     live_patterns,
     run_synthetic_pattern_monitor,
 )
+from ormah.config import Settings
 
 NOW = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
 TASK_NOTIFICATION = r"<task-notification>"
@@ -61,16 +65,25 @@ def test_pattern_still_firing_is_not_rot(engine):
     assert find_rotted_patterns(engine.db.conn, engine.settings, NOW) == []
 
 
-def _rotted_history(engine, pattern, *, hits=2, age_days=60):
-    """`hits` past matches for `pattern`, plus recent human traffic.
+def _rotted_history(engine, pattern, *, hits=2, age_days=60, opportunity=None):
+    """`hits` past matches for `pattern`, then enough later traffic to prove the
+    pattern had a real chance to fire again (the opportunity guard).
 
     hits defaults to 2 because whisper_pattern_rot_min_matches defaults to 2 — a
     single historical match is deliberately not rot (council I4).
+
+    opportunity defaults to the configured minimum: a rotted pattern needs ample
+    traffic since it last fired, or "it stopped" cannot be told from "the user was
+    away".
     """
     for i in range(hits):
         _decision(engine, outcome="silent_synthetic", matched_pattern=pattern,
                   logged_at=NOW - timedelta(days=age_days + i))
-    _decision(engine, outcome="injected", matched_pattern=None, logged_at=NOW)
+    n = (engine.settings.whisper_pattern_rot_min_opportunity
+         if opportunity is None else opportunity)
+    for i in range(n):
+        _decision(engine, outcome="injected", matched_pattern=None,
+                  logged_at=NOW - timedelta(minutes=n - i))
 
 
 def test_pattern_that_matched_before_and_stopped_is_rot(engine):
@@ -115,14 +128,39 @@ def test_single_historical_match_is_not_rot(engine):
     assert find_rotted_patterns(engine.db.conn, engine.settings, NOW) == []
 
 
-def test_no_traffic_at_all_proposes_nothing(engine):
-    """The vacation guard. Two weeks away must not rot every pattern at once."""
+def test_no_traffic_since_last_match_proposes_nothing(engine):
+    """Rewritten from the old global vacation guard, which the opportunity guard
+    replaces (final review, Important): zero traffic since the pattern last fired
+    is zero opportunity to prove it stopped, whatever the calendar says."""
     engine.settings.whisper_pattern_rot_days = 30
     _decision(engine, outcome="silent_synthetic",
               matched_pattern=TASK_NOTIFICATION, logged_at=NOW - timedelta(days=60))
-    # No row inside the window at all.
+    # No row after the match at all — zero opportunity.
 
     assert find_rotted_patterns(engine.db.conn, engine.settings, NOW) == []
+
+
+def test_returning_from_vacation_does_not_rot_everything(engine):
+    """The old global guard was satisfied by ONE prompt after a month away and
+    proposed the entire pattern list as rotted (final review, Important)."""
+    engine.settings.whisper_pattern_rot_days = 30
+    # Fired right up until the user left, 36 days ago...
+    _rotted_history(engine, TASK_NOTIFICATION, age_days=36, opportunity=0)
+    # ...then a single prompt on returning.
+    _decision(engine, outcome="injected", matched_pattern=None, logged_at=NOW)
+
+    assert find_rotted_patterns(engine.db.conn, engine.settings, NOW) == []
+
+
+def test_ample_traffic_since_last_match_is_rot(engine):
+    """The mirror case: the marker really did stop, and there was plenty of
+    traffic in which it could have appeared."""
+    engine.settings.whisper_pattern_rot_days = 30
+    _rotted_history(engine, TASK_NOTIFICATION)
+
+    rotted = find_rotted_patterns(engine.db.conn, engine.settings, NOW)
+
+    assert [r.pattern for r in rotted] == [TASK_NOTIFICATION]
 
 
 def test_pattern_removed_from_config_is_ignored(engine):
@@ -260,7 +298,10 @@ def test_a_second_rot_episode_gets_a_fresh_proposal(engine):
     _decision(engine, outcome="silent_synthetic",
               matched_pattern=TASK_NOTIFICATION, logged_at=later + timedelta(days=1))
     much_later = later + timedelta(days=60)
-    _decision(engine, outcome="injected", matched_pattern=None, logged_at=much_later)
+    n = engine.settings.whisper_pattern_rot_min_opportunity
+    for i in range(n):
+        _decision(engine, outcome="injected", matched_pattern=None,
+                  logged_at=much_later - timedelta(minutes=n - i))
 
     result = run_synthetic_pattern_monitor(engine, now=much_later)
 
@@ -305,3 +346,33 @@ def test_decay_manager_does_not_eat_pattern_proposals(engine):
         "SELECT COUNT(*) FROM proposals WHERE type = 'pattern'"
     ).fetchone()[0]
     assert count == 1
+
+
+def _settings(**overrides):
+    """Settings isolated from the user's global .env (which carries an
+    llm_provider this branch rejects — an unrelated ValidationError would make
+    these tests pass for the wrong reason)."""
+    base = dict(_env_file=None, llm_provider="none", ingest_llm_provider="none")
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_zero_monitor_interval_is_rejected():
+    """0 makes APScheduler fire every second, forever, and tracked() logs each
+    run as a success — an invisible hot loop (final review, Important)."""
+    with pytest.raises(ValidationError, match="whisper pattern monitor settings must be >= 1"):
+        _settings(whisper_pattern_monitor_interval_minutes=0)
+
+
+def test_zero_rot_days_is_rejected():
+    """0 used to silently disable the job (rot_days doubled as the guard window)."""
+    with pytest.raises(ValidationError, match="whisper pattern monitor settings must be >= 1"):
+        _settings(whisper_pattern_rot_days=0)
+
+
+def test_defaults_are_valid():
+    s = _settings()
+    assert s.whisper_pattern_rot_days == 30
+    assert s.whisper_pattern_monitor_interval_minutes == 1440
+    assert s.whisper_pattern_rot_min_matches == 2
+    assert s.whisper_pattern_rot_min_opportunity == 50

@@ -214,9 +214,7 @@ class Settings(BaseSettings):
 
     # Rot detection for the list above (#143). A pattern that matched before and
     # stopped is stale; a pattern that never matched is merely irrelevant to this
-    # install and stays silent. rot_days is also the traffic-guard window: no
-    # whisper traffic at all in it means the user was away, not that the patterns
-    # died — so nothing is proposed.
+    # install and stays silent.
     whisper_pattern_rot_days: int = 30
     whisper_pattern_monitor_interval_minutes: int = 1440
     # A pattern that fired once, months ago, is not evidence of a live workflow.
@@ -224,6 +222,10 @@ class Settings(BaseSettings):
     # alert — which defeats the feature. Require a real history before calling
     # anything rotted (council I4).
     whisper_pattern_rot_min_matches: int = 2
+    # How much whisper traffic must have happened since a pattern last fired before
+    # "it stopped" beats "it just did not come up". Guards against a user returning
+    # from vacation and having every pattern proposed as rotted.
+    whisper_pattern_rot_min_opportunity: int = 50
 
     # Whisper topic-shift detection (skip injection when topic unchanged)
     whisper_topic_shift_enabled: bool = True
@@ -446,6 +448,18 @@ class Settings(BaseSettings):
     def _whisper_log_cleanup_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"whisper log cleanup settings must be >= 1, got {v}")
+        return v
+
+    @field_validator(
+        "whisper_pattern_rot_days",
+        "whisper_pattern_monitor_interval_minutes",
+        "whisper_pattern_rot_min_matches",
+        "whisper_pattern_rot_min_opportunity",
+    )
+    @classmethod
+    def _whisper_pattern_monitor_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"whisper pattern monitor settings must be >= 1, got {v}")
         return v
 
     @field_validator("core_memory_cap")

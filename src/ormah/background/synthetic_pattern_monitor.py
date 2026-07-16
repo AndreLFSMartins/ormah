@@ -60,9 +60,15 @@ def find_rotted_patterns(
     Rot is "matched before and stopped" — not "matches zero". A pattern that
     never matched is irrelevant to this install (no scheduled tasks, say), and
     proposing its removal would be noise the user learns to ignore.
+
+    Each live pattern also passes a per-pattern opportunity guard: the question
+    is not "was there any traffic at all" (one prompt after a month away used to
+    satisfy that and rot the entire list), but "how much traffic happened since
+    THIS pattern last fired". Little traffic means the user was away, not that
+    the marker died.
     """
     # With the filter off, NOTHING writes silent_synthetic, so every last_seen
-    # freezes while ordinary human traffic keeps the vacation guard satisfied —
+    # freezes while ordinary human traffic keeps the opportunity guard satisfied —
     # every pattern would age into a false proposal claiming an upstream rename
     # that never happened, and the user might delete a still-valid filter
     # (council C1). No filter, no signal, no opinion.
@@ -70,12 +76,6 @@ def find_rotted_patterns(
         return []
 
     cutoff = (now - timedelta(days=settings.whisper_pattern_rot_days)).isoformat()
-
-    # Vacation guard: with no traffic at all, every pattern looks rotted.
-    if conn.execute(
-        "SELECT 1 FROM whisper_decisions WHERE logged_at > ? LIMIT 1", (cutoff,)
-    ).fetchone() is None:
-        return []
 
     history = {
         row[0]: (row[1], row[2])
@@ -96,6 +96,19 @@ def find_rotted_patterns(
             continue  # still firing
         if hits < settings.whisper_pattern_rot_min_matches:
             continue  # fired once in passing; not evidence of a live workflow
+        # Opportunity guard, per pattern (replaces the old global vacation guard).
+        # The right question is not "was there any traffic at all" — one prompt
+        # after a month away satisfied that and proposed the whole list as rotted.
+        # It is "how much traffic happened SINCE this pattern last fired?". Little
+        # traffic means the user was away, not that the marker died.
+        # ponytail: a flat count, not the pattern's historical rate. A rare pattern
+        # needs more silence than a common one to prove rot; upgrade to
+        # rate-based expectation (hits/traffic * opportunity) if this proves noisy.
+        opportunity = conn.execute(
+            "SELECT COUNT(*) FROM whisper_decisions WHERE logged_at > ?", (seen,)
+        ).fetchone()[0]
+        if opportunity < settings.whisper_pattern_rot_min_opportunity:
+            continue
         rotted.append(RottedPattern(pattern=pattern, origin=origin, last_seen=seen))
     return rotted
 
