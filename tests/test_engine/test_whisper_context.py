@@ -3366,6 +3366,39 @@ class TestSyntheticPromptEndpoint:
         assert resp.status_code == 200
         engine.get_whisper_context.assert_called_once()
 
+    def test_boundary_records_which_builtin_pattern_fired(self, engine):
+        """Rot detection is impossible without knowing WHICH pattern matched (#143)."""
+        engine.note_synthetic_whisper_skip(
+            prompt="<task-notification>done",
+            session_id="s-1",
+            matched_pattern=r"<task-notification>",
+        )
+        row = engine.db.conn.execute(
+            "SELECT outcome, matched_pattern FROM whisper_decisions WHERE session_id = 's-1'"
+        ).fetchone()
+        assert row["outcome"] == "silent_synthetic"
+        assert row["matched_pattern"] == r"<task-notification>"
+
+    def test_boundary_records_an_operator_pattern_verbatim(self, engine):
+        engine.note_synthetic_whisper_skip(
+            prompt="BATCH JOB 7", session_id="s-2", matched_pattern=r"BATCH JOB",
+        )
+        row = engine.db.conn.execute(
+            "SELECT matched_pattern FROM whisper_decisions WHERE session_id = 's-2'"
+        ).fetchone()
+        assert row["matched_pattern"] == r"BATCH JOB"
+
+    def test_non_synthetic_decisions_leave_matched_pattern_null(self, engine):
+        """Only silent_synthetic rows carry a pattern; everything else stays NULL."""
+        engine.context_builder._log_decision(
+            session_id="s-3", space=None, prompt="a human prompt",
+            intent=None, outcome="silent_short",
+        )
+        row = engine.db.conn.execute(
+            "SELECT matched_pattern FROM whisper_decisions WHERE session_id = 's-3'"
+        ).fetchone()
+        assert row["matched_pattern"] is None
+
 
 class TestSessionBufferEviction:
     """Dead sessions are evicted from _session_buffers on access (I12)."""

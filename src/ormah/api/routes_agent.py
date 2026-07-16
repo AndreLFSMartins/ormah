@@ -154,6 +154,7 @@ async def whisper(request: Request):
             await anyio.to_thread.run_sync(
                 lambda: engine.note_synthetic_whisper_skip(
                     prompt=prompt, space=space, session_id=session_id,
+                    matched_pattern=matched,
                 )
             )
             return TextResponse(text="")

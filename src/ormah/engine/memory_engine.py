@@ -1070,6 +1070,7 @@ class MemoryEngine:
         prompt: str,
         space: str | None = None,
         session_id: str | None = None,
+        matched_pattern: str | None = None,
     ) -> None:
         """Record a whisper call skipped because the prompt was machine-generated.
 
@@ -1081,6 +1082,7 @@ class MemoryEngine:
         self.context_builder._log_decision(
             session_id=session_id, space=space, prompt=prompt,
             intent=None, outcome="silent_synthetic",
+            matched_pattern=matched_pattern,
         )
 
     def get_whisper_context(
