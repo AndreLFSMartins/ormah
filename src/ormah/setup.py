@@ -2441,9 +2441,25 @@ def _pi_is_wired() -> bool:
 
 
 def _claude_code_wire() -> None:
-    ormah_bin = get_ormah_bin_path()
-    configure_claude_hooks(ormah_bin)
-    configure_claude_code_mcp(ormah_bin)
+    # The plugin registers the same UserPromptSubmit/PreCompact/SessionEnd hooks
+    # and the same MCP server. Wiring them again in ~/.claude/settings.json runs
+    # both copies: the whisper fires twice per human turn, and no merge can dedupe
+    # across the two files. The agent and slash command are namespaced by the
+    # plugin (ormah:maintenance vs ormah-maintenance), so they are not duplicate
+    # registrations — they stay installed, as does CLAUDE.md, which no plugin can
+    # write.
+    if _claude_code_plugin_provides_hooks():
+        _remove_claude_hooks()
+        _remove_mcp_from_json(Path.home() / ".claude.json")
+        info(
+            "Claude Code plugin already provides the hooks and MCP server "
+            "— removed redundant CLI wiring"
+        )
+    else:
+        ormah_bin = get_ormah_bin_path()
+        configure_claude_hooks(ormah_bin)
+        configure_claude_code_mcp(ormah_bin)
+
     install_claude_md()
     install_claude_agents()
     install_claude_commands()

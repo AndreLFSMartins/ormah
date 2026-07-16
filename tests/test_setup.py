@@ -32,6 +32,7 @@ from ormah.setup import (
     _atomic_write,
     _claude_code_is_wired,
     _claude_code_plugin_provides_hooks,
+    _claude_code_wire,
     _is_ormah_hook,
     _merge_hooks,
     _merge_json_file,
@@ -462,6 +463,190 @@ class TestClaudeCodePluginProvidesHooks:
         self._install(tmp_path)
         with patch("ormah.setup.Path.home", return_value=tmp_path):
             assert _claude_code_plugin_provides_hooks() is False
+
+
+class TestClaudeCodeWirePluginGuard:
+    def _seed_working_plugin(self, tmp_path: Path, *, enabled: bool = True, scope: str = "user") -> Path:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        install_path = claude_dir / "plugins" / "cache" / "ormah" / "ormah" / "0.13.3"
+        (install_path / "hooks").mkdir(parents=True)
+        (install_path / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}) + "\n")
+        (claude_dir / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {"ormah@ormah": [
+                {"scope": scope, "installPath": str(install_path), "version": "0.13.3"}
+            ]},
+        }, indent=2) + "\n")
+        (claude_dir / "settings.json").write_text(json.dumps({
+            "enabledPlugins": {"ormah@ormah": enabled},
+            "theme": "dark",
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/ormah whisper inject", "timeout": 10}]}
+                ],
+                "SessionEnd": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/ormah whisper store", "timeout": 300}]}
+                ],
+            },
+        }, indent=2) + "\n")
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"ormah": {"type": "stdio", "command": "/usr/bin/ormah", "args": ["mcp"]}}
+        }, indent=2) + "\n")
+        return claude_dir
+
+    def test_working_plugin_strips_hooks_and_mcp_and_writes_no_wiring(self, tmp_path):
+        claude_dir = self._seed_working_plugin(tmp_path)
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.configure_claude_code_mcp") as configure_mcp,
+            patch("ormah.setup.install_claude_agents") as install_agents,
+            patch("ormah.setup.install_claude_commands") as install_commands,
+            patch("ormah.setup.install_claude_md") as install_md,
+        ):
+            _claude_code_wire()
+
+        settings = json.loads((claude_dir / "settings.json").read_text())
+        assert "hooks" not in settings                              # both ormah hooks stripped
+        assert settings["enabledPlugins"] == {"ormah@ormah": True}  # untouched
+        assert settings["theme"] == "dark"                          # co-tenant keys survive
+        assert "mcpServers" not in json.loads((tmp_path / ".claude.json").read_text())
+
+        configure_hooks.assert_not_called()
+        configure_mcp.assert_not_called()
+        # not duplicate registrations — the plugin namespaces these
+        install_md.assert_called_once()
+        install_agents.assert_called_once()
+        install_commands.assert_called_once()
+
+    def test_strip_preserves_third_party_hooks(self, tmp_path):
+        claude_dir = self._seed_working_plugin(tmp_path)
+        settings = json.loads((claude_dir / "settings.json").read_text())
+        settings["hooks"]["UserPromptSubmit"][0]["hooks"].append(
+            {"type": "command", "command": "/usr/bin/other-tool run"}
+        )
+        (claude_dir / "settings.json").write_text(json.dumps(settings, indent=2) + "\n")
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.install_claude_md"),
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+        ):
+            _claude_code_wire()
+
+        hooks = json.loads((claude_dir / "settings.json").read_text())["hooks"]
+        surviving = hooks["UserPromptSubmit"][0]["hooks"]
+        assert len(surviving) == 1
+        assert surviving[0]["command"] == "/usr/bin/other-tool run"
+
+    def test_enabled_but_uninstalled_plugin_wires_normally(self, tmp_path):
+        """A stale enabled flag must not cost the user the whisper."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"ormah@ormah": True}}, indent=2) + "\n"
+        )  # no installed_plugins.json
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.configure_claude_code_mcp") as configure_mcp,
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+            patch("ormah.setup.install_claude_md"),
+        ):
+            _claude_code_wire()
+
+        configure_hooks.assert_called_once_with("/usr/bin/ormah")
+        configure_mcp.assert_called_once_with("/usr/bin/ormah")
+
+    def test_project_scoped_plugin_wires_normally(self, tmp_path):
+        """Deliberate: the CLI hooks are global and serve every other project."""
+        self._seed_working_plugin(tmp_path, scope="project")
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.configure_claude_code_mcp"),
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+            patch("ormah.setup.install_claude_md"),
+        ):
+            _claude_code_wire()
+
+        configure_hooks.assert_called_once_with("/usr/bin/ormah")
+
+    def test_plugin_disabled_wires_normally(self, tmp_path):
+        self._seed_working_plugin(tmp_path, enabled=False)
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.configure_claude_code_mcp"),
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+            patch("ormah.setup.install_claude_md"),
+        ):
+            _claude_code_wire()
+
+        configure_hooks.assert_called_once_with("/usr/bin/ormah")
+
+    def test_unreadable_settings_wires_normally(self, tmp_path):
+        """Fail-open: an unparseable config must not silently disable the whisper."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text("{not json")
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.configure_claude_code_mcp"),
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+            patch("ormah.setup.install_claude_md"),
+        ):
+            _claude_code_wire()
+
+        configure_hooks.assert_called_once_with("/usr/bin/ormah")
+
+    def test_fresh_plugin_install_removes_nothing(self, tmp_path):
+        """Working plugin, no CLI wiring ever done — the guard is idempotent."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        install_path = claude_dir / "plugins" / "cache" / "ormah" / "ormah" / "0.13.3"
+        (install_path / "hooks").mkdir(parents=True)
+        (install_path / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}) + "\n")
+        (claude_dir / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {"ormah@ormah": [
+                {"scope": "user", "installPath": str(install_path), "version": "0.13.3"}
+            ]},
+        }, indent=2) + "\n")
+        (claude_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"ormah@ormah": True}}, indent=2) + "\n"
+        )
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.install_claude_md") as install_md,
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+        ):
+            _claude_code_wire()
+
+        assert json.loads((claude_dir / "settings.json").read_text()) == {
+            "enabledPlugins": {"ormah@ormah": True}
+        }
+        configure_hooks.assert_not_called()
+        install_md.assert_called_once()
 
 
 class TestConfigureClaudeDesktop:
