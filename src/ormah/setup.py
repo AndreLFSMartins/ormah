@@ -684,25 +684,29 @@ def _install_markdown_block(
     target.write_text(updated)
 
 
-def _plugin_enabled_in_settings(settings_path: Path, plugin_name: str) -> bool:
-    """Return True when the plugin is enabled in a Claude settings file."""
+def _enabled_plugin_keys(settings_path: Path, plugin_name: str) -> list[str]:
+    """Return the fully-qualified enabledPlugins keys for a plugin, in file order."""
     if not settings_path.exists():
-        return False
+        return []
     try:
         data = json.loads(settings_path.read_text())
     except (json.JSONDecodeError, ValueError):
-        return False
+        return []
 
     enabled_plugins = data.get("enabledPlugins", {})
     if not isinstance(enabled_plugins, dict):
-        return False
+        return []
 
-    for key, enabled in enabled_plugins.items():
-        if enabled is not True:
-            continue
-        if key == plugin_name or key.startswith(f"{plugin_name}@"):
-            return True
-    return False
+    return [
+        key
+        for key, enabled in enabled_plugins.items()
+        if enabled is True and (key == plugin_name or key.startswith(f"{plugin_name}@"))
+    ]
+
+
+def _plugin_enabled_in_settings(settings_path: Path, plugin_name: str) -> bool:
+    """Return True when the plugin is enabled in a Claude settings file."""
+    return bool(_enabled_plugin_keys(settings_path, plugin_name))
 
 
 def _candidate_project_roots(cwd: Path | None = None) -> list[Path]:
@@ -2299,6 +2303,12 @@ def _claude_code_plugin_provides_hooks() -> bool:
       - installed: ``plugins[]`` in ~/.claude/plugins/installed_plugins.json,
                    carrying the scope and the resolved installPath.
 
+    The two files must agree on the SAME fully-qualified key (e.g.
+    ``ormah@some-market``), not merely both mention an "ormah"-prefixed key:
+    a stale, still-installed marketplace entry must never stand in for the
+    marketplace that is actually enabled, or a broken active install could
+    hide behind a healthy but abandoned one.
+
     This predicate licenses deleting the user's own wiring, so it requires both,
     plus hooks/hooks.json AND .mcp.json under that installPath — the wire guard
     strips both the CLI hooks and the CLI's MCP entry, so proving only the
@@ -2317,7 +2327,8 @@ def _claude_code_plugin_provides_hooks() -> bool:
     Fails open: any unreadable or unparseable config returns False, so setup
     wires exactly as it does today.
     """
-    if not _plugin_enabled_in_settings(Path.home() / ".claude" / "settings.json", "ormah"):
+    enabled_keys = _enabled_plugin_keys(Path.home() / ".claude" / "settings.json", "ormah")
+    if not enabled_keys:
         return False
 
     registry_path = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
@@ -2330,9 +2341,8 @@ def _claude_code_plugin_provides_hooks() -> bool:
     if not isinstance(plugins, dict):
         return False
 
-    for key, entries in plugins.items():
-        if not isinstance(key, str) or key.split("@")[0] != "ormah":
-            continue
+    for key in enabled_keys:
+        entries = plugins.get(key)
         if not isinstance(entries, list):
             continue
         for entry in entries:
