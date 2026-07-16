@@ -28,9 +28,10 @@ from ormah.setup import (
     CLAUDE_MD_SENTINEL_START,
     PI_AGENTS_MD_SENTINEL_END,
     PI_AGENTS_MD_SENTINEL_START,
-    _get_agent,
     _atomic_write,
+    _claude_code_is_wired,
     _discover_transcripts,
+    _get_agent,
     _is_ormah_hook,
     _merge_hooks,
     _merge_json_file,
@@ -1785,6 +1786,59 @@ class TestInstallPiMd:
 
         captured = capsys.readouterr()
         assert "Instructions added to ./AGENTS.md" in captured.out
+
+
+class TestClaudeCodeIsWired:
+    def _write_settings(self, tmp_path: Path, data: dict) -> Path:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        settings_path = claude_dir / "settings.json"
+        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+        return settings_path
+
+    def test_detects_cli_hooks_when_no_mcp_entry_exists(self, tmp_path):
+        """Regression: the hooks branch read entry.get("command") off the matcher
+        dict, so it never matched; only the .claude.json MCP fallback could
+        return True. No ~/.claude.json here, so the fallback cannot rescue it."""
+        self._write_settings(tmp_path, {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/ormah whisper inject", "timeout": 10}]}
+                ]
+            }
+        })
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is True
+
+    def test_third_party_hook_is_not_mistaken_for_ormah(self, tmp_path):
+        self._write_settings(tmp_path, {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/other-tool whisper inject"}]}
+                ]
+            }
+        })
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is False
+
+    def test_falls_back_to_mcp_entry_when_no_hooks(self, tmp_path):
+        self._write_settings(tmp_path, {"hooks": {}})
+        (tmp_path / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"ormah": {"command": "/usr/bin/ormah", "args": ["mcp"]}}}) + "\n"
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is True
+
+    def test_malformed_matcher_does_not_raise(self, tmp_path):
+        self._write_settings(tmp_path, {
+            "hooks": {"UserPromptSubmit": ["not-a-dict", {"no_hooks_key": True}, {"hooks": "not-a-list"}]}
+        })
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is False
 
 
 class TestInstallPiAgents:
