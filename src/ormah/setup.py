@@ -2296,11 +2296,16 @@ def _claude_code_is_wired() -> bool:
         data = json.loads(settings_path.read_text())
         hooks = data.get("hooks") or {}
         for matchers in hooks.values():
-            if isinstance(matchers, list):
-                for entry in matchers:
-                    cmd = entry.get("command", "") if isinstance(entry, dict) else str(entry)
-                    if "ormah whisper" in cmd:
-                        return True
+            if not isinstance(matchers, list):
+                continue
+            for matcher in matchers:
+                if not isinstance(matcher, dict):
+                    continue
+                inner = matcher.get("hooks")
+                if not isinstance(inner, list):
+                    continue
+                if any(_is_ormah_hook(entry) for entry in inner):
+                    return True
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
     claude_json = Path.home() / ".claude.json"
