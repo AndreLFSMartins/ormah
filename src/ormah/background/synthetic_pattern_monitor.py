@@ -159,27 +159,35 @@ def run_synthetic_pattern_monitor(
     created = 0
     for entry in rotted:
         action = _proposed_action(entry)
-        # Any status, not just pending: a rejected proposal must stay dead, and a
-        # rotted pattern the user already saw must not be re-filed every night.
-        #
-        # `created > last_seen` is what keeps that from being permanent (council
-        # I2): a proposal filed BEFORE the pattern's last match is about an
-        # episode that has since ended, so it no longer blocks. A pattern that
-        # rots, gets repaired, resumes matching and rots again therefore gets a
-        # fresh proposal, while the ordinary "still dead" case stays deduped.
-        existing = engine.db.conn.execute(
-            "SELECT 1 FROM proposals WHERE type = ? AND proposed_action = ? "
-            "AND created > ? LIMIT 1",
-            (ProposalType.pattern.value, action, entry.last_seen),
-        ).fetchone()
-        if existing is not None:
-            continue
         reason = (
             f"Last matched {entry.last_seen}, more than "
             f"{settings.whisper_pattern_rot_days} days ago, while whisper traffic "
             f"continued. Origin: {entry.origin}."
         )
+        # Dedup has two rules, both needed:
+        #
+        # - A `pending` proposal always blocks. If the user never resolves it and
+        #   the pattern later rots again, `created > last_seen` alone would stop
+        #   blocking once last_seen moves past the old `created`, filing a SECOND
+        #   pending proposal for the same action with a contradictory reason
+        #   (council-pr A1). There is never a reason to queue two identical
+        #   pending proposals at once.
+        # - A resolved proposal (approved/rejected) only blocks if it postdates
+        #   the pattern's last match (council I2): filed BEFORE that match, it is
+        #   about an episode that has since ended and must not block a fresh
+        #   rot episode after a repair.
+        #
+        # The SELECT and INSERT run inside one transaction so the scheduler and
+        # a manual `/admin` trigger can't both observe "not found" and insert two
+        # rows for the same identity (council-pr A2, TOCTOU).
         with engine.db.transaction() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM proposals WHERE type = ? AND proposed_action = ? "
+                "AND (status = 'pending' OR created > ?) LIMIT 1",
+                (ProposalType.pattern.value, action, entry.last_seen),
+            ).fetchone()
+            if existing is not None:
+                continue
             conn.execute(
                 "INSERT INTO proposals (id, type, status, source_nodes, "
                 "proposed_action, reason, created) "

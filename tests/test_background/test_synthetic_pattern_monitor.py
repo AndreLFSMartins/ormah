@@ -310,6 +310,37 @@ def test_a_second_rot_episode_gets_a_fresh_proposal(engine):
     assert count == 2
 
 
+def test_abandoned_pending_proposal_is_not_duplicated(engine):
+    """An unresolved pending proposal must not be filed twice.
+
+    The pattern rots, a proposal is filed and left pending, the marker comes back,
+    then rots again. `created > last_seen` alone stops blocking at that point, so
+    without the pending rule the queue would show two identical proposals with
+    contradictory reasons (council-pr A1).
+    """
+    _rot_one_builtin(engine)
+    first = run_synthetic_pattern_monitor(engine, now=NOW)
+    assert first["proposals_created"] == 1  # left pending on purpose
+
+    # The marker comes back, fires twice, then goes quiet again.
+    later = NOW + timedelta(days=100)
+    for i in range(2):
+        _decision(engine, outcome="silent_synthetic",
+                  matched_pattern=TASK_NOTIFICATION, logged_at=later + timedelta(days=i))
+    much_later = later + timedelta(days=60)
+    for i in range(engine.settings.whisper_pattern_rot_min_opportunity):
+        _decision(engine, outcome="injected", matched_pattern=None,
+                  logged_at=much_later - timedelta(minutes=i + 1))
+
+    second = run_synthetic_pattern_monitor(engine, now=much_later)
+
+    assert second["proposals_created"] == 0
+    total = engine.db.conn.execute(
+        "SELECT COUNT(*) FROM proposals WHERE type = 'pattern' AND status = 'pending'"
+    ).fetchone()[0]
+    assert total == 1
+
+
 def test_proposed_action_says_the_action_is_manual(engine):
     """council I3. Approving executes nothing, yet the shared proposals surface
     reports success and drops the item — the text must not let the user believe
