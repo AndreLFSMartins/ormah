@@ -1673,7 +1673,7 @@ def _remove_mcp_from_json(config_path: Path) -> None:
     else:
         data["mcpServers"] = mcp_servers
 
-    config_path.write_text(json.dumps(data, indent=2) + "\n")
+    _atomic_write(str(config_path), json.dumps(data, indent=2) + "\n")
     ok(f"Removed ormah from {config_path}")
 
 
