@@ -9,6 +9,7 @@ from ormah.background.synthetic_pattern_monitor import (
     OPERATOR,
     find_rotted_patterns,
     live_patterns,
+    run_synthetic_pattern_monitor,
 )
 
 NOW = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
@@ -148,3 +149,159 @@ def test_find_rotted_patterns_writes_nothing(engine):
 
     count = engine.db.conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
     assert count == 0
+
+
+def _rot_one_builtin(engine):
+    """A rotted <task-notification> plus live traffic — the standard setup.
+
+    Reuses _rotted_history from task 3, so the 2-match minimum stays in one place.
+    """
+    engine.settings.whisper_pattern_rot_days = 30
+    _rotted_history(engine, TASK_NOTIFICATION)
+
+
+def test_rotted_pattern_creates_one_pending_proposal(engine):
+    _rot_one_builtin(engine)
+
+    result = run_synthetic_pattern_monitor(engine, now=NOW)
+
+    assert result == {"rotted": 1, "proposals_created": 1}
+    row = engine.db.conn.execute(
+        "SELECT type, status, source_nodes, proposed_action, reason FROM proposals"
+    ).fetchone()
+    assert row["type"] == "pattern"
+    assert row["status"] == "pending"
+    assert row["source_nodes"] == "[]"
+    assert TASK_NOTIFICATION in row["proposed_action"]
+
+
+def test_running_twice_does_not_duplicate(engine):
+    """The job runs daily and the pattern stays rotted daily."""
+    _rot_one_builtin(engine)
+
+    run_synthetic_pattern_monitor(engine, now=NOW)
+    second = run_synthetic_pattern_monitor(engine, now=NOW + timedelta(days=1))
+
+    assert second["proposals_created"] == 0
+    count = engine.db.conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
+    assert count == 1
+
+
+def test_proposed_action_is_stable_across_days(engine):
+    """proposed_action IS the dedup key: a date or count in it would change every
+    run, the dedup would never hit, and this would file one proposal per day."""
+    _rot_one_builtin(engine)
+
+    run_synthetic_pattern_monitor(engine, now=NOW)
+    first = engine.db.conn.execute("SELECT proposed_action FROM proposals").fetchone()[0]
+    engine.db.conn.execute("DELETE FROM proposals")
+    run_synthetic_pattern_monitor(engine, now=NOW + timedelta(days=9))
+    later = engine.db.conn.execute("SELECT proposed_action FROM proposals").fetchone()[0]
+
+    assert first == later
+
+
+def test_rejected_proposal_is_not_re_proposed(engine):
+    """Rejecting means "I know, leave it" — it must not come back tomorrow."""
+    _rot_one_builtin(engine)
+    run_synthetic_pattern_monitor(engine, now=NOW)
+    engine.db.conn.execute("UPDATE proposals SET status = 'rejected'")
+    engine.db.conn.commit()
+
+    result = run_synthetic_pattern_monitor(engine, now=NOW + timedelta(days=1))
+
+    assert result["proposals_created"] == 0
+
+
+def test_builtin_and_operator_get_different_actions(engine):
+    """Telling the user to remove from .env a pattern that is not in their .env
+    is an instruction impossible to follow."""
+    engine.settings.whisper_pattern_rot_days = 30
+    engine.settings.whisper_synthetic_prompt_patterns = [r"BATCH JOB"]
+    _rotted_history(engine, TASK_NOTIFICATION)
+    _rotted_history(engine, r"BATCH JOB")
+
+    run_synthetic_pattern_monitor(engine, now=NOW)
+
+    actions = {
+        r["proposed_action"]
+        for r in engine.db.conn.execute("SELECT proposed_action FROM proposals").fetchall()
+    }
+    operator_action = next(a for a in actions if r"BATCH JOB" in a)
+    builtin_action = next(a for a in actions if TASK_NOTIFICATION in a)
+    assert "ORMAH_WHISPER_SYNTHETIC_PROMPT_PATTERNS" in operator_action
+    assert "ORMAH_WHISPER_SYNTHETIC_PROMPT_PATTERNS" not in builtin_action
+
+
+def test_reason_carries_the_variable_evidence(engine):
+    _rot_one_builtin(engine)
+
+    run_synthetic_pattern_monitor(engine, now=NOW)
+
+    reason = engine.db.conn.execute("SELECT reason FROM proposals").fetchone()[0]
+    assert (NOW - timedelta(days=60)).isoformat() in reason
+
+
+def test_a_second_rot_episode_gets_a_fresh_proposal(engine):
+    """council I2. Pattern rots, is repaired, resumes matching, rots AGAIN.
+
+    Without `created > last_seen` in the dedup, the historical row would block
+    the new episode forever and the second regression would go unreported.
+    """
+    _rot_one_builtin(engine)
+    run_synthetic_pattern_monitor(engine, now=NOW)
+    engine.db.conn.execute("UPDATE proposals SET status = 'approved'")
+    engine.db.conn.commit()
+
+    # The marker comes back (repaired), fires twice, then goes quiet again.
+    later = NOW + timedelta(days=100)
+    _decision(engine, outcome="silent_synthetic",
+              matched_pattern=TASK_NOTIFICATION, logged_at=later)
+    _decision(engine, outcome="silent_synthetic",
+              matched_pattern=TASK_NOTIFICATION, logged_at=later + timedelta(days=1))
+    much_later = later + timedelta(days=60)
+    _decision(engine, outcome="injected", matched_pattern=None, logged_at=much_later)
+
+    result = run_synthetic_pattern_monitor(engine, now=much_later)
+
+    assert result["proposals_created"] == 1
+    count = engine.db.conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
+    assert count == 2
+
+
+def test_proposed_action_says_the_action_is_manual(engine):
+    """council I3. Approving executes nothing, yet the shared proposals surface
+    reports success and drops the item — the text must not let the user believe
+    the repair happened."""
+    _rot_one_builtin(engine)
+
+    run_synthetic_pattern_monitor(engine, now=NOW)
+
+    action = engine.db.conn.execute("SELECT proposed_action FROM proposals").fetchone()[0]
+    assert action.startswith("MANUAL ACTION REQUIRED")
+
+
+def test_no_rot_creates_nothing(engine):
+    engine.settings.whisper_pattern_rot_days = 30
+    _decision(engine, outcome="silent_synthetic",
+              matched_pattern=TASK_NOTIFICATION, logged_at=NOW - timedelta(days=1))
+
+    assert run_synthetic_pattern_monitor(engine, now=NOW) == {
+        "rotted": 0, "proposals_created": 0,
+    }
+
+
+def test_decay_manager_does_not_eat_pattern_proposals(engine):
+    """decay_manager.py:20-24 deletes type='decay' proposals on EVERY run,
+    unguarded. This pins that 'pattern' is not caught by that DELETE."""
+    from ormah.background.decay_manager import run_decay
+
+    _rot_one_builtin(engine)
+    run_synthetic_pattern_monitor(engine, now=NOW)
+
+    run_decay(engine)
+
+    count = engine.db.conn.execute(
+        "SELECT COUNT(*) FROM proposals WHERE type = 'pattern'"
+    ).fetchone()[0]
+    assert count == 1
