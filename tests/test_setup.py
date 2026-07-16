@@ -481,6 +481,32 @@ class TestClaudeCodePluginProvidesHooks:
         with patch("ormah.setup.Path.home", return_value=tmp_path):
             assert _claude_code_plugin_provides_hooks() is False
 
+    def test_false_when_enabled_key_does_not_match_installed_key(self, tmp_path):
+        """The enabled key must be matched to the SAME registry key. A stale
+        but healthy ormah@old-market install must not license stripping when
+        the actually-enabled plugin (ormah@new-market) is broken."""
+        self._enable(tmp_path, key="ormah@new-market")
+        plugins_dir = tmp_path / ".claude" / "plugins"
+        plugins_dir.mkdir(parents=True, exist_ok=True)
+        broken_path = tmp_path / "vanished"  # never created -> no manifests
+        good_path = plugins_dir / "cache" / "ormah" / "old-market" / "0.1.0"
+        (good_path / "hooks").mkdir(parents=True, exist_ok=True)
+        (good_path / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}) + "\n")
+        (good_path / ".mcp.json").write_text(json.dumps({"mcpServers": {}}) + "\n")
+        (plugins_dir / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {
+                "ormah@new-market": [
+                    {"scope": "user", "installPath": str(broken_path), "version": "1.0.0"}
+                ],
+                "ormah@old-market": [
+                    {"scope": "user", "installPath": str(good_path), "version": "0.1.0"}
+                ],
+            },
+        }, indent=2) + "\n")
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
 
 class TestClaudeCodeWirePluginGuard:
     def _seed_working_plugin(self, tmp_path: Path, *, enabled: bool = True, scope: str = "user") -> Path:
