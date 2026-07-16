@@ -2295,9 +2295,14 @@ def _claude_code_plugin_provides_hooks() -> bool:
                    carrying the scope and the resolved installPath.
 
     This predicate licenses deleting the user's own wiring, so it requires both,
-    plus hooks/hooks.json under that installPath. A stale flag pointing at a
-    missing cache dir or a half-finished update would otherwise leave the user
-    with no whisper at all — silently.
+    plus hooks/hooks.json AND .mcp.json under that installPath — the wire guard
+    strips both the CLI hooks and the CLI's MCP entry, so proving only the
+    hooks manifest is not enough: a half-finished update could ship hooks.json
+    without yet shipping .mcp.json, and stripping the MCP entry with no
+    plugin-provided replacement would cost the user remember/recall with the
+    whisper still silently intact. A stale flag pointing at a missing cache
+    dir or a half-finished update would otherwise leave the user with no
+    whisper at all — silently.
 
     Only a user-scoped plugin counts: configure_claude_hooks writes to the global
     ~/.claude/settings.json, which serves every project, so those hooks are
@@ -2331,7 +2336,10 @@ def _claude_code_plugin_provides_hooks() -> bool:
             install_path = entry.get("installPath")
             if not isinstance(install_path, str) or not install_path:
                 continue
-            if (Path(install_path) / "hooks" / "hooks.json").is_file():
+            install_dir = Path(install_path)
+            if (install_dir / "hooks" / "hooks.json").is_file() and (
+                install_dir / ".mcp.json"
+            ).is_file():
                 return True
     return False
 
