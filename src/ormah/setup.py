@@ -2290,6 +2290,57 @@ class AgentDescriptor:
     platform: list[str] | None = field(default=None)
 
 
+def _claude_code_plugin_provides_hooks() -> bool:
+    """True when a user-scoped ormah plugin is enabled AND actually installed.
+
+    Claude Code keeps the two states in two different files, and an enabled flag
+    is not proof that a working plugin exists:
+      - enabled:   ``enabledPlugins`` in ~/.claude/settings.json
+      - installed: ``plugins[]`` in ~/.claude/plugins/installed_plugins.json,
+                   carrying the scope and the resolved installPath.
+
+    This predicate licenses deleting the user's own wiring, so it requires both,
+    plus hooks/hooks.json under that installPath. A stale flag pointing at a
+    missing cache dir or a half-finished update would otherwise leave the user
+    with no whisper at all — silently.
+
+    Only a user-scoped plugin counts: configure_claude_hooks writes to the global
+    ~/.claude/settings.json, which serves every project, so those hooks are
+    redundant only when the plugin is global too. A project-scoped plugin keeps
+    its duplication rather than break the whisper everywhere else.
+
+    Fails open: any unreadable or unparseable config returns False, so setup
+    wires exactly as it does today.
+    """
+    if not _plugin_enabled_in_settings(Path.home() / ".claude" / "settings.json", "ormah"):
+        return False
+
+    registry_path = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+    try:
+        data = json.loads(registry_path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict):
+        return False
+
+    for key, entries in plugins.items():
+        if not isinstance(key, str) or key.split("@")[0] != "ormah":
+            continue
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("scope") != "user":
+                continue
+            install_path = entry.get("installPath")
+            if not isinstance(install_path, str) or not install_path:
+                continue
+            if (Path(install_path) / "hooks" / "hooks.json").is_file():
+                return True
+    return False
+
+
 def _claude_code_detected() -> bool:
     return _find_binary("claude") is not None
 

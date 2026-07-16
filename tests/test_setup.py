@@ -30,6 +30,7 @@ from ormah.setup import (
     PI_AGENTS_MD_SENTINEL_START,
     _atomic_write,
     _claude_code_is_wired,
+    _claude_code_plugin_provides_hooks,
     _discover_transcripts,
     _get_agent,
     _is_ormah_hook,
@@ -392,6 +393,95 @@ class TestConfigureClaudeCodeMcp:
             "/usr/local/bin/claude", "mcp", "add", "ormah", "--scope", "user",
             "--", "/usr/local/bin/ormah", "mcp",
         ]
+
+
+class TestClaudeCodePluginProvidesHooks:
+    def _enable(self, tmp_path: Path, value=True, key: str = "ormah@ormah") -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        (claude_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {key: value}}, indent=2) + "\n"
+        )
+
+    def _install(self, tmp_path: Path, *, scope: str = "user", with_hooks: bool = True,
+                 key: str = "ormah@ormah", install_path: Path | None = None) -> Path:
+        plugins_dir = tmp_path / ".claude" / "plugins"
+        plugins_dir.mkdir(parents=True, exist_ok=True)
+        target = install_path if install_path is not None else plugins_dir / "cache" / "ormah" / "ormah" / "0.13.3"
+        if with_hooks:
+            (target / "hooks").mkdir(parents=True, exist_ok=True)
+            (target / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}) + "\n")
+        (plugins_dir / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {key: [{"scope": scope, "installPath": str(target), "version": "0.13.3"}]},
+        }, indent=2) + "\n")
+        return target
+
+    def test_true_when_enabled_and_installed_with_hooks(self, tmp_path):
+        self._enable(tmp_path)
+        self._install(tmp_path)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is True
+
+    def test_true_for_any_marketplace_name(self, tmp_path):
+        self._enable(tmp_path, key="ormah@some-other-market")
+        self._install(tmp_path, key="ormah@some-other-market")
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is True
+
+    def test_false_when_enabled_but_not_installed(self, tmp_path):
+        """A stale enabled flag must never license deleting the working wiring."""
+        self._enable(tmp_path)
+        # no installed_plugins.json at all
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_registry_lists_plugin_but_install_path_is_gone(self, tmp_path):
+        self._enable(tmp_path)
+        self._install(tmp_path, install_path=tmp_path / "vanished", with_hooks=False)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_install_exists_but_hooks_json_is_missing(self, tmp_path):
+        """An interrupted update can leave the dir without its hooks manifest."""
+        self._enable(tmp_path)
+        target = self._install(tmp_path, with_hooks=False)
+        target.mkdir(parents=True, exist_ok=True)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_installed_but_disabled(self, tmp_path):
+        self._enable(tmp_path, value=False)
+        self._install(tmp_path)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_plugin_is_project_scoped(self, tmp_path):
+        """Deliberate: the CLI hooks are global and serve every other project.
+        Stripping them for a one-project plugin would break the whisper there."""
+        self._enable(tmp_path)
+        self._install(tmp_path, scope="project")
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_for_another_plugin(self, tmp_path):
+        self._enable(tmp_path, key="superpowers@claude-plugins-official")
+        self._install(tmp_path, key="superpowers@claude-plugins-official")
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_fails_open_on_corrupt_registry(self, tmp_path):
+        self._enable(tmp_path)
+        plugins_dir = tmp_path / ".claude" / "plugins"
+        plugins_dir.mkdir(parents=True)
+        (plugins_dir / "installed_plugins.json").write_text("{not json")
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_fails_open_on_missing_settings(self, tmp_path):
+        self._install(tmp_path)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
 
 
 class TestConfigureClaudeDesktop:
