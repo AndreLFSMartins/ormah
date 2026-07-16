@@ -2319,6 +2319,14 @@ def _claude_code_plugin_provides_hooks() -> bool:
     redundant only when the plugin is global too. A project-scoped plugin keeps
     its duplication rather than break the whisper everywhere else.
 
+    Both manifests must also actually declare content, not merely exist:
+    hooks.json must parse and contain at least one hook entry that
+    ``_is_ormah_hook`` recognizes as Ormah's, and .mcp.json must parse and
+    declare an ``ormah`` entry under ``mcpServers``. An interrupted update
+    can leave empty placeholder files (``{"hooks": {}}`` / ``{"mcpServers":
+    {}}``) that pass an ``is_file()`` check while providing nothing — that
+    must not license the strip either.
+
     Fails open: any unreadable or unparseable config returns False, so setup
     wires exactly as it does today.
     """
@@ -2347,11 +2355,60 @@ def _claude_code_plugin_provides_hooks() -> bool:
             if not isinstance(install_path, str) or not install_path:
                 continue
             install_dir = Path(install_path)
-            if (install_dir / "hooks" / "hooks.json").is_file() and (
-                install_dir / ".mcp.json"
-            ).is_file():
+            if _hooks_manifest_wires_ormah(
+                install_dir / "hooks" / "hooks.json"
+            ) and _mcp_manifest_wires_ormah(install_dir / ".mcp.json"):
                 return True
     return False
+
+
+def _hooks_manifest_wires_ormah(hooks_json_path: Path) -> bool:
+    """True when a plugin's hooks.json is a real manifest declaring an Ormah hook.
+
+    An interrupted plugin update can leave hooks.json present but empty
+    (``{"hooks": {}}``) or non-existent as JSON; either must not count as
+    "the plugin provides hooks". Reuses ``_is_ormah_hook`` so a renamed event
+    still counts — only the hook entry's command shape matters, not the
+    event name.
+    """
+    try:
+        data = json.loads(hooks_json_path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for matchers in hooks.values():
+        if not isinstance(matchers, list):
+            continue
+        for matcher in matchers:
+            if not isinstance(matcher, dict):
+                continue
+            inner = matcher.get("hooks")
+            if not isinstance(inner, list):
+                continue
+            if any(_is_ormah_hook(entry) for entry in inner):
+                return True
+    return False
+
+
+def _mcp_manifest_wires_ormah(mcp_json_path: Path) -> bool:
+    """True when a plugin's .mcp.json is a real manifest declaring an ormah server.
+
+    An interrupted plugin update can leave .mcp.json present but empty
+    (``{"mcpServers": {}}``); that must not count as "the plugin provides
+    the MCP server".
+    """
+    try:
+        data = json.loads(mcp_json_path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    servers = data.get("mcpServers")
+    return isinstance(servers, dict) and "ormah" in servers
 
 
 def _claude_code_detected() -> bool:

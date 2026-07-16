@@ -376,6 +376,22 @@ class TestConfigureClaudeCodeMcp:
         ]
 
 
+REALISTIC_HOOKS_JSON = {
+    "hooks": {
+        "UserPromptSubmit": [
+            {"hooks": [{
+                "type": "command",
+                "command": "${CLAUDE_PLUGIN_ROOT}/bin/ormah-whisper-inject",
+                "timeout": 10,
+            }]}
+        ]
+    }
+}
+REALISTIC_MCP_JSON = {
+    "mcpServers": {"ormah": {"type": "stdio", "command": "${CLAUDE_PLUGIN_ROOT}/bin/ormah-mcp"}}
+}
+
+
 class TestClaudeCodePluginProvidesHooks:
     def _enable(self, tmp_path: Path, value=True, key: str = "ormah@ormah") -> None:
         claude_dir = tmp_path / ".claude"
@@ -386,7 +402,8 @@ class TestClaudeCodePluginProvidesHooks:
 
     def _install(self, tmp_path: Path, *, scope: str = "user", with_hooks: bool = True,
                  with_mcp: bool | None = None, key: str = "ormah@ormah",
-                 install_path: Path | None = None) -> Path:
+                 install_path: Path | None = None, hooks_content: dict | None = None,
+                 mcp_content: dict | None = None) -> Path:
         # with_mcp mirrors with_hooks by default, so every existing call site
         # (none of which pass with_mcp) keeps its current install-dir behavior.
         if with_mcp is None:
@@ -396,10 +413,12 @@ class TestClaudeCodePluginProvidesHooks:
         target = install_path if install_path is not None else plugins_dir / "cache" / "ormah" / "ormah" / "0.13.3"
         if with_hooks:
             (target / "hooks").mkdir(parents=True, exist_ok=True)
-            (target / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}) + "\n")
+            content = hooks_content if hooks_content is not None else REALISTIC_HOOKS_JSON
+            (target / "hooks" / "hooks.json").write_text(json.dumps(content) + "\n")
         if with_mcp:
             target.mkdir(parents=True, exist_ok=True)
-            (target / ".mcp.json").write_text(json.dumps({"mcpServers": {}}) + "\n")
+            content = mcp_content if mcp_content is not None else REALISTIC_MCP_JSON
+            (target / ".mcp.json").write_text(json.dumps(content) + "\n")
         (plugins_dir / "installed_plugins.json").write_text(json.dumps({
             "version": 2,
             "plugins": {key: [{"scope": scope, "installPath": str(target), "version": "0.13.3"}]},
@@ -507,6 +526,33 @@ class TestClaudeCodePluginProvidesHooks:
         with patch("ormah.setup.Path.home", return_value=tmp_path):
             assert _claude_code_plugin_provides_hooks() is False
 
+    def test_false_when_hooks_manifest_is_empty_object(self, tmp_path):
+        """An interrupted update can leave hooks.json parseable but empty."""
+        self._enable(tmp_path)
+        self._install(tmp_path, hooks_content={"hooks": {}})
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_mcp_manifest_has_no_ormah_server(self, tmp_path):
+        """An interrupted update can leave .mcp.json parseable but empty."""
+        self._enable(tmp_path)
+        self._install(tmp_path, mcp_content={"mcpServers": {}})
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_hooks_manifest_has_only_third_party_hook(self, tmp_path):
+        """Proves the check inspects ormah's own hooks, not just any hook."""
+        self._enable(tmp_path)
+        self._install(tmp_path, hooks_content={
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/other-tool run"}]}
+                ]
+            }
+        })
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
 
 class TestClaudeCodeWirePluginGuard:
     def _seed_working_plugin(self, tmp_path: Path, *, enabled: bool = True, scope: str = "user") -> Path:
@@ -514,8 +560,8 @@ class TestClaudeCodeWirePluginGuard:
         claude_dir.mkdir(exist_ok=True)
         install_path = claude_dir / "plugins" / "cache" / "ormah" / "ormah" / "0.13.3"
         (install_path / "hooks").mkdir(parents=True)
-        (install_path / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}) + "\n")
-        (install_path / ".mcp.json").write_text(json.dumps({"mcpServers": {}}) + "\n")
+        (install_path / "hooks" / "hooks.json").write_text(json.dumps(REALISTIC_HOOKS_JSON) + "\n")
+        (install_path / ".mcp.json").write_text(json.dumps(REALISTIC_MCP_JSON) + "\n")
         (claude_dir / "plugins" / "installed_plugins.json").write_text(json.dumps({
             "version": 2,
             "plugins": {"ormah@ormah": [
@@ -666,8 +712,8 @@ class TestClaudeCodeWirePluginGuard:
         claude_dir.mkdir()
         install_path = claude_dir / "plugins" / "cache" / "ormah" / "ormah" / "0.13.3"
         (install_path / "hooks").mkdir(parents=True)
-        (install_path / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}) + "\n")
-        (install_path / ".mcp.json").write_text(json.dumps({"mcpServers": {}}) + "\n")
+        (install_path / "hooks" / "hooks.json").write_text(json.dumps(REALISTIC_HOOKS_JSON) + "\n")
+        (install_path / ".mcp.json").write_text(json.dumps(REALISTIC_MCP_JSON) + "\n")
         (claude_dir / "plugins" / "installed_plugins.json").write_text(json.dumps({
             "version": 2,
             "plugins": {"ormah@ormah": [
@@ -2151,8 +2197,8 @@ class TestClaudeCodeIsWired:
         )
         install_path = claude_dir / "plugins" / "cache" / "ormah" / "ormah" / "0.13.3"
         (install_path / "hooks").mkdir(parents=True)
-        (install_path / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}) + "\n")
-        (install_path / ".mcp.json").write_text(json.dumps({"mcpServers": {}}) + "\n")
+        (install_path / "hooks" / "hooks.json").write_text(json.dumps(REALISTIC_HOOKS_JSON) + "\n")
+        (install_path / ".mcp.json").write_text(json.dumps(REALISTIC_MCP_JSON) + "\n")
         (claude_dir / "plugins" / "installed_plugins.json").write_text(json.dumps({
             "version": 2,
             "plugins": {"ormah@ormah": [
