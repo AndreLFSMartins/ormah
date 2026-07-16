@@ -212,6 +212,19 @@ class Settings(BaseSettings):
     whisper_synthetic_filter_enabled: bool = True
     whisper_synthetic_prompt_patterns: list[str] = []
 
+    # Rot detection for the list above (#143). A pattern that matched before and
+    # stopped is stale; a pattern that never matched is merely irrelevant to this
+    # install and stays silent. rot_days is also the traffic-guard window: no
+    # whisper traffic at all in it means the user was away, not that the patterns
+    # died — so nothing is proposed.
+    whisper_pattern_rot_days: int = 30
+    whisper_pattern_monitor_interval_minutes: int = 1440
+    # A pattern that fired once, months ago, is not evidence of a live workflow.
+    # Proposing its removal is noise, and noise teaches the user to ignore the
+    # alert — which defeats the feature. Require a real history before calling
+    # anything rotted (council I4).
+    whisper_pattern_rot_min_matches: int = 2
+
     # Whisper topic-shift detection (skip injection when topic unchanged)
     whisper_topic_shift_enabled: bool = True
     whisper_topic_shift_threshold: float = 0.75  # cosine sim above this = same topic
