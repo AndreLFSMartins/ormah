@@ -2056,6 +2056,35 @@ class TestRemoveMcpFromJson:
         result = json.loads(config.read_text())
         assert result == original
 
+    def test_write_is_atomic(self, tmp_path):
+        """~/.claude.json holds the user's whole Claude Code config, and a later
+        change makes this path run on every setup --update for plugin users. A
+        bare write_text truncates it on a crash mid-write."""
+        config = tmp_path / "claude.json"
+        config.write_text(json.dumps({
+            "mcpServers": {
+                "ormah": {"command": "/bin/ormah", "args": ["mcp"]},
+                "other": {"command": "/bin/other"},
+            }
+        }, indent=2) + "\n")
+
+        with patch("ormah.setup._atomic_write") as atomic_write:
+            _remove_mcp_from_json(config)
+
+        atomic_write.assert_called_once()
+        written_path = atomic_write.call_args[0][0]
+        assert str(written_path) == str(config)
+        payload = json.loads(atomic_write.call_args[0][1])
+        assert payload["mcpServers"] == {"other": {"command": "/bin/other"}}
+
+    def test_corrupt_file_is_left_untouched(self, tmp_path):
+        config = tmp_path / "claude.json"
+        config.write_text("{not json")
+
+        _remove_mcp_from_json(config)
+
+        assert config.read_text() == "{not json"
+
 
 class TestRemoveCodexMcpConfig:
     def test_removes_ormah_block(self, tmp_path):
