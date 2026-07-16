@@ -35,6 +35,9 @@ _TASK_RUNNERS = {
     "embedding_backfill": ("ormah.background.embedding_backfill", "run_embedding_backfill"),
     "cloud_backup": ("ormah.cloud.jobs", "run_cloud_backup"),
     "restore_verification": ("ormah.cloud.jobs", "run_restore_verification"),
+    "synthetic_pattern_monitor": (
+        "ormah.background.synthetic_pattern_monitor", "run_synthetic_pattern_monitor",
+    ),
 }
 
 _TASK_DESCRIPTIONS = {
@@ -52,6 +55,7 @@ _TASK_DESCRIPTIONS = {
     "embedding_backfill": "Backfills missing vector embeddings (delta) or re-embeds all on an embedding-schema bump. Keeps vector search complete after restarts and overnight ingest (#32).",
     "cloud_backup": "Encrypts and uploads a due cloud backup without changing the sync head.",
     "restore_verification": "Downloads, decrypts, rebuilds, and searches the latest cloud backup.",
+    "synthetic_pattern_monitor": "Detects synthetic-prompt patterns that stopped matching and proposes removing or repairing them. Proposes only — never edits your config (#143).",
 }
 
 # Order for sleep cycle (full maintenance pass)

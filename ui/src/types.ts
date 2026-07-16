@@ -81,7 +81,7 @@ export interface NodeDetail {
   tags: string[];
 }
 
-export type ProposalType = "merge" | "conflict" | "decay";
+export type ProposalType = "merge" | "conflict" | "decay" | "pattern";
 export type ProposalStatus = "pending" | "approved" | "rejected";
 
 export interface ProposalNode {
