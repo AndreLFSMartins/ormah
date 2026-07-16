@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import numpy as np
 
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
+from ormah.engine.prompt_classifier import is_synthetic_prompt
 from ormah.index.graph import GraphIndex
 from ormah.text.tokens import distinctive_tokens
 
@@ -392,6 +393,26 @@ class ContextBuilder:
             logger.info(
                 "Whisper diagnostics: prompt=%r no_engine -> skip",
                 prompt_snippet,
+            )
+            if _return_debug:
+                return "", _injected_ids
+            return ""
+
+        # Machine-generated turn (subagent notification, scheduled task, loop
+        # check): no human will read the injection, and the usage judge would
+        # score it as an unreferenced miss. Skip before the classifier — the
+        # last point where no encode/search/rerank has been paid (#134).
+        _s = getattr(self.engine, "settings", None)
+        if getattr(_s, "whisper_synthetic_filter_enabled", True) and is_synthetic_prompt(
+            prompt, getattr(_s, "whisper_synthetic_prompt_patterns", ()) or ()
+        ):
+            logger.info(
+                "Whisper diagnostics: prompt=%r synthetic_prompt -> skip",
+                prompt_snippet,
+            )
+            self._log_decision(
+                session_id=session_id, space=space, prompt=prompt,
+                intent=None, outcome="silent_synthetic",
             )
             if _return_debug:
                 return "", _injected_ids

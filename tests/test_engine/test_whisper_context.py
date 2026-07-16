@@ -1778,9 +1778,13 @@ def _make_settings_mock(
     claude_maintenance_enabled=False,
     whisper_no_overlap_ce_floor=0.45,
     whisper_no_overlap_cosine_floor=0.70,
+    whisper_synthetic_filter_enabled=True,
+    whisper_synthetic_prompt_patterns=(),
 ):
     """Create a MagicMock settings object with affinity-related float attributes."""
     settings = MagicMock()
+    settings.whisper_synthetic_filter_enabled = whisper_synthetic_filter_enabled
+    settings.whisper_synthetic_prompt_patterns = whisper_synthetic_prompt_patterns
     settings.whisper_reranker_min_score = whisper_reranker_min_score
     settings.whisper_exploration_enabled = whisper_exploration_enabled
     settings.affinity_similarity_threshold = affinity_similarity_threshold
@@ -2848,6 +2852,53 @@ class TestWhisperDecisions:
         return db.conn.execute(
             "SELECT * FROM whisper_decisions ORDER BY id"
         ).fetchall()
+
+    def test_synthetic_prompt_logs_silent_synthetic(self, db_graph):
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph)
+
+        out = builder.build_whisper_context(
+            prompt="<task-notification>\n<task-id>x</task-id>\n<status>done</status>",
+            session_id="s-synth",
+        )
+
+        assert out == ""
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "silent_synthetic"
+        assert rows[0]["session_id"] == "s-synth"
+
+    def test_ide_wrapped_human_prompt_is_not_skipped(self, db_graph):
+        # REGRESSION GUARD (issue #134): must NOT log silent_synthetic — this is a
+        # real human prompt the IDE merely prefixed. 46/46 live events carried
+        # human text after the tag, so filtering it would silence the whisper
+        # whenever a file is open in the IDE.
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph, results=[])
+
+        builder.build_whisper_context(
+            prompt=("<ide_opened_file>The user opened /x/a.md in the IDE."
+                    "</ide_opened_file>\nrevisa o portfólio de segurança"),
+            session_id="s-ide",
+        )
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] != "silent_synthetic"
+
+    def test_filter_disabled_does_not_skip(self, db_graph):
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph, results=[])
+        builder.engine.settings = _make_settings_mock(
+            whisper_synthetic_filter_enabled=False,
+        )
+
+        builder.build_whisper_context(
+            prompt="<task-notification>\n<task-id>x</task-id>", session_id="s-off",
+        )
+
+        rows = self._decisions(db)
+        assert rows[0]["outcome"] != "silent_synthetic"
 
     def test_short_prompt_logs_silent_short(self, db_graph):
         db, graph = db_graph
