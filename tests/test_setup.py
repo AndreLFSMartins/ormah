@@ -1910,6 +1910,36 @@ class TestClaudeCodeIsWired:
         with patch("ormah.setup.Path.home", return_value=tmp_path):
             assert _claude_code_is_wired() is False
 
+    def test_plugin_providing_hooks_counts_as_wired(self, tmp_path):
+        """The plugin provides the hooks and MCP server; without this the UI
+        would report a working install as not wired once Task 4 strips the CLI
+        wiring."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        (claude_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"ormah@ormah": True}}, indent=2) + "\n"
+        )
+        install_path = claude_dir / "plugins" / "cache" / "ormah" / "ormah" / "0.13.3"
+        (install_path / "hooks").mkdir(parents=True)
+        (install_path / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}) + "\n")
+        (claude_dir / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {"ormah@ormah": [
+                {"scope": "user", "installPath": str(install_path), "version": "0.13.3"}
+            ]},
+        }, indent=2) + "\n")
+        # no ormah hooks in settings.json, no ~/.claude.json — the plugin is the only wiring
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is True
+
+    def test_enabled_but_uninstalled_plugin_alone_is_not_wired(self, tmp_path):
+        """Nothing would actually fire — reporting 'wired' would be a lie."""
+        self._write_settings(tmp_path, {"enabledPlugins": {"ormah@ormah": True}})
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is False
+
 
 class TestInstallPiAgents:
     def test_creates_agent_file(self, tmp_path, capsys):
