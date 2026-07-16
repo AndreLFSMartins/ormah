@@ -50,7 +50,7 @@ def test_detect_clients_codex_via_dir(tmp_path):
     assert d["codex"] is True
 
 
-def test_run_setup_json_wires_detected(monkeypatch):
+def test_run_setup_json_wires_detected(monkeypatch, tmp_path):
     calls: list[str] = []
     monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
     monkeypatch.setattr(setup, "_preload_local_models", lambda: None)
@@ -61,7 +61,8 @@ def test_run_setup_json_wires_detected(monkeypatch):
     ):
         monkeypatch.setattr(setup, name, lambda *a, _n=name: calls.append(_n))
 
-    result = setup.run_setup_json()
+    with patch("ormah.setup.Path.home", return_value=tmp_path):
+        result = setup.run_setup_json()
 
     assert result["detected"] == ["claude_code"]
     assert result["wired"] == ["claude_code"]
@@ -70,7 +71,7 @@ def test_run_setup_json_wires_detected(monkeypatch):
     assert "configure_claude_hooks" in calls
 
 
-def test_run_setup_json_captures_errors(monkeypatch):
+def test_run_setup_json_captures_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(setup, "get_ormah_bin_path", lambda: "/bin/ormah")
     monkeypatch.setattr(setup, "_preload_local_models", lambda: None)
     set_detected(monkeypatch, "claude_code")
@@ -85,7 +86,8 @@ def test_run_setup_json_captures_errors(monkeypatch):
     ):
         monkeypatch.setattr(setup, name, lambda *a: None)
 
-    result = setup.run_setup_json()
+    with patch("ormah.setup.Path.home", return_value=tmp_path):
+        result = setup.run_setup_json()
 
     assert result["wired"] == []
     assert "claude_code" in result["errors"]
