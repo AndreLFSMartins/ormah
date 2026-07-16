@@ -2346,6 +2346,10 @@ def _claude_code_detected() -> bool:
 
 
 def _claude_code_is_wired() -> bool:
+    # The plugin ships the hooks and the MCP server — an install with a working
+    # plugin is wired even when settings.json holds nothing of ours.
+    if _claude_code_plugin_provides_hooks():
+        return True
     # Check for ormah whisper hooks in settings.json and ormah MCP in .claude.json
     settings_path = Path.home() / ".claude" / "settings.json"
     try:
