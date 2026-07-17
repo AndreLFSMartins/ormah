@@ -684,25 +684,29 @@ def _install_markdown_block(
     target.write_text(updated)
 
 
-def _plugin_enabled_in_settings(settings_path: Path, plugin_name: str) -> bool:
-    """Return True when the plugin is enabled in a Claude settings file."""
+def _enabled_plugin_keys(settings_path: Path, plugin_name: str) -> list[str]:
+    """Return the fully-qualified enabledPlugins keys for a plugin, in file order."""
     if not settings_path.exists():
-        return False
+        return []
     try:
         data = json.loads(settings_path.read_text())
     except (json.JSONDecodeError, ValueError):
-        return False
+        return []
 
     enabled_plugins = data.get("enabledPlugins", {})
     if not isinstance(enabled_plugins, dict):
-        return False
+        return []
 
-    for key, enabled in enabled_plugins.items():
-        if enabled is not True:
-            continue
-        if key == plugin_name or key.startswith(f"{plugin_name}@"):
-            return True
-    return False
+    return [
+        key
+        for key, enabled in enabled_plugins.items()
+        if enabled is True and (key == plugin_name or key.startswith(f"{plugin_name}@"))
+    ]
+
+
+def _plugin_enabled_in_settings(settings_path: Path, plugin_name: str) -> bool:
+    """Return True when the plugin is enabled in a Claude settings file."""
+    return bool(_enabled_plugin_keys(settings_path, plugin_name))
 
 
 def _candidate_project_roots(cwd: Path | None = None) -> list[Path]:
@@ -1678,7 +1682,7 @@ def _remove_mcp_from_json(config_path: Path) -> None:
     else:
         data["mcpServers"] = mcp_servers
 
-    config_path.write_text(json.dumps(data, indent=2) + "\n")
+    _atomic_write(str(config_path), json.dumps(data, indent=2) + "\n")
     ok(f"Removed ormah from {config_path}")
 
 
@@ -2290,22 +2294,153 @@ class AgentDescriptor:
     platform: list[str] | None = field(default=None)
 
 
+def _claude_code_plugin_provides_hooks() -> bool:
+    """True when a user-scoped ormah plugin is enabled AND actually installed.
+
+    Claude Code keeps the two states in two different files, and an enabled flag
+    is not proof that a working plugin exists:
+      - enabled:   ``enabledPlugins`` in ~/.claude/settings.json
+      - installed: ``plugins[]`` in ~/.claude/plugins/installed_plugins.json,
+                   carrying the scope and the resolved installPath.
+
+    The two files must agree on the SAME fully-qualified key (e.g.
+    ``ormah@some-market``), not merely both mention an "ormah"-prefixed key:
+    a stale, still-installed marketplace entry must never stand in for the
+    marketplace that is actually enabled, or a broken active install could
+    hide behind a healthy but abandoned one.
+
+    This predicate licenses deleting the user's own wiring, so it requires both,
+    plus hooks/hooks.json AND .mcp.json under that installPath — the wire guard
+    strips both the CLI hooks and the CLI's MCP entry, so proving only the
+    hooks manifest is not enough: a half-finished update could ship hooks.json
+    without yet shipping .mcp.json, and stripping the MCP entry with no
+    plugin-provided replacement would cost the user remember/recall with the
+    whisper still silently intact. A stale flag pointing at a missing cache
+    dir or a half-finished update would otherwise leave the user with no
+    whisper at all — silently.
+
+    Only a user-scoped plugin counts: configure_claude_hooks writes to the global
+    ~/.claude/settings.json, which serves every project, so those hooks are
+    redundant only when the plugin is global too. A project-scoped plugin keeps
+    its duplication rather than break the whisper everywhere else.
+
+    Both manifests must also actually declare content, not merely exist:
+    hooks.json must parse and contain at least one hook entry that
+    ``_is_ormah_hook`` recognizes as Ormah's, and .mcp.json must parse and
+    declare an ``ormah`` entry under ``mcpServers``. An interrupted update
+    can leave empty placeholder files (``{"hooks": {}}`` / ``{"mcpServers":
+    {}}``) that pass an ``is_file()`` check while providing nothing — that
+    must not license the strip either.
+
+    Fails open: any unreadable or unparseable config returns False, so setup
+    wires exactly as it does today.
+    """
+    enabled_keys = _enabled_plugin_keys(Path.home() / ".claude" / "settings.json", "ormah")
+    if not enabled_keys:
+        return False
+
+    registry_path = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+    try:
+        data = json.loads(registry_path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict):
+        return False
+
+    for key in enabled_keys:
+        entries = plugins.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("scope") != "user":
+                continue
+            install_path = entry.get("installPath")
+            if not isinstance(install_path, str) or not install_path:
+                continue
+            install_dir = Path(install_path)
+            if _hooks_manifest_wires_ormah(
+                install_dir / "hooks" / "hooks.json"
+            ) and _mcp_manifest_wires_ormah(install_dir / ".mcp.json"):
+                return True
+    return False
+
+
+def _hooks_manifest_wires_ormah(hooks_json_path: Path) -> bool:
+    """True when a plugin's hooks.json is a real manifest declaring an Ormah hook.
+
+    An interrupted plugin update can leave hooks.json present but empty
+    (``{"hooks": {}}``) or non-existent as JSON; either must not count as
+    "the plugin provides hooks". Reuses ``_is_ormah_hook`` so a renamed event
+    still counts — only the hook entry's command shape matters, not the
+    event name.
+    """
+    try:
+        data = json.loads(hooks_json_path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for matchers in hooks.values():
+        if not isinstance(matchers, list):
+            continue
+        for matcher in matchers:
+            if not isinstance(matcher, dict):
+                continue
+            inner = matcher.get("hooks")
+            if not isinstance(inner, list):
+                continue
+            if any(_is_ormah_hook(entry) for entry in inner):
+                return True
+    return False
+
+
+def _mcp_manifest_wires_ormah(mcp_json_path: Path) -> bool:
+    """True when a plugin's .mcp.json is a real manifest declaring an ormah server.
+
+    An interrupted plugin update can leave .mcp.json present but empty
+    (``{"mcpServers": {}}``); that must not count as "the plugin provides
+    the MCP server".
+    """
+    try:
+        data = json.loads(mcp_json_path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    servers = data.get("mcpServers")
+    return isinstance(servers, dict) and "ormah" in servers
+
+
 def _claude_code_detected() -> bool:
     return _find_binary("claude") is not None
 
 
 def _claude_code_is_wired() -> bool:
+    # The plugin ships the hooks and the MCP server — an install with a working
+    # plugin is wired even when settings.json holds nothing of ours.
+    if _claude_code_plugin_provides_hooks():
+        return True
     # Check for ormah whisper hooks in settings.json and ormah MCP in .claude.json
     settings_path = Path.home() / ".claude" / "settings.json"
     try:
         data = json.loads(settings_path.read_text())
         hooks = data.get("hooks") or {}
         for matchers in hooks.values():
-            if isinstance(matchers, list):
-                for entry in matchers:
-                    cmd = entry.get("command", "") if isinstance(entry, dict) else str(entry)
-                    if "ormah whisper" in cmd:
-                        return True
+            if not isinstance(matchers, list):
+                continue
+            for matcher in matchers:
+                if not isinstance(matcher, dict):
+                    continue
+                inner = matcher.get("hooks")
+                if not isinstance(inner, list):
+                    continue
+                if any(_is_ormah_hook(entry) for entry in inner):
+                    return True
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
     claude_json = Path.home() / ".claude.json"
@@ -2386,9 +2521,25 @@ def _pi_is_wired() -> bool:
 
 
 def _claude_code_wire() -> None:
-    ormah_bin = get_ormah_bin_path()
-    configure_claude_hooks(ormah_bin)
-    configure_claude_code_mcp(ormah_bin)
+    # The plugin registers the same UserPromptSubmit/PreCompact/SessionEnd hooks
+    # and the same MCP server. Wiring them again in ~/.claude/settings.json runs
+    # both copies: the whisper fires twice per human turn, and no merge can dedupe
+    # across the two files. The agent and slash command are namespaced by the
+    # plugin (ormah:maintenance vs ormah-maintenance), so they are not duplicate
+    # registrations — they stay installed, as does CLAUDE.md, which no plugin can
+    # write.
+    if _claude_code_plugin_provides_hooks():
+        _remove_claude_hooks()
+        _remove_mcp_from_json(Path.home() / ".claude.json")
+        info(
+            "Claude Code plugin already provides the hooks and MCP server "
+            "— removed redundant CLI wiring"
+        )
+    else:
+        ormah_bin = get_ormah_bin_path()
+        configure_claude_hooks(ormah_bin)
+        configure_claude_code_mcp(ormah_bin)
+
     install_claude_md()
     install_claude_agents()
     install_claude_commands()
