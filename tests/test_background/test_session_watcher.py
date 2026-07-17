@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ormah.background.session_watcher import (
+    IngestResult,
     SessionHandler,
     _ingest_session,
     _load_state,
@@ -152,7 +153,7 @@ def test_ingest_session_basic(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
-    assert result is True
+    assert result == IngestResult.OK
     rel = str(jsonl.relative_to(watch_dir))
     assert rel in state
     entry = state[rel]
@@ -179,7 +180,7 @@ def test_subagent_transcript_is_not_ingested(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
-    assert result is False
+    assert result == IngestResult.NO_PROGRESS
     assert state == {}
 
 
@@ -231,7 +232,7 @@ def test_ingest_codex_session_resolves_rollout_session_id_and_space(engine, tmp_
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     rel = str(jsonl.relative_to(watch_dir))
     entry = state[rel]
@@ -260,7 +261,7 @@ def test_ingest_codex_session_without_whisper_log_does_not_infer_date_space(engi
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     entry = state[str(jsonl.relative_to(watch_dir))]
     assert entry["source"] == "codex"
@@ -677,7 +678,9 @@ def test_min_turns_filter(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
-    assert result is False
+    # A fresh (active, not idle) file below min_turns hits the short-tail branch and
+    # defers → TRANSIENT (retry until it grows past min_turns or the session idles).
+    assert result == IngestResult.TRANSIENT
     assert str(jsonl.relative_to(watch_dir)) not in state
 
 
@@ -693,8 +696,8 @@ def test_unchanged_session_skipped(engine, tmp_path):
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is False
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.NO_PROGRESS
 
 
 # --- Test 5: Scan respects lookback ---
@@ -770,13 +773,13 @@ def test_lifecycle_start_stop(engine, tmp_path):
     observers = start_session_watcher(engine)
     try:
         assert len(observers) == 1
-        assert observers[0].is_alive()
+        assert observers[0].observer.is_alive()
     finally:
         stop_session_watcher(observers)
 
     # Give observer thread a moment to stop
     time.sleep(0.1)
-    assert not observers[0].is_alive()
+    assert not observers[0].observer.is_alive()
 
 
 def test_lifecycle_includes_codex_sessions_when_using_default_agent_dir(
@@ -799,7 +802,7 @@ def test_lifecycle_includes_codex_sessions_when_using_default_agent_dir(
     observers = start_session_watcher(engine)
     try:
         assert len(observers) == 2
-        assert all(observer.is_alive() for observer in observers)
+        assert all(w.observer.is_alive() for w in observers)
     finally:
         stop_session_watcher(observers)
 
@@ -869,12 +872,12 @@ def test_incremental_only_new_turns(engine, tmp_path):
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=capture):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
         first_offset = state[str(jsonl.relative_to(watch_dir))]["end_offset"]
         assert first_offset > 0
 
         _make_jsonl(jsonl, user_turns=12)  # identical first 6 turns + 6 appended
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " not in captured[1]
     assert "User message 6 " in captured[1]
@@ -902,11 +905,11 @@ def test_incremental_defers_small_append(engine, tmp_path):
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=counting):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
         saved = dict(state[str(jsonl.relative_to(watch_dir))])
 
-        _make_jsonl(jsonl, user_turns=8)  # only 2 new turns < min_turns
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is False
+        _make_jsonl(jsonl, user_turns=8)  # only 2 new turns < min_turns, file still active → TRANSIENT defer
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
 
     assert calls == 1
     assert state[str(jsonl.relative_to(watch_dir))] == saved
@@ -932,10 +935,10 @@ def test_shrink_resets_cursor(engine, tmp_path):
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=capture):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
         _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " in captured[1]
 
@@ -1015,7 +1018,7 @@ def test_inflight_multirecord_response_not_split(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=capture):
         # Every pair is terminal -> all committed; the cursor sits after the last one.
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
         cursor1 = state[rel]["end_offset"]
 
         # New turn: prompt + a FIRST assistant record still in flight (tool_use). The
@@ -1023,13 +1026,13 @@ def test_inflight_multirecord_response_not_split(engine, tmp_path):
         # into the middle of the response.
         _append_user(jsonl, 6)
         _append_assistant(jsonl, 6, stop_reason="tool_use")
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is False
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) != IngestResult.OK
         assert state[rel]["end_offset"] == cursor1
 
         # The response completes with a terminal record: prompt + BOTH assistant records
         # commit together — never split.
         _append_assistant(jsonl, 6, stop_reason="end_turn")
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     committed = captured[-1]
     assert "User message 6 " in committed
@@ -1061,7 +1064,7 @@ def test_codex_multirecord_turn_committed_whole_via_task_complete(engine, tmp_pa
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=capture):
         # Fresh/active: the two task_complete turns commit whole; the in-flight one waits.
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     committed = captured[-1]
     assert committed.count("Assistant response 0 part ") == 3  # turn 0 not split
@@ -1105,7 +1108,7 @@ def test_legacy_mid_response_cursor_recovered(engine, tmp_path):
 
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          patch.object(engine, "ingest_conversation", side_effect=capture):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
 
     committed = captured[-1]
     assert "Prompt with the memory detail" in committed   # prompt recovered
@@ -1117,7 +1120,7 @@ def test_legacy_mid_response_cursor_recovered(engine, tmp_path):
     # second pass on the unchanged file skips without re-recovering.
     assert state[rel]["end_offset"] == jsonl.stat().st_size
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is False
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.NO_PROGRESS
 
 
 def test_codex_inflight_turn_not_split_on_idle(engine, tmp_path):
@@ -1132,7 +1135,7 @@ def test_codex_inflight_turn_not_split_on_idle(engine, tmp_path):
     _append_codex_turn(jsonl, 0, records=2, complete=True)
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
     cursor = state[rel]["end_offset"]
 
     # In-flight multi-record turn, file now idle. The turn has no closure signal, so it is
@@ -1142,7 +1145,7 @@ def test_codex_inflight_turn_not_split_on_idle(engine, tmp_path):
     os.utime(jsonl, (now, now - 120))
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1,
-                               idle_threshold=30) is False
+                               idle_threshold=30) == IngestResult.NO_PROGRESS
     assert state[rel]["end_offset"] == cursor
 
 
@@ -1174,7 +1177,7 @@ def test_idle_tail_with_dangling_user_no_duplicate(engine, tmp_path):
          patch.object(engine, "ingest_conversation", side_effect=capture):
         assert _ingest_session(
             engine, jsonl, state, watch_dir, min_turns=5, idle_threshold=30
-        ) is True
+        ) == IngestResult.OK
         assert "User message 8 " not in captured[-1]
 
         _append_assistant(jsonl, 8)
@@ -1182,7 +1185,7 @@ def test_idle_tail_with_dangling_user_no_duplicate(engine, tmp_path):
         os.utime(jsonl, (now2, now2 - 120))
         assert _ingest_session(
             engine, jsonl, state, watch_dir, min_turns=1, idle_threshold=30
-        ) is True
+        ) == IngestResult.OK
 
     joined = "\n".join(captured)
     assert joined.count("User message 8 ") == 1
@@ -1216,7 +1219,7 @@ def test_session_tail_idle_ingested(engine, tmp_path):
          patch.object(engine, "ingest_conversation", side_effect=counting):
         assert _ingest_session(
             engine, jsonl, state, watch_dir, min_turns=5, idle_threshold=30
-        ) is True
+        ) == IngestResult.OK
     assert calls == 1
 
 
@@ -1381,15 +1384,547 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     _make_jsonl(jsonl, user_turns=10)
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
     first_nodes = list(state[rel]["node_ids"])
     assert first_nodes  # first ingest produced at least one node
 
     _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset → full re-ingest
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) is True
+        assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     # Full re-ingest (prev_offset reset to 0): stale node_ids must not be concatenated,
     # so the stored provenance carries no duplicates.
     nodes = state[rel]["node_ids"]
     assert len(nodes) == len(set(nodes))
+
+
+def test_do_ingest_returns_ok_when_it_ingests(engine, tmp_path):
+    """_do_ingest reports IngestResult so reconcile can count recoveries and triage failures."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler._do_ingest(jsonl) == IngestResult.OK
+        assert handler._do_ingest(jsonl) == IngestResult.NO_PROGRESS  # nothing new the second time
+
+
+def test_reconcile_ingests_file_the_live_path_missed(engine, tmp_path):
+    """A changed, idle transcript whose fsevent never reached the handler is recovered."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    assert rel not in handler._state  # simulate the dropped event: handler never saw it
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        recovered = handler.reconcile()
+
+    assert recovered == 1
+    assert rel in handler._state
+    assert handler._state[rel]["user_turns"] == 6
+
+
+def test_reconcile_skips_fully_consumed_file_on_second_pass(engine, tmp_path):
+    """A second reconcile does not re-ingest a file already consumed to EOF (cheap skip)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1
+        assert handler.reconcile() == 0
+
+
+def test_reconcile_does_not_reingest_what_live_path_already_took(engine, tmp_path):
+    """reconcile shares handler state, so a file ingested live is not re-ingested."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._do_ingest(jsonl)                      # live path ingests it
+        rel = str(jsonl.relative_to(watch_dir))
+        node_count = len(handler._state[rel]["node_ids"])
+        recovered = handler.reconcile()
+
+    assert recovered == 0
+    assert len(handler._state[rel]["node_ids"]) == node_count
+
+
+def test_reconcile_logs_recovery_heartbeat(engine, tmp_path, caplog):
+    """reconcile emits the functional heartbeat when it recovers >0 transcripts."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        with caplog.at_level("INFO", logger="ormah.background.session_watcher"):
+            handler.reconcile()
+    assert any("reconcile recovered" in r.message for r in caplog.records)
+
+
+# --- Adversarial regressions for the two HIGH council findings ---
+
+def test_reconcile_retries_seen_file_when_first_do_ingest_fails(engine, tmp_path):
+    """A transient ingest failure must NOT strand a seen file: the next tick retries it."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    # Seed state as a seen file with a pending tail (cursor behind EOF).
+    rel = str(jsonl.relative_to(watch_dir))
+    handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    calls = {"n": 0}
+    real = _ingest_session
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return IngestResult.TRANSIENT     # transient failure on the first reconcile
+        return real(*a, **k)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+            patch("ormah.background.session_watcher._ingest_session", side_effect=flaky):
+        assert handler.reconcile() == 0       # first tick: ingest "fails"
+        assert handler.reconcile() == 1       # second tick retries (not skipped) and recovers
+
+
+def test_reconcile_recovers_partial_tail_without_mtime_change(engine, tmp_path):
+    """A grown tail with an UNCHANGED mtime is still recovered (cursor != size, not mtime)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1               # consumes the first 6 turns
+        old_mtime = jsonl.stat().st_mtime
+        _make_jsonl(jsonl, user_turns=12)             # append 6 more (size grows)
+        os.utime(jsonl, (old_mtime, old_mtime))       # mtime unchanged on purpose
+        recovered = handler.reconcile()
+
+    assert recovered == 1                             # picked up via end_offset != size
+
+
+def test_reconcile_while_live_ingesting_defers_then_retries(engine, tmp_path):
+    """If the live path owns the path mid-ingest, reconcile defers, then retries next tick."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler._ingesting.add(str(jsonl))                # simulate live path mid-ingest
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 0               # deferred: live path owns it
+
+    handler._ingesting.discard(str(jsonl))            # live path finished without ingesting
+    handler._pending.discard(str(jsonl))
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1               # not poisoned -> retried and recovered
+
+
+def test_reconcile_bounds_retries_for_abandoned_inflight_tail(engine, tmp_path):
+    """A seen tail that never converges (always no-op) is retried a bounded number of
+    times, not re-attempted (re-hashed) every tick forever."""
+    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    # Seen file stuck below EOF that never makes progress (abandoned in-flight tail).
+    handler._state[rel] = {"hash": "x", "end_offset": 1, "node_ids": [], "user_turns": 0}
+
+    calls = {"n": 0}
+
+    def noop(path):
+        calls["n"] += 1
+        return IngestResult.NO_PROGRESS  # never makes progress (size + safe boundary frozen)
+
+    handler._do_ingest = noop
+    for _ in range(8):
+        handler.reconcile()
+
+    assert calls["n"] == MAX_RECONCILE_RETRIES  # bounded, not 8
+
+
+def test_run_session_reconcile_recreates_dead_observer(engine, tmp_path):
+    """A dead Observer is stopped/joined and recreated; reconcile still runs."""
+    from ormah.background.session_watcher import SessionWatch, run_session_reconcile
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+
+    dead = MagicMock()
+    dead.is_alive.return_value = False
+    watch = SessionWatch(watch_dir=watch_dir, handler=handler, observer=dead)
+
+    with patch("ormah.background.session_watcher.Observer") as MockObserver:
+        new_obs = MockObserver.return_value
+        total = run_session_reconcile([watch])
+
+    dead.stop.assert_called_once()        # old observer cleaned up before recreate
+    dead.join.assert_called_once()
+    new_obs.schedule.assert_called_once()
+    new_obs.start.assert_called_once()
+    assert watch.observer is new_obs
+    assert total == 0  # empty dir, nothing to recover
+
+
+def test_run_session_reconcile_runs_reconcile_even_when_recreate_fails(engine, tmp_path):
+    """If recreating a dead Observer raises, the reconcile scan still runs (safety-net guarantee)."""
+    from ormah.background.session_watcher import SessionWatch, run_session_reconcile
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler.reconcile = MagicMock(return_value=0)
+
+    dead = MagicMock()
+    dead.is_alive.return_value = False
+    watch = SessionWatch(watch_dir=watch_dir, handler=handler, observer=dead)
+
+    with patch("ormah.background.session_watcher.Observer", side_effect=RuntimeError("boom")):
+        total = run_session_reconcile([watch])
+
+    handler.reconcile.assert_called_once()  # safety net ran despite recreate failure
+    assert total == 0
+
+
+def test_reconcile_does_not_starve_valid_file_behind_stuck_never_seen_files(engine, tmp_path):
+    """>cap never-seen files that never ingest must not starve a later valid transcript:
+    they get parked after MAX_RECONCILE_RETRIES, freeing the per-tick budget for the valid one."""
+    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+
+    cap = engine.settings.session_watcher_reconcile_max_per_tick
+    for i in range(cap):                              # sort BEFORE 'zz-valid' below
+        p = project_dir / f"00stuck-{i:03d}.jsonl"
+        p.write_text("not a valid transcript line\n")  # ingests nothing -> stays never-seen
+        _mark_idle(p)
+
+    valid = project_dir / "zz-valid.jsonl"            # sorts AFTER all stuck files
+    _make_jsonl(valid, user_turns=6)
+    _mark_idle(valid)
+    rel_valid = str(valid.relative_to(watch_dir))
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        for _ in range(MAX_RECONCILE_RETRIES + 2):    # let the stuck files exhaust their budget
+            handler.reconcile()
+            if rel_valid in handler._state:
+                break
+
+    assert rel_valid in handler._state                # reached, not starved
+
+
+def test_reconcile_never_parks_transient_failures(engine, tmp_path):
+    """A TRANSIENT _do_ingest result must never increment _reconcile_attempts — the file
+    is retried every tick indefinitely, never parked (unlike NO_PROGRESS which parks after
+    MAX_RECONCILE_RETRIES attempts at the same file size)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    # Seed state: seen file with a pending tail (cursor behind EOF).
+    handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    ingest_calls = {"n": 0}
+
+    def always_transient(path):
+        ingest_calls["n"] += 1
+        return IngestResult.TRANSIENT
+
+    handler._do_ingest = always_transient
+    for _ in range(6):
+        handler.reconcile()
+
+    # Must have been attempted every single tick — never parked.
+    assert ingest_calls["n"] == 6
+    # And _reconcile_attempts must not have accumulated a count for this file.
+    assert handler._reconcile_attempts.get(rel) is None
+
+
+# --- Council-PR H1/H2: change-token park key + TRANSIENT deprioritization ---
+
+def test_reconcile_unparks_after_same_size_content_change(engine, tmp_path):
+    """H1: a same-byte-size content rewrite (new mtime) un-parks a NO_PROGRESS file.
+
+    If a parked file's content is repaired but byte length is unchanged, the mtime_ns
+    changes. The new (size, mtime_ns) token differs from the parked token, so the file
+    is un-parked and _do_ingest is called again on the next tick.
+    """
+    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    # Seed state: seen file with a pending tail (cursor behind EOF).
+    handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    ingest_calls = {"n": 0}
+
+    def always_no_progress(path):
+        ingest_calls["n"] += 1
+        return IngestResult.NO_PROGRESS
+
+    handler._do_ingest = always_no_progress
+
+    # Drive reconcile MAX_RECONCILE_RETRIES times to park the file.
+    for _ in range(MAX_RECONCILE_RETRIES):
+        handler.reconcile()
+    assert ingest_calls["n"] == MAX_RECONCILE_RETRIES
+
+    # File is now parked: further reconcile calls must NOT call _do_ingest.
+    handler.reconcile()
+    assert ingest_calls["n"] == MAX_RECONCILE_RETRIES  # count did not increase → parked
+
+    # Rewrite with identical byte size but a bumped mtime (content changed, size unchanged).
+    original_size = jsonl.stat().st_size
+    content = jsonl.read_bytes()
+    jsonl.write_bytes(content)  # same bytes = same size; write bumps mtime_ns
+    assert jsonl.stat().st_size == original_size  # size unchanged — regression guard
+
+    # Now reconcile must call _do_ingest again (token changed → un-parked).
+    handler.reconcile()
+    assert ingest_calls["n"] == MAX_RECONCILE_RETRIES + 1
+
+
+def test_reconcile_deprioritizes_persistent_transient_behind_valid(engine, tmp_path):
+    """H2: files that keep returning TRANSIENT are deprioritized, not starved-out, so an
+    older valid file is still ingested within a bounded number of ticks.
+
+    Setup: cap=2 newest files → always TRANSIENT; 1 older file → returns OK.
+    After TRANSIENT files cross MAX_RECONCILE_RETRIES ticks at their token, they sort
+    behind the valid file and the valid file is ingested.
+    """
+    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+
+    cap = 2
+    engine.settings.session_watcher_reconcile_max_per_tick = cap
+
+    now = time.time()
+
+    # Two newest TRANSIENT files.
+    transient_files = []
+    for i in range(cap):
+        p = project_dir / f"new-{i:03d}.jsonl"
+        _make_jsonl(p, user_turns=6)
+        mtime = now - i  # newest first (decreasing by 1s)
+        os.utime(p, (mtime, mtime))
+        transient_files.append(p)
+
+    # One older valid file.
+    valid = project_dir / "old-valid.jsonl"
+    _make_jsonl(valid, user_turns=6)
+    old_mtime = now - 1000  # clearly older
+    os.utime(valid, (old_mtime, old_mtime))
+
+    # Seed all as seen with a pending tail.
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    for p in transient_files + [valid]:
+        rel = str(p.relative_to(watch_dir))
+        handler._state[rel] = {"hash": "x", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    transient_paths = {str(p) for p in transient_files}
+    valid_path = str(valid)
+    ingested_paths: list[str] = []
+
+    def selective_ingest(path):
+        ingested_paths.append(str(path))
+        if str(path) in transient_paths:
+            return IngestResult.TRANSIENT
+        return IngestResult.OK
+
+    handler._do_ingest = selective_ingest
+
+    # Run enough ticks for TRANSIENT files to cross MAX_RECONCILE_RETRIES at their token
+    # and become deprioritized, then for the valid file to be picked up.
+    max_ticks = MAX_RECONCILE_RETRIES + 3
+    for _ in range(max_ticks):
+        handler.reconcile()
+        if valid_path in ingested_paths:
+            break
+
+    assert valid_path in ingested_paths, (
+        f"Valid file was never ingested after {max_ticks} ticks — it was starved. "
+        f"ingested_paths={ingested_paths}"
+    )
+
+
+def test_reconcile_deprioritized_transients_retried_oldest_first(engine, tmp_path):
+    """H2': among already-deprioritized TRANSIENT files, the OLDEST is retried first (FIFO).
+
+    Non-deprioritized candidates sort newest-first (fresh drops recover soonest), but within the
+    deprioritized group oldest-first avoids a long-failing transient that just became recoverable
+    being starved behind newer deprioritized peers.
+    """
+    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    now = time.time()
+
+    older = project_dir / "older.jsonl"
+    newer = project_dir / "newer.jsonl"
+    _make_jsonl(older, user_turns=6)
+    _make_jsonl(newer, user_turns=6)
+    os.utime(older, (now - 1000, now - 1000))
+    os.utime(newer, (now - 1, now - 1))
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler.engine.settings.session_watcher_reconcile_max_per_tick = 1  # one slot per tick
+
+    # Seed both as seen-pending AND already deprioritized at their current token.
+    for p in (older, newer):
+        rel = str(p.relative_to(watch_dir))
+        st = p.stat()
+        handler._state[rel] = {"hash": "x", "end_offset": 0, "node_ids": [], "user_turns": 0}
+        handler._reconcile_transient[rel] = (st.st_size, st.st_mtime_ns, MAX_RECONCILE_RETRIES)
+
+    calls: list[str] = []
+
+    def record_ingest(path):
+        calls.append(str(path))
+        return IngestResult.TRANSIENT
+
+    handler._do_ingest = record_ingest
+    handler.reconcile()  # cap=1 -> only the first-sorted deprioritized candidate runs
+
+    assert calls == [str(older)], (
+        f"Oldest deprioritized file should be retried first (FIFO), got {calls}"
+    )
+
+
+# --- Council-PR F2/F3: per-tick time budget + lookback<0 never-seen guard ---
+
+def test_reconcile_respects_per_tick_time_budget(engine, tmp_path):
+    """The per-tick wall-clock budget causes an early break, so not all candidates are processed
+    in one reconcile() call even when count < max_per_tick."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+
+    # Three seen files with a pending tail (end_offset=0, size>0) — all are reconcile candidates.
+    files = []
+    for i in range(3):
+        p = project_dir / f"session-{i:02d}.jsonl"
+        _make_jsonl(p, user_turns=6)
+        _mark_idle(p)
+        files.append(p)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler.engine.settings.session_watcher_reconcile_max_seconds = 30.0
+
+    # Seed all files as seen-but-pending (cursor at 0, size > 0).
+    for p in files:
+        rel = str(p.relative_to(watch_dir))
+        handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    ingest_calls = []
+
+    def counting_ingest(path):
+        ingest_calls.append(path)
+        return IngestResult.OK
+
+    handler._do_ingest = counting_ingest
+
+    # Tie the clock to real progress instead of an exact call count: time stays at 0.0
+    # until the first file is ingested, then jumps past the 30s budget so the next
+    # loop-check breaks. Robust to any extra time.time() calls reconcile() may add.
+    def fake_time():
+        return 9999.0 if ingest_calls else 0.0
+
+    with patch("ormah.background.session_watcher.time.time", side_effect=fake_time):
+        handler.reconcile()
+
+    # Budget broke after 1 — fewer than all 3 candidates were processed.
+    assert len(ingest_calls) == 1
+
+
+def test_reconcile_skips_never_seen_when_lookback_negative(engine, tmp_path):
+    """When lookback_hours < 0 (catch-up disabled), never-seen files must be skipped in
+    reconcile() — mirroring the _scan_sessions rule."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    # lookback_hours=-1 means no catch-up: never-seen files must be skipped.
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, lookback_hours=-1)
+    rel = str(jsonl.relative_to(watch_dir))
+    assert rel not in handler._state  # never seen
+
+    ingest_calls = []
+
+    def counting_ingest(path):
+        ingest_calls.append(path)
+        return IngestResult.OK
+
+    handler._do_ingest = counting_ingest
+    recovered = handler.reconcile()
+
+    assert recovered == 0
+    assert ingest_calls == []
+    assert rel not in handler._state
