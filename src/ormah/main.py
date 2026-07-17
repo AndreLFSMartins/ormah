@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
@@ -43,9 +44,6 @@ try:
     APP_VERSION = pkg_version("ormah")
 except PackageNotFoundError:
     APP_VERSION = "0.0.0"
-
-
-import threading
 
 # Embedding-backfill fallback (#32, council C2/CH1/CH2): when the scheduler fails
 # to start, a daemon thread heals missing vectors off the bind path. It retries
