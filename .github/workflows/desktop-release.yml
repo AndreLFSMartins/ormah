@@ -100,6 +100,24 @@ jobs:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: echo "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
 
+      # macos-14 runners have a known mDNSResponder bug: sustained network
+      # activity (notarytool's long-poll against Apple's notary API) exhausts
+      # the resolver's connection pool and it wedges, so every DNS lookup
+      # after that fails with "no network route" — this reproduced twice,
+      # ~48min in, regardless of notarization auth method, which is what
+      # points at the runner's DNS rather than our credentials. Periodically
+      # restarting the resolver during the build keeps it from wedging.
+      # See https://github.com/actions/runner-images/issues/9628
+      - name: Start DNS resolver keepalive
+        if: runner.os == 'macOS'
+        run: |
+          ( while true; do
+              sleep 180
+              sudo dscacheutil -flushcache
+              sudo killall -HUP mDNSResponder 2>/dev/null || true
+            done ) &
+          echo "DNS_KEEPALIVE_PID=$!" >> "$GITHUB_ENV"
+
       - name: Build and bundle (macOS)
         if: runner.os == 'macOS'
         working-directory: desktop
@@ -111,6 +129,10 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: cargo tauri build --target ${{ matrix.target }}
+
+      - name: Stop DNS resolver keepalive
+        if: runner.os == 'macOS' && always()
+        run: kill "$DNS_KEEPALIVE_PID" 2>/dev/null || true
 
       - name: Build and bundle (Linux)
         if: runner.os == 'Linux'
