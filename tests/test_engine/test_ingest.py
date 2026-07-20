@@ -311,3 +311,13 @@ class TestIngestTruncation:
         prompt = captured_prompt["prompt"]
         marker_count = prompt.count(marker)
         assert marker_count == 500
+
+
+def test_extraction_schema_and_prompt_wire_provenance():
+    from ormah.engine import memory_engine as me
+    item = me._INGEST_RESPONSE_SCHEMA["properties"]["memories"]["items"]
+    assert item["properties"]["provenance"]["enum"] == ["material", "product"]
+    assert "provenance" in item["required"]
+    rules = me._INGEST_LLM_RULES
+    assert "material" in rules and "product" in rules
+    assert '"provenance"' in rules  # appears in the output-format section

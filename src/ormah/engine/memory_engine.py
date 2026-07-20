@@ -3127,6 +3127,15 @@ GOOD: "Decided to use JWT tokens over session cookies for the API because the cl
 
 Before adding a memory to your list, check if you've already extracted something that covers the same ground. Prefer fewer, richer memories over many thin ones. If a decision memory already explains the architecture, you don't need a separate architecture fact.
 
+## Provenance (required)
+
+Label every memory on ONE axis: did the session PRODUCE it, or did it merely PASS THROUGH?
+
+- **material** — restates input that passed *through* the session: third-party API/SDK facts, a version string, generic technical knowledge, a read-through of someone else's code — content that would be true and findable in docs/code regardless of this conversation.
+- **product** — something the session itself *produced*: a decision, a user correction, a discovered bug, a complaint, an outcome — even when it is *about* an external tool.
+
+When uncertain, label **product**. A dropped Material re-extracts later (it recurs); a dropped Product often happens once and is lost.
+
 ## Output format
 
 For each memory:
@@ -3136,6 +3145,7 @@ For each memory:
 - "tags": 2-5 tags. Include the project name if mentioned, technology names, and domain terms. Tags are indexed for search.
 - "about_self": true if about the user's identity, preferences, or personal information. This triggers special handling: person types get promoted to core memory; user-related memories are marked for recall and whisper.
 - "confidence": 0.0-1.0. Use 1.0 for explicit statements by the user. Use 0.7-0.9 for clear but unstated implications. Use 0.4-0.6 for inferences you're less sure about. Low confidence memories are penalized in search ranking, so be honest.
+- "provenance": "material" or "product" — see the Provenance rule above. This is required.
 
 Return: {{"memories": [...]}}
 Return {{"memories": []}} if nothing worth remembering was discussed.
@@ -3158,9 +3168,11 @@ _INGEST_RESPONSE_SCHEMA = {
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "about_self": {"type": "boolean"},
                     "confidence": {"type": "number"},
+                    "provenance": {"type": "string", "enum": ["material", "product"]},
                 },
                 "required": [
                     "content", "type", "title", "tags", "about_self", "confidence",
+                    "provenance",
                 ],
                 "additionalProperties": False,
             },
