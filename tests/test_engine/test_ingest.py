@@ -342,6 +342,9 @@ def _canned(provenance):
 def test_relevance_gate_drop(engine, monkeypatch, gate, enforce, prov, kept):
     engine.settings.ingest_relevance_gate = gate
     engine.settings.ingest_relevance_gate_enforce = enforce
+    # Enforcement is code-disabled until the enforce-gate PR; simulate availability so
+    # this test still exercises the gate/enforce/prov trichotomy it was written for.
+    monkeypatch.setattr(memory_engine, "_RELEVANCE_ENFORCE_AVAILABLE", True)
     monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned(prov))
     out = engine.ingest_conversation("hello world " * 20, dry_run=True)
     assert (len(out) == 1) is kept
@@ -387,6 +390,7 @@ def test_quarantine_write_failure_fails_open_and_keeps_material(engine, monkeypa
     monkeypatch.setattr(q, "record_dropped", _boom)
     engine.settings.ingest_relevance_gate = True
     engine.settings.ingest_relevance_gate_enforce = True
+    monkeypatch.setattr(memory_engine, "_RELEVANCE_ENFORCE_AVAILABLE", True)
     material = _canned("material")[0]
     product = _canned("product")[0]
     product["content"] = "y" * 60  # distinct content from the material candidate
@@ -406,6 +410,7 @@ def test_enforce_true_drops_material_with_successful_record(engine, monkeypatch,
     monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
     engine.settings.ingest_relevance_gate = True
     engine.settings.ingest_relevance_gate_enforce = True
+    monkeypatch.setattr(memory_engine, "_RELEVANCE_ENFORCE_AVAILABLE", True)
     monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
     created = engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
     assert created == []
@@ -432,6 +437,7 @@ def test_enforce_true_dry_run_drops_from_preview_without_ledger_write(engine, mo
     monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
     engine.settings.ingest_relevance_gate = True
     engine.settings.ingest_relevance_gate_enforce = True
+    monkeypatch.setattr(memory_engine, "_RELEVANCE_ENFORCE_AVAILABLE", True)
     monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
     out = engine.ingest_conversation("hello world " * 20, dry_run=True, space="proj")
     assert out == []
@@ -448,3 +454,36 @@ def test_shadow_mode_dry_run_keeps_in_preview_without_ledger_write(engine, monke
     out = engine.ingest_conversation("hello world " * 20, dry_run=True, space="proj")
     assert len(out) == 1
     assert list(q.iter_dropped(engine.settings)) == []
+
+
+def test_enforce_setting_alone_does_not_drop_material_until_enforce_gate_lands(
+    engine, monkeypatch, tmp_path
+):
+    """Council fix: enforce (actually dropping Material) stays code-disabled via the
+    module-level _RELEVANCE_ENFORCE_AVAILABLE constant until the enforce-gate PR lands,
+    even if the setting requests it. The candidate must be KEPT (shadow) and recorded."""
+    from ormah.engine import relevance_quarantine as q
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
+    engine.settings.ingest_relevance_gate = True
+    engine.settings.ingest_relevance_gate_enforce = True
+    assert memory_engine._RELEVANCE_ENFORCE_AVAILABLE is False
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
+    created = engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
+    assert len(created) == 1
+    assert len(list(q.iter_dropped(engine.settings))) == 1
+
+
+def test_enforce_availability_guard_is_the_only_thing_holding_the_drop(
+    engine, monkeypatch, tmp_path
+):
+    """Proves the guard, not something else, is gating enforcement: flipping the module
+    constant (as the future enforce-gate PR will) makes the same settings actually drop."""
+    from ormah.engine import relevance_quarantine as q
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
+    engine.settings.ingest_relevance_gate = True
+    engine.settings.ingest_relevance_gate_enforce = True
+    monkeypatch.setattr(memory_engine, "_RELEVANCE_ENFORCE_AVAILABLE", True)
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
+    created = engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
+    assert created == []
+    assert len(list(q.iter_dropped(engine.settings))) == 1

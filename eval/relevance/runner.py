@@ -50,10 +50,22 @@ def main(
         return 2
 
     engine = engine_factory()
-    # product preserved: extractor emits at least one candidate labeled "product"
-    prod_ok = sum("product" in _labels_for(engine, c["snippet"]) for c in prod) / len(prod)
-    # material dropped: extractor labels a candidate "material" (the gate would drop it)
-    mat_ok = sum("material" in _labels_for(engine, c["snippet"]) for c in mat) / len(mat)
+    # product preserved: extractor emits "product" and no "material" for the snippet
+    # (a mixed emission means the extractor also mislabeled a candidate as material).
+    prod_ok = 0
+    for c in prod:
+        labels = _labels_for(engine, c["snippet"])
+        if "product" in labels and "material" not in labels:
+            prod_ok += 1
+    prod_ok /= len(prod)
+    # material dropped: extractor emits ONLY "material" for the snippet (the gate would
+    # drop it); a mixed emission means the gate would keep it via the surviving "product".
+    mat_ok = 0
+    for c in mat:
+        labels = _labels_for(engine, c["snippet"])
+        if "material" in labels and "product" not in labels:
+            mat_ok += 1
+    mat_ok /= len(mat)
     print(f"product_preserved={prod_ok:.3f} (>=0.98)  material_dropped={mat_ok:.3f} (>=0.80)")
     ok = prod_ok >= 0.98 and mat_ok >= 0.80
     print("PASS" if ok else "FAIL")

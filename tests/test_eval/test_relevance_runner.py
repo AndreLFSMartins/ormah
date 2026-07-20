@@ -138,6 +138,64 @@ def test_main_treats_extractor_error_as_no_labels(tmp_path, capsys):
     assert rc == 1
 
 
+# --- main(): mixed-label scoring (council fix) ------------------------------
+
+def test_main_product_case_with_mixed_labels_is_not_preserved(tmp_path, capsys):
+    # A product case that ALSO emits a "material" candidate must not count as preserved:
+    # the extractor mislabeled at least one candidate for this snippet.
+    corpus_path = _write_corpus(tmp_path, product_count=MIN_PER_CLASS, material_count=MIN_PER_CLASS)
+    labels_by_id = {f"prod-snippet-{i}": ["product"] for i in range(MIN_PER_CLASS)}
+    labels_by_id["prod-snippet-0"] = ["material", "product"]
+    labels_by_id.update({f"mat-snippet-{i}": ["material"] for i in range(MIN_PER_CLASS)})
+    engine = _FakeEngine(labels_by_id)
+
+    rc = main(engine_factory=lambda: engine, corpus_path=corpus_path)
+
+    out = capsys.readouterr().out
+    assert "product_preserved=0.950" in out
+    assert "FAIL" in out
+    assert rc == 1
+
+
+def test_main_material_case_with_mixed_labels_is_not_dropped(tmp_path, capsys):
+    # 20 material cases; 5/20 also emit a "product" candidate alongside "material" -> those
+    # must NOT count as dropped (gate only drops when "material" is the only label present),
+    # pushing material_dropped to 0.75, below the 0.80 threshold.
+    corpus_path = _write_corpus(tmp_path, product_count=MIN_PER_CLASS, material_count=MIN_PER_CLASS)
+    labels_by_id = {f"prod-snippet-{i}": ["product"] for i in range(MIN_PER_CLASS)}
+    mat_labels = {f"mat-snippet-{i}": ["material"] for i in range(MIN_PER_CLASS)}
+    for i in range(5):
+        mat_labels[f"mat-snippet-{i}"] = ["material", "product"]
+    labels_by_id.update(mat_labels)
+    engine = _FakeEngine(labels_by_id)
+
+    rc = main(engine_factory=lambda: engine, corpus_path=corpus_path)
+
+    out = capsys.readouterr().out
+    assert "material_dropped=0.750" in out
+    assert "FAIL" in out
+    assert rc == 1
+
+
+def test_main_all_mixed_corpus_fails(tmp_path, capsys):
+    # Every case (product and material) emits BOTH labels: the old scorer false-passed
+    # both metrics on this corpus; the fixed scorer must fail both.
+    corpus_path = _write_corpus(tmp_path, product_count=MIN_PER_CLASS, material_count=MIN_PER_CLASS)
+    labels_by_id = {f"prod-snippet-{i}": ["material", "product"] for i in range(MIN_PER_CLASS)}
+    labels_by_id.update(
+        {f"mat-snippet-{i}": ["material", "product"] for i in range(MIN_PER_CLASS)}
+    )
+    engine = _FakeEngine(labels_by_id)
+
+    rc = main(engine_factory=lambda: engine, corpus_path=corpus_path)
+
+    out = capsys.readouterr().out
+    assert "product_preserved=0.000" in out
+    assert "material_dropped=0.000" in out
+    assert "FAIL" in out
+    assert rc == 1
+
+
 # --- seed corpus sanity (no extraction — just structural checks) ---------
 
 def test_seed_corpus_meets_minimum_size_and_has_ambiguous_pairs():

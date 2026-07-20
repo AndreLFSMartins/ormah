@@ -1,3 +1,5 @@
+import pytest
+
 from ormah.engine import relevance_quarantine as q
 
 
@@ -5,7 +7,7 @@ def test_record_and_iter_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "quarantine.jsonl")
     q.record_dropped(None, content="the requests lib raises Timeout", title="requests Timeout",
                      node_type="fact", space="proj", provider="claude_cli", model="haiku",
-                     dropped_at="2026-07-20T00:00:00+00:00")
+                     dropped_at="2026-07-20T00:00:00+00:00", mode="shadow")
     rows = list(q.iter_dropped(None))
     assert len(rows) == 1
     r = rows[0]
@@ -13,6 +15,24 @@ def test_record_and_iter_roundtrip(tmp_path, monkeypatch):
     assert r["label"] == "material"
     assert r["provider"] == "claude_cli"
     assert len(r["prompt_version"]) == 12
+    assert r["mode"] == "shadow"
+
+
+def test_record_dropped_requires_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "quarantine.jsonl")
+    with pytest.raises(TypeError):
+        q.record_dropped(None, content="c", title="t", node_type="fact", space=None,
+                         provider="claude_cli", model="haiku",
+                         dropped_at="2026-07-20T00:00:00+00:00")
+
+
+def test_record_dropped_mode_enforced(tmp_path, monkeypatch):
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "quarantine.jsonl")
+    q.record_dropped(None, content="c", title="t", node_type="fact", space=None,
+                     provider="claude_cli", model="haiku",
+                     dropped_at="2026-07-20T00:00:00+00:00", mode="enforced")
+    rows = list(q.iter_dropped(None))
+    assert rows[0]["mode"] == "enforced"
 
 
 def test_iter_empty_when_absent(tmp_path, monkeypatch):
@@ -26,7 +46,7 @@ def test_record_dropped_creates_missing_parent_dir(tmp_path, monkeypatch):
     assert not target.parent.exists()
     q.record_dropped(None, content="c", title="t", node_type="fact", space=None,
                      provider="claude_cli", model="haiku",
-                     dropped_at="2026-07-20T00:00:00+00:00")
+                     dropped_at="2026-07-20T00:00:00+00:00", mode="shadow")
     assert target.exists()
     rows = list(q.iter_dropped(None))
     assert len(rows) == 1

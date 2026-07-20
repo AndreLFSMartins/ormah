@@ -2723,7 +2723,15 @@ class MemoryEngine:
                 if prov not in ("material", "product"):
                     missing_label += 1
                 if prov == "material":
-                    enforce = self.settings.ingest_relevance_gate_enforce
+                    enforce = (
+                        self.settings.ingest_relevance_gate_enforce
+                        and _RELEVANCE_ENFORCE_AVAILABLE
+                    )
+                    if self.settings.ingest_relevance_gate_enforce and not _RELEVANCE_ENFORCE_AVAILABLE:
+                        logger.warning(
+                            "Relevance gate: enforce requested but not yet available — "
+                            "staying in shadow (see ADR-0002 enforce-gate)"
+                        )
                     if dry_run:
                         # Never write the ledger from a dry run.
                         if enforce:
@@ -2745,6 +2753,7 @@ class MemoryEngine:
                                 provider=_resolve_ingest_provider(self.settings),
                                 model=_resolve_ingest_model(self.settings),
                                 dropped_at=datetime.now(timezone.utc).isoformat(),
+                                mode="enforced" if enforce else "shadow",
                             )
                             recorded = True
                         except Exception as e:
@@ -3243,6 +3252,12 @@ _INGEST_RESPONSE_SCHEMA = {
     "required": ["memories"],
     "additionalProperties": False,
 }
+
+
+# Enforcement (actually dropping Material) stays code-disabled until the enforce-gate lands
+# (quarantine ledger in backup/restore + fsync durability + fixed eval scorer). Until then the
+# gate runs SHADOW-only even if ORMAH_INGEST_RELEVANCE_GATE_ENFORCE=true. See ADR-0002 amendment.
+_RELEVANCE_ENFORCE_AVAILABLE = False
 
 
 _INGEST_LLM_PROMPT = """\

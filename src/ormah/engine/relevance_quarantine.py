@@ -36,8 +36,13 @@ def record_dropped(
     provider: str,
     model: str,
     dropped_at: str,
+    mode: str,
 ) -> None:
-    """Append one dropped-candidate record to the quarantine ledger."""
+    """Append one dropped-candidate record to the quarantine ledger.
+
+    *mode* is "shadow" (candidate was recorded but kept) or "enforced" (candidate was
+    actually dropped) — see the enforce-availability guard in memory_engine.py.
+    """
     path = quarantine_path(settings)
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -50,6 +55,7 @@ def record_dropped(
         "model": model,
         "prompt_version": prompt_version(),
         "label": "material",
+        "mode": mode,
     }
     with path.open("a") as f:
         f.write(json.dumps(record) + "\n")

@@ -382,3 +382,15 @@ def test_relevance_gate_env_off(monkeypatch):
     monkeypatch.setenv("ORMAH_INGEST_RELEVANCE_GATE", "false")
     from ormah.config import Settings
     assert Settings().ingest_relevance_gate is False
+
+
+def test_relevance_gate_enforce_defaults_off(monkeypatch):
+    monkeypatch.delenv("ORMAH_INGEST_RELEVANCE_GATE_ENFORCE", raising=False)
+    from ormah.config import Settings
+    assert Settings().ingest_relevance_gate_enforce is False
+
+
+def test_relevance_gate_enforce_env_on(monkeypatch):
+    monkeypatch.setenv("ORMAH_INGEST_RELEVANCE_GATE_ENFORCE", "true")
+    from ormah.config import Settings
+    assert Settings().ingest_relevance_gate_enforce is True
