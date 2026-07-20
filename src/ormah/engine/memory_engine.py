@@ -2708,6 +2708,7 @@ class MemoryEngine:
         skipped = 0
         dropped_material = 0
         missing_label = 0
+        shadow_would_drop = 0
         for mem in extracted:
             if not isinstance(mem, dict):
                 continue
@@ -2722,7 +2723,15 @@ class MemoryEngine:
                 if prov not in ("material", "product"):
                     missing_label += 1
                 if prov == "material":
-                    if not dry_run:
+                    enforce = self.settings.ingest_relevance_gate_enforce
+                    if dry_run:
+                        # Never write the ledger from a dry run.
+                        if enforce:
+                            dropped_material += 1
+                            continue
+                        shadow_would_drop += 1
+                        # fall through: shadow mode keeps the memory
+                    else:
                         from ormah.background.llm_client import (
                             _resolve_ingest_model,
                             _resolve_ingest_provider,
@@ -2737,14 +2746,28 @@ class MemoryEngine:
                                 model=_resolve_ingest_model(self.settings),
                                 dropped_at=datetime.now(timezone.utc).isoformat(),
                             )
+                            recorded = True
                         except Exception as e:
                             logger.warning(
                                 "Relevance gate: quarantine ledger write failed: %s", e
                             )
-                    logger.info("Relevance gate: dropped Material: %s",
-                                mem.get("title") or mem_content[:40])
-                    dropped_material += 1
-                    continue
+                            recorded = False
+
+                        if enforce and recorded:
+                            logger.info("Relevance gate: dropped Material: %s",
+                                        mem.get("title") or mem_content[:40])
+                            dropped_material += 1
+                            continue
+                        elif enforce and not recorded:
+                            logger.warning(
+                                "Relevance gate: kept Material (fail-open) — "
+                                "quarantine write failed"
+                            )
+                            # fall through: fail-open keeps the memory
+                        else:
+                            # shadow mode: record but keep
+                            shadow_would_drop += 1
+                            # fall through: shadow mode keeps the memory
 
             # Dedup: check if a very similar memory already exists (skip in dry_run)
             if not dry_run and self._is_duplicate_memory(mem_content):
@@ -2801,9 +2824,12 @@ class MemoryEngine:
 
         if skipped:
             logger.debug("Ingestion: skipped %d duplicates", skipped)
-        if dropped_material or missing_label:
-            logger.info("Relevance gate: dropped %d Material, %d candidates had no usable label",
-                        dropped_material, missing_label)
+        if dropped_material or missing_label or shadow_would_drop:
+            logger.info(
+                "Relevance gate: dropped %d Material, %d candidates had no usable label, "
+                "%d shadow would-drop",
+                dropped_material, missing_label, shadow_would_drop,
+            )
         if created and not dry_run:
             logger.info("Ingested %d memories from conversation", len(created))
         return created

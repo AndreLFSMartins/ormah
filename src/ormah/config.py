@@ -347,6 +347,7 @@ class Settings(BaseSettings):
     ingest_chunk_chars: int = 40000  # timeout-safe payload per claude_cli call (~10K tokens)
     ingest_min_confidence: float = 0.0  # drop auto-extracted memories below this confidence (0 = off)
     ingest_relevance_gate: bool = True  # drop memories the Extractor labels provenance=material
+    ingest_relevance_gate_enforce: bool = False  # False = SHADOW (record would-drops, keep them); True = actually drop
 
     # Consolidation
     consolidation_interval_minutes: int = 1440

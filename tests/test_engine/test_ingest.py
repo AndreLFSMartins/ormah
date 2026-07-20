@@ -331,15 +331,17 @@ def _canned(provenance):
     return [m]
 
 
-@pytest.mark.parametrize("gate,prov,kept", [
-    (True,  "material", False),   # dropped
-    (True,  "product",  True),
-    (True,  None,       True),    # missing label -> keep (errs toward Product)
-    (True,  "garbage",  True),    # unknown label -> keep
-    (False, "material", True),    # kill-switch off -> keep
+@pytest.mark.parametrize("gate,enforce,prov,kept", [
+    (True,  True,  "material", False),   # enforced -> dropped
+    (True,  False, "material", True),    # shadow (default) -> kept, would-drop only
+    (True,  True,  "product",  True),
+    (True,  True,  None,       True),    # missing label -> keep (errs toward Product)
+    (True,  True,  "garbage",  True),    # unknown label -> keep
+    (False, False, "material", True),    # kill-switch off -> keep
 ])
-def test_relevance_gate_drop(engine, monkeypatch, gate, prov, kept):
+def test_relevance_gate_drop(engine, monkeypatch, gate, enforce, prov, kept):
     engine.settings.ingest_relevance_gate = gate
+    engine.settings.ingest_relevance_gate_enforce = enforce
     monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned(prov))
     out = engine.ingest_conversation("hello world " * 20, dry_run=True)
     assert (len(out) == 1) is kept
@@ -373,19 +375,10 @@ def test_dropped_material_records_effective_provider_and_model(engine, monkeypat
     assert rows[0]["model"] == "claude-haiku-4-5-20251001"
 
 
-def test_dry_run_does_not_write_to_quarantine_ledger(engine, monkeypatch, tmp_path):
-    from ormah.engine import relevance_quarantine as q
-    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
-    engine.settings.ingest_relevance_gate = True
-    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
-    out = engine.ingest_conversation("hello world " * 20, dry_run=True, space="proj")
-    assert out == []
-    assert list(q.iter_dropped(engine.settings)) == []
-
-
-def test_quarantine_write_failure_does_not_abort_ingestion(engine, monkeypatch):
-    """The ledger is a best-effort safety net: a write failure (disk full, permission)
-    must not propagate and must not drop sibling memories from the same batch."""
+def test_quarantine_write_failure_fails_open_and_keeps_material(engine, monkeypatch):
+    """Fail-open (council fix): a drop must only happen WITH a recovery record. If the
+    ledger write fails while enforcing, the Material candidate is KEPT (not dropped) and
+    the sibling from the same batch is not lost either; no exception propagates."""
     from ormah.engine import relevance_quarantine as q
 
     def _boom(*args, **kwargs):
@@ -393,6 +386,7 @@ def test_quarantine_write_failure_does_not_abort_ingestion(engine, monkeypatch):
 
     monkeypatch.setattr(q, "record_dropped", _boom)
     engine.settings.ingest_relevance_gate = True
+    engine.settings.ingest_relevance_gate_enforce = True
     material = _canned("material")[0]
     product = _canned("product")[0]
     product["content"] = "y" * 60  # distinct content from the material candidate
@@ -400,6 +394,57 @@ def test_quarantine_write_failure_does_not_abort_ingestion(engine, monkeypatch):
         type(engine), "_extract_memories_llm", lambda self, c: [material, product]
     )
     created = engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
-    # does not raise (implicit); material still dropped from output; product sibling not lost
+    # does not raise (implicit); material kept (fail-open) AND sibling product not lost
+    assert len(created) == 2
+    titles = {c["title"] for c in created}
+    assert titles == {material["title"], product["title"]}
+
+
+def test_enforce_true_drops_material_with_successful_record(engine, monkeypatch, tmp_path):
+    """enforce=True + a successful ledger write -> the memory is actually dropped."""
+    from ormah.engine import relevance_quarantine as q
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
+    engine.settings.ingest_relevance_gate = True
+    engine.settings.ingest_relevance_gate_enforce = True
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
+    created = engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
+    assert created == []
+    assert len(list(q.iter_dropped(engine.settings))) == 1
+
+
+def test_shadow_mode_default_keeps_material_and_records(engine, monkeypatch, tmp_path):
+    """Default (no enforce set) is SHADOW: Material is kept in output but still recorded
+    to the quarantine ledger so the label can be validated against real data."""
+    from ormah.engine import relevance_quarantine as q
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
+    engine.settings.ingest_relevance_gate = True
+    assert engine.settings.ingest_relevance_gate_enforce is False
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
+    created = engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
     assert len(created) == 1
-    assert created[0]["title"] == product["title"]
+    assert len(list(q.iter_dropped(engine.settings))) == 1
+
+
+def test_enforce_true_dry_run_drops_from_preview_without_ledger_write(engine, monkeypatch, tmp_path):
+    """enforce=True + dry_run: the Material candidate is absent from the preview, but the
+    ledger is never touched during a dry run (dry_run never writes)."""
+    from ormah.engine import relevance_quarantine as q
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
+    engine.settings.ingest_relevance_gate = True
+    engine.settings.ingest_relevance_gate_enforce = True
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
+    out = engine.ingest_conversation("hello world " * 20, dry_run=True, space="proj")
+    assert out == []
+    assert list(q.iter_dropped(engine.settings)) == []
+
+
+def test_shadow_mode_dry_run_keeps_in_preview_without_ledger_write(engine, monkeypatch, tmp_path):
+    """Shadow (default) + dry_run: the Material candidate stays in the preview and the
+    ledger is never touched during a dry run."""
+    from ormah.engine import relevance_quarantine as q
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
+    engine.settings.ingest_relevance_gate = True
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
+    out = engine.ingest_conversation("hello world " * 20, dry_run=True, space="proj")
+    assert len(out) == 1
+    assert list(q.iter_dropped(engine.settings)) == []
