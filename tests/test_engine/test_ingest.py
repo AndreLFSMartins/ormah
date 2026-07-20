@@ -352,3 +352,32 @@ def test_dropped_material_is_recorded(engine, monkeypatch, tmp_path):
     monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
     engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
     assert len(list(q.iter_dropped(engine.settings))) == 1
+
+
+def test_dropped_material_records_effective_provider_and_model(engine, monkeypatch, tmp_path):
+    """provider/model in the ledger must be the EFFECTIVE (resolved) values used by the
+    actual extraction call, not the (usually empty) ingest_llm_provider/model override
+    fields -- those fall back to llm_provider/llm_model when unset."""
+    from ormah.engine import relevance_quarantine as q
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
+    engine.settings.ingest_relevance_gate = True
+    engine.settings.ingest_llm_provider = ""
+    engine.settings.ingest_llm_model = ""
+    engine.settings.llm_provider = "claude_cli"
+    engine.settings.llm_model = "claude-haiku-4-5-20251001"
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
+    engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
+    rows = list(q.iter_dropped(engine.settings))
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "claude_cli"
+    assert rows[0]["model"] == "claude-haiku-4-5-20251001"
+
+
+def test_dry_run_does_not_write_to_quarantine_ledger(engine, monkeypatch, tmp_path):
+    from ormah.engine import relevance_quarantine as q
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
+    engine.settings.ingest_relevance_gate = True
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
+    out = engine.ingest_conversation("hello world " * 20, dry_run=True, space="proj")
+    assert out == []
+    assert list(q.iter_dropped(engine.settings)) == []

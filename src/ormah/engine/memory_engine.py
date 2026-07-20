@@ -2722,15 +2722,20 @@ class MemoryEngine:
                 if prov not in ("material", "product"):
                     missing_label += 1
                 if prov == "material":
-                    from ormah.engine import relevance_quarantine as _q
-                    _q.record_dropped(
-                        self.settings, content=mem_content,
-                        title=mem.get("title") or mem_content[:60],
-                        node_type=mem.get("type", "fact"), space=space,
-                        provider=self.settings.ingest_llm_provider,
-                        model=self.settings.ingest_llm_model,
-                        dropped_at=datetime.now(timezone.utc).isoformat(),
-                    )
+                    if not dry_run:
+                        from ormah.background.llm_client import (
+                            _resolve_ingest_model,
+                            _resolve_ingest_provider,
+                        )
+                        from ormah.engine import relevance_quarantine as _q
+                        _q.record_dropped(
+                            self.settings, content=mem_content,
+                            title=mem.get("title") or mem_content[:60],
+                            node_type=mem.get("type", "fact"), space=space,
+                            provider=_resolve_ingest_provider(self.settings),
+                            model=_resolve_ingest_model(self.settings),
+                            dropped_at=datetime.now(timezone.utc).isoformat(),
+                        )
                     logger.info("Relevance gate: dropped Material: %s",
                                 mem.get("title") or mem_content[:40])
                     dropped_material += 1
