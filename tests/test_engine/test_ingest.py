@@ -321,3 +321,34 @@ def test_extraction_schema_and_prompt_wire_provenance():
     rules = me._INGEST_LLM_RULES
     assert "material" in rules and "product" in rules
     assert '"provenance"' in rules  # appears in the output-format section
+
+
+def _canned(provenance):
+    m = {"content": "x" * 60, "type": "fact", "title": "t",
+         "tags": [], "about_self": False, "confidence": 0.9, "provenance": provenance}
+    if provenance is None:
+        m.pop("provenance")
+    return [m]
+
+
+@pytest.mark.parametrize("gate,prov,kept", [
+    (True,  "material", False),   # dropped
+    (True,  "product",  True),
+    (True,  None,       True),    # missing label -> keep (errs toward Product)
+    (True,  "garbage",  True),    # unknown label -> keep
+    (False, "material", True),    # kill-switch off -> keep
+])
+def test_relevance_gate_drop(engine, monkeypatch, gate, prov, kept):
+    engine.settings.ingest_relevance_gate = gate
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned(prov))
+    out = engine.ingest_conversation("hello world " * 20, dry_run=True)
+    assert (len(out) == 1) is kept
+
+
+def test_dropped_material_is_recorded(engine, monkeypatch, tmp_path):
+    from ormah.engine import relevance_quarantine as q
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
+    engine.settings.ingest_relevance_gate = True
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
+    engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
+    assert len(list(q.iter_dropped(engine.settings))) == 1

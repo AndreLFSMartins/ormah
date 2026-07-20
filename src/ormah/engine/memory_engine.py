@@ -2706,12 +2706,35 @@ class MemoryEngine:
 
         created = []
         skipped = 0
+        dropped_material = 0
+        missing_label = 0
         for mem in extracted:
             if not isinstance(mem, dict):
                 continue
             mem_content = (mem.get("content") or "").strip()
             if not mem_content:
                 continue
+
+            # Relevance gate (ADR-0002): drop input echoed back as knowledge. Trust the
+            # label; drop ONLY exact "material" so an absent/unknown label errs toward Product.
+            prov = mem.get("provenance")
+            if self.settings.ingest_relevance_gate:
+                if prov not in ("material", "product"):
+                    missing_label += 1
+                if prov == "material":
+                    from ormah.engine import relevance_quarantine as _q
+                    _q.record_dropped(
+                        self.settings, content=mem_content,
+                        title=mem.get("title") or mem_content[:60],
+                        node_type=mem.get("type", "fact"), space=space,
+                        provider=self.settings.ingest_llm_provider,
+                        model=self.settings.ingest_llm_model,
+                        dropped_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    logger.info("Relevance gate: dropped Material: %s",
+                                mem.get("title") or mem_content[:40])
+                    dropped_material += 1
+                    continue
 
             # Dedup: check if a very similar memory already exists (skip in dry_run)
             if not dry_run and self._is_duplicate_memory(mem_content):
@@ -2768,6 +2791,9 @@ class MemoryEngine:
 
         if skipped:
             logger.debug("Ingestion: skipped %d duplicates", skipped)
+        if dropped_material or missing_label:
+            logger.info("Relevance gate: dropped %d Material, %d candidates had no usable label",
+                        dropped_material, missing_label)
         if created and not dry_run:
             logger.info("Ingested %d memories from conversation", len(created))
         return created
