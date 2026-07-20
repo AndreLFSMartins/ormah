@@ -2728,14 +2728,19 @@ class MemoryEngine:
                             _resolve_ingest_provider,
                         )
                         from ormah.engine import relevance_quarantine as _q
-                        _q.record_dropped(
-                            self.settings, content=mem_content,
-                            title=mem.get("title") or mem_content[:60],
-                            node_type=mem.get("type", "fact"), space=space,
-                            provider=_resolve_ingest_provider(self.settings),
-                            model=_resolve_ingest_model(self.settings),
-                            dropped_at=datetime.now(timezone.utc).isoformat(),
-                        )
+                        try:
+                            _q.record_dropped(
+                                self.settings, content=mem_content,
+                                title=mem.get("title") or mem_content[:60],
+                                node_type=mem.get("type", "fact"), space=space,
+                                provider=_resolve_ingest_provider(self.settings),
+                                model=_resolve_ingest_model(self.settings),
+                                dropped_at=datetime.now(timezone.utc).isoformat(),
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "Relevance gate: quarantine ledger write failed: %s", e
+                            )
                     logger.info("Relevance gate: dropped Material: %s",
                                 mem.get("title") or mem_content[:40])
                     dropped_material += 1

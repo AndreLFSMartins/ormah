@@ -381,3 +381,25 @@ def test_dry_run_does_not_write_to_quarantine_ledger(engine, monkeypatch, tmp_pa
     out = engine.ingest_conversation("hello world " * 20, dry_run=True, space="proj")
     assert out == []
     assert list(q.iter_dropped(engine.settings)) == []
+
+
+def test_quarantine_write_failure_does_not_abort_ingestion(engine, monkeypatch):
+    """The ledger is a best-effort safety net: a write failure (disk full, permission)
+    must not propagate and must not drop sibling memories from the same batch."""
+    from ormah.engine import relevance_quarantine as q
+
+    def _boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(q, "record_dropped", _boom)
+    engine.settings.ingest_relevance_gate = True
+    material = _canned("material")[0]
+    product = _canned("product")[0]
+    product["content"] = "y" * 60  # distinct content from the material candidate
+    monkeypatch.setattr(
+        type(engine), "_extract_memories_llm", lambda self, c: [material, product]
+    )
+    created = engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
+    # does not raise (implicit); material still dropped from output; product sibling not lost
+    assert len(created) == 1
+    assert created[0]["title"] == product["title"]
