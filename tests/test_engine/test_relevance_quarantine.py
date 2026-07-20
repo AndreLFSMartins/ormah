@@ -18,3 +18,25 @@ def test_record_and_iter_roundtrip(tmp_path, monkeypatch):
 def test_iter_empty_when_absent(tmp_path, monkeypatch):
     monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "missing.jsonl")
     assert list(q.iter_dropped(None)) == []
+
+
+def test_record_dropped_creates_missing_parent_dir(tmp_path, monkeypatch):
+    target = tmp_path / "sub" / "q.jsonl"
+    monkeypatch.setattr(q, "quarantine_path", lambda s: target)
+    assert not target.parent.exists()
+    q.record_dropped(None, content="c", title="t", node_type="fact", space=None,
+                     provider="claude_cli", model="haiku",
+                     dropped_at="2026-07-20T00:00:00+00:00")
+    assert target.exists()
+    rows = list(q.iter_dropped(None))
+    assert len(rows) == 1
+    assert rows[0]["content"] == "c"
+
+
+def test_iter_dropped_skips_corrupt_line(tmp_path, monkeypatch):
+    target = tmp_path / "quarantine.jsonl"
+    monkeypatch.setattr(q, "quarantine_path", lambda s: target)
+    target.write_text('{"content": "valid record"}\n{"content": "trunc' )
+    rows = list(q.iter_dropped(None))
+    assert len(rows) == 1
+    assert rows[0]["content"] == "valid record"

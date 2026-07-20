@@ -63,5 +63,9 @@ def iter_dropped(settings) -> Iterator[dict]:
     with path.open("r") as f:
         for line in f:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
