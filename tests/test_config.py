@@ -348,6 +348,8 @@ def test_reconcile_max_seconds_rejects_zero():
 def test_reconcile_max_seconds_rejects_negative():
     with pytest.raises(ValidationError, match="session_watcher_reconcile_max_seconds must be > 0"):
         _settings(session_watcher_reconcile_max_seconds=-1.0)
+
+
 # --- Embedding backfill / vector-store reconciliation (#32) ---
 
 def test_embedding_backfill_settings_defaults():
