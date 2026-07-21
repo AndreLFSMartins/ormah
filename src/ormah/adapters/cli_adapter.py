@@ -440,13 +440,16 @@ def cmd_whisper_store(args):
     if start_offset >= path.stat().st_size:
         sys.exit(0)
 
-    from ormah.transcript.parser import parse_transcript
+    from ormah.transcript.parser import parse_transcript, should_rewind
 
     try:
         result = parse_transcript(path, start_offset=start_offset)
-        if result.leading_orphan:
-            # Cursor left mid-response by an older version: re-parse from the start to
-            # recover the dropped tail with its prompt (one-time full re-extract).
+        if should_rewind(result, start_offset):
+            # Orphan with NO forward progress: a genuine cursor left mid-response by an
+            # older version — re-parse from the start to recover the dropped tail with its
+            # prompt. With forward progress the orphan is a false positive (ADR-0003,
+            # #149): drop the fragment and advance, or every hook fire re-extracts the
+            # whole transcript.
             start_offset = 0
             result = parse_transcript(path, start_offset=0)
     except Exception:
