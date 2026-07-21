@@ -424,6 +424,64 @@ class TestWhisperStoreCursor:
         assert "First part" in bodies[0]["content"]
         assert "Second part answer" in bodies[0]["content"]
 
+    def test_api_error_orphan_advances_cursor_without_full_reextract(
+        self, monkeypatch, tmp_path
+    ):
+        """ADR-0003 regression (bug #149, hook path): a false-positive leading_orphan —
+        an assistant 'API Error' record right after the end_turn boundary the cursor is
+        parked on — must not re-send the whole transcript. The orphan is dropped and only
+        the tail past the cursor is sent; the cursor advances to EOF."""
+        monkeypatch.setattr("ormah.adapters.cli_adapter.settings.whisper_out_min_turns", 1)
+        transcript = tmp_path / "session.jsonl"
+        first_turn = [
+            {"type": "user", "message": {"content": "Prompt one"}},
+            {"type": "assistant", "message": {"stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Answer one"}]}},
+        ]
+        tail = [
+            {"type": "assistant", "message": {"stop_reason": "stop_sequence",
+                "content": [{"type": "text",
+                    "text": "API Error: Connection closed mid-response."}]}},
+            {"type": "user", "message": {"content": "continue"}},
+            {"type": "assistant", "message": {"stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Answer two"}]}},
+        ]
+        transcript.write_text("\n".join(json.dumps(r) for r in first_turn) + "\n")
+        from ormah.transcript.parser import parse_transcript
+        boundary = parse_transcript(transcript).safe_end_offset
+        with transcript.open("a") as f:
+            for r in tail:
+                f.write(json.dumps(r) + "\n")
+
+        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_DIR, _WHISPER_CURSOR_FILE
+        _WHISPER_CURSOR_DIR.mkdir(parents=True, exist_ok=True)
+        _WHISPER_CURSOR_FILE.write_text(json.dumps({"sess1": boundary}))
+
+        bodies = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(
+            "ormah.adapters.cli_adapter._whisper_store_client",
+            lambda: httpx.Client(transport=transport, base_url="http://test"),
+        )
+        hook_input = json.dumps({
+            "transcript_path": str(transcript), "cwd": "/tmp",
+            "session_id": "sess1", "trigger": "auto",
+        })
+
+        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+
+        assert len(bodies) == 1
+        assert "Answer one" not in bodies[0]["content"]  # no whole-file re-extract
+        assert "API Error" not in bodies[0]["content"]   # orphan fragment dropped
+        assert "continue" in bodies[0]["content"]        # stranded tail recovered
+        cursors = json.loads(_WHISPER_CURSOR_FILE.read_text())
+        assert cursors["sess1"] == transcript.stat().st_size  # cursor monotonic, at EOF
+
     def test_cursor_skips_already_processed(self, monkeypatch, tmp_path):
         """Second run on unchanged file → no HTTP call."""
         transcript = tmp_path / "session.jsonl"
