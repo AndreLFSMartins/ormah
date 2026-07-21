@@ -50,12 +50,18 @@ def main(
         return 2
 
     engine = engine_factory()
-    # product preserved: extractor emits "product" and no "material" for the snippet
-    # (a mixed emission means the extractor also mislabeled a candidate as material).
+    # product preserved := the gate does NOT drop the snippet. The gate drops ONLY a
+    # candidate labeled exactly "material", so a product is preserved iff no "material"
+    # label is present. An extraction miss ([]) or an unknown label is NOT a gate
+    # false-drop (nothing is labeled material -> nothing is dropped) and must not be
+    # penalized here -- that would conflate extraction recall with the gate's action,
+    # which is the only thing this ship gate measures. A mixed [material, product]
+    # emission DOES drop a product-derived candidate, so "material" in labels correctly
+    # marks it not-preserved (this keeps the council mixed-label fix).
     prod_ok = 0
     for c in prod:
         labels = _labels_for(engine, c["snippet"])
-        if "product" in labels and "material" not in labels:
+        if "material" not in labels:
             prod_ok += 1
     prod_ok /= len(prod)
     # material dropped: extractor emits ONLY "material" for the snippet (the gate would

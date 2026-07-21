@@ -122,8 +122,12 @@ def test_main_fails_when_material_dropped_below_threshold(tmp_path, capsys):
     assert rc == 1
 
 
-def test_main_treats_extractor_error_as_no_labels(tmp_path, capsys):
-    # An extraction error for a product case means it is not preserved.
+def test_main_extraction_miss_for_product_is_not_a_false_drop(tmp_path, capsys):
+    # An extraction error/miss for a product case means the extractor emitted nothing.
+    # The gate drops ONLY on a "material" label, so it drops nothing here -> the product
+    # is still "preserved" (the gate did no harm). Extraction recall is a separate concern
+    # from the gate's false-drop rate, which is what this ship gate measures. (This is the
+    # scorer-artifact fix: an empty emission previously counted as a false-drop.)
     corpus_path = _write_corpus(tmp_path, product_count=MIN_PER_CLASS, material_count=MIN_PER_CLASS)
     labels_by_id = {f"prod-snippet-{i}": ["product"] for i in range(MIN_PER_CLASS)}
     labels_by_id["prod-snippet-0"] = "LLM extraction failed."
@@ -133,9 +137,10 @@ def test_main_treats_extractor_error_as_no_labels(tmp_path, capsys):
     rc = main(engine_factory=lambda: engine, corpus_path=corpus_path)
 
     out = capsys.readouterr().out
-    assert "product_preserved=0.950" in out
-    assert "FAIL" in out
-    assert rc == 1
+    assert "product_preserved=1.000" in out
+    assert "material_dropped=1.000" in out
+    assert "PASS" in out
+    assert rc == 0
 
 
 # --- main(): mixed-label scoring (council fix) ------------------------------
