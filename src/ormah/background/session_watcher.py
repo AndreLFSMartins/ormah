@@ -18,7 +18,7 @@ from watchdog.observers import Observer
 
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.text.tokens import distinctive_tokens
-from ormah.transcript.parser import TranscriptResult, TranscriptTurn, parse_transcript
+from ormah.transcript.parser import TranscriptResult, TranscriptTurn, parse_transcript, should_rewind
 
 logger = logging.getLogger(__name__)
 
@@ -771,10 +771,12 @@ def _ingest_session(
 
     try:
         result = parse_transcript(path, start_offset=prev_offset)
-        if result.leading_orphan:
-            # A cursor left mid-response by an older version: re-parse the whole file so
-            # the dropped tail is recovered and re-paired with its prompt. A one-time
-            # re-ingest of this file; the background dedup jobs reconcile any overlap.
+        if should_rewind(result, prev_offset):
+            # Orphan with NO forward progress: a genuine cursor left mid-response by an
+            # older version. Re-parse the whole file so the dropped tail is re-paired with
+            # its prompt. With forward progress the orphan is a false positive (ADR-0003,
+            # #149): the fragment is dropped and the cursor advances — rewinding there
+            # would re-ingest the whole file on every tick forever.
             logger.info("Session watcher recovering legacy mid-response cursor for %s", rel)
             prev_offset = 0
             result = parse_transcript(path, start_offset=0)
