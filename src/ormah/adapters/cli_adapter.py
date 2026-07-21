@@ -450,8 +450,14 @@ def cmd_whisper_store(args):
             # prompt. With forward progress the orphan is a false positive (ADR-0003,
             # #149): drop the fragment and advance, or every hook fire re-extracts the
             # whole transcript.
+            original_offset = start_offset
             start_offset = 0
             result = parse_transcript(path, start_offset=0)
+            if result.safe_end_offset <= original_offset:
+                # The rewind made no progress: the "orphan" tail is a still-open in-flight
+                # response, not a recoverable one. ADR-0003: a no-progress transcript
+                # parks, it does not re-extract the closed prefix on every hook fire.
+                sys.exit(0)
     except Exception:
         sys.exit(0)
 

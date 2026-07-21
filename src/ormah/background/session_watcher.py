@@ -18,7 +18,12 @@ from watchdog.observers import Observer
 
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.text.tokens import distinctive_tokens
-from ormah.transcript.parser import TranscriptResult, TranscriptTurn, parse_transcript, should_rewind
+from ormah.transcript.parser import (
+    TranscriptResult,
+    TranscriptTurn,
+    parse_transcript,
+    should_rewind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -777,9 +782,15 @@ def _ingest_session(
             # its prompt. With forward progress the orphan is a false positive (ADR-0003,
             # #149): the fragment is dropped and the cursor advances — rewinding there
             # would re-ingest the whole file on every tick forever.
+            original_offset = prev_offset
             logger.info("Session watcher recovering legacy mid-response cursor for %s", rel)
             prev_offset = 0
             result = parse_transcript(path, start_offset=0)
+            if result.safe_end_offset <= original_offset:
+                # The rewind itself made no progress: the "orphan" tail is a still-open
+                # in-flight response, not a recoverable one. ADR-0003: a no-progress
+                # transcript parks, it does not re-extract the closed prefix every tick.
+                return IngestResult.NO_PROGRESS
     except Exception as e:  # noqa: BLE001 - transcript parsers can raise provider-specific errors
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return IngestResult.NO_PROGRESS

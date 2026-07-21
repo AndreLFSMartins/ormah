@@ -482,6 +482,53 @@ class TestWhisperStoreCursor:
         cursors = json.loads(_WHISPER_CURSOR_FILE.read_text())
         assert cursors["sess1"] == transcript.stat().st_size  # cursor monotonic, at EOF
 
+    def test_inflight_orphan_rewind_parks_cursor_unchanged(self, monkeypatch, tmp_path):
+        """ADR-0003 critical regression (Codex review, #149): an orphan with NO forward
+        progress whose rewind ALSO makes no progress — a still-open in-flight response, not
+        a genuinely recoverable one — must park: no POST, cursor untouched."""
+        monkeypatch.setattr("ormah.adapters.cli_adapter.settings.whisper_out_min_turns", 1)
+        transcript = tmp_path / "session.jsonl"
+
+        closed_turn = [
+            {"type": "user", "message": {"content": "Prompt about the release plan"}},
+            {"type": "assistant", "message": {"stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Answer about the release plan"}]}},
+        ]
+        transcript.write_text("\n".join(json.dumps(r) for r in closed_turn) + "\n")
+        from ormah.transcript.parser import parse_transcript
+        boundary = parse_transcript(transcript).safe_end_offset
+
+        with transcript.open("a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"stop_reason": "tool_use",
+                "content": [{"type": "text", "text": "In-flight fragment"}]}}) + "\n")
+
+        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_DIR, _WHISPER_CURSOR_FILE
+        _WHISPER_CURSOR_DIR.mkdir(parents=True, exist_ok=True)
+        _WHISPER_CURSOR_FILE.write_text(json.dumps({"sess1": boundary}))
+
+        bodies = []
+
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
+
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(
+            "ormah.adapters.cli_adapter._whisper_store_client",
+            lambda: httpx.Client(transport=transport, base_url="http://test"),
+        )
+        hook_input = json.dumps({
+            "transcript_path": str(transcript), "cwd": "/tmp",
+            "session_id": "sess1", "trigger": "auto",
+        })
+
+        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+
+        assert bodies == []  # never re-ingested
+        cursors = json.loads(_WHISPER_CURSOR_FILE.read_text())
+        assert cursors["sess1"] == boundary  # cursor left untouched
+
     def test_cursor_skips_already_processed(self, monkeypatch, tmp_path):
         """Second run on unchanged file → no HTTP call."""
         transcript = tmp_path / "session.jsonl"

@@ -1623,6 +1623,47 @@ def test_legacy_orphan_with_later_turns_advances_and_drops(engine, tmp_path, cap
     assert "Prompt two" in prompt        # later turn ingested normally
 
 
+def test_inflight_orphan_rewind_parks_without_reingest(engine, tmp_path, caplog):
+    """ADR-0003 critical regression (Codex review, #149): an orphan with NO forward
+    progress whose rewind (full re-parse) ALSO makes no progress — because the tail is a
+    still-open (in-flight) response, not a genuinely recoverable one — must park
+    (NO_PROGRESS) rather than re-extract the closed prefix on every tick."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+
+    closed_turn = [
+        {"type": "user", "message": {"content": "Prompt about the release plan"}},
+        {"type": "assistant", "message": {"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Answer about the release plan"}]}},
+    ]
+    with open(jsonl, "w") as f:
+        for line in closed_turn:
+            f.write(json.dumps(line) + "\n")
+    boundary = parse_transcript(jsonl).safe_end_offset  # cursor parked here by tick N
+
+    # An in-flight response fragment: text-bearing, non-terminal stop_reason, no
+    # following user turn and no closure — the response is genuinely still being written.
+    with open(jsonl, "a") as f:
+        f.write(json.dumps({"type": "assistant", "message": {"stop_reason": "tool_use",
+            "content": [{"type": "text", "text": "In-flight fragment"}]}}) + "\n")
+    _mark_idle(jsonl)
+
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {rel: {"end_offset": boundary, "hash": "stale", "user_turns": 1, "node_ids": []}}
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as mock_llm, \
+         caplog.at_level(logging.INFO, logger="ormah.background.session_watcher"):
+        r1 = _ingest_session(engine, jsonl, state, watch_dir, 1)
+        r2 = _ingest_session(engine, jsonl, state, watch_dir, 1)
+
+    assert r1 == IngestResult.NO_PROGRESS
+    assert r2 == IngestResult.NO_PROGRESS
+    assert mock_llm.call_count == 0                       # never re-ingested
+    assert state[rel]["end_offset"] == boundary            # cursor left untouched
+
+
 # --- Test 19: in-flight skip reschedules the dropped event (no lost tail) ---
 
 def test_inflight_skip_reschedules(engine, tmp_path):
