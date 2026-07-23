@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -19,8 +20,9 @@ from ormah.background.session_watcher import (
     _load_state,
     _record_whisper_usage_signals,
     _save_state,
-    _scan_sessions,
     _space_from_encoded_dir,
+    _expand_watch_dir,
+    run_session_reconcile,
     start_session_watcher,
     stop_session_watcher,
 )
@@ -137,6 +139,59 @@ def _insert_injected_whisper_log(
     )
     engine.db.conn.commit()
     return cursor.lastrowid
+
+
+# --- ADR-0004 always-on-worker test helpers -----------------------------------
+
+def _wait_until(pred, timeout=6.0, interval=0.02):
+    """Poll ``pred`` until true or ``timeout`` elapses; return the final truthiness."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(interval)
+    return bool(pred())
+
+
+def _spool_idle(spool):
+    """True once the spool holds no pending work and nothing is mid-flight in running/."""
+    running = spool.root / "running"
+    running_empty = not any(p.name.endswith(".json") for p in running.iterdir())
+    return spool.pending_count() == 0 and running_empty
+
+
+def _drain_all(handler, timeout=20.0):
+    """Drain the spool synchronously through the ONE ingestion path (deterministic, no
+    thread). Stops when no due job remains (a backed-off job is left queued)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        job = handler.spool.claim_next()
+        if job is None:
+            return
+        handler._run_job(job)
+
+
+def _handler_with_spool(engine, watch_dir, spool_dir, **overrides):
+    from ormah.background.ingest_spool import IngestSpool
+
+    spool = IngestSpool(spool_dir)
+    kw = dict(debounce_seconds=60.0, min_turns=5, idle_threshold=30.0, lookback_hours=9999)
+    kw.update(overrides)
+    return SessionHandler(
+        engine, watch_dir, kw["debounce_seconds"], kw["min_turns"],
+        kw["idle_threshold"], kw["lookback_hours"], spool=spool,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_default_acceptance_roots(monkeypatch):
+    """D8: the real ~/.claude/projects and ~/.codex/sessions exist on the dev machine, so
+    without this the suite would build watches over real home. Default acceptance roots come
+    only from tests that set them explicitly."""
+    monkeypatch.setattr(
+        "ormah.background.session_watcher._default_acceptance_roots", lambda: []
+    )
+
 
 
 # --- Test 1: Space detection from encoded directory names ---
@@ -499,26 +554,6 @@ def test_subagent_transcript_is_not_ingested(engine, tmp_path):
 
     assert result == IngestResult.NO_PROGRESS
     assert state == {}
-
-
-def test_scan_skips_subagents_keeps_primary(engine, tmp_path):
-    """A scan ingests the primary session transcript but skips sibling subagent transcripts."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    sub_dir = project_dir / "abc123" / "subagents"
-    sub_dir.mkdir(parents=True)
-    primary = project_dir / "abc123.jsonl"
-    _make_jsonl(primary, user_turns=6)
-    _mark_idle(primary)  # finished session, below flush_bytes → idle flush
-    _make_jsonl(sub_dir / "agent-deadbeef.jsonl", user_turns=6)
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        ingested = _scan_sessions(engine, watch_dir, min_turns=5, lookback_hours=9999)
-
-    assert ingested == 1
-    state = _load_state(watch_dir)
-    sub_rel = str((sub_dir / "agent-deadbeef.jsonl").relative_to(watch_dir))
-    assert sub_rel not in state
 
 
 def test_ingest_codex_session_resolves_rollout_session_id_and_space(engine, tmp_path):
@@ -1034,65 +1069,8 @@ def test_unchanged_session_skipped(engine, tmp_path):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.NO_PROGRESS
 
 
-# --- Test 5: Scan respects lookback ---
-
-def test_scan_respects_lookback(engine, tmp_path):
-    """Old files are skipped during catch-up scan, recent ones ingested."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-proj"
-    project_dir.mkdir(parents=True)
-
-    recent = project_dir / "recent.jsonl"
-    _make_jsonl(recent, user_turns=6)
-    _mark_idle(recent)  # finished session, below flush_bytes → idle flush
-
-    old = project_dir / "old.jsonl"
-    _make_jsonl(old, user_turns=6)
-    # Set mtime to 200 hours ago (beyond 72h lookback)
-    import os
-    old_time = time.time() - (200 * 3600)
-    os.utime(old, (old_time, old_time))
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        count = _scan_sessions(engine, watch_dir, min_turns=5, lookback_hours=72)
-
-    assert count == 1  # only recent
-    state = _load_state(watch_dir)
-    assert str(recent.relative_to(watch_dir)) in state
-    assert str(old.relative_to(watch_dir)) not in state
-
 
 # --- Test 6: Debounce coalesces writes ---
-
-def test_debounce_coalesces_writes(engine, tmp_path):
-    """5 rapid events → 1 ingestion call."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-proj"
-    project_dir.mkdir(parents=True)
-
-    handler = SessionHandler(engine, watch_dir, debounce_seconds=0.3, min_turns=5)
-    jsonl = project_dir / "active.jsonl"
-
-    call_count = 0
-    original_ingest = _ingest_session
-
-    def counting_ingest(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        return original_ingest(*args, **kwargs)
-
-    with patch("ormah.background.session_watcher._ingest_session", side_effect=counting_ingest):
-        for i in range(5):
-            _make_jsonl(jsonl, user_turns=6 + i)
-            from watchdog.events import FileModifiedEvent
-            handler.on_modified(FileModifiedEvent(str(jsonl)))
-            time.sleep(0.05)
-
-        # Wait for debounce
-        time.sleep(0.5)
-
-    assert call_count == 1
-
 
 # --- Test 7: Lifecycle start/stop ---
 
@@ -1144,13 +1122,6 @@ def test_lifecycle_includes_codex_sessions_when_using_default_agent_dir(
 
 # --- Test 8: Disabled returns empty ---
 
-def test_disabled_returns_empty(engine, tmp_path):
-    """session_watcher_enabled=False → empty list."""
-    engine.settings.session_watcher_enabled = False
-    observers = start_session_watcher(engine)
-    assert observers == []
-
-
 # --- Test 9: State persistence ---
 
 def test_state_persistence(tmp_path):
@@ -1177,15 +1148,6 @@ def test_state_persistence(tmp_path):
 
 
 # --- Test 10: Nonexistent watch dir ---
-
-def test_nonexistent_watch_dir(engine, tmp_path):
-    """Nonexistent watch dir returns empty, no crash."""
-    engine.settings.session_watcher_enabled = True
-    engine.settings.session_watcher_dir = tmp_path / "does-not-exist"
-
-    observers = start_session_watcher(engine)
-    assert observers == []
-
 
 # --- Test 11: Incremental — only appended turns are re-ingested ---
 
@@ -1570,101 +1532,6 @@ def test_session_tail_idle_ingested(engine, tmp_path):
     assert calls == 1
 
 
-def test_retry_fires_and_ingests_after_idle(engine, tmp_path):
-    from ormah.background import session_watcher as sw
-
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-proj"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "active.jsonl"
-
-    _make_jsonl(jsonl, user_turns=6)
-
-    captured_timers = []
-
-    class FakeTimer:
-        def __init__(self, delay, fn, args=()):
-            self.delay = delay
-            self.fn = fn
-            self.args = args
-            self.daemon = False
-        def start(self):
-            captured_timers.append(self)
-        def cancel(self):
-            pass
-
-    calls = 0
-    real_ingest = engine.ingest_conversation
-
-    def counting(content, **kwargs):
-        nonlocal calls
-        calls += 1
-        return real_ingest(content=content, **kwargs)
-
-    # Seed state outside counting context so the initial 6-pair ingest is not counted.
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
-         patch.object(sw, "Timer", FakeTimer):
-        handler = sw.SessionHandler(
-            engine, watch_dir, debounce_seconds=60, min_turns=5, idle_threshold=30,
-        )
-        sw._ingest_session(engine, jsonl, handler._state, watch_dir, min_turns=5)
-
-    _append_pair(jsonl, 6)
-    _append_pair(jsonl, 7)
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
-         patch.object(engine, "ingest_conversation", side_effect=counting), \
-         patch.object(sw, "Timer", FakeTimer):
-        handler._do_ingest(jsonl)
-        assert calls == 0
-        assert len(captured_timers) == 1
-        assert captured_timers[0].delay == 30
-
-        now = time.time()
-        os.utime(jsonl, (now, now - 120))
-        timer = captured_timers[0]
-        timer.fn(*timer.args)
-
-    assert calls == 1
-
-
-def test_concurrent_ingest_skipped(engine, tmp_path):
-    import threading
-    from ormah.background import session_watcher as sw
-
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-proj"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "active.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
-
-    started = threading.Event()
-    release = threading.Event()
-    calls = 0
-
-    def blocking_ingest(content, **kwargs):
-        nonlocal calls
-        calls += 1
-        started.set()
-        release.wait(timeout=5)
-        return []
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
-         patch.object(engine, "ingest_conversation", side_effect=blocking_ingest):
-        handler = sw.SessionHandler(
-            engine, watch_dir, debounce_seconds=60, min_turns=5, idle_threshold=30,
-        )
-        t1 = threading.Thread(target=handler._do_ingest, args=(jsonl,))
-        t1.start()
-        assert started.wait(timeout=5)
-        handler._do_ingest(jsonl)
-        release.set()
-        t1.join(timeout=5)
-
-    assert calls == 1
-
-
 # --- ADR-0003 (#149): gate the rewind on forward progress ---
 
 
@@ -1884,59 +1751,6 @@ def test_inflight_orphan_rewind_parks_without_reingest(engine, tmp_path, caplog)
 
 # --- Test 19: in-flight skip reschedules the dropped event (no lost tail) ---
 
-def test_inflight_skip_reschedules(engine, tmp_path):
-    """A modify event skipped because an ingest is in flight must be rescheduled, not dropped."""
-    import threading
-
-    from ormah.background import session_watcher as sw
-
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-proj"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "active.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
-
-    scheduled = []
-
-    class FakeTimer:
-        def __init__(self, delay, fn, args=()):
-            self.delay = delay
-            self.fn = fn
-            self.args = args
-            self.daemon = False
-        def start(self):
-            scheduled.append(self)
-        def cancel(self):
-            pass
-
-    started = threading.Event()
-    release = threading.Event()
-
-    def blocking_ingest(content, **kwargs):
-        started.set()
-        release.wait(timeout=5)
-        return []
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
-         patch.object(engine, "ingest_conversation", side_effect=blocking_ingest), \
-         patch.object(sw, "Timer", FakeTimer):
-        handler = sw.SessionHandler(
-            engine, watch_dir, debounce_seconds=60, min_turns=5, idle_threshold=30,
-        )
-        t1 = threading.Thread(target=handler._do_ingest, args=(jsonl,))
-        t1.start()
-        assert started.wait(timeout=5)   # ingest A is in flight
-        handler._do_ingest(jsonl)        # skipped — must mark pending
-        assert scheduled == []           # nothing rescheduled while A still runs
-        release.set()
-        t1.join(timeout=5)
-
-    # After A finishes, the skipped event was rescheduled as a fresh debounce
-    assert len(scheduled) == 1
-    assert scheduled[0].delay == 60
-
-
 # --- Test 20: shrink resets node_ids provenance, not just turn count ---
 
 def test_shrink_resets_node_ids(engine, tmp_path):
@@ -1966,641 +1780,16 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     assert len(nodes) == len(set(nodes))
 
 
-def test_do_ingest_returns_ok_when_it_ingests(engine, tmp_path):
-    """_do_ingest reports IngestResult so reconcile can count recoveries and triage failures."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert handler._do_ingest(jsonl) == IngestResult.OK
-        assert handler._do_ingest(jsonl) == IngestResult.NO_PROGRESS  # nothing new the second time
-
-
-def test_reconcile_ingests_file_the_live_path_missed(engine, tmp_path):
-    """A changed, idle transcript whose fsevent never reached the handler is recovered."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    rel = str(jsonl.relative_to(watch_dir))
-    assert rel not in handler._state  # simulate the dropped event: handler never saw it
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        recovered = handler.reconcile()
-
-    assert recovered == 1
-    assert rel in handler._state
-    assert handler._state[rel]["user_turns"] == 6
-
-
-def test_reconcile_skips_fully_consumed_file_on_second_pass(engine, tmp_path):
-    """A second reconcile does not re-ingest a file already consumed to EOF (cheap skip)."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert handler.reconcile() == 1
-        assert handler.reconcile() == 0
-
-
-def test_reconcile_does_not_reingest_what_live_path_already_took(engine, tmp_path):
-    """reconcile shares handler state, so a file ingested live is not re-ingested."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        handler._do_ingest(jsonl)                      # live path ingests it
-        rel = str(jsonl.relative_to(watch_dir))
-        node_count = len(handler._state[rel]["node_ids"])
-        recovered = handler.reconcile()
-
-    assert recovered == 0
-    assert len(handler._state[rel]["node_ids"]) == node_count
-
-
-def test_reconcile_logs_recovery_heartbeat(engine, tmp_path, caplog):
-    """reconcile emits the functional heartbeat when it recovers >0 transcripts."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        with caplog.at_level("INFO", logger="ormah.background.session_watcher"):
-            handler.reconcile()
-    assert any("reconcile recovered" in r.message for r in caplog.records)
-
-
 # --- Adversarial regressions for the two HIGH council findings ---
-
-def test_reconcile_retries_seen_file_when_first_do_ingest_fails(engine, tmp_path):
-    """A transient ingest failure must NOT strand a seen file: the next tick retries it."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    # Seed state as a seen file with a pending tail (cursor behind EOF).
-    rel = str(jsonl.relative_to(watch_dir))
-    handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
-
-    calls = {"n": 0}
-    real = _ingest_session
-
-    def flaky(*a, **k):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return IngestResult.TRANSIENT     # transient failure on the first reconcile
-        return real(*a, **k)
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
-            patch("ormah.background.session_watcher._ingest_session", side_effect=flaky):
-        assert handler.reconcile() == 0       # first tick: ingest "fails"
-        assert handler.reconcile() == 1       # second tick retries (not skipped) and recovers
-
-
-def test_reconcile_recovers_partial_tail_without_mtime_change(engine, tmp_path):
-    """A grown tail with an UNCHANGED mtime is still recovered (cursor != size, not mtime)."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert handler.reconcile() == 1               # consumes the first 6 turns
-        old_mtime = jsonl.stat().st_mtime
-        _make_jsonl(jsonl, user_turns=12)             # append 6 more (size grows)
-        os.utime(jsonl, (old_mtime, old_mtime))       # mtime unchanged on purpose
-        recovered = handler.reconcile()
-
-    assert recovered == 1                             # picked up via end_offset != size
-
-
-def test_reconcile_while_live_ingesting_defers_then_retries(engine, tmp_path):
-    """If the live path owns the path mid-ingest, reconcile defers, then retries next tick."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    handler._ingesting.add(str(jsonl))                # simulate live path mid-ingest
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert handler.reconcile() == 0               # deferred: live path owns it
-
-    handler._ingesting.discard(str(jsonl))            # live path finished without ingesting
-    handler._pending.discard(str(jsonl))
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert handler.reconcile() == 1               # not poisoned -> retried and recovered
-
-
-def test_reconcile_bounds_retries_for_abandoned_inflight_tail(engine, tmp_path):
-    """A seen tail that never converges (always no-op) is retried a bounded number of
-    times, not re-attempted (re-hashed) every tick forever."""
-    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
-
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    rel = str(jsonl.relative_to(watch_dir))
-    # Seen file stuck below EOF that never makes progress (abandoned in-flight tail).
-    handler._state[rel] = {"hash": "x", "end_offset": 1, "node_ids": [], "user_turns": 0}
-
-    calls = {"n": 0}
-
-    def noop(path):
-        calls["n"] += 1
-        return IngestResult.NO_PROGRESS  # never makes progress (size + safe boundary frozen)
-
-    handler._do_ingest = noop
-    for _ in range(8):
-        handler.reconcile()
-
-    assert calls["n"] == MAX_RECONCILE_RETRIES  # bounded, not 8
-
-
-def test_run_session_reconcile_recreates_dead_observer(engine, tmp_path):
-    """A dead Observer is stopped/joined and recreated; reconcile still runs."""
-    from ormah.background.session_watcher import SessionWatch, run_session_reconcile
-
-    watch_dir = tmp_path / "projects"
-    watch_dir.mkdir(parents=True)
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-
-    dead = MagicMock()
-    dead.is_alive.return_value = False
-    watch = SessionWatch(watch_dir=watch_dir, handler=handler, observer=dead)
-
-    with patch("ormah.background.session_watcher.Observer") as MockObserver:
-        new_obs = MockObserver.return_value
-        total = run_session_reconcile([watch])
-
-    dead.stop.assert_called_once()        # old observer cleaned up before recreate
-    dead.join.assert_called_once()
-    new_obs.schedule.assert_called_once()
-    new_obs.start.assert_called_once()
-    assert watch.observer is new_obs
-    assert total == 0  # empty dir, nothing to recover
-
-
-def test_run_session_reconcile_runs_reconcile_even_when_recreate_fails(engine, tmp_path):
-    """If recreating a dead Observer raises, the reconcile scan still runs (safety-net guarantee)."""
-    from ormah.background.session_watcher import SessionWatch, run_session_reconcile
-
-    watch_dir = tmp_path / "projects"
-    watch_dir.mkdir(parents=True)
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    handler.reconcile = MagicMock(return_value=0)
-
-    dead = MagicMock()
-    dead.is_alive.return_value = False
-    watch = SessionWatch(watch_dir=watch_dir, handler=handler, observer=dead)
-
-    with patch("ormah.background.session_watcher.Observer", side_effect=RuntimeError("boom")):
-        total = run_session_reconcile([watch])
-
-    handler.reconcile.assert_called_once()  # safety net ran despite recreate failure
-    assert total == 0
-
-
-def test_reconcile_does_not_starve_valid_file_behind_stuck_never_seen_files(engine, tmp_path):
-    """>cap never-seen files that never ingest must not starve a later valid transcript:
-    they get parked after MAX_RECONCILE_RETRIES, freeing the per-tick budget for the valid one."""
-    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
-
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-
-    cap = engine.settings.session_watcher_reconcile_max_per_tick
-    for i in range(cap):                              # sort BEFORE 'zz-valid' below
-        p = project_dir / f"00stuck-{i:03d}.jsonl"
-        p.write_text("not a valid transcript line\n")  # ingests nothing -> stays never-seen
-        _mark_idle(p)
-
-    valid = project_dir / "zz-valid.jsonl"            # sorts AFTER all stuck files
-    _make_jsonl(valid, user_turns=6)
-    _mark_idle(valid)
-    rel_valid = str(valid.relative_to(watch_dir))
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        for _ in range(MAX_RECONCILE_RETRIES + 2):    # let the stuck files exhaust their budget
-            handler.reconcile()
-            if rel_valid in handler._state:
-                break
-
-    assert rel_valid in handler._state                # reached, not starved
-
-
-def test_reconcile_never_parks_transient_failures(engine, tmp_path):
-    """A TRANSIENT _do_ingest result must never increment _reconcile_attempts — the file
-    is retried every tick indefinitely, never parked (unlike NO_PROGRESS which parks after
-    MAX_RECONCILE_RETRIES attempts at the same file size)."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    rel = str(jsonl.relative_to(watch_dir))
-    # Seed state: seen file with a pending tail (cursor behind EOF).
-    handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
-
-    ingest_calls = {"n": 0}
-
-    def always_transient(path):
-        ingest_calls["n"] += 1
-        return IngestResult.TRANSIENT
-
-    handler._do_ingest = always_transient
-    for _ in range(6):
-        handler.reconcile()
-
-    # Must have been attempted every single tick — never parked.
-    assert ingest_calls["n"] == 6
-    # And _reconcile_attempts must not have accumulated a count for this file.
-    assert handler._reconcile_attempts.get(rel) is None
-
 
 # --- Council-PR H1/H2: change-token park key + TRANSIENT deprioritization ---
 
-def test_reconcile_unparks_after_same_size_content_change(engine, tmp_path):
-    """H1: a same-byte-size content rewrite (new mtime) un-parks a NO_PROGRESS file.
-
-    If a parked file's content is repaired but byte length is unchanged, the mtime_ns
-    changes. The new (size, mtime_ns) token differs from the parked token, so the file
-    is un-parked and _do_ingest is called again on the next tick.
-    """
-    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
-
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    rel = str(jsonl.relative_to(watch_dir))
-    # Seed state: seen file with a pending tail (cursor behind EOF).
-    handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
-
-    ingest_calls = {"n": 0}
-
-    def always_no_progress(path):
-        ingest_calls["n"] += 1
-        return IngestResult.NO_PROGRESS
-
-    handler._do_ingest = always_no_progress
-
-    # Drive reconcile MAX_RECONCILE_RETRIES times to park the file.
-    for _ in range(MAX_RECONCILE_RETRIES):
-        handler.reconcile()
-    assert ingest_calls["n"] == MAX_RECONCILE_RETRIES
-
-    # File is now parked: further reconcile calls must NOT call _do_ingest.
-    handler.reconcile()
-    assert ingest_calls["n"] == MAX_RECONCILE_RETRIES  # count did not increase → parked
-
-    # Rewrite with identical byte size but a bumped mtime (content changed, size unchanged).
-    original_size = jsonl.stat().st_size
-    content = jsonl.read_bytes()
-    jsonl.write_bytes(content)  # same bytes = same size; write bumps mtime_ns
-    assert jsonl.stat().st_size == original_size  # size unchanged — regression guard
-
-    # Now reconcile must call _do_ingest again (token changed → un-parked).
-    handler.reconcile()
-    assert ingest_calls["n"] == MAX_RECONCILE_RETRIES + 1
-
-
-def test_reconcile_deprioritizes_persistent_transient_behind_valid(engine, tmp_path):
-    """H2: files that keep returning TRANSIENT are deprioritized, not starved-out, so an
-    older valid file is still ingested within a bounded number of ticks.
-
-    Setup: cap=2 newest files → always TRANSIENT; 1 older file → returns OK.
-    After TRANSIENT files cross MAX_RECONCILE_RETRIES ticks at their token, they sort
-    behind the valid file and the valid file is ingested.
-    """
-    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
-
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-
-    cap = 2
-    engine.settings.session_watcher_reconcile_max_per_tick = cap
-
-    now = time.time()
-
-    # Two newest TRANSIENT files.
-    transient_files = []
-    for i in range(cap):
-        p = project_dir / f"new-{i:03d}.jsonl"
-        _make_jsonl(p, user_turns=6)
-        mtime = now - i  # newest first (decreasing by 1s)
-        os.utime(p, (mtime, mtime))
-        transient_files.append(p)
-
-    # One older valid file.
-    valid = project_dir / "old-valid.jsonl"
-    _make_jsonl(valid, user_turns=6)
-    old_mtime = now - 1000  # clearly older
-    os.utime(valid, (old_mtime, old_mtime))
-
-    # Seed all as seen with a pending tail.
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    for p in transient_files + [valid]:
-        rel = str(p.relative_to(watch_dir))
-        handler._state[rel] = {"hash": "x", "end_offset": 0, "node_ids": [], "user_turns": 0}
-
-    transient_paths = {str(p) for p in transient_files}
-    valid_path = str(valid)
-    ingested_paths: list[str] = []
-
-    def selective_ingest(path):
-        ingested_paths.append(str(path))
-        if str(path) in transient_paths:
-            return IngestResult.TRANSIENT
-        return IngestResult.OK
-
-    handler._do_ingest = selective_ingest
-
-    # Run enough ticks for TRANSIENT files to cross MAX_RECONCILE_RETRIES at their token
-    # and become deprioritized, then for the valid file to be picked up.
-    max_ticks = MAX_RECONCILE_RETRIES + 3
-    for _ in range(max_ticks):
-        handler.reconcile()
-        if valid_path in ingested_paths:
-            break
-
-    assert valid_path in ingested_paths, (
-        f"Valid file was never ingested after {max_ticks} ticks — it was starved. "
-        f"ingested_paths={ingested_paths}"
-    )
-
-
-def test_reconcile_deprioritized_transients_retried_oldest_first(engine, tmp_path):
-    """H2': among already-deprioritized TRANSIENT files, the OLDEST is retried first (FIFO).
-
-    Non-deprioritized candidates sort newest-first (fresh drops recover soonest), but within the
-    deprioritized group oldest-first avoids a long-failing transient that just became recoverable
-    being starved behind newer deprioritized peers.
-    """
-    from ormah.background.session_watcher import MAX_RECONCILE_RETRIES
-
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    now = time.time()
-
-    older = project_dir / "older.jsonl"
-    newer = project_dir / "newer.jsonl"
-    _make_jsonl(older, user_turns=6)
-    _make_jsonl(newer, user_turns=6)
-    os.utime(older, (now - 1000, now - 1000))
-    os.utime(newer, (now - 1, now - 1))
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    handler.engine.settings.session_watcher_reconcile_max_per_tick = 1  # one slot per tick
-
-    # Seed both as seen-pending AND already deprioritized at their current token.
-    for p in (older, newer):
-        rel = str(p.relative_to(watch_dir))
-        st = p.stat()
-        handler._state[rel] = {"hash": "x", "end_offset": 0, "node_ids": [], "user_turns": 0}
-        handler._reconcile_transient[rel] = (st.st_size, st.st_mtime_ns, MAX_RECONCILE_RETRIES)
-
-    calls: list[str] = []
-
-    def record_ingest(path):
-        calls.append(str(path))
-        return IngestResult.TRANSIENT
-
-    handler._do_ingest = record_ingest
-    handler.reconcile()  # cap=1 -> only the first-sorted deprioritized candidate runs
-
-    assert calls == [str(older)], (
-        f"Oldest deprioritized file should be retried first (FIFO), got {calls}"
-    )
-
-
 # --- Council-PR F2/F3: per-tick time budget + lookback<0 never-seen guard ---
-
-def test_reconcile_respects_per_tick_time_budget(engine, tmp_path):
-    """The per-tick wall-clock budget causes an early break, so not all candidates are processed
-    in one reconcile() call even when count < max_per_tick."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-
-    # Three seen files with a pending tail (end_offset=0, size>0) — all are reconcile candidates.
-    files = []
-    for i in range(3):
-        p = project_dir / f"session-{i:02d}.jsonl"
-        _make_jsonl(p, user_turns=6)
-        _mark_idle(p)
-        files.append(p)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    handler.engine.settings.session_watcher_reconcile_max_seconds = 30.0
-
-    # Seed all files as seen-but-pending (cursor at 0, size > 0).
-    for p in files:
-        rel = str(p.relative_to(watch_dir))
-        handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
-
-    ingest_calls = []
-
-    def counting_ingest(path):
-        ingest_calls.append(path)
-        return IngestResult.OK
-
-    handler._do_ingest = counting_ingest
-
-    # Tie the clock to real progress instead of an exact call count: time stays at 0.0
-    # until the first file is ingested, then jumps past the 30s budget so the next
-    # loop-check breaks. Robust to any extra time.time() calls reconcile() may add.
-    def fake_time():
-        return 9999.0 if ingest_calls else 0.0
-
-    with patch("ormah.background.session_watcher.time.time", side_effect=fake_time):
-        handler.reconcile()
-
-    # Budget broke after 1 — fewer than all 3 candidates were processed.
-    assert len(ingest_calls) == 1
-
-
-def test_reconcile_skips_never_seen_when_lookback_negative(engine, tmp_path):
-    """When lookback_hours < 0 (catch-up disabled), never-seen files must be skipped in
-    reconcile() — mirroring the _scan_sessions rule."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-
-    # lookback_hours=-1 means no catch-up: never-seen files must be skipped.
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, lookback_hours=-1)
-    rel = str(jsonl.relative_to(watch_dir))
-    assert rel not in handler._state  # never seen
-
-    ingest_calls = []
-
-    def counting_ingest(path):
-        ingest_calls.append(path)
-        return IngestResult.OK
-
-    handler._do_ingest = counting_ingest
-    recovered = handler.reconcile()
-
-    assert recovered == 0
-    assert ingest_calls == []
-    assert rel not in handler._state
-
 
 # --- Merge of #52 (catch-up off bind path) onto the reconcile rework -------------------
 # These cover the behavior the merge introduced that NEITHER prior suite tested:
 # the off-bind startup catch-up and the shutdown drain that closes the use-after-close
 # window (issue #52), now expressed on the reconcile API (list[SessionWatch] + _stop_event).
-
-
-def test_do_ingest_rejected_after_stop_event(engine, tmp_path):
-    """Once _stop_event is set, _do_ingest rejects under the lock before touching the engine —
-    the guard that closes the use-after-close window at shutdown (issue #52)."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl)
-    _mark_idle(jsonl)
-
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    handler._stop_event.set()
-
-    with patch("ormah.background.session_watcher._ingest_session") as mock_ingest:
-        result = handler._do_ingest(jsonl)
-
-    assert result == IngestResult.TRANSIENT
-    mock_ingest.assert_not_called()          # rejected before the heavy work
-    assert handler.in_flight_count() == 0     # never claimed the path
-
-
-def test_stop_session_watcher_drains_inflight_ingest(engine, tmp_path):
-    """stop_session_watcher blocks until an in-flight ingest finishes, so nothing writes to the
-    DB after the lifespan calls engine.shutdown() right after (use-after-close guard, issue #52)."""
-    import threading
-
-    from ormah.background.session_watcher import SessionWatch
-
-    watch_dir = tmp_path / "projects"
-    watch_dir.mkdir(parents=True)
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-
-    entered = threading.Event()
-    release = threading.Event()
-
-    def blocking_ingest(*a, **k):
-        entered.set()
-        release.wait(5)
-        return IngestResult.OK
-
-    def worker():
-        with patch("ormah.background.session_watcher._ingest_session", side_effect=blocking_ingest):
-            handler._do_ingest(watch_dir / "x.jsonl")
-
-    t = threading.Thread(target=worker)
-    t.start()
-    assert entered.wait(5)                     # an ingest is now in-flight
-    assert handler.in_flight_count() == 1
-
-    watch = SessionWatch(
-        watch_dir=watch_dir, handler=handler, observer=MagicMock(), startup_thread=None,
-    )
-    stop_returned = threading.Event()
-
-    def stopper():
-        stop_session_watcher([watch])
-        stop_returned.set()
-
-    s = threading.Thread(target=stopper)
-    s.start()
-
-    assert not stop_returned.wait(0.5)         # stop must NOT return while ingest is in-flight
-    release.set()                              # let the ingest finish
-    assert stop_returned.wait(5)               # now the drain completes and stop returns
-    t.join(5)
-    s.join(5)
-    assert handler.in_flight_count() == 0
-
-
-def test_start_session_watcher_runs_catchup_off_bind(engine, tmp_path):
-    """start_session_watcher ingests a pre-existing backlog via the off-bind startup thread:
-    the observer is live immediately (not blocked on a synchronous scan) and the backlog is
-    recovered once the startup thread joins (issue #52)."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    project_dir.mkdir(parents=True)
-    jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl)
-    _mark_idle(jsonl)
-
-    engine.settings.session_watcher_enabled = True
-    engine.settings.session_watcher_dir = watch_dir
-    engine.settings.session_watcher_debounce_seconds = 10.0
-    engine.settings.session_watcher_lookback_hours = 9999
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        watches = start_session_watcher(engine)
-        try:
-            assert len(watches) == 1
-            assert watches[0].observer.is_alive()        # live from t0, scan did not block the bind
-            assert watches[0].startup_thread is not None
-            watches[0].startup_thread.join(10)           # deterministic wait for the off-bind drain
-            assert not watches[0].startup_thread.is_alive()
-            rel = str(jsonl.relative_to(watch_dir))
-            assert rel in watches[0].handler._state      # backlog ingested off the bind path
-        finally:
-            stop_session_watcher(watches)
 
 
 def test_large_orphan_beyond_flush_bytes_does_not_rewind(engine, tmp_path, caplog):
@@ -2648,3 +1837,1274 @@ def test_large_orphan_beyond_flush_bytes_does_not_rewind(engine, tmp_path, caplo
     assert "recovering legacy mid-response cursor" not in caplog.text
     assert offsets == sorted(offsets)                        # never-regressing cursor
     assert state[rel]["end_offset"] == jsonl.stat().st_size  # fully drained
+
+
+# ======================================================================================
+# ADR-0004 slice 1 — always-on ingest worker; Observer & reconcile become producers.
+# The disposition (02-always-on-worker.md) rewrote/deleted the old cursor-flag tests below.
+# ======================================================================================
+
+
+def _partial_unterminated(path):
+    """A single user+assistant turn with NO terminal stop_reason -> no safe boundary."""
+    path.write_text(
+        json.dumps({"type": "user", "message": {"content": "a single prompt with enough text to parse here"}})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "a partial answer that never closed with a stop reason"}]}})
+        + "\n"
+    )
+
+
+# --- Structural: worker always on, Observer opt-in (Step 1) ----------------------------
+
+def test_worker_starts_with_watcher_disabled(engine, tmp_path):
+    """session_watcher_enabled=False still yields a live handler + drain, but NO Observer."""
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir()
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = watch_dir
+    watches = start_session_watcher(engine)
+    try:
+        assert len(watches) == 1
+        assert watches[0].observer is None
+        assert watches[0].handler is not None
+        assert watches[0].spool is not None
+        assert watches[0].handler._drain_thread.is_alive()
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_observer_attached_only_when_enabled(engine, tmp_path):
+    """enabled=True keeps today's behavior: Observer scheduled and alive."""
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir()
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = watch_dir
+    watches = start_session_watcher(engine)
+    try:
+        assert watches[0].observer is not None and watches[0].observer.is_alive()
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_disabled_yields_worker_without_observer(engine, tmp_path):
+    """Row 21 rename of test_disabled_returns_empty: disabled now returns a worker (not [])."""
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir()
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = watch_dir
+    watches = start_session_watcher(engine)
+    try:
+        assert len(watches) == 1
+        assert watches[0].observer is None
+        assert watches[0].handler is not None
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_absent_watch_dir_is_created(engine, tmp_path):
+    """Row 22 rename of test_nonexistent_watch_dir: an absent watch root is CREATED and still
+    yields a handler (council R4/R5) so a later nudge under it is accepted, not 422'd."""
+    missing = tmp_path / "does-not-exist"
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = missing
+    watches = start_session_watcher(engine)
+    try:
+        assert len(watches) == 1
+        assert watches[0].watch_dir == _expand_watch_dir(missing)
+        assert missing.is_dir()
+        assert watches[0].handler is not None
+        assert watches[0].observer is None
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_configured_but_absent_dir_still_yields_a_handler(engine, tmp_path):
+    """council R4/R5 (Step 1, verbatim intent): session_watcher_dir points at a path that does
+    not exist yet — start_session_watcher must still return one SessionWatch."""
+    missing = tmp_path / "later-appears"
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = missing
+    watches = start_session_watcher(engine)
+    try:
+        assert len(watches) == 1
+        assert watches[0].watch_dir == _expand_watch_dir(missing)
+        assert missing.is_dir()
+        assert watches[0].handler is not None
+        assert watches[0].observer is None
+    finally:
+        stop_session_watcher(watches)
+
+
+# --- Consent is structural: the queue IS the intent (Step 1) ---------------------------
+
+def test_disabled_worker_ingests_only_what_the_spool_holds(engine, tmp_path):
+    """With the watcher disabled the worker drains the queue and nothing else. A transcript
+    nobody nudged is never touched — no reconcile scope rule, no discover flag."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    never_seen = proj / "never.jsonl"
+    _make_jsonl(never_seen, user_turns=6)
+    _mark_idle(never_seen)
+    nudged = proj / "nudged.jsonl"
+    _make_jsonl(nudged, user_turns=6)
+    _mark_idle(nudged)
+
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = watch_dir
+    watches = start_session_watcher(engine)
+    try:
+        w = watches[0]
+        rel_nudged = str(nudged.relative_to(watch_dir))
+        rel_never = str(never_seen.relative_to(watch_dir))
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            w.spool.enqueue(nudged, boundary=nudged.stat().st_size, reason="nudge")
+            w.handler.wake()
+            assert _wait_until(lambda: rel_nudged in _load_state(watch_dir), timeout=8)
+        state = _load_state(watch_dir)
+        assert rel_nudged in state
+        assert rel_never not in state, \
+            "a disabled watcher must not ingest transcripts nobody asked for"
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_disabled_worker_ignores_growth_after_the_accepted_boundary(engine, tmp_path):
+    """After a nudged transcript drains, APPENDING more turns must not be ingested while the
+    watcher is off — new content needs a new nudge (here: an empty queue means no work)."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "known.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = watch_dir
+    watches = start_session_watcher(engine)
+    try:
+        w = watches[0]
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            w.spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+            w.handler.wake()
+            assert _wait_until(lambda: rel in _load_state(watch_dir), timeout=8)
+        first_offset = _load_state(watch_dir)[rel]["end_offset"]
+        assert first_offset > 0
+
+        _make_jsonl(jsonl, user_turns=12)          # the session grew; nobody nudged
+        _mark_idle(jsonl)
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as llm:
+            w.handler.wake()
+            time.sleep(0.5)
+            assert not llm.called, "an empty queue means no work, even with new bytes on disk"
+        assert _load_state(watch_dir)[rel]["end_offset"] == first_offset
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_a_capped_batch_re_enqueues_the_remainder(engine, tmp_path):
+    """The drain must finish a boundary larger than flush_bytes on its own, across several
+    capped batches — no sticky flag needed."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "big.jsonl"
+    _make_jsonl(jsonl, user_turns=12)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    boundary = jsonl.stat().st_size
+
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = watch_dir
+    engine.settings.session_watcher_flush_bytes = 400        # force several capped batches
+    watches = start_session_watcher(engine)
+    try:
+        w = watches[0]
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            w.spool.enqueue(jsonl, boundary=boundary, reason="nudge")
+            w.handler.wake()
+            assert _wait_until(
+                lambda: (_load_state(watch_dir).get(rel, {}).get("end_offset", 0)) >= boundary,
+                timeout=25,
+            ), "the drain must reach the accepted boundary across capped batches"
+            assert _wait_until(lambda: _spool_idle(w.spool), timeout=5)
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_a_transient_failure_keeps_the_job_queued(engine, tmp_path):
+    """A failed attempt must not consume the intent, and an OUTAGE must never dead-letter
+    (ADR-0004 H1)."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = watch_dir
+    watches = start_session_watcher(engine)
+    try:
+        w = watches[0]
+        with patch(_LLM_PATCH, return_value=None), \
+             patch("ormah.background.session_watcher.ingest_provider_configured",
+                   return_value=True):
+            w.spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+            w.handler.wake()
+            # the attempt fails (provider "down"); the job is requeued with backoff, not lost
+            time.sleep(1.0)
+            assert w.spool.pending_count() == 1
+        state = _load_state(watch_dir)
+        assert rel not in state or state[rel].get("end_offset", 0) == 0
+        assert not list((w.spool.root / "failed").iterdir()), \
+            "an outage must never dead-letter an accepted job"
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_crash_recovery_requeues_an_in_flight_job(engine, tmp_path):
+    """A job left in running/ by a killed process must come back on the next start."""
+    from ormah.background.ingest_spool import IngestSpool, root_key, spool_root
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = watch_dir
+    # simulate the previous process: enqueue, claim, then die without completing
+    pre = IngestSpool(spool_root(engine.settings) / root_key(_expand_watch_dir(watch_dir)))
+    pre.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+    assert pre.claim_next() is not None
+    assert pre.pending_count() == 0
+
+    watches = start_session_watcher(engine)          # <- the restart
+    try:
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _wait_until(
+                lambda: _load_state(watch_dir).get(rel, {}).get("end_offset", 0) > 0,
+                timeout=12,
+            ), "a job orphaned in running/ must be recovered and drained"
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_observer_and_drain_never_ingest_the_same_transcript(engine, tmp_path):
+    """council R12: the Observer must ENQUEUE, not ingest. With both a file event and a nudge
+    racing on one transcript, exactly ONE extraction may run at a time."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    engine.settings.session_watcher_enabled = True       # Observer ON -- the risky config
+    engine.settings.session_watcher_dir = watch_dir
+    engine.settings.session_watcher_debounce_seconds = 0.05
+    concurrent, active = [], []
+    lock = threading.Lock()
+
+    def _slow_llm(*a, **kw):
+        with lock:
+            if active:
+                concurrent.append(1)
+            active.append(1)
+        time.sleep(0.3)
+        with lock:
+            active.pop()
+        return _LLM_RESPONSE
+
+    watches = start_session_watcher(engine)
+    try:
+        w = watches[0]
+        with patch(_LLM_PATCH, side_effect=_slow_llm):
+            w.spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+            w.handler.wake()
+            _make_jsonl(jsonl, user_turns=12)        # file event -> Observer produces too
+            time.sleep(2.0)
+        assert not concurrent, \
+            f"two extractions overlapped on one transcript ({len(concurrent)} times)"
+    finally:
+        stop_session_watcher(watches)
+
+
+# --- Discovery vs acceptance roots (council R10/R11) -----------------------------------
+
+def test_acceptance_only_root_is_never_swept_while_enabled(engine, tmp_path, monkeypatch):
+    """council R12 (codex): with a CUSTOM session_watcher_dir, the default roots exist only so
+    an explicit nudge is not 422'd. They must get no Observer and no reconcile."""
+    custom = tmp_path / "custom"
+    (custom / "p").mkdir(parents=True)
+    default_root = tmp_path / "claude-projects"
+    (default_root / "p").mkdir(parents=True)
+    stray = default_root / "p" / "nobody-nudged.jsonl"
+    _make_jsonl(stray, user_turns=6)
+    _mark_idle(stray)
+
+    monkeypatch.setattr(
+        "ormah.background.session_watcher._default_acceptance_roots",
+        lambda: [_expand_watch_dir(default_root)],
+    )
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = custom
+    watches = start_session_watcher(engine)
+    try:
+        acc = next(w for w in watches if w.watch_dir == _expand_watch_dir(default_root))
+        assert acc.discover is False
+        assert acc.observer is None
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as llm:
+            run_session_reconcile(watches)
+            time.sleep(0.3)  # give any (wrongly) enqueued drain a chance to run
+            assert not llm.called, "an acceptance-only root must never be swept"
+        assert str(stray.relative_to(default_root)) not in _load_state(default_root)
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_custom_watch_dir_still_accepts_default_root_nudges(engine, tmp_path, monkeypatch):
+    """council R10: a custom session_watcher_dir replaces discovery, but the default Claude/
+    Codex roots must still be ACCEPTED (a handler exists) so a nudge under them is not 422'd."""
+    custom = tmp_path / "custom"
+    custom.mkdir()
+    default_root = tmp_path / "claude-projects"
+    default_root.mkdir()
+    monkeypatch.setattr(
+        "ormah.background.session_watcher._default_acceptance_roots",
+        lambda: [_expand_watch_dir(default_root)],
+    )
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = custom
+    watches = start_session_watcher(engine)
+    try:
+        dirs = {w.watch_dir for w in watches}
+        assert _expand_watch_dir(custom) in dirs
+        assert _expand_watch_dir(default_root) in dirs
+        acc = next(w for w in watches if w.watch_dir == _expand_watch_dir(default_root))
+        assert acc.discover is False and acc.handler is not None
+        cus = next(w for w in watches if w.watch_dir == _expand_watch_dir(custom))
+        assert cus.discover is True
+    finally:
+        stop_session_watcher(watches)
+
+
+def test_overlapping_roots_are_collapsed_to_one(engine, tmp_path, monkeypatch):
+    """council R11: an ancestor acceptance root nested with a discovery root collapses to one,
+    so a transcript can never get two cursors (single-cursor invariant)."""
+    parent = tmp_path / "claude"
+    parent.mkdir()
+    child = parent / "projects"
+    child.mkdir()
+    monkeypatch.setattr(
+        "ormah.background.session_watcher._default_acceptance_roots",
+        lambda: [_expand_watch_dir(parent)],
+    )
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = child
+    watches = start_session_watcher(engine)
+    try:
+        assert [w.watch_dir for w in watches] == [_expand_watch_dir(child)]
+    finally:
+        stop_session_watcher(watches)
+
+
+# --- Atomic state file -----------------------------------------------------------------
+
+def test_save_state_is_atomic_under_a_torn_write(tmp_path, monkeypatch):
+    """A torn write must not discard the cursor file: os.replace raising leaves the ORIGINAL
+    intact (measured: 7081 torn reads on a direct write vs 0 via replace)."""
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir()
+    good = {f"proj/f{i}.jsonl": {"end_offset": i, "hash": "h", "node_ids": []} for i in range(300)}
+    _save_state(watch_dir, good)
+    assert _load_state(watch_dir) == good
+
+    def _boom(src, dst):
+        raise OSError("simulated torn write")
+
+    monkeypatch.setattr("ormah.background.session_watcher.os.replace", _boom)
+    with pytest.raises(OSError):
+        _save_state(watch_dir, {"different": {"end_offset": 999}})
+    # every prior entry survives, still valid JSON
+    assert _load_state(watch_dir) == good
+
+
+# --- Rewrites of the reconcile suite (now a producer that enqueues) --------------------
+
+def test_reconcile_ingests_file_the_live_path_missed(engine, tmp_path):
+    """A changed, idle transcript whose fsevent never reached the handler is ENQUEUED by the
+    sweep and then ingested by the drain."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    rel = str(jsonl.relative_to(watch_dir))
+    assert rel not in handler._state
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1          # producer: enqueued the missed file
+        _drain_all(handler)
+    assert rel in handler._state
+    assert handler._state[rel]["user_turns"] == 6
+
+
+def test_reconcile_skips_subagents_keeps_primary(engine, tmp_path):
+    """reconcile's discovery walk enqueues the primary session transcript but skips sibling
+    subagent transcripts. Migrated from the dead direct-ingest catch-up scan (ADR-0004
+    R12 cleanup) — same assertion, driven through reconcile()+drain instead of the
+    orphaned function."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    sub_dir = project_dir / "abc123" / "subagents"
+    sub_dir.mkdir(parents=True)
+    primary = project_dir / "abc123.jsonl"
+    _make_jsonl(primary, user_turns=6)
+    _mark_idle(primary)  # finished session, below flush_bytes → idle flush
+    _make_jsonl(sub_dir / "agent-deadbeef.jsonl", user_turns=6)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1  # only the primary is a candidate
+        _drain_all(handler)
+
+    rel = str(primary.relative_to(watch_dir))
+    sub_rel = str((sub_dir / "agent-deadbeef.jsonl").relative_to(watch_dir))
+    assert rel in handler._state
+    assert sub_rel not in handler._state
+
+
+def test_reconcile_respects_lookback_for_never_seen_files(engine, tmp_path):
+    """A positive lookback cutoff excludes an old never-seen file from the reconcile sweep
+    while a recent never-seen file is enqueued and ingested. Migrated from the dead
+    direct-ingest catch-up scan (ADR-0004 R12 cleanup) — reconcile's lookback_hours>0
+    cutoff branch (as opposed to the lookback_hours<0 disabled case already covered by
+    test_reconcile_skips_never_seen_when_lookback_negative) had no direct test before this."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+
+    recent = project_dir / "recent.jsonl"
+    _make_jsonl(recent, user_turns=6)
+    _mark_idle(recent)  # finished session, below flush_bytes → idle flush
+
+    old = project_dir / "old.jsonl"
+    _make_jsonl(old, user_turns=6)
+    old_time = time.time() - (200 * 3600)  # beyond the 72h lookback below
+    os.utime(old, (old_time, old_time))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool", lookback_hours=72)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1  # only recent enqueued
+        _drain_all(handler)
+
+    rel_recent = str(recent.relative_to(watch_dir))
+    rel_old = str(old.relative_to(watch_dir))
+    assert rel_recent in handler._state
+    assert rel_old not in handler._state
+
+
+def test_reconcile_skips_fully_consumed_file_on_second_pass(engine, tmp_path):
+    """A second sweep does not re-enqueue a file already consumed to EOF."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1
+        _drain_all(handler)
+        assert handler.reconcile() == 0          # fully consumed -> no duplicate enqueue
+
+
+def test_reconcile_does_not_reingest_what_live_path_already_took(engine, tmp_path):
+    """reconcile shares handler state, so a file already drained is not re-enqueued."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    rel = str(jsonl.relative_to(watch_dir))
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")   # the live path enqueues it
+        _drain_all(handler)
+        node_count = len(handler._state[rel]["node_ids"])
+        assert handler.reconcile() == 0            # not re-enqueued
+    assert len(handler._state[rel]["node_ids"]) == node_count
+
+
+def test_reconcile_logs_recovery_heartbeat(engine, tmp_path, caplog):
+    """reconcile emits the functional heartbeat, now counting ENQUEUED (not ingested)."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with caplog.at_level("INFO", logger="ormah.background.session_watcher"):
+        handler.reconcile()
+    assert any("reconcile enqueued" in r.message for r in caplog.records)
+
+
+def test_reconcile_recovers_partial_tail_without_mtime_change(engine, tmp_path):
+    """A grown tail with an UNCHANGED mtime is still enqueued (cursor != size, not mtime)."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1
+        _drain_all(handler)
+        old_mtime = jsonl.stat().st_mtime
+        _make_jsonl(jsonl, user_turns=12)             # append 6 more (size grows)
+        os.utime(jsonl, (old_mtime, old_mtime))       # mtime unchanged on purpose
+        assert handler.reconcile() == 1               # picked up via end_offset != size
+        _drain_all(handler)
+    assert handler._state[rel]["end_offset"] == jsonl.stat().st_size
+
+
+def test_reconcile_while_live_ingesting_does_not_double_enqueue(engine, tmp_path):
+    """reconcile no longer touches _ingesting; a path already queued at its current boundary
+    is not double-enqueued (enqueue is idempotent per (path, boundary))."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    handler.spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+    assert handler.spool.pending_count() == 1
+    handler.reconcile()                               # producer must not double-queue
+    assert handler.spool.pending_count() == 1
+
+
+def test_reconcile_skips_never_seen_when_lookback_negative(engine, tmp_path):
+    """lookback_hours < 0 (catch-up disabled): never-seen files are not enqueued."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool", lookback_hours=-1)
+    rel = str(jsonl.relative_to(watch_dir))
+    assert rel not in handler._state
+    assert handler.reconcile() == 0
+    assert handler.spool.pending_count() == 0
+    assert rel not in handler._state
+
+
+def test_reconcile_respects_per_tick_enqueue_cap(engine, tmp_path):
+    """D3: the per-tick budget survives as the producer-side ENQUEUE cap — a sweep over more
+    candidates than the cap enqueues exactly the cap."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    handler.engine.settings.session_watcher_reconcile_max_per_tick = 2
+    for i in range(5):
+        p = proj / f"session-{i:02d}.jsonl"
+        _make_jsonl(p, user_turns=6)
+        _mark_idle(p)
+    assert handler.reconcile() == 2
+    assert handler.spool.pending_count() == 2
+
+
+def test_reconcile_does_not_starve_valid_file_behind_stuck_never_seen_files(engine, tmp_path):
+    """D3: > cap never-seen files that dead-letter must not starve a later valid transcript —
+    once they leave the candidate set the valid file gets through under the enqueue cap."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    handler.engine.settings.session_watcher_reconcile_max_per_tick = 3
+    now = time.time()
+    for i in range(3):                                # oldest -> enqueued first
+        p = proj / f"stuck-{i:03d}.jsonl"
+        _partial_unterminated(p)
+        os.utime(p, (now - 1000 + i, now - 1000 + i))
+    valid = proj / "zz-valid.jsonl"                   # newer than the stuck files -> sorts last
+    _make_jsonl(valid, user_turns=6)
+    os.utime(valid, (now - 100, now - 100))           # idle (age > threshold) yet newest
+    rel_valid = str(valid.relative_to(watch_dir))
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        for _ in range(4):
+            handler.reconcile()
+            _drain_all(handler)
+            if rel_valid in handler._state:
+                break
+    assert rel_valid in handler._state                # reached, not starved
+
+
+def test_a_due_job_is_claimed_ahead_of_a_backed_off_one(engine, tmp_path):
+    """T-N1: a due valid job is ingested and does not stall behind an external-failure job
+    whose not_before is in the future (replaces the deprioritization FIFO coverage)."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    valid = proj / "valid.jsonl"
+    _make_jsonl(valid, user_turns=6)
+    _mark_idle(valid)
+    stuck = proj / "stuck.jsonl"
+    _make_jsonl(stuck, user_turns=6)
+    _mark_idle(stuck)
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    rel_valid = str(valid.relative_to(watch_dir))
+
+    spool.enqueue(stuck, boundary=stuck.stat().st_size, reason="nudge")
+    stuck_job = spool.claim_next()
+    spool.requeue(stuck_job, failure_class="external")   # not_before ~ now + backoff
+    spool.enqueue(valid, boundary=valid.stat().st_size, reason="nudge")
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _drain_all(handler)                              # claims the due one, skips the backed-off
+    assert rel_valid in handler._state
+    assert spool.pending_count() == 1                    # the backed-off job is still queued
+    assert not list((spool.root / "failed").iterdir())   # not dead-lettered
+
+
+def test_reconcile_enqueues_at_most_the_per_tick_cap(engine, tmp_path):
+    """T-N2: a sweep over more than the cap enqueues exactly the cap, OLDEST-first."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    handler.engine.settings.session_watcher_reconcile_max_per_tick = 3
+    now = time.time()
+    files = []
+    for i in range(5):
+        p = proj / f"s-{i}.jsonl"
+        _make_jsonl(p, user_turns=6)
+        os.utime(p, (now - (100 - i), now - (100 - i)))   # i=0 oldest .. i=4 newest
+        files.append(p)
+
+    assert handler.reconcile() == 3
+    assert handler.spool.pending_count() == 3
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _drain_all(handler)
+    state = handler._state
+    for p in files[:3]:                                   # the 3 oldest
+        assert str(p.relative_to(watch_dir)) in state
+    for p in files[3:]:                                   # the 2 newest were not enqueued
+        assert str(p.relative_to(watch_dir)) not in state
+
+
+def test_idle_file_with_no_safe_boundary_is_dead_lettered(engine, tmp_path):
+    """T-N3: an idle transcript whose bytes never reach a safe boundary (a single unterminated
+    turn) dead-letters with a distinct reason instead of silently completing."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "partial.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _drain_all(handler)
+
+    assert list((spool.root / "failed").glob("*.json")), \
+        "an idle file with no safe boundary must be dead-lettered, not silently completed"
+    assert spool.pending_count() == 0
+    assert not any(p.name.endswith(".json") for p in (spool.root / "running").iterdir())
+    errs = list((spool.root / "failed").glob("*.error"))
+    assert errs and "no_safe_boundary" in errs[0].read_text()
+
+
+def test_frozen_prefix_advance_never_passes_the_accepted_boundary(engine, tmp_path):
+    """council-pr F1: a nudge accepted boundary B; the live file then grew to S>B, still an
+    unterminated single turn, and went idle. The frozen-prefix advance must stop the cursor
+    at B (the accepted boundary), NEVER at raw EOF S -- bytes [B,S] were never accepted nor
+    extracted, so a later nudge at S must still be able to re-examine them."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "partial.jsonl"
+
+    def _user(t):
+        return json.dumps({"type": "user", "message": {"content": t}})
+
+    def _asst_open(t):  # no stop_reason, no following user -> never a safe boundary
+        return json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}
+        )
+
+    prefix = _user("prompt one long enough to parse here") + "\n" \
+        + _asst_open("answer one still streaming and open") + "\n"
+    jsonl.write_text(prefix)
+    boundary = jsonl.stat().st_size          # B: exactly what the nudge measured
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    spool.enqueue(jsonl, boundary=boundary, reason="nudge")   # the nudge accepted exactly B
+
+    # the LIVE session grew PAST the accepted boundary, still with no safe boundary anywhere
+    jsonl.write_text(
+        prefix + _asst_open("more streaming tokens appended after the boundary") + "\n"
+    )
+    size = jsonl.stat().st_size               # S
+    assert size > boundary
+    _mark_idle(jsonl)                         # ...then went idle with the turn still open
+
+    rel = str(jsonl.relative_to(watch_dir))
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _drain_all(handler)
+
+    cursor = _load_state(watch_dir).get(rel, {}).get("end_offset", 0)
+    assert cursor <= boundary, (
+        f"frozen-prefix advance jumped the cursor to {cursor} (S={size}); it must never "
+        f"pass the accepted boundary B={boundary}, or bytes [B,S] are skipped forever"
+    )
+    # [B,S] was not permanently consumed: a second nudge at S can still claim it for work.
+    spool.enqueue(jsonl, boundary=size, reason="nudge")
+    assert spool.claim_next() is not None, "the second nudge at S must be claimable"
+
+
+def test_unexpected_exception_requeues_instead_of_stranding_in_running(engine, tmp_path):
+    """council-pr F2: an unexpected exception AFTER the job is claimed into running/ must not
+    strand it there until the next restart's recover(). The drain loop requeues it as an
+    EXTERNAL failure (persisted backoff) so it returns to pending/ and retries -- never
+    dead-lettered (H1)."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+
+    orig_run = SessionHandler._run_job
+    state = {"raised": False}
+
+    def flaky(self, job):
+        if not state["raised"]:
+            state["raised"] = True
+            raise RuntimeError("unexpected mid-ingest failure after the claim")
+        return orig_run(self, job)
+
+    running = spool.root / "running"
+
+    def running_json():
+        return [p for p in running.iterdir() if p.name.endswith(".json")]
+
+    try:
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+             patch.object(SessionHandler, "_run_job", flaky):
+            handler.start_drain()
+            handler.wake()
+            assert _wait_until(
+                lambda: state["raised"] and not running_json(), timeout=8
+            ), "the claimed job was stranded in running/ after an unexpected exception"
+            assert _wait_until(lambda: spool.pending_count() >= 1, timeout=8), \
+                "the job must be back in pending/ (requeued with backoff), not lost"
+            assert not list((spool.root / "failed").iterdir()), \
+                "a transient/unexpected error must never dead-letter accepted work (H1)"
+    finally:
+        handler._stop_event.set()
+        handler.wake()
+        handler.join_drain(timeout=5)
+
+
+def test_observer_job_respects_min_turns_but_nudge_force_flushes(engine, tmp_path):
+    """council-pr F3: force-flush is the NUDGE's intent, not every producer's. An Observer
+    job for a fresh, below-min_turns, NON-idle transcript must NOT bypass the min_turns gate
+    (it would fragment an active session); the same transcript via a NUDGE job DOES
+    force-flush and ingest a short just-ended session."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+
+    # Fresh (NOT idle) + below min_turns=5 -> the min_turns accumulation gate applies.
+    obs_file = proj / "obs.jsonl"
+    _make_jsonl(obs_file, user_turns=2)       # 2 < 5, mtime is now -> active
+    rel_obs = str(obs_file.relative_to(watch_dir))
+    spool.enqueue(obs_file, boundary=obs_file.stat().st_size, reason="observer", force_flush=False)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as llm:
+        _drain_all(handler)
+    assert rel_obs not in _load_state(watch_dir), \
+        "an Observer job must not force-flush past the min_turns gate on an active session"
+    assert not llm.called, "no extraction may run for a deferred below-min_turns Observer job"
+
+    # The SAME shape via a NUDGE force-flushes: a SessionEnd/PreCompact is an explicit ask.
+    nudge_file = proj / "nudge.jsonl"
+    _make_jsonl(nudge_file, user_turns=2)     # also below min_turns and active
+    rel_nudge = str(nudge_file.relative_to(watch_dir))
+    spool.enqueue(nudge_file, boundary=nudge_file.stat().st_size, reason="nudge", force_flush=True)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _drain_all(handler)
+    assert rel_nudge in _load_state(watch_dir), \
+        "a nudge job must force-flush a short just-ended session past the min_turns gate"
+
+
+def test_frozen_prefix_advance_never_moves_the_cursor_backward(engine, tmp_path):
+    """council-pr R2 F2: _mark_frozen_prefix_consumed must be monotonic. A stale or
+    out-of-order boundary job (boundary < the current cursor) must NEVER rewind the cursor --
+    that would re-open already-consumed bytes for duplicate extraction. The prior
+    ``end_offset = min(boundary, size)`` wrote the lower boundary directly."""
+    from ormah.background.ingest_spool import IngestSpool
+    from ormah.background.session_watcher import _commit_state
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    jsonl.write_text("x" * 5000)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    # cursor already well past, persisted to BOTH memory and disk
+    _commit_state(handler._state, rel, {"end_offset": 4000}, handler._state_lock, watch_dir)
+
+    handler._mark_frozen_prefix_consumed(jsonl, rel, boundary=1000)   # stale, LOWER boundary
+    assert handler._state[rel]["end_offset"] == 4000, (
+        "a boundary below the current cursor must never rewind it (duplicate re-ingestion)"
+    )
+    assert _load_state(watch_dir).get(rel, {}).get("end_offset") == 4000, (
+        "the rewind must not be persisted to disk either"
+    )
+
+
+def test_capped_continuation_inherits_the_producer_force_flush(engine, tmp_path):
+    """council-pr R2 F4: a capped batch's 'drain' continuation must inherit the ORIGINATING
+    producer's force_flush, not force-flush unconditionally. An Observer's capped remainder
+    must continue NON-forcing (else it fragments an active session past its gates); a nudge's
+    remainder stays forcing."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool", min_turns=1)
+    handler.flush_bytes = 300      # small -> the first closed batch caps (content past it)
+    spool = handler.spool
+
+    obs_file = proj / "obs.jsonl"
+    _make_jsonl(obs_file, user_turns=12)       # large -> flush_bytes=300 caps the first batch
+    _mark_idle(obs_file)
+    spool.enqueue(obs_file, boundary=obs_file.stat().st_size, reason="observer", force_flush=False)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        job = spool.claim_next()
+        handler._run_job(job)                  # OK + capped -> enqueues a 'drain' continuation
+    conts = [json.loads(p.read_text()) for p in (spool.root / "pending").glob("*.json")]
+    assert conts, "a capped Observer batch must enqueue a drain continuation"
+    assert all(c["reason"] == "drain" for c in conts)
+    assert all(c["force_flush"] is False for c in conts), (
+        "an Observer-originated continuation must NOT force-flush the remainder"
+    )
+
+    nudge_file = proj / "nudge.jsonl"
+    _make_jsonl(nudge_file, user_turns=12)
+    spool.enqueue(nudge_file, boundary=nudge_file.stat().st_size, reason="nudge", force_flush=True)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        job = spool.claim_next()
+        handler._run_job(job)
+    n_conts = [
+        json.loads(p.read_text())
+        for p in (spool.root / "pending").glob("*.json")
+        if "nudge" in Path(json.loads(p.read_text())["path"]).name
+    ]
+    assert n_conts, "a capped nudge batch must enqueue a drain continuation"
+    assert all(c["force_flush"] is True for c in n_conts), (
+        "a nudge-originated continuation must keep force-flushing the remainder"
+    )
+
+
+def test_live_drain_recovers_a_job_stranded_in_running(engine, tmp_path):
+    """council-pr R2 F1: a job orphaned in running/ (a requeue that itself failed on an FS
+    fault) is invisible to claim_next, which scans only pending/. The live drain must
+    periodically recover running/ back to pending/ WITHOUT waiting for a process restart."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge", force_flush=True)
+    claimed = spool.claim_next()               # moves it into running/
+    assert claimed is not None and spool.pending_count() == 0
+    # deliberately do NOT complete/requeue -> stranded in running/, invisible to a pending scan
+    handler._idle_poll_seconds = 0.05          # tick the idle recover fast for the test
+    handler._recover_stale_seconds = 0.0       # recover regardless of age (default 60s gate)
+
+    try:
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            handler.start_drain()
+            handler.wake()
+            assert _wait_until(
+                lambda: _spool_idle(spool) and rel in _load_state(watch_dir), timeout=8
+            ), "the stranded running/ job was never recovered and ingested by the live drain"
+    finally:
+        handler._stop_event.set()
+        handler.wake()
+        handler.join_drain(timeout=5)
+
+
+# --- Debounce coalescing now happens on the producer (enqueue), not the ingest ---------
+
+def test_debounce_coalesces_writes(engine, tmp_path):
+    """5 rapid events -> 1 ENQUEUE (the debounce coalesces on the Observer, the drain would
+    then ingest once)."""
+    from watchdog.events import FileModifiedEvent
+
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-proj"
+    proj.mkdir(parents=True)
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 0.3, 5, spool=spool)
+    jsonl = proj / "active.jsonl"
+
+    for i in range(5):
+        _make_jsonl(jsonl, user_turns=6 + i)
+        handler.on_modified(FileModifiedEvent(str(jsonl)))
+        time.sleep(0.05)
+    time.sleep(0.5)                                        # let the single debounced timer fire
+
+    assert spool.pending_count() == 1
+
+
+def test_retry_fires_and_ingests_after_idle(engine, tmp_path):
+    """The idle refire now ENQUEUES; the appended tail is ingested through the drain path."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-proj"
+    proj.mkdir(parents=True)
+    jsonl = proj / "active.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool", idle_threshold=30)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+    first_offset = handler._state[rel]["end_offset"]
+    assert first_offset > 0
+
+    _append_pair(jsonl, 6)
+    _append_pair(jsonl, 7)
+    _mark_idle(jsonl)                                     # grew, then went idle
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+    assert handler._state[rel]["end_offset"] > first_offset
+
+
+# --- Shutdown / lifecycle against the drain thread -------------------------------------
+
+def test_drain_rejected_after_stop_event(engine, tmp_path):
+    """Once _stop_event is set, the drain refuses to ingest before touching the engine —
+    the use-after-close guard at shutdown (issue #52), now on the drain claim step."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl)
+    _mark_idle(jsonl)
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    handler._stop_event.set()
+    spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+    job = spool.claim_next()
+    assert job is not None
+
+    with patch("ormah.background.session_watcher._ingest_session") as mock_ingest:
+        handler._run_job(job)
+
+    mock_ingest.assert_not_called()
+    assert handler.in_flight_count() == 0
+
+
+def test_stop_session_watcher_drains_inflight_ingest(engine, tmp_path):
+    """stop_session_watcher blocks until an in-flight drain ingest finishes, so nothing writes
+    to the DB after engine.shutdown() (use-after-close guard, issue #52)."""
+    from ormah.background.ingest_spool import IngestSpool
+    from ormah.background.session_watcher import SessionWatch
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-proj"
+    proj.mkdir(parents=True)
+    jsonl = proj / "x.jsonl"
+    _make_jsonl(jsonl)
+    _mark_idle(jsonl)
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_ingest(*a, **k):
+        entered.set()
+        release.wait(5)
+        return IngestResult.OK
+
+    spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+    with patch("ormah.background.session_watcher._ingest_session", side_effect=blocking_ingest):
+        handler.start_drain()
+        handler.wake()
+        assert entered.wait(5)                     # an ingest is now in-flight on the drain
+        assert handler.in_flight_count() == 1
+
+        watch = SessionWatch(
+            watch_dir=watch_dir, handler=handler, observer=MagicMock(),
+            spool=spool, discover=False,
+        )
+        stop_returned = threading.Event()
+
+        def stopper():
+            stop_session_watcher([watch])
+            stop_returned.set()
+
+        s = threading.Thread(target=stopper)
+        s.start()
+        assert not stop_returned.wait(0.5)         # stop must NOT return while ingest is in-flight
+        release.set()                              # let the ingest finish
+        assert stop_returned.wait(5)               # now the drain completes and stop returns
+        s.join(5)
+    assert handler.in_flight_count() == 0
+
+
+def test_start_session_watcher_recovers_backlog_off_bind(engine, tmp_path):
+    """start_session_watcher makes the Observer live immediately (no synchronous scan blocks the
+    bind) and the pre-existing backlog is recovered off-bind via the startup discovery sweep +
+    drain — not a synchronous bind-time scan (issue #52)."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = watch_dir
+    engine.settings.session_watcher_lookback_hours = 9999
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        watches = start_session_watcher(engine)
+        try:
+            assert len(watches) == 1
+            assert watches[0].observer is not None and watches[0].observer.is_alive()
+            assert watches[0].spool is not None   # the always-on worker owns recovery now
+            assert _wait_until(lambda: rel in watches[0].handler._state, timeout=12), \
+                "the startup backlog must be recovered off the bind path"
+        finally:
+            stop_session_watcher(watches)
+
+
+# --- run_session_reconcile: Observer opt-in, sweep gated on discover -------------------
+
+def test_run_session_reconcile_recreates_dead_observer(engine, tmp_path):
+    """A dead Observer is stopped/joined and recreated; the sweep is gated on discover."""
+    from ormah.background.ingest_spool import IngestSpool
+    from ormah.background.session_watcher import SessionWatch
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999,
+                             spool=IngestSpool(tmp_path / "spool"))
+
+    dead = MagicMock()
+    dead.is_alive.return_value = False
+    watch = SessionWatch(watch_dir=watch_dir, handler=handler, observer=dead,
+                         spool=handler.spool, discover=False)
+
+    with patch("ormah.background.session_watcher.Observer") as MockObserver:
+        new_obs = MockObserver.return_value
+        total = run_session_reconcile([watch])
+
+    dead.stop.assert_called_once()
+    dead.join.assert_called_once()
+    new_obs.schedule.assert_called_once()
+    new_obs.start.assert_called_once()
+    assert watch.observer is new_obs
+    assert total == 0  # discover=False -> the sweep is skipped
+
+
+def test_run_session_reconcile_runs_reconcile_even_when_recreate_fails(engine, tmp_path):
+    """If recreating a dead Observer raises, a discover watch still runs its reconcile sweep."""
+    from ormah.background.ingest_spool import IngestSpool
+    from ormah.background.session_watcher import SessionWatch
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999,
+                             spool=IngestSpool(tmp_path / "spool"))
+    handler.reconcile = MagicMock(return_value=0)
+
+    dead = MagicMock()
+    dead.is_alive.return_value = False
+    watch = SessionWatch(watch_dir=watch_dir, handler=handler, observer=dead,
+                         spool=handler.spool, discover=True)
+
+    with patch("ormah.background.session_watcher.Observer", side_effect=RuntimeError("boom")):
+        total = run_session_reconcile([watch])
+
+    handler.reconcile.assert_called_once()  # safety net ran despite recreate failure
+    assert total == 0
+
+
+def test_run_session_reconcile_skips_observer_recreation_when_none(engine, tmp_path):
+    """run_session_reconcile on an observer-less watch does NOT create an Observer."""
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir()
+    engine.settings.session_watcher_enabled = False
+    engine.settings.session_watcher_dir = watch_dir
+    watches = start_session_watcher(engine)          # disabled -> observer None
+    try:
+        run_session_reconcile(watches)
+        assert watches[0].observer is None
+    finally:
+        stop_session_watcher(watches)
+
+
+# --- ADR-0004 Task 3: force-flush + the accepted-boundary hard ceiling ---
+
+
+def test_force_flush_ingests_fresh_small_transcript(engine, tmp_path):
+    """A JUST-written transcript (not idle) with fewer than min_turns user turns is ingested
+    when force_flush is set (the nudge's intent), and is NOT ingested without it — that gap
+    is what makes a SessionEnd nudge useless otherwise. force_flush is now decoupled from the
+    boundary ceiling (council-pr F3): the boundary caps how far a parse reads; only the
+    explicit force_flush bypasses the min_turns/idle gate."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=2)          # below min_turns, and NOT _mark_idle'd
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        # A boundary ALONE (Observer/reconcile job) must not force past the min_turns gate.
+        assert _ingest_session(
+            engine, jsonl, {}, watch_dir, min_turns=5,
+            boundary=jsonl.stat().st_size) != IngestResult.OK
+        # The nudge lane force-flushes: below min_turns and not idle, it still ingests.
+        assert _ingest_session(
+            engine, jsonl, {}, watch_dir, min_turns=5,
+            boundary=jsonl.stat().st_size, force_flush=True) == IngestResult.OK
+
+
+def test_ingest_never_reads_past_the_accepted_boundary(engine, tmp_path):
+    """council R11: PreCompact nudges a LIVE session. If the transcript grows between the
+    nudge and the worker running it, turns nobody nudged must not be ingested — that is
+    the consent violation, and parse_transcript has no absolute ceiling of its own."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    _make_jsonl(jsonl, user_turns=4)
+    boundary = jsonl.stat().st_size
+    _make_jsonl(jsonl, user_turns=12)         # grew AFTER the nudge was accepted
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _ingest_session(
+            engine, jsonl, state, watch_dir, min_turns=5,
+            boundary=boundary, force_flush=True,   # the nudge lane: force-flush + ceiling
+        )
+    assert state[rel]["end_offset"] <= boundary
+
+
+# NOTE: the capped-drain case is owned by Task 2 and is implemented there as
+# test_a_capped_batch_re_enqueues_the_remainder — do not duplicate it here.
+
+
+def test_rewind_recovery_honours_the_accepted_boundary(engine, tmp_path, caplog):
+    """The ADR-0003 orphan-recovery rewind (re-parse from offset 0) must carry the same
+    ceiling as the happy path — otherwise the recovery path becomes the consent leak.
+    A genuine legacy mid-response cursor triggers the rewind; the file ALSO has closed
+    turns past the accepted boundary that must NOT be re-ingested."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    records = [
+        {"type": "user", "message": {"content": "Prompt about the architecture decision"}},
+        {"type": "assistant", "message": {"stop_reason": "tool_use",
+            "content": [{"type": "text", "text": "First part"}]}},
+        {"type": "assistant", "message": {"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Second part closing the first turn"}]}},
+        {"type": "user", "message": {"content": "A LATER prompt appended after the nudge"}},
+        {"type": "assistant", "message": {"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "A later answer nobody nudged"}]}},
+    ]
+    with open(jsonl, "w") as f:
+        for line in records:
+            f.write(json.dumps(line) + "\n")
+    raw = jsonl.read_bytes().splitlines(keepends=True)
+    mid = len(raw[0]) + len(raw[1])            # cursor parked mid-response by an older version
+    boundary = mid + len(raw[2])               # accepted EOF = end of the first closed turn
+    _mark_idle(jsonl)
+
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {rel: {"end_offset": mid, "hash": "stale", "user_turns": 1, "node_ids": []}}
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as mock_llm, \
+         caplog.at_level(logging.INFO, logger="ormah.background.session_watcher"):
+        r1 = _ingest_session(engine, jsonl, state, watch_dir, 1, boundary=boundary)
+    assert r1 == IngestResult.OK
+    assert "recovering legacy mid-response cursor" in caplog.text     # the rewind ran
+    prompt = str(mock_llm.call_args_list[0])
+    assert "Prompt about the architecture decision" in prompt         # re-paired from 0
+    assert "A LATER prompt appended after the nudge" not in prompt     # past the ceiling
+    assert "A later answer nobody nudged" not in prompt               # never ingested
+    assert state[rel]["end_offset"] <= boundary
+

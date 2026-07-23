@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import time
@@ -17,6 +19,7 @@ from threading import Event, Lock, Thread, Timer
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from ormah.background.ingest_spool import IngestSpool, root_key, spool_root
 from ormah.background.llm_client import ingest_provider_configured
 from ormah.engine.memory_engine import (
     EXTRACT_ERR_CALL_FAILED,
@@ -37,7 +40,6 @@ class IngestResult(Enum):
     TRANSIENT = "transient"      # external failure (engine error) or defer -> retry, never park
 
 _STATE_FILENAME = ".session_watcher_state"
-MAX_RECONCILE_RETRIES = 3
 MAX_EXTRACT_FAILURES = 3  # per-slice extraction failures (provider present) before skipping it
 _HEURISTIC_SOURCE = "transcript_watcher_heuristic"
 _LLM_JUDGE_SOURCE = "transcript_watcher_llm_judge"
@@ -666,19 +668,66 @@ def _expand_watch_dir(path: Path) -> Path:
     return Path(path).expanduser().resolve()
 
 
-def _session_watch_dirs(settings) -> list[Path]:
-    """Return existing transcript watch directories for the current settings."""
+def _default_acceptance_roots() -> list[Path]:
+    """The standard hook locations a nudge may target regardless of discovery config.
+
+    Patchable (council R10/D8): a nudge is an explicit user request, so a path under the
+    default Claude or Codex root is accepted even when a custom ``session_watcher_dir``
+    replaced the discovery defaults — otherwise every ``~/.codex/sessions`` transcript
+    would get a permanent 422. Tests patch this to ``[]`` so the suite never builds watches
+    over the real ``~/.claude`` / ``~/.codex`` on a dev machine.
+    """
+    return [
+        _expand_watch_dir(_DEFAULT_SESSION_WATCHER_DIR),
+        _expand_watch_dir(_CODEX_SESSION_WATCHER_DIR),
+    ]
+
+
+def _configured_watch_roots(settings) -> list[Path]:
+    """Discovery roots for the current settings, WITHOUT an ``exists()`` filter (council
+    R4/R5), so an absent configured dir still yields a handler and a later nudge for a
+    transcript under it is accepted instead of 422'd forever."""
     primary = _expand_watch_dir(settings.session_watcher_dir)
-    candidates = [primary]
-
+    roots = [primary]
     if primary == _expand_watch_dir(_DEFAULT_SESSION_WATCHER_DIR):
-        candidates.append(_expand_watch_dir(_CODEX_SESSION_WATCHER_DIR))
+        roots.append(_expand_watch_dir(_CODEX_SESSION_WATCHER_DIR))
+    return roots
 
-    watch_dirs: list[Path] = []
-    for candidate in candidates:
-        if candidate.exists() and candidate not in watch_dirs:
-            watch_dirs.append(candidate)
-    return watch_dirs
+
+def _is_nested_or_equal(a: Path, b: Path) -> bool:
+    """True when ``a`` is ``b`` or lives inside ``b``."""
+    return a == b or b in a.parents
+
+
+def _resolve_acceptance_roots(settings) -> list[tuple[Path, bool]]:
+    """Return ``(root, discover)`` for every root a nudge may target.
+
+    Separate "where I discover" from "what I accept" (council R10/R11):
+      - Discovery roots (``_configured_watch_roots``) get an Observer and a reconcile sweep,
+        but only while ``session_watcher_enabled`` is true.
+      - Acceptance roots = discovery ∪ the default Claude/Codex roots. Every acceptance root
+        gets a handler + spool so ``/ingest/nudge`` can be honoured, but an acceptance-only
+        root is never swept (``discover=False``) — sweeping it would ingest transcripts under
+        a directory the user deliberately swapped out.
+
+    Roots are deduplicated by resolved path, and any root nested under (or containing) a root
+    already kept is collapsed away, so one transcript can never get two cursors — the ADR's
+    single-cursor invariant. Discovery roots are considered first so they win the collapse
+    and keep their ``discover`` flag.
+    """
+    enabled = bool(settings.session_watcher_enabled)
+    discovery = _configured_watch_roots(settings)
+    discovery_set = set(discovery)
+    ordered = discovery + [r for r in _default_acceptance_roots() if r not in discovery_set]
+
+    kept: list[tuple[Path, bool]] = []
+    for root in ordered:
+        if any(
+            _is_nested_or_equal(root, k) or _is_nested_or_equal(k, root) for k, _ in kept
+        ):
+            continue
+        kept.append((root, enabled and root in discovery_set))
+    return kept
 
 
 def _file_hash(path: Path) -> str:
@@ -698,9 +747,24 @@ def _load_state(watch_dir: Path) -> dict:
 
 
 def _save_state(watch_dir: Path, state: dict) -> None:
-    """Persist state for the watch directory."""
+    """Persist state atomically — a torn ``write_text`` would discard every cursor in this
+    dir (``_load_state`` treats corrupt JSON as "start fresh"), and with an always-on worker
+    a concurrent reader is the norm, not the exception (measured: 7081 torn reads on a direct
+    write vs 0 via ``os.replace``). Stage in a per-pid tmp file, fsync it, then rename it into
+    place; fsync the directory so the rename itself survives a crash."""
     state_path = watch_dir / _STATE_FILENAME
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp = state_path.with_suffix(state_path.suffix + f".tmp{os.getpid()}")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, state_path)
+    with contextlib.suppress(OSError):  # durability of the rename itself, best-effort
+        dir_fd = os.open(state_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
 
 def _commit_state(state: dict, rel: str, entry: dict, state_lock, watch_dir: Path) -> None:
@@ -735,16 +799,29 @@ def _ingest_session(
     flush_bytes: int = 60000,
     on_defer_active=None,
     state_lock=None,
+    boundary: int | None = None,
+    force_flush: bool = False,
 ) -> IngestResult:
     """Ingest a single JSONL session transcript if changed.
+
+    ``boundary`` is the accepted EOF the drain forwards from the spool job (ADR-0004 Task 3).
+    When present it does two narrow things, and nothing else: (1) it is an absolute
+    ``stop_offset`` ceiling passed to EVERY parse in this lane — the happy path, the
+    orphan-recovery rewind probe, and the rewind re-parse — so ingestion never reads past the
+    bytes the nudge measured (PreCompact nudges a LIVE, still-growing session); (2) it
+    FORCE-FLUSHES, bypassing ONLY the idle-threshold and the ``min_turns`` gate, so a short
+    just-ended session is not stranded. It must NOT touch the safe-boundary rule or any
+    cap/quarantine rule: an ended session is final, but a response still being written must
+    never be split from its prompt.
 
     Returns:
         IngestResult.OK         — new content was committed.
         IngestResult.NO_PROGRESS — nothing to commit at the safe boundary (file is frozen,
-                                   corrupt, or already fully consumed) — park-eligible by
-                                   reconcile after MAX_RECONCILE_RETRIES at the same size.
-        IngestResult.TRANSIENT  — external failure (engine error, in-flight defer, or
-                                   in-flight skip); never increments the park counter.
+                                   corrupt, or already fully consumed). The drain completes an
+                                   empty delta, or dead-letters an idle file whose bytes never
+                                   reach a safe boundary.
+        IngestResult.TRANSIENT  — external failure (engine error, in-flight defer, or below
+                                   min_turns while active); the drain requeues with backoff.
     """
     if _is_subagent_transcript(path):
         return IngestResult.NO_PROGRESS
@@ -772,8 +849,16 @@ def _ingest_session(
     if prev_offset > size:
         prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
 
+    # Two INDEPENDENT effects of a nudge, decoupled (council-pr F3): the `boundary`
+    # stop_offset ceiling applies to EVERY producer's job (never read past accepted bytes),
+    # but the FORCE-FLUSH intent (bypass idle + min_turns) belongs ONLY to an explicit nudge.
+    # Deriving force_flush from `boundary is not None` leaked the bypass to Observer/reconcile
+    # jobs (which also carry a boundary), fragmenting active sessions. The caller now passes
+    # force_flush from the job's reason; boundary keeps pinning the ceiling for all jobs.
     try:
-        result = parse_transcript(path, start_offset=prev_offset, max_bytes=flush_bytes)
+        result = parse_transcript(
+            path, start_offset=prev_offset, max_bytes=flush_bytes, stop_offset=boundary
+        )
         if should_rewind(result, prev_offset):
             # Orphan with NO forward progress: a genuine cursor left mid-response by an
             # older version. Re-parse the whole file so the dropped tail is re-paired with
@@ -786,7 +871,9 @@ def _ingest_session(
             # Uncapped probe: decide progress on the true whole-file boundary. A capped
             # re-parse can stop before the parked cursor even when recoverable closed
             # content exists past it, which would mis-park a recoverable file forever.
-            result = parse_transcript(path, start_offset=0)
+            # The stop_offset ceiling still applies: the recovery path must honour the same
+            # accepted boundary as the happy path, or it becomes the consent leak.
+            result = parse_transcript(path, start_offset=0, stop_offset=boundary)
             if result.safe_end_offset <= original_offset:
                 # The rewind itself made no progress: the "orphan" tail is a still-open
                 # in-flight response, not a recoverable one. ADR-0003: a no-progress
@@ -794,7 +881,9 @@ def _ingest_session(
                 return IngestResult.NO_PROGRESS
             # There is something to recover: drain capped as usual so the ingest slice
             # honours flush_bytes; later ticks continue incrementally from the new cursor.
-            result = parse_transcript(path, start_offset=0, max_bytes=flush_bytes)
+            result = parse_transcript(
+                path, start_offset=0, max_bytes=flush_bytes, stop_offset=boundary
+            )
     except Exception as e:
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return IngestResult.NO_PROGRESS
@@ -820,7 +909,9 @@ def _ingest_session(
 
     # Salience: don't extract from a below-threshold window unless the session is finished (idle).
     # A short but complete session is still captured; a short ACTIVE window defers to accumulate.
-    if not is_idle and payload_users < min_turns:
+    # A nudge force-flushes: a SessionEnd/PreCompact on a short session is an explicit ask, so
+    # the min_turns accumulation gate does not apply.
+    if not is_idle and not force_flush and payload_users < min_turns:
         if on_defer_active is not None:
             on_defer_active()
         return IngestResult.TRANSIENT
@@ -836,8 +927,8 @@ def _ingest_session(
 
     # Batch gate: flush once idle, or once the parser filled a full flush_bytes batch
     # (result.capped). Below that, defer so a Batch accumulates instead of round-tripping
-    # the LLM per turn.
-    if not _should_flush(is_idle, result.capped):
+    # the LLM per turn. A nudge force-flushes past this too: it authorised these exact bytes.
+    if not force_flush and not _should_flush(is_idle, result.capped):
         if on_defer_active is not None:
             on_defer_active()  # schedule a retry so the tail is not lost
         return IngestResult.TRANSIENT
@@ -995,59 +1086,6 @@ def _ingest_session(
     return IngestResult.OK
 
 
-def _scan_sessions(
-    engine: MemoryEngine,
-    watch_dir: Path,
-    min_turns: int,
-    lookback_hours: int,
-) -> int:
-    """Scan for new/changed JSONL transcripts. Returns count ingested."""
-    state = _load_state(watch_dir)
-    ingested = 0
-
-    # Read from settings so a tuned flush_bytes/idle_threshold is honored at catch-up too,
-    # not just _ingest_session's hardcoded defaults.
-    flush_bytes = getattr(engine.settings, "session_watcher_flush_bytes", 60000)
-    idle_threshold = getattr(engine.settings, "session_watcher_idle_threshold", 600.0)
-
-    now = time.time()
-    cutoff = now - (lookback_hours * 3600) if lookback_hours > 0 else 0
-
-    for jsonl_file in sorted(watch_dir.rglob("*.jsonl")):
-        rel = str(jsonl_file.relative_to(watch_dir))
-
-        # Lookback cutoff applies only to never-ingested files
-        if rel not in state and lookback_hours >= 0 and cutoff > 0:
-            try:
-                mtime = jsonl_file.stat().st_mtime
-            except OSError:
-                continue
-            if mtime < cutoff:
-                continue
-
-        # lookback_hours == -1 means skip all never-ingested files (no catch-up)
-        if rel not in state and lookback_hours < 0:
-            continue
-
-        if _ingest_session(
-            engine, jsonl_file, state, watch_dir, min_turns,
-            idle_threshold=idle_threshold, flush_bytes=flush_bytes,
-        ) == IngestResult.OK:
-            ingested += 1
-
-    # Clean stale state entries for deleted files
-    stale_keys = [
-        rel for rel in list(state.keys())
-        if not (watch_dir / rel).exists()
-    ]
-    for key in stale_keys:
-        del state[key]
-    if stale_keys:
-        _save_state(watch_dir, state)
-
-    return ingested
-
-
 class SessionHandler(FileSystemEventHandler):
     """Watches for .jsonl file create/modify events with debouncing."""
 
@@ -1062,6 +1100,7 @@ class SessionHandler(FileSystemEventHandler):
         retry_seconds: float = 30.0,
         flush_bytes: int = 60000,
         stop_event: Event | None = None,
+        spool: "IngestSpool | None" = None,
     ) -> None:
         self.engine = engine
         self.watch_dir = watch_dir
@@ -1071,80 +1110,220 @@ class SessionHandler(FileSystemEventHandler):
         self.lookback_hours = lookback_hours
         self.retry_seconds = retry_seconds
         self.flush_bytes = flush_bytes
+        self.spool = spool
         self._state = _load_state(watch_dir)
         self._timers: dict[str, Timer] = {}
         self._ingesting: set[str] = set()
-        self._pending: set[str] = set()
         self._lock = Lock()
         self._state_lock = Lock()
-        self._reconcile_attempts: dict[str, tuple[int, int, int]] = {}  # rel -> (size, mtime_ns, no_progress_count)
-        self._reconcile_transient: dict[str, tuple[int, int, int]] = {}  # rel -> (size, mtime_ns, count)
         self._stop_event = stop_event or Event()
+        # Always-on drain worker (ADR-0004): one serial consumer owns _ingesting and the
+        # state lock; producers (Observer, reconcile, /ingest/nudge) only enqueue.
+        self._wake = Event()
+        self._drain_thread: Thread | None = None
+        self._idle_poll_seconds = 2.0  # belt-and-braces: covers any missed wake() signal
+        # Idle-branch recover() only reclaims running/ claims older than this, so it never
+        # steals a legitimately in-flight claim or races a fresh requeue's two-copy window
+        # (council-pr R3 F3). Longer than any healthy _run_job extraction; orphans are rare.
+        self._recover_stale_seconds = 60.0
 
-    def _schedule_ingest(self, path: Path) -> None:
-        """Schedule a debounced ingestion for the given file."""
-        if self._stop_event.is_set():
+    # --- Producer side: the Observer debounces file events into the spool -----------------
+
+    def _schedule_enqueue(self, path: Path) -> None:
+        """Debounce a file event, then ENQUEUE (never ingest) so the single drain owns
+        extraction. The debounce belongs here — on the producer — not on the drain."""
+        if self._stop_event.is_set() or self.spool is None:
             return
         key = str(path)
         with self._lock:
             if key in self._timers:
                 self._timers[key].cancel()
-            timer = Timer(
-                self.debounce_seconds,
-                self._do_ingest,
-                args=(path,),
-            )
+            timer = Timer(self.debounce_seconds, self._enqueue_path, args=(path, "observer"))
             timer.daemon = True
             self._timers[key] = timer
             timer.start()
 
-    def _schedule_retry(self, path: Path) -> None:
-        """Re-attempt ingestion after retry_seconds — decoupled from idle_threshold so an
-        FSEvents-miss (or a capped drain continuation) is retried promptly."""
-        if self._stop_event.is_set():
+    def _enqueue_path(self, path: Path, reason: str) -> None:
+        """Enqueue the file at its current EOF and wake the drain. The claim/dedup is the
+        spool's; a boundary already queued is never lowered (Task 1)."""
+        with self._lock:
+            self._timers.pop(str(path), None)
+        if self._stop_event.is_set() or self.spool is None:
             return
-        key = str(path)
-        with self._lock:
-            if key in self._timers:
-                self._timers[key].cancel()
-            timer = Timer(self.retry_seconds, self._do_ingest, args=(path,))
-            timer.daemon = True
-            self._timers[key] = timer
-            timer.start()
-
-    def _do_ingest(self, path: Path) -> IngestResult:
-        """Ingest the session (after debounce, retry, or reconcile). Returns IngestResult.
-
-        The heavy work (parse/LLM/DB) runs lock-free; only the state read-modify-write
-        serializes via ``self._state_lock`` (passed into ``_ingest_session``), so a backlog
-        reconcile never blocks the live fast path.
-        """
-        key = str(path)
-        with self._lock:
-            self._timers.pop(key, None)
-            if self._stop_event.is_set():     # shutting down -> reject before claiming / touching DB
-                return IngestResult.TRANSIENT
-            if key in self._ingesting:
-                self._pending.add(key)
-                return IngestResult.TRANSIENT
-            self._ingesting.add(key)
-        result = IngestResult.NO_PROGRESS
         try:
-            result = _ingest_session(
-                self.engine, path, self._state, self.watch_dir, self.min_turns,
-                idle_threshold=self.idle_threshold,
-                flush_bytes=self.flush_bytes,
-                on_defer_active=lambda: self._schedule_retry(path),
-                state_lock=self._state_lock,
-            )
+            boundary = path.stat().st_size
+        except OSError:
+            return
+        # force_flush=False: the Observer/idle-retry lane is discovery, never an explicit ask;
+        # it must respect min_turns/idle so an active session is not fragmented (council-pr R2).
+        self.spool.enqueue(path, boundary=boundary, reason=reason, force_flush=False)
+        self.wake()
+
+    # --- Consumer side: the one serial drain thread ---------------------------------------
+
+    def start_drain(self) -> None:
+        """Start the always-on drain worker. Call after ``spool.recover()``."""
+        self._drain_thread = Thread(
+            target=self._drain_forever, daemon=True,
+            name=f"ingest-drain-{self.watch_dir.name}",
+        )
+        self._drain_thread.start()
+
+    def wake(self) -> None:
+        """Signal that the spool has work. Never blocks — the request path calls this."""
+        self._wake.set()
+
+    def join_drain(self, timeout: float | None = None) -> None:
+        if self._drain_thread is not None:
+            self._drain_thread.join(timeout)
+
+    def _drain_forever(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                job = self.spool.claim_next()
+            except Exception as e:  # a broken spool must not kill the worker
+                logger.warning("Ingest drain claim error on %s: %s", self.watch_dir, e)
+                job = None
+            if job is None:
+                # council-pr R2 F1: a job orphaned in running/ (a requeue that itself failed on
+                # an FS fault, below) is invisible to claim_next, which scans only pending/, and
+                # startup recover() will not run again until the NEXT restart. Sweep STALE
+                # running/ claims back to pending/ here so they self-heal live. Age-gated
+                # (council-pr R3 F3): only claims older than _recover_stale_seconds are reclaimed,
+                # so this never steals a legitimately in-flight claim (another process sharing the
+                # spool, #150) nor races a fresh requeue's sub-ms two-copy window. recover()
+                # no-ops on an empty running/ (the steady state) -- a cheap listdir per idle tick.
+                with contextlib.suppress(Exception):
+                    self.spool.recover(min_age_seconds=self._recover_stale_seconds)
+                self._wake.wait(timeout=self._idle_poll_seconds)
+                self._wake.clear()
+                continue
+            try:
+                self._run_job(job)
+            except Exception as e:  # one bad job must not kill the worker
+                logger.warning("Ingest drain run error on %s: %s", self.watch_dir, e)
+                # council-pr F2: the job was already claimed into running/ by claim_next.
+                # An unexpected error here (OSError from _commit_state/complete, an
+                # _ingest_session raise, ...) would otherwise strand it in running/ until the
+                # NEXT restart's recover() -- the live drain only scans pending/. Requeue it
+                # as an EXTERNAL failure (persisted backoff), retried forever, never
+                # dead-lettered (H1: an unexpected error is treated as transient). Guard the
+                # double-dispose: if _run_job already completed/requeued the job its running/
+                # file is gone, so resurrecting it would duplicate-extract -- skip then. A
+                # requeue that itself raises must not kill the worker either.
+                with contextlib.suppress(Exception):
+                    if job._file.exists():
+                        self.spool.requeue(job, failure_class="external")
+
+    @contextlib.contextmanager
+    def _ingesting_guard(self, path: Path):
+        """The single in-flight marker, so ``in_flight_count`` (shutdown drain) sees the
+        one running extraction and ``stop_session_watcher`` waits it out."""
+        key = str(path)
+        with self._lock:
+            self._ingesting.add(key)
+        try:
+            yield
         finally:
             with self._lock:
                 self._ingesting.discard(key)
-                rerun = key in self._pending
-                self._pending.discard(key)
-        if rerun:
-            self._schedule_ingest(path)
-        return result
+
+    def _run_job(self, job) -> None:
+        """The ONE place a transcript is ingested. Owns the guard and the state lock, so
+        there is exactly one writer per path and one writer of the cursor regardless of how
+        many producers enqueued it."""
+        if self._stop_event.is_set():
+            # Shutting down: refuse before touching the engine (use-after-close guard, #52).
+            # The job stays claimed in running/ and spool.recover() requeues it next start.
+            return
+        path = job.path
+        rel = str(path.relative_to(self.watch_dir))
+        # Force-flush is the explicit nudge's intent, persisted on the job and read back here
+        # -- NEVER re-derived from job.reason (council-pr R2 F4: deriving it from a shared
+        # "drain" reason force-flushed every producer's capped remainder, including Observer's).
+        # Observer and reconcile jobs pass the boundary CEILING but do NOT force-flush, so an
+        # active, below-min_turns session keeps accumulating instead of fragmenting per event.
+        force_flush = job.force_flush
+        with self._ingesting_guard(path):
+            result = _ingest_session(
+                self.engine, path, self._state, self.watch_dir, self.min_turns,
+                idle_threshold=self.idle_threshold, flush_bytes=self.flush_bytes,
+                boundary=job.boundary, force_flush=force_flush, state_lock=self._state_lock,
+            )
+        if result is IngestResult.TRANSIENT:
+            # External failure class -> retried forever with persisted backoff, never
+            # dead-lettered: an outage must not discard accepted work (ADR-0004 H1).
+            self.spool.requeue(job, failure_class="external")
+            return
+        if result is IngestResult.OK:
+            if (self._state.get(rel, {}).get("end_offset") or 0) < job.boundary:
+                # Capped batch: the boundary is not drained yet. ENQUEUE the remainder
+                # FIRST, COMPLETE SECOND (council R12) — the reverse order loses the intent
+                # if the process dies between the two calls; a duplicate job is a no-op.
+                # The continuation INHERITS this job's force_flush (council-pr R2 F4): an
+                # Observer's remainder stays non-forcing, a nudge's remainder stays forcing.
+                self.spool.enqueue(
+                    path, boundary=job.boundary, reason="drain", force_flush=job.force_flush
+                )
+            self.spool.complete(job)
+            return
+        # NO_PROGRESS: the closed delta at the safe boundary is empty.
+        if self._idle_with_unsafe_tail(path, rel, job.boundary):
+            # An idle transcript whose bytes never reach a safe boundary (a single
+            # unterminated turn): completing would strand those bytes forever. Advance the
+            # cursor past the frozen prefix so the sweep stops re-selecting it, and keep a
+            # dead-letter record with a distinct reason (slice 3 owns the real policy) —
+            # never a silent complete.
+            self._mark_frozen_prefix_consumed(path, rel, job.boundary)
+            self.spool.requeue(job, failure_class="no_safe_boundary")
+            return
+        self.spool.complete(job)
+
+    def _idle_with_unsafe_tail(self, path: Path, rel: str, boundary: int | None = None) -> bool:
+        """True when the file is idle, has bytes past the cursor, yet the parser closes
+        nothing there (a single unterminated turn). Non-idle files keep being retried
+        (re-enqueued as they grow); an unparseable/empty delta is the file's own fault.
+
+        The parse honours the accepted ``boundary`` as a ``stop_offset`` ceiling (council-pr
+        F1): a still-growing session can have bytes past the boundary that the nudge never
+        accepted, and examining them here would decide "frozen" on unaccepted content."""
+        try:
+            st = path.stat()
+        except OSError:
+            return False
+        if time.time() - st.st_mtime <= self.idle_threshold:
+            return False
+        cursor = self._state.get(rel, {}).get("end_offset") or 0
+        if st.st_size <= cursor:
+            return False
+        try:
+            parsed = parse_transcript(path, start_offset=cursor, stop_offset=boundary)
+        except Exception:
+            return False
+        return parsed.safe_end_offset <= cursor
+
+    def _mark_frozen_prefix_consumed(
+        self, path: Path, rel: str, boundary: int | None = None
+    ) -> None:
+        """Advance the cursor over a dead-lettered frozen prefix so reconcile stops
+        re-selecting it — but NEVER past the accepted ``boundary`` (council-pr F1), and NEVER
+        BACKWARD past the current cursor (council-pr R2 F2). Jumping to raw EOF would mark bytes
+        [boundary, size] consumed even though no nudge accepted them; writing a boundary below
+        the current cursor (a stale/out-of-order job) would rewind it and re-open already-
+        consumed bytes for duplicate extraction. If the file later grows past a new, higher
+        boundary, that new nudge re-opens the remainder for examination."""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        cursor = self._state.get(rel, {}).get("end_offset") or 0
+        target = min(boundary, size) if boundary is not None else size
+        if target <= cursor:
+            # stale/out-of-order boundary, or nothing new to skip -- monotonic: never rewind.
+            return
+        entry = dict(self._state.get(rel, {}))
+        entry["end_offset"] = target
+        _commit_state(self._state, rel, entry, self._state_lock, self.watch_dir)
 
     def cancel_pending_timers(self) -> None:
         """Cancel debounce/retry timers that have not fired yet (shutdown)."""
@@ -1159,33 +1338,26 @@ class SessionHandler(FileSystemEventHandler):
             return len(self._ingesting)
 
     def reconcile(self) -> int:
-        """Disk-truth safety net: ingest transcripts the live FSEvents path dropped.
+        """Disk-truth safety net, now a PRODUCER: ENQUEUE (never ingest) transcripts the
+        live FSEvents path dropped, so the one serial drain still owns extraction.
 
-        Mechanism-agnostic and cheap: a stat-only scan finds files that still need work —
-        never-seen (within lookback) or a state cursor not at EOF — then routes up to
-        ``session_watcher_reconcile_max_per_tick`` of them through ``self._do_ingest`` (the
-        single state owner, so no clobber / no double-ingest). A file with a pending or failed
-        tail (``end_offset != size``) is retried each tick — bounded to
-        ``MAX_RECONCILE_RETRIES`` attempts per size so an abandoned in-flight tail is not
-        re-hashed forever — so a transient ingest failure never strands it. Returns
-        transcripts recovered.
+        A stat-only scan finds files that still need work — never-seen (within lookback) or a
+        state cursor behind EOF — and enqueues at most
+        ``session_watcher_reconcile_max_per_tick`` of them, OLDEST-first by mtime (D3: the
+        producer-side cap preserves both the per-tick budget and the no-starvation guard; the
+        serial drain paces consumption, this cap paces production so one sweep of a 10k-file
+        backlog cannot enqueue 10k jobs at once). ``enqueue`` is idempotent per (path,
+        boundary), so re-sweeping a still-pending file is a no-op. Returns the number enqueued.
 
-        Candidates are sorted most-recently-modified first so freshly dropped transcripts are
-        recovered soonest. A per-tick wall-clock budget
-        (``session_watcher_reconcile_max_seconds``) caps scheduler-thread occupancy: remaining
-        candidates are picked up on the next tick.
-
-        The park key for NO_PROGRESS is ``(size, mtime_ns)``: a same-size content rewrite
-        (e.g. a repaired JSONL line) changes the mtime_ns, producing a new token that un-parks
-        the file immediately without waiting for a process restart.  Persistently-TRANSIENT files
-        (external failures that repeat at the same token) are deprioritized — sorted behind
-        fresh candidates — rather than parked, so they keep being retried but cannot monopolize
-        the per-tick cap and starve valid candidates.
+        Gated by the caller on the per-watch ``discover`` flag — an acceptance-only root is
+        never swept.
         """
+        if self.spool is None:
+            return 0
         cutoff = time.time() - (self.lookback_hours * 3600) if self.lookback_hours > 0 else 0
         cap = self.engine.settings.session_watcher_reconcile_max_per_tick
-        candidates: list[tuple[float, Path]] = []
-        for jsonl_file in sorted(self.watch_dir.rglob("*.jsonl")):
+        candidates: list[tuple[float, Path, int]] = []
+        for jsonl_file in self.watch_dir.rglob("*.jsonl"):
             if _is_subagent_transcript(jsonl_file):
                 continue
             try:
@@ -1195,162 +1367,139 @@ class SessionHandler(FileSystemEventHandler):
             rel = str(jsonl_file.relative_to(self.watch_dir))
             entry = self._state.get(rel)
             if entry is None:
-                # Never-seen: mirror _scan_sessions catch-up rules.
+                # Never-seen: mirror the lookback catch-up rules below.
                 if self.lookback_hours < 0:
                     continue  # catch-up disabled -> skip never-seen files
                 if cutoff > 0 and st.st_mtime < cutoff:
                     continue
-            elif entry.get("end_offset", 0) == st.st_size:
-                # Fully consumed -> skip cheaply (no hash, no _do_ingest).
-                # ponytail: known limitation (council-pr H1') — a same-size rewrite that PRESERVES
-                # mtime_ns (utime / cp --preserve, or an in-place repair restoring the timestamp)
-                # is invisible here and in the park check below. Closing it means hashing every
-                # consumed file each tick, reintroducing the O(n) scan cost flagged earlier; the
-                # Claude/Codex transcript workload is append-only (rewrites grow the file), so this
-                # pattern does not occur in practice. Upgrade path: content-hash token if it ever does.
-                continue
-            # else: seen with cursor not at EOF -> pending/failed tail (or a rewrite).
-            token = (st.st_size, st.st_mtime_ns)
-            # H1: park NO_PROGRESS by (size, mtime_ns) — a same-size content rewrite (new mtime)
-            # changes the token and un-parks the file, so a recoverable tail is never stranded.
-            park = self._reconcile_attempts.get(rel)
-            if park is not None and (park[0], park[1]) == token and park[2] >= MAX_RECONCILE_RETRIES:
-                continue  # parked at this exact content; skip until the content (token) changes
-            # H2: deprioritize (never park) a file that keeps failing TRANSIENT at this token, so a
-            # cluster of deterministically-failing files can't monopolize the per-tick cap and
-            # starve valid candidates. Deprioritized files still get retried — just behind fresh ones.
-            tr = self._reconcile_transient.get(rel)
-            deprioritized = (
-                tr is not None and (tr[0], tr[1]) == token and tr[2] >= MAX_RECONCILE_RETRIES
-            )
-            candidates.append((deprioritized, st.st_mtime, jsonl_file))
-        # Non-deprioritized first (newest-first, so freshly dropped transcripts recover soonest),
-        # then deprioritized (oldest-first FIFO, so a long-failing transient that just became
-        # recoverable is retried before newer deprioritized peers — no intra-group starvation).
-        candidates.sort(key=lambda t: (t[0], t[1] if t[0] else -t[1]))
-        recovered = 0
-        budget = self.engine.settings.session_watcher_reconcile_max_seconds
-        start = time.time()
-        for _dep, _mtime, jsonl_file in candidates[:cap]:
-            if time.time() - start >= budget:
-                break  # yield scheduler thread; remaining picked up next tick
-            rel = str(jsonl_file.relative_to(self.watch_dir))
-            try:
-                st2 = jsonl_file.stat()
-            except OSError:
-                continue
-            size, mtime_ns = st2.st_size, st2.st_mtime_ns
-            result = self._do_ingest(jsonl_file)
-            if result == IngestResult.OK:
-                recovered += 1
-                self._reconcile_attempts.pop(rel, None)
-                self._reconcile_transient.pop(rel, None)
-            elif result == IngestResult.NO_PROGRESS:
-                prev = self._reconcile_attempts.get(rel)
-                count = prev[2] + 1 if (prev is not None and (prev[0], prev[1]) == (size, mtime_ns)) else 1
-                self._reconcile_attempts[rel] = (size, mtime_ns, count)
-                self._reconcile_transient.pop(rel, None)
-            else:  # TRANSIENT — never park; count toward deprioritization at this token
-                prev = self._reconcile_transient.get(rel)
-                count = prev[2] + 1 if (prev is not None and (prev[0], prev[1]) == (size, mtime_ns)) else 1
-                self._reconcile_transient[rel] = (size, mtime_ns, count)
-                self._reconcile_attempts.pop(rel, None)
-        if recovered:
+            elif (entry.get("end_offset") or 0) >= st.st_size:
+                continue  # fully consumed -> skip cheaply
+            # else: seen with cursor behind EOF -> pending/failed tail (or a grown file).
+            candidates.append((st.st_mtime, jsonl_file, st.st_size))
+        # Oldest-first: the longest-waiting transcript is enqueued before newer ones, so a
+        # steady drip of fresh files cannot indefinitely defer an older one past the cap.
+        candidates.sort(key=lambda t: t[0])
+        enqueued = 0
+        for _mtime, jsonl_file, size in candidates[:cap]:
+            # force_flush=False: reconcile is a disk-truth safety net, not an explicit ask --
+            # it must respect min_turns/idle so it never fragments an active session (R2 F4).
+            self.spool.enqueue(jsonl_file, boundary=size, reason="reconcile", force_flush=False)
+            enqueued += 1
+        if enqueued:
+            self.wake()
             logger.info(
-                "Session watcher reconcile recovered %d transcript(s) the live path missed",
-                recovered,
+                "Session watcher reconcile enqueued %d transcript(s) the live path missed",
+                enqueued,
             )
-        return recovered
+        return enqueued
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".jsonl"):
             path = Path(event.src_path)
             if not _is_subagent_transcript(path):
-                self._schedule_ingest(path)
+                self._schedule_enqueue(path)
 
     def on_modified(self, event):
         if not event.is_directory and event.src_path.endswith(".jsonl"):
             path = Path(event.src_path)
             if not _is_subagent_transcript(path):
-                self._schedule_ingest(path)
+                self._schedule_enqueue(path)
 
 
 @dataclass
 class SessionWatch:
-    """A live watcher: its directory, handler, (swappable) Observer, and startup-drain thread."""
+    """A live watch root: its directory, always-on handler + spool, and — only when this root
+    is a discovery root and the watcher is enabled — a swappable Observer."""
     watch_dir: Path
     handler: SessionHandler
-    observer: Observer
-    startup_thread: "Thread | None" = None
+    observer: "Observer | None"
+    spool: "IngestSpool"
+    discover: bool = False
 
 
-def _run_startup_reconcile(handler: SessionHandler) -> None:
-    """Drain the startup backlog off the bind path (replaces the on-bind _scan_sessions call).
+def _run_startup_discovery(handler: SessionHandler) -> None:
+    """One reconcile sweep at startup so a discovery root does not wait a full reconcile
+    interval after a restart to re-enqueue transcripts whose cursor is behind EOF.
 
-    One reconcile pass — bounded by the per-tick cap/budget; whatever is left is picked up by the
-    periodic reconcile job. Runs in a non-daemon thread so a mid-ingest is drained at shutdown.
+    ``reconcile`` only ENQUEUES (no DB writes), so this may run on a daemon thread off the
+    bind path — the original bind-blocking bug was the old catch-up scan ingesting
+    synchronously.
     """
     try:
         handler.reconcile()
     except Exception as e:  # a bad backlog file must not crash the startup thread
-        logger.warning("Session watcher startup reconcile error for %s: %s", handler.watch_dir, e)
+        logger.warning("Session watcher startup discovery error for %s: %s", handler.watch_dir, e)
 
 
 def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
-    """Start real-time watchers immediately, then drain the startup backlog off the bind path.
+    """Build the always-on ingest worker for every acceptance root and return the watches.
 
-    The catch-up scan that used to run synchronously here (blocking the HTTP bind for minutes on
-    restart, issue #52) now runs in a non-daemon thread per watch dir via the reconcile path.
-    Observers are live from t0, so nothing is missed while the backlog drains. Returns list of
-    SessionWatch for shutdown and reconcile.
+    Each root gets a handler + spool + drain thread unconditionally (the worker is always on,
+    so ``/ingest/nudge`` is honoured even when the watcher is disabled). A discovery root that
+    is enabled additionally gets an Observer and a startup discovery sweep. Crash recovery is
+    ``spool.recover()`` — microseconds — not a startup tree walk.
     """
     s = engine.settings
-    if not s.session_watcher_enabled:
-        return []
-
-    watch_dirs = _session_watch_dirs(s)
-    if not watch_dirs:
-        logger.warning("Session watcher dir does not exist: %s", _expand_watch_dir(s.session_watcher_dir))
+    roots = _resolve_acceptance_roots(s)
+    if not roots:
+        logger.warning("Session watcher: no watch root resolved from %s", s.session_watcher_dir)
         return []
 
     stop_event = Event()
     watches: list[SessionWatch] = []
     try:
-        for watch_dir in watch_dirs:
+        for watch_dir, discover in roots:
+            try:
+                # Our own watch root: create it if absent (council R4/R5) so a later nudge is
+                # accepted, not 422'd forever. Skip only a root whose creation raises.
+                watch_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                logger.warning("Session watcher: cannot create watch root %s: %s", watch_dir, e)
+                continue
+            spool = IngestSpool(spool_root(s) / root_key(watch_dir))
+            requeued = spool.recover()  # BEFORE the drain thread starts
+            if requeued:
+                logger.info("Recovered %d in-flight ingest job(s) on %s", requeued, watch_dir)
             handler = SessionHandler(
                 engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
                 s.session_watcher_idle_threshold, s.session_watcher_lookback_hours,
                 retry_seconds=s.session_watcher_retry_seconds,
                 flush_bytes=s.session_watcher_flush_bytes,
-                stop_event=stop_event,
+                stop_event=stop_event, spool=spool,
             )
-            observer = Observer()
-            observer.schedule(handler, str(watch_dir), recursive=True)
-            observer.start()
-            startup_thread = Thread(
-                target=_run_startup_reconcile, args=(handler,),
-                name="ormah-session-startup-reconcile", daemon=False,
-            )
-            startup_thread.start()
+            handler.start_drain()  # the always-on worker
+            observer = None
+            if discover:
+                observer = Observer()
+                observer.schedule(handler, str(watch_dir), recursive=True)
+                observer.start()
+                # Off-bind startup sweep so a restart re-enqueues a behind-EOF cursor now,
+                # not one reconcile interval later. reconcile is DB-free, so daemon is safe.
+                Thread(
+                    target=_run_startup_discovery, args=(handler,),
+                    name="ormah-session-startup-discovery", daemon=True,
+                ).start()
             watches.append(SessionWatch(
-                watch_dir=watch_dir, handler=handler, observer=observer, startup_thread=startup_thread,
+                watch_dir=watch_dir, handler=handler, observer=observer,
+                spool=spool, discover=discover,
             ))
-            logger.info("Session watcher started on %s", watch_dir)
+            logger.info("Ingest worker started on %s (observer=%s)", watch_dir, bool(observer))
     except Exception:
-        # transactional startup: tear down everything already running — observers, timers, and any
-        # in-flight ingest — so a leaked, never-drained handler cannot write to the DB after
-        # engine.shutdown() closes it.
+        # transactional startup: tear down everything already running — drain threads,
+        # observers, timers, and any in-flight ingest — so a leaked, never-drained handler
+        # cannot write to the DB after engine.shutdown() closes it.
         stop_event.set()
         for w in watches:
             w.handler.cancel_pending_timers()
+            w.handler.wake()
+            if w.observer is not None:
+                w.observer.stop()
         for w in watches:
-            w.observer.stop()
-        for w in watches:
-            if w.startup_thread is not None:
-                w.startup_thread.join()
+            w.handler.join_drain()
         _drain_handlers([w.handler for w in watches])
         for w in watches:
-            w.observer.join(timeout=5)
+            if w.observer is not None:
+                w.observer.join(timeout=5)
         raise
     return watches
 
@@ -1374,52 +1523,58 @@ def _drain_handlers(handlers: list["SessionHandler"]) -> None:
 def stop_session_watcher(watches: list[SessionWatch]) -> None:
     """Stop observers and fully drain in-flight ingests before returning.
 
-    The lifespan calls engine.shutdown() (db.close()) right after this. Under-_lock stop checks
-    reject NEW ingests; we then wait for every in-flight ingest (live, startup, or reconcile) to
-    finish, so nothing touches the DB after db.close(). The wait is NOT capped — a deadline cap
-    would re-open the use-after-close window by abandoning a still-running ingest (issue #52).
+    The lifespan calls engine.shutdown() (db.close()) right after this. The stop check in
+    ``_run_job`` rejects NEW ingests; we stop the drain thread and wait for any in-flight
+    ingest to finish, so nothing touches the DB after db.close(). The wait is NOT capped — a
+    deadline cap would re-open the use-after-close window by abandoning a running ingest (#52).
     """
     for w in watches:
         w.handler._stop_event.set()
     for w in watches:
-        w.observer.stop()
-    for w in watches:
+        if w.observer is not None:
+            w.observer.stop()
         w.handler.cancel_pending_timers()
+        w.handler.wake()  # unblock the drain's idle wait so it exits promptly
     for w in watches:
-        if w.startup_thread is not None:
-            w.startup_thread.join()
+        w.handler.join_drain()  # uncapped: waits out the one running ingest, then the thread exits
     _drain_handlers([w.handler for w in watches])
     for w in watches:
-        w.observer.join(timeout=5)
+        if w.observer is not None:
+            w.observer.join(timeout=5)
     if watches:
         logger.info("Session watcher stopped")
 
 
 def run_session_reconcile(watches: list[SessionWatch]) -> int:
-    """Periodic safety net: recreate any dead Observer, then reconcile each watcher.
+    """Periodic safety net: recreate any dead Observer, then reconcile each DISCOVERY watch.
 
-    Recreating the Observer keeps the fast path alive going forward; the reconcile scan recovers
-    anything the live path dropped (Observer death OR FSEvents coalescing). Returns total recovered.
+    Recreating the Observer keeps the fast path alive going forward; the reconcile sweep
+    enqueues anything the live path dropped. ``reconcile`` is gated on the per-watch
+    ``discover`` flag, never a global read of ``session_watcher_enabled`` — an acceptance-only
+    root (a default Claude/Codex root under a custom ``session_watcher_dir``) must never be
+    swept. Returns total enqueued.
     """
     total = 0
     for w in watches:
-        try:
-            alive = w.observer.is_alive()
-        except Exception:
-            alive = False
-        if not alive:
-            logger.warning("Session watcher Observer not alive for %s; recreating", w.watch_dir)
+        if w.observer is not None:
             try:
-                w.observer.stop()
-                w.observer.join(timeout=5)
-            except Exception as e:
-                logger.debug("Stopping dead Observer for %s failed: %s", w.watch_dir, e)
-            try:
-                observer = Observer()
-                observer.schedule(w.handler, str(w.watch_dir), recursive=True)
-                observer.start()
-                w.observer = observer
-            except Exception as e:
-                logger.warning("Failed to recreate Observer for %s: %s", w.watch_dir, e)
-        total += w.handler.reconcile()
+                alive = w.observer.is_alive()
+            except Exception:
+                alive = False
+            if not alive:
+                logger.warning("Session watcher Observer not alive for %s; recreating", w.watch_dir)
+                try:
+                    w.observer.stop()
+                    w.observer.join(timeout=5)
+                except Exception as e:
+                    logger.debug("Stopping dead Observer for %s failed: %s", w.watch_dir, e)
+                try:
+                    observer = Observer()
+                    observer.schedule(w.handler, str(w.watch_dir), recursive=True)
+                    observer.start()
+                    w.observer = observer
+                except Exception as e:
+                    logger.warning("Failed to recreate Observer for %s: %s", w.watch_dir, e)
+        if w.discover:
+            total += w.handler.reconcile()
     return total

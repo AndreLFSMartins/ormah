@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
+import time
+import uuid
 
 import httpx
 
 from pathlib import Path
+
+try:
+    import fcntl  # POSIX only; Windows falls back to no locking (documented degraded mode)
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 from ormah.adapters.space_detect import detect_space_from_dir, resolve_space
 from ormah.config import settings
@@ -294,11 +302,11 @@ def cmd_whisper_inject(args):
     # Track prompt count per session (used by nudge and periodic extraction)
     count = 0
     if session_id:
-        cursors = _load_cursors()
+        counters = _load_nudge_counters()
         count_key = f"nudge:{session_id}"
-        count = cursors.get(count_key, 0) + 1
-        cursors[count_key] = count
-        _save_cursors(cursors)
+        count = counters.get(count_key, 0) + 1
+        counters[count_key] = count
+        _save_nudge_counters(counters)
 
         # Append nudge at interval
         if (settings.whisper_nudge_interval > 0
@@ -384,138 +392,231 @@ def _spawn_background_store(transcript_path: Path, cwd: str, session_id: str) ->
         pass  # fire and forget
 
 
-def _whisper_store_timeout(s) -> float:
-    """Client timeout for whisper-out. When the ingest provider is claude_cli the
-    server-side extraction can run up to claude_cli_timeout_seconds, so the client
-    timeout must cover that budget (plus margin) or it fires first and the cursor
-    never advances (permanent stall on the same slice)."""
-    timeout = 60.0
-    ingest_provider = s.ingest_llm_provider or s.llm_provider
-    if ingest_provider == "claude_cli":
-        timeout = max(timeout, s.claude_cli_timeout_seconds + 15.0)
-    return timeout
+_WHISPER_CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))) / "ormah"
+_NUDGE_COUNTER_FILE = _WHISPER_CACHE_DIR / "whisper-nudge-counters.json"
+_LEGACY_CURSOR_FILE = _WHISPER_CACHE_DIR / "whisper-cursors.json"  # pre-ADR-0004, multi-session
 
 
-def _whisper_store_client() -> httpx.Client:
-    """Client with longer timeout for whisper-out — extraction can take 30s+."""
-    return httpx.Client(base_url=BASE, timeout=_whisper_store_timeout(settings))
-
-
-_WHISPER_CURSOR_DIR = Path(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))) / "ormah"
-_WHISPER_CURSOR_FILE = _WHISPER_CURSOR_DIR / "whisper-cursors.json"
-
-
-def _load_cursors() -> dict:
+def _load_nudge_counters() -> dict:
     try:
-        return json.loads(_WHISPER_CURSOR_FILE.read_text())
+        return json.loads(_NUDGE_COUNTER_FILE.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
 
-def _save_cursors(cursors: dict) -> None:
+def _save_nudge_counters(counters: dict) -> None:
     try:
-        _WHISPER_CURSOR_DIR.mkdir(parents=True, exist_ok=True)
-        _WHISPER_CURSOR_FILE.write_text(json.dumps(cursors))
+        _WHISPER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _NUDGE_COUNTER_FILE.write_text(json.dumps(counters))
+    except OSError:
+        pass
+
+
+def _retire_legacy_cursor(session_id: str, path: str) -> None:
+    """Drop only this transcript's key; delete the file once it is empty (council R10).
+
+    whisper-cursors.json is MULTI-SESSION: the old hook keyed on either session_id or
+    the transcript path, so both are removed for this event only. Unlinking the whole
+    file would wipe cursors for sessions that have not yet migrated to the server.
+    """
+    try:
+        cursors = json.loads(_LEGACY_CURSOR_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return
+    if not isinstance(cursors, dict):
+        return
+    for key in (session_id, path):  # the old code keyed on either
+        cursors.pop(key, None)
+    try:
+        if cursors:
+            _LEGACY_CURSOR_FILE.write_text(json.dumps(cursors))
+        else:
+            _LEGACY_CURSOR_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+_NUDGE_OUTBOX_FILE = _WHISPER_CACHE_DIR / "whisper-nudge-outbox.jsonl"
+_NUDGE_OUTBOX_LOCK = _WHISPER_CACHE_DIR / "whisper-nudge-outbox.lock"
+_OUTBOX_MAX_AGE_DAYS = 30
+_OUTBOX_DRAIN_SECONDS = 5.0  # well under the 30s hook timeout
+_OUTBOX_DRAIN_MAX = 20
+
+
+@contextlib.contextmanager
+def _outbox_lock():
+    """Lock a STABLE file, never the outbox itself.
+
+    flock locks an inode. The drain replaces the outbox path, so a locker holding the
+    old inode would let an appender write into an unlinked file — losing the event
+    (measured: 1140 mutual-exclusion violations vs 0 with a dedicated lock file).
+    """
+    _WHISPER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if fcntl is None:  # pragma: no cover - Windows: degraded, documented, never fatal
+        yield
+        return
+    with open(_NUDGE_OUTBOX_LOCK, "a+") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+
+
+def _nudge_client() -> httpx.Client:
+    """Short-timeout client for the hook (council R10): the manifest allows 30s TOTAL,
+    so a single request must never be able to consume the whole budget."""
+    return httpx.Client(base_url=BASE, timeout=5.0)
+
+
+def _queue_nudge(path: str) -> str:
+    """Append a boundary event durably and return its record id.
+
+    Called BEFORE any network work; the id is what an ack removes (council R10).
+    """
+    rec_id = uuid.uuid4().hex
+    try:
+        with _outbox_lock():
+            with open(_NUDGE_OUTBOX_FILE, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"id": rec_id, "path": path, "at": time.time()}) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+    except OSError as e:
+        # Degraded mode (council R9): the boundary event is lost if the server is also
+        # down. Say so on stderr — silent loss is what we are trying to avoid — but
+        # never block or fail the hook.
+        print(f"ormah: could not queue nudge: {e}", file=sys.stderr)
+    return rec_id
+
+
+def _rewrite_outbox(records: list[dict]) -> None:
+    """Atomic rewrite. Caller MUST hold _outbox_lock()."""
+    tmp = _NUDGE_OUTBOX_FILE.with_suffix(f".jsonl.tmp{os.getpid()}")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, _NUDGE_OUTBOX_FILE)
+
+
+def _read_outbox() -> list[dict]:
+    """Caller MUST hold _outbox_lock(). Skips torn lines instead of crashing."""
+    out = []
+    try:
+        for line in _NUDGE_OUTBOX_FILE.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except (FileNotFoundError, OSError):
+        pass
+    return out
+
+
+def _unqueue_nudge(rec_id: str) -> None:
+    """Drop ONE record after its own 202 — never every record for that path."""
+    try:
+        with _outbox_lock():
+            _rewrite_outbox([r for r in _read_outbox() if r.get("id") != rec_id])
+    except OSError:
+        pass
+
+
+def _drain_nudge_outbox(c) -> None:
+    """Retry older queued nudges, oldest first, within a strict budget.
+
+    Budgeted because an unbounded backlog with a slow client would outlive the hook
+    itself (council R9). Whatever does not fit stays queued for the next fire. The
+    network runs with NO lock held (council R10): read under the lock, release, do the
+    requests, then re-take the lock and rewrite only the records still present.
+    """
+    deadline = time.monotonic() + _OUTBOX_DRAIN_SECONDS
+    cutoff = time.time() - _OUTBOX_MAX_AGE_DAYS * 86400
+    try:
+        with _outbox_lock():  # phase (a): read, then RELEASE
+            records = _read_outbox()
+    except OSError:
+        return
+
+    acked, sent, seen = set(), 0, set()
+    for rec in records:  # phase (b): network, NO lock held
+        p, at, rid = rec.get("path"), rec.get("at", 0), rec.get("id")
+        if not p or not rid:
+            continue
+        if at < cutoff or not Path(p).exists():
+            acked.add(rid)  # expired / transcript gone
+            continue
+        if p in seen:
+            # Only treat it as a duplicate when the earlier record for this path actually
+            # got a 202. Marking it acked on a FAILED send would discard a newer boundary
+            # that was never delivered.
+            acked.add(rid)
+            continue
+        if sent >= _OUTBOX_DRAIN_MAX or time.monotonic() >= deadline:
+            break  # out of budget: the rest stays queued
+        sent += 1
+        try:
+            status = c.post(
+                "/ingest/nudge", json={"path": p, "session_id": None}
+            ).status_code
+            if status == 202:
+                acked.add(rid)
+                seen.add(p)  # only NOW is a later record a duplicate
+            elif status in (404, 422):
+                # A permanently un-acceptable path must not occupy the drain budget for
+                # 30 days and starve valid backlog behind it.
+                acked.add(rid)
+        except Exception:
+            pass  # transient: keep it queued
+
+    try:
+        with _outbox_lock():  # phase (c): re-read, drop only acked ids
+            _rewrite_outbox([r for r in _read_outbox() if r.get("id") not in acked])
     except OSError:
         pass
 
 
 def cmd_whisper_store(args):
-    """PreCompact/SessionEnd hook handler: extract and store memories from transcript."""
+    """PreCompact/SessionEnd hook: pure nudge (ADR-0004). The server owns the cursor and
+    does the extraction on its own schedule; this process never waits on it. Space,
+    min-turns and safe-boundary logic all live server-side in _ingest_session now, which
+    is why they are gone from here. The hook ALWAYS exits 0 (never block compaction)."""
     try:
-        raw = sys.stdin.read()
-        hook_data = json.loads(raw)
+        hook_data = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, ValueError):
         sys.exit(0)
 
     transcript_path = hook_data.get("transcript_path", "")
-    cwd = hook_data.get("cwd", "")
     session_id = hook_data.get("session_id", "")
-
     if not transcript_path and session_id:
         resolved = _resolve_transcript_path(session_id)
         transcript_path = str(resolved) if resolved else ""
-
-    if not transcript_path:
+    if not transcript_path or not Path(transcript_path).exists():
         sys.exit(0)
 
-    path = Path(transcript_path)
-    if not path.exists():
-        sys.exit(0)
-
-    # Load cursor — only process new content since last extraction
-    cursors = _load_cursors()
-    cursor_key = session_id or str(path)
-    start_offset = cursors.get(cursor_key, 0)
-
-    # Skip if file hasn't grown since last extraction
-    if start_offset >= path.stat().st_size:
-        sys.exit(0)
-
-    from ormah.transcript.parser import parse_transcript, should_rewind
-
+    # council R9: make the CURRENT event durable before any network work — a slow or
+    # backlogged drain must never be able to lose the boundary that just happened.
+    rec_id = _queue_nudge(transcript_path)
+    body = {"path": transcript_path, "session_id": session_id or None}
+    accepted = False
     try:
-        result = parse_transcript(path, start_offset=start_offset)
-        if should_rewind(result, start_offset):
-            # Orphan with NO forward progress: a genuine cursor left mid-response by an
-            # older version — re-parse from the start to recover the dropped tail with its
-            # prompt. With forward progress the orphan is a false positive (ADR-0003,
-            # #149): drop the fragment and advance, or every hook fire re-extracts the
-            # whole transcript.
-            original_offset = start_offset
-            start_offset = 0
-            result = parse_transcript(path, start_offset=0)
-            if result.safe_end_offset <= original_offset:
-                # The rewind made no progress: the "orphan" tail is a still-open in-flight
-                # response, not a recoverable one. ADR-0003: a no-progress transcript
-                # parks, it does not re-extract the closed prefix on every hook fire.
-                sys.exit(0)
+        with _nudge_client() as c:  # SHORT timeout (5s), not the 30s _client()
+            r = c.post("/ingest/nudge", json=body)
+            accepted = r.status_code == 202
+            if accepted:
+                _unqueue_nudge(rec_id)  # remove THIS record, not every one for the path
+            _drain_nudge_outbox(c)  # older entries, budgeted, no lock over the wire
     except Exception:
-        sys.exit(0)
-
-    # Commit only the closed ("safe") payload — content proven complete by a terminal
-    # stop_reason or a following user turn — and advance the cursor to its boundary. Like
-    # the session watcher, this never splits a multi-record response from its prompt if
-    # the hook fires while a response is still being written.
-    min_turns = settings.whisper_out_min_turns
-    if result.safe_user_turn_count < min_turns:
-        sys.exit(0)
-
-    if not result.safe_conversation.strip():
-        sys.exit(0)
-
-    space = detect_space_from_dir(cwd) if cwd else None
-
-    body: dict = {"content": result.safe_conversation}
-    params: dict = {"extra_tags": "whisper-out"}
-    if space:
-        params["default_space"] = space
-
-    try:
-        with _whisper_store_client() as c:
-            r = c.post("/ingest/conversation", json=body, params=params)
-            r.raise_for_status()
-            resp = r.json()
-            # Advance the cursor ONLY on an explicit successful extraction. /ingest/conversation
-            # returns HTTP 200 {"status":"processed"} on success (even extracted==0 — a
-            # legitimate empty extraction that MUST advance, else the same slice reprocesses
-            # forever) and {"status":"error"} when extraction fails (e.g. claude_cli returned
-            # None). Anything else — a non-object body from a rogue proxy (null/list/number,
-            # whose .get() would raise), a missing status, or an unrecognized status — is
-            # treated as failure: do NOT advance, so the slice is retried rather than lost.
-            extraction_ok = isinstance(resp, dict) and resp.get("status") == "processed"
-    except Exception:
-        # Server down, timeout, or any error — exit silently, never block compaction
-        sys.exit(0)
-
-    if not extraction_ok:
-        sys.exit(0)
-
-    # Update cursor only after successful extraction, to the closed boundary so a
-    # still-in-flight trailing response is re-read (with its prompt) on the next run.
-    cursors[cursor_key] = result.safe_end_offset
-    _save_cursors(cursors)
-
+        accepted = False  # server down — the record stays queued
+    if accepted:
+        # Retire the legacy client cursor for THIS transcript only, and only once the
+        # server has taken ownership of it (council R4 + R10). A 404/422/offline nudge
+        # must leave it alone — it is the only record of what was already ingested — and
+        # the file is MULTI-SESSION, so it is never unlinked wholesale.
+        _retire_legacy_cursor(session_id, transcript_path)
     sys.exit(0)
 
 
@@ -543,7 +644,7 @@ def cmd_whisper_setup(args):
                 {
                     "type": "command",
                     "command": f"{ormah_bin} whisper store",
-                    "timeout": 300,
+                    "timeout": 30,
                     "async": True,
                 }
             ]
@@ -555,7 +656,7 @@ def cmd_whisper_setup(args):
                 {
                     "type": "command",
                     "command": f"{ormah_bin} whisper store",
-                    "timeout": 300,
+                    "timeout": 30,
                 }
             ]
         }

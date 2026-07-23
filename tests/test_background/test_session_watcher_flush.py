@@ -300,30 +300,6 @@ def test_ingest_session_active_small_session_defers(tmp_path):
     assert engine.recorded_lengths
 
 
-def test_scan_sessions_honors_settings_flush_bytes(tmp_path):
-    """_scan_sessions must read flush_bytes/idle_threshold from engine.settings, not the
-    _ingest_session defaults — otherwise a tuned (lowered) flush_bytes has no effect on the
-    startup catch-up scan.
-
-    Two turns so the parser's break-before capping can actually fire at the lowered
-    threshold (a lone first turn always commits uncapped, regardless of flush_bytes).
-    """
-    from ormah.background.session_watcher import _scan_sessions
-
-    watch_dir = tmp_path
-    path = watch_dir / "small.jsonl"
-    _write_turns(path, turns=2, pad=2000)
-    # Not idle and well below the function's default flush_bytes (60000), but above a
-    # lowered setting — only capped (and so flushed) if _scan_sessions actually threads
-    # the setting through to parse_transcript's max_bytes.
-    engine = _FakeEngine(flush_bytes=1000, idle_threshold=600.0)
-
-    count = _scan_sessions(engine, watch_dir, min_turns=1, lookback_hours=72)
-
-    assert count == 1
-    assert engine.recorded_lengths
-
-
 def test_prompt_is_delta_first():
     from ormah.engine.memory_engine import _INGEST_LLM_PROMPT
 

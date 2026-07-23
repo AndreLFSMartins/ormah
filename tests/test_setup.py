@@ -278,6 +278,12 @@ class TestConfigureClaudeHooks:
         cmd = hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
         assert cmd == "/abs/path/ormah whisper inject"
 
+        # ADR-0004: the store hook is a pure nudge, so its budget drops 300 -> 30s.
+        precompact = hooks["PreCompact"][0]["hooks"][0]
+        assert precompact["timeout"] == 30
+        assert precompact["async"] is True
+        assert hooks["SessionEnd"][0]["hooks"][0]["timeout"] == 30
+
     def test_merges_with_existing_settings(self, tmp_path):
         settings_path = str(tmp_path / ".claude" / "settings.json")
         os.makedirs(os.path.dirname(settings_path))

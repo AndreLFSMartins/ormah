@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File
 from pydantic import BaseModel
@@ -14,6 +16,39 @@ router = APIRouter(prefix="/ingest", tags=["ingest"])
 class ConversationLog(BaseModel):
     agent_id: str | None = None
     content: str
+
+
+class NudgeRequest(BaseModel):
+    path: str
+    session_id: str | None = None
+
+
+@router.post("/nudge", status_code=202)
+def ingest_nudge(req: NudgeRequest, request: Request):
+    """ADR-0004: fire-and-forget ingest trigger. The server owns the cursor; the worker
+    drains the spool on its own schedule. The client never waits on extraction."""
+    watches = getattr(request.app.state, "session_watches", [])
+    path = Path(req.path).resolve()
+    for w in watches:
+        try:
+            path.relative_to(Path(w.watch_dir).resolve())
+        except ValueError:
+            continue
+        try:
+            boundary = path.stat().st_size
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="transcript not found")
+        try:
+            # DURABLE BEFORE THE 202: the hook drops its outbox record on this response
+            # and never retries, so an unrecorded nudge is a lost session.
+            # force_flush=True: a nudge is an explicit SessionEnd/PreCompact ask -- it must
+            # flush a short just-ended session past the min_turns/idle gates (council-pr R2).
+            w.spool.enqueue(path, boundary=boundary, reason="nudge", force_flush=True)
+        except OSError as e:
+            raise HTTPException(status_code=503, detail=f"could not accept nudge: {e}")
+        w.handler.wake()          # Task 2: nudge the worker loop; never blocks
+        return {"status": "accepted"}
+    raise HTTPException(status_code=422, detail="path outside watched directories")
 
 
 @router.post("/conversation")

@@ -1,14 +1,22 @@
-"""Tests for whisper-out: involuntary memory storage on PreCompact."""
+"""Tests for whisper-out: the PreCompact/SessionEnd hook is a pure /ingest/nudge trigger.
+
+ADR-0004: the hook no longer parses, min-turns-gates, space-detects or keeps a client
+cursor. It queues the boundary event durably (an outbox), POSTs a nudge, and always exits
+0. The server owns the cursor and does extraction on its own schedule.
+"""
 
 from __future__ import annotations
 
 import io
 import json
-from unittest.mock import patch, MagicMock
+import multiprocessing as mp
+import time
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
+import ormah.adapters.cli_adapter as cli
 from ormah.adapters.cli_adapter import main
 
 
@@ -57,166 +65,308 @@ def _make_transcript(user_turns: int = 6) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_cursors(tmp_path, monkeypatch):
-    """Point cursor file to tmp_path so tests don't share state."""
-    cursor_dir = tmp_path / "cursors"
-    cursor_dir.mkdir()
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_DIR", cursor_dir)
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_FILE", cursor_dir / "whisper-cursors.json")
+def _isolate_cache(tmp_path, monkeypatch):
+    """Point the whisper cache (outbox, lock, counters, legacy cursor) at a temp dir so
+    tests never touch the real ~/.cache/ormah. XDG_CACHE_HOME is set too, so child
+    processes that re-import cli_adapter (spawn) resolve the SAME directory."""
+    cache_home = tmp_path / "cache"
+    cache_home.mkdir()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    cache_dir = cache_home / "ormah"
+    monkeypatch.setattr(cli, "_WHISPER_CACHE_DIR", cache_dir)
+    monkeypatch.setattr(cli, "_NUDGE_OUTBOX_FILE", cache_dir / "whisper-nudge-outbox.jsonl")
+    monkeypatch.setattr(cli, "_NUDGE_OUTBOX_LOCK", cache_dir / "whisper-nudge-outbox.lock")
+    monkeypatch.setattr(cli, "_NUDGE_COUNTER_FILE", cache_dir / "whisper-nudge-counters.json")
+    monkeypatch.setattr(cli, "_LEGACY_CURSOR_FILE", cache_dir / "whisper-cursors.json")
+    return cache_dir
 
 
-class TestWhisperStoreBasic:
-    def test_whisper_store_basic(self, monkeypatch, tmp_path):
-        """Mock transcript + mock HTTP → memories extracted and stored."""
+def _mock_client(monkeypatch, handler):
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        cli, "_nudge_client",
+        lambda: httpx.Client(transport=transport, base_url="http://test"),
+    )
+
+
+def _outbox_records(cache_dir) -> list[dict]:
+    p = cache_dir / "whisper-nudge-outbox.jsonl"
+    if not p.exists():
+        return []
+    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+
+
+class TestWhisperStoreNudge:
+    def test_whisper_store_posts_nudge(self, monkeypatch, tmp_path, _isolate_cache):
+        """SessionEnd hook POSTs {path, session_id} to /ingest/nudge and exits 0 — no
+        content, no parse, no cursor file."""
         transcript = tmp_path / "session.jsonl"
         transcript.write_text(_make_transcript(6))
 
-        captured_requests = []
+        captured = []
 
         def handler(request):
-            captured_requests.append(request)
-            return _mock_response({"status": "processed", "extracted": 2, "memories": []})
+            captured.append(request)
+            return _mock_response({"status": "accepted"}, status_code=202)
 
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
+        _mock_client(monkeypatch, handler)
 
         hook_input = json.dumps({
             "transcript_path": str(transcript),
-            "cwd": "/Users/someone/Projects/myapp",
-            "session_id": "abc123",
-            "trigger": "auto",
-        })
-
-        code, out, err = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-        assert len(captured_requests) == 1
-
-    def test_whisper_store_reads_transcript(self, monkeypatch, tmp_path):
-        """Verify parse_transcript is called with correct path."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        captured_paths = []
-
-        from ormah.transcript import parser as parser_mod
-        original_parse = parser_mod.parse_transcript
-
-        def tracking_parse(path, **kwargs):
-            captured_paths.append(str(path))
-            return original_parse(path, **kwargs)
-
-        monkeypatch.setattr("ormah.transcript.parser.parse_transcript", tracking_parse)
-
-        def handler(request):
-            return _mock_response({"status": "processed", "extracted": 0, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
+            "cwd": str(tmp_path),
             "session_id": "abc",
-            "trigger": "auto",
         })
-
         code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+
         assert code == 0
-        assert len(captured_paths) == 1
-        assert captured_paths[0] == str(transcript)
+        assert len(captured) == 1
+        assert str(captured[0].url).endswith("/ingest/nudge")
+        assert json.loads(captured[0].content) == {"path": str(transcript), "session_id": "abc"}
+        # No legacy cursor file is ever created by the pure nudge.
+        assert not (_isolate_cache / "whisper-cursors.json").exists()
+        # Its own record was removed on the 202 — nothing left queued.
+        assert _outbox_records(_isolate_cache) == []
 
-
-class TestWhisperStoreSkips:
-    def test_whisper_store_skips_short_session(self, monkeypatch, tmp_path):
-        """< min_turns → silent exit, no HTTP call."""
-        transcript = tmp_path / "short.jsonl"
-        transcript.write_text(_make_transcript(2))  # Only 2 turns, below default 5
-
-        captured_requests = []
-
-        def handler(request):
-            captured_requests.append(request)
-            return _mock_response({"status": "processed", "extracted": 0, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
-            "session_id": "abc",
-            "trigger": "auto",
-        })
-
-        code, out, err = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-        assert len(captured_requests) == 0  # No HTTP call made
-
-    def test_whisper_store_resolves_transcript_from_session_id(self, monkeypatch, tmp_path):
-        """When transcript_path is absent, resolve it from session_id."""
-        transcript = tmp_path / "resolved.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        captured_requests = []
-
-        def handler(request):
-            captured_requests.append(request)
-            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._resolve_transcript_path",
-            lambda session_id: transcript if session_id == "abc" else None,
-        )
-
-        hook_input = json.dumps({
-            "cwd": "/tmp",
-            "session_id": "abc",
-            "trigger": "auto",
-        })
-
-        code, out, err = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-        assert len(captured_requests) == 1
-
-
-class TestWhisperStoreSilentOnError:
-    def test_whisper_store_silent_on_error(self, monkeypatch, tmp_path):
-        """Server down → exit 0 (no crash)."""
+    def test_whisper_store_exits_zero_when_server_down(self, monkeypatch, tmp_path, _isolate_cache):
+        """Server unreachable -> exit 0 silently AND the path is queued in the outbox."""
         transcript = tmp_path / "session.jsonl"
         transcript.write_text(_make_transcript(6))
 
         def handler(request):
             raise httpx.ConnectError("Connection refused")
 
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
+        _mock_client(monkeypatch, handler)
+
+        hook_input = json.dumps({"transcript_path": str(transcript), "session_id": "abc"})
+        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+
+        assert code == 0
+        recs = _outbox_records(_isolate_cache)
+        assert [r["path"] for r in recs] == [str(transcript)]
+
+    def test_current_event_is_queued_before_any_network_call(
+        self, monkeypatch, tmp_path, _isolate_cache
+    ):
+        """council R9: the current boundary must be durable BEFORE the POST. Simulate the
+        hook being killed mid-request and assert the outbox already holds this transcript."""
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text(_make_transcript(6))
+
+        class _KillClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **k):
+                raise SystemExit(0)
+
+        monkeypatch.setattr(cli, "_nudge_client", lambda: _KillClient())
+
+        hook_input = json.dumps({"transcript_path": str(transcript), "session_id": "abc"})
+        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+
+        assert code == 0
+        recs = _outbox_records(_isolate_cache)
+        assert [r["path"] for r in recs] == [str(transcript)]
+
+    def test_drain_is_budgeted_and_cannot_starve_the_current_event(
+        self, monkeypatch, tmp_path, _isolate_cache
+    ):
+        """council R9: with many queued entries, the current transcript is queued and
+        POSTed FIRST, and the drain stops at _OUTBOX_DRAIN_MAX leaving the rest queued."""
+        monkeypatch.setattr(cli, "_OUTBOX_DRAIN_MAX", 3)
+        monkeypatch.setattr(cli, "_OUTBOX_DRAIN_SECONDS", 100.0)  # isolate the count budget
+
+        # Seed 10 older entries, each a real existing transcript.
+        _isolate_cache.mkdir(parents=True, exist_ok=True)
+        seeded = []
+        with (_isolate_cache / "whisper-nudge-outbox.jsonl").open("w") as fh:
+            for i in range(10):
+                t = tmp_path / f"old-{i}.jsonl"
+                t.write_text(_make_transcript(2))
+                seeded.append(str(t))
+                fh.write(json.dumps({"id": f"seed-{i}", "path": str(t), "at": time.time()}) + "\n")
+
+        current = tmp_path / "current.jsonl"
+        current.write_text(_make_transcript(6))
+
+        captured = []
+
+        def handler(request):
+            captured.append(json.loads(request.content)["path"])
+            return _mock_response({"status": "accepted"}, status_code=202)
+
+        _mock_client(monkeypatch, handler)
+
+        hook_input = json.dumps({"transcript_path": str(current), "session_id": "cur"})
+        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+
+        assert code == 0
+        assert captured[0] == str(current)          # current event went first
+        assert len(captured) == 1 + 3               # current + exactly DRAIN_MAX drained
+        remaining = {r["path"] for r in _outbox_records(_isolate_cache)}
+        assert len(remaining) == 7                  # the rest stayed queued
+        assert str(current) not in remaining        # the current event was acked, not left
+
+    def test_entry_removed_only_on_its_own_202(self, monkeypatch, tmp_path, _isolate_cache):
+        """council R9: a mixed response map (202 for A, 500 for B) removes A and keeps B —
+        removal is never batch-wide."""
+        a = tmp_path / "a.jsonl"
+        a.write_text(_make_transcript(2))
+        b = tmp_path / "b.jsonl"
+        b.write_text(_make_transcript(2))
+
+        _isolate_cache.mkdir(parents=True, exist_ok=True)
+        with (_isolate_cache / "whisper-nudge-outbox.jsonl").open("w") as fh:
+            fh.write(json.dumps({"id": "id-a", "path": str(a), "at": time.time()}) + "\n")
+            fh.write(json.dumps({"id": "id-b", "path": str(b), "at": time.time()}) + "\n")
+
+        current = tmp_path / "current.jsonl"
+        current.write_text(_make_transcript(6))
+
+        def handler(request):
+            path = json.loads(request.content)["path"]
+            if path == str(b):
+                return _mock_response({"status": "error"}, status_code=500)
+            return _mock_response({"status": "accepted"}, status_code=202)
+
+        _mock_client(monkeypatch, handler)
+
+        hook_input = json.dumps({"transcript_path": str(current), "session_id": "cur"})
+        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+
+        assert code == 0
+        remaining = [r["path"] for r in _outbox_records(_isolate_cache)]
+        assert remaining == [str(b)]                # only the 500 stayed queued
+
+    @pytest.mark.skipif(cli.fcntl is None, reason="POSIX fcntl unavailable (degraded mode)")
+    def test_concurrent_append_during_drain_is_not_lost(self, monkeypatch, _isolate_cache):
+        """council R9 (the inode trap): a drain that rewrites the outbox via os.replace
+        must not swallow a concurrent append, because both take the STABLE lock file."""
+        _isolate_cache.mkdir(parents=True, exist_ok=True)
+        appends = 60
+        rewrites = 60
+        barrier = mp.Barrier(2)
+
+        appender = mp.Process(target=_concurrent_appender, args=(barrier, appends))
+        drainer = mp.Process(target=_concurrent_drainer, args=(barrier, rewrites))
+        appender.start()
+        drainer.start()
+        appender.join(30)
+        drainer.join(30)
+        assert not appender.is_alive() and not drainer.is_alive()
+
+        paths = {r["path"] for r in _outbox_records(_isolate_cache)}
+        expected = {f"/append/{i}" for i in range(appends)}
+        assert expected <= paths            # not one appended record was lost
+
+    def test_outbox_is_drained_on_the_next_fire(self, monkeypatch, tmp_path, _isolate_cache):
+        """A queued nudge is re-sent (and removed) on the next fire; a vanished file is
+        dropped without a POST; a still-valid entry and the new path are POSTed."""
+        gone = tmp_path / "gone.jsonl"
+        gone.write_text(_make_transcript(2))
+        old = tmp_path / "old.jsonl"
+        old.write_text(_make_transcript(2))
+
+        _isolate_cache.mkdir(parents=True, exist_ok=True)
+        with (_isolate_cache / "whisper-nudge-outbox.jsonl").open("w") as fh:
+            fh.write(json.dumps({"id": "id-gone", "path": str(gone), "at": time.time()}) + "\n")
+            fh.write(json.dumps({"id": "id-old", "path": str(old), "at": time.time()}) + "\n")
+
+        gone.unlink()  # transcript vanished after it was queued
+
+        new = tmp_path / "new.jsonl"
+        new.write_text(_make_transcript(6))
+
+        posted = []
+
+        def handler(request):
+            posted.append(json.loads(request.content)["path"])
+            return _mock_response({"status": "accepted"}, status_code=202)
+
+        _mock_client(monkeypatch, handler)
+
+        hook_input = json.dumps({"transcript_path": str(new), "session_id": "new"})
+        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+
+        assert code == 0
+        assert str(new) in posted
+        assert str(old) in posted
+        assert str(gone) not in posted                 # vanished file never POSTed
+        assert _outbox_records(_isolate_cache) == []   # everything acked/dropped
+
+    def test_whisper_store_exits_zero_on_missing_transcript(self, monkeypatch, _isolate_cache):
+        """No transcript_path and unresolvable session_id -> exit 0, no HTTP, no queue."""
+        monkeypatch.setattr(cli, "_resolve_transcript_path", lambda session_id: None)
+
+        def handler(request):  # pragma: no cover - must never be called
+            raise AssertionError("no HTTP call expected")
+
+        _mock_client(monkeypatch, handler)
+
+        hook_input = json.dumps({"session_id": "no-such-session"})
+        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
+
+        assert code == 0
+        assert not (_isolate_cache / "whisper-nudge-outbox.jsonl").exists()
+
+    def test_legacy_cursor_key_removed_only_after_202(self, monkeypatch, tmp_path, _isolate_cache):
+        """council R4 + R10: on 202 ONLY this session's key leaves whisper-cursors.json;
+        other sessions survive. On 422 nothing is removed at all."""
+        _isolate_cache.mkdir(parents=True, exist_ok=True)
+        cursor_file = _isolate_cache / "whisper-cursors.json"
+        cursor_file.write_text(json.dumps({"sess-A": 100, "sess-B": 200}))
+
+        ta = tmp_path / "a.jsonl"
+        ta.write_text(_make_transcript(6))
+
+        def ok_handler(request):
+            return _mock_response({"status": "accepted"}, status_code=202)
+
+        _mock_client(monkeypatch, ok_handler)
+        _run_cli(
+            ["whisper", "store"], monkeypatch,
+            stdin_text=json.dumps({"transcript_path": str(ta), "session_id": "sess-A"}),
         )
 
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
-            "session_id": "abc",
-            "trigger": "auto",
-        })
+        assert cursor_file.exists()
+        assert json.loads(cursor_file.read_text()) == {"sess-B": 200}
 
-        code, out, err = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
+        # A 422 nudge for sess-B must leave its cursor untouched.
+        tb = tmp_path / "b.jsonl"
+        tb.write_text(_make_transcript(6))
+
+        def rejected_handler(request):
+            return _mock_response({"detail": "outside watched dirs"}, status_code=422)
+
+        _mock_client(monkeypatch, rejected_handler)
+        _run_cli(
+            ["whisper", "store"], monkeypatch,
+            stdin_text=json.dumps({"transcript_path": str(tb), "session_id": "sess-B"}),
+        )
+
+        assert json.loads(cursor_file.read_text()) == {"sess-B": 200}
+
+
+# --- module-level workers for the multiprocessing concurrency test (must be picklable) ---
+
+
+def _concurrent_appender(barrier, n):
+    import ormah.adapters.cli_adapter as _cli
+
+    barrier.wait()
+    for i in range(n):
+        _cli._queue_nudge(f"/append/{i}")
+
+
+def _concurrent_drainer(barrier, n):
+    import ormah.adapters.cli_adapter as _cli
+
+    barrier.wait()
+    for _ in range(n):
+        _cli._unqueue_nudge("no-such-id")  # pure read + os.replace rewrite under the lock
 
 
 class TestResolveTranscriptPath:
@@ -243,541 +393,6 @@ class TestResolveTranscriptPath:
         from ormah.adapters.cli_adapter import _resolve_transcript_path
 
         assert _resolve_transcript_path("sess-456") == transcript
-
-
-class TestWhisperStoreSpace:
-    def test_whisper_store_resolves_space(self, monkeypatch, tmp_path):
-        """cwd="/path/to/ormah" → space="ormah" in request params."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        captured_requests = []
-
-        def handler(request):
-            captured_requests.append(request)
-            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": str(tmp_path),  # space will be the dir name
-            "session_id": "abc",
-            "trigger": "auto",
-        })
-
-        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-        assert len(captured_requests) == 1
-
-        url = str(captured_requests[0].url)
-        assert "default_space=" in url
-
-
-class TestWhisperStoreExtraTags:
-    def test_whisper_store_passes_extra_tags(self, monkeypatch, tmp_path):
-        """Verify "whisper-out" tag in request."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        captured_requests = []
-
-        def handler(request):
-            captured_requests.append(request)
-            return _mock_response({"status": "processed", "extracted": 0, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
-            "session_id": "abc",
-            "trigger": "auto",
-        })
-
-        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-        assert len(captured_requests) == 1
-
-        url = str(captured_requests[0].url)
-        assert "extra_tags=whisper-out" in url
-
-
-class TestWhisperStoreCursor:
-    def test_cursor_saves_after_success(self, monkeypatch, tmp_path):
-        """After successful extraction, cursor is persisted."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        def handler(request):
-            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
-            "session_id": "sess1",
-            "trigger": "auto",
-        })
-
-        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
-        cursors = json.loads(_WHISPER_CURSOR_FILE.read_text())
-        assert "sess1" in cursors
-        assert cursors["sess1"] > 0
-        assert cursors["sess1"] == transcript.stat().st_size
-
-    def test_cursor_holds_back_dangling_prompt(self, monkeypatch, tmp_path):
-        """A store fired while a prompt's response is not written yet must not ingest the
-        dangling prompt or advance the cursor past it — the prompt stays with its response
-        on the next run (no split)."""
-        monkeypatch.setattr("ormah.adapters.cli_adapter.settings.whisper_out_min_turns", 1)
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))  # 6 complete (end_turn) turns
-        with transcript.open("a") as f:
-            f.write(json.dumps({"type": "user",
-                "message": {"content": "Dangling prompt about the new feature"}}) + "\n")
-
-        bodies = []
-
-        def handler(request):
-            bodies.append(json.loads(request.content))
-            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-        hook_input = json.dumps({
-            "transcript_path": str(transcript), "cwd": "/tmp",
-            "session_id": "sess1", "trigger": "auto",
-        })
-
-        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
-        cursors = json.loads(_WHISPER_CURSOR_FILE.read_text())
-        assert "Dangling prompt" not in bodies[0]["content"]       # held back
-        assert cursors["sess1"] < transcript.stat().st_size        # cursor before it
-
-        # The response arrives; the next run pairs the prompt with its response.
-        with transcript.open("a") as f:
-            f.write(json.dumps({"type": "assistant",
-                "message": {"stop_reason": "end_turn",
-                            "content": [{"type": "text", "text": "Answer to the new feature"}]}}) + "\n")
-        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert "Dangling prompt" in bodies[1]["content"]
-        assert "Answer to the new feature" in bodies[1]["content"]
-
-    def test_legacy_mid_response_cursor_recovered(self, monkeypatch, tmp_path):
-        """A whisper cursor left mid-response by an older version is recovered: the store
-        re-parses from 0 so the dropped tail is sent with its prompt, not orphaned."""
-        monkeypatch.setattr("ormah.adapters.cli_adapter.settings.whisper_out_min_turns", 1)
-        transcript = tmp_path / "session.jsonl"
-        records = [
-            {"type": "user", "message": {"content": "Prompt about the architecture decision"}},
-            {"type": "assistant", "message": {"stop_reason": "tool_use",
-                "content": [{"type": "text", "text": "First part"}]}},
-            {"type": "assistant", "message": {"stop_reason": "end_turn",
-                "content": [{"type": "text", "text": "Second part answer"}]}},
-        ]
-        transcript.write_text("\n".join(json.dumps(r) for r in records) + "\n")
-        raw = transcript.read_bytes().splitlines(keepends=True)
-        mid = len(raw[0]) + len(raw[1])  # cursor saved mid-response
-
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE, _WHISPER_CURSOR_DIR
-        _WHISPER_CURSOR_DIR.mkdir(parents=True, exist_ok=True)
-        _WHISPER_CURSOR_FILE.write_text(json.dumps({"sess1": mid}))
-
-        bodies = []
-
-        def handler(request):
-            bodies.append(json.loads(request.content))
-            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-        hook_input = json.dumps({
-            "transcript_path": str(transcript), "cwd": "/tmp",
-            "session_id": "sess1", "trigger": "auto",
-        })
-        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-
-        assert "Prompt about the architecture decision" in bodies[0]["content"]
-        assert "First part" in bodies[0]["content"]
-        assert "Second part answer" in bodies[0]["content"]
-
-    def test_api_error_orphan_advances_cursor_without_full_reextract(
-        self, monkeypatch, tmp_path
-    ):
-        """ADR-0003 regression (bug #149, hook path): a false-positive leading_orphan —
-        an assistant 'API Error' record right after the end_turn boundary the cursor is
-        parked on — must not re-send the whole transcript. The orphan is dropped and only
-        the tail past the cursor is sent; the cursor advances to EOF."""
-        monkeypatch.setattr("ormah.adapters.cli_adapter.settings.whisper_out_min_turns", 1)
-        transcript = tmp_path / "session.jsonl"
-        first_turn = [
-            {"type": "user", "message": {"content": "Prompt one"}},
-            {"type": "assistant", "message": {"stop_reason": "end_turn",
-                "content": [{"type": "text", "text": "Answer one"}]}},
-        ]
-        tail = [
-            {"type": "assistant", "message": {"stop_reason": "stop_sequence",
-                "content": [{"type": "text",
-                    "text": "API Error: Connection closed mid-response."}]}},
-            {"type": "user", "message": {"content": "continue"}},
-            {"type": "assistant", "message": {"stop_reason": "end_turn",
-                "content": [{"type": "text", "text": "Answer two"}]}},
-        ]
-        transcript.write_text("\n".join(json.dumps(r) for r in first_turn) + "\n")
-        from ormah.transcript.parser import parse_transcript
-        boundary = parse_transcript(transcript).safe_end_offset
-        with transcript.open("a") as f:
-            for r in tail:
-                f.write(json.dumps(r) + "\n")
-
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_DIR, _WHISPER_CURSOR_FILE
-        _WHISPER_CURSOR_DIR.mkdir(parents=True, exist_ok=True)
-        _WHISPER_CURSOR_FILE.write_text(json.dumps({"sess1": boundary}))
-
-        bodies = []
-
-        def handler(request):
-            bodies.append(json.loads(request.content))
-            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-        hook_input = json.dumps({
-            "transcript_path": str(transcript), "cwd": "/tmp",
-            "session_id": "sess1", "trigger": "auto",
-        })
-
-        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-
-        assert len(bodies) == 1
-        assert "Answer one" not in bodies[0]["content"]  # no whole-file re-extract
-        assert "API Error" not in bodies[0]["content"]   # orphan fragment dropped
-        assert "continue" in bodies[0]["content"]        # stranded tail recovered
-        cursors = json.loads(_WHISPER_CURSOR_FILE.read_text())
-        assert cursors["sess1"] == transcript.stat().st_size  # cursor monotonic, at EOF
-
-    def test_inflight_orphan_rewind_parks_cursor_unchanged(self, monkeypatch, tmp_path):
-        """ADR-0003 critical regression (Codex review, #149): an orphan with NO forward
-        progress whose rewind ALSO makes no progress — a still-open in-flight response, not
-        a genuinely recoverable one — must park: no POST, cursor untouched."""
-        monkeypatch.setattr("ormah.adapters.cli_adapter.settings.whisper_out_min_turns", 1)
-        transcript = tmp_path / "session.jsonl"
-
-        closed_turn = [
-            {"type": "user", "message": {"content": "Prompt about the release plan"}},
-            {"type": "assistant", "message": {"stop_reason": "end_turn",
-                "content": [{"type": "text", "text": "Answer about the release plan"}]}},
-        ]
-        transcript.write_text("\n".join(json.dumps(r) for r in closed_turn) + "\n")
-        from ormah.transcript.parser import parse_transcript
-        boundary = parse_transcript(transcript).safe_end_offset
-
-        with transcript.open("a") as f:
-            f.write(json.dumps({"type": "assistant", "message": {"stop_reason": "tool_use",
-                "content": [{"type": "text", "text": "In-flight fragment"}]}}) + "\n")
-
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_DIR, _WHISPER_CURSOR_FILE
-        _WHISPER_CURSOR_DIR.mkdir(parents=True, exist_ok=True)
-        _WHISPER_CURSOR_FILE.write_text(json.dumps({"sess1": boundary}))
-
-        bodies = []
-
-        def handler(request):
-            bodies.append(json.loads(request.content))
-            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-        hook_input = json.dumps({
-            "transcript_path": str(transcript), "cwd": "/tmp",
-            "session_id": "sess1", "trigger": "auto",
-        })
-
-        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-
-        assert bodies == []  # never re-ingested
-        cursors = json.loads(_WHISPER_CURSOR_FILE.read_text())
-        assert cursors["sess1"] == boundary  # cursor left untouched
-
-    def test_cursor_skips_already_processed(self, monkeypatch, tmp_path):
-        """Second run on unchanged file → no HTTP call."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-        file_size = transcript.stat().st_size
-
-        # Pre-seed cursor at end of file
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE, _WHISPER_CURSOR_DIR
-        _WHISPER_CURSOR_DIR.mkdir(parents=True, exist_ok=True)
-        _WHISPER_CURSOR_FILE.write_text(json.dumps({"sess1": file_size}))
-
-        captured_requests = []
-
-        def handler(request):
-            captured_requests.append(request)
-            return _mock_response({"status": "processed", "extracted": 0, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
-            "session_id": "sess1",
-            "trigger": "auto",
-        })
-
-        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-        assert len(captured_requests) == 0  # Skipped — already processed
-
-    def test_cursor_processes_only_new_content(self, monkeypatch, tmp_path):
-        """After appending new turns, only new content is sent."""
-        transcript = tmp_path / "session.jsonl"
-        part1 = _make_transcript(6)
-        transcript.write_text(part1)
-        part1_size = transcript.stat().st_size
-
-        # Pre-seed cursor at end of part1
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE, _WHISPER_CURSOR_DIR
-        _WHISPER_CURSOR_DIR.mkdir(parents=True, exist_ok=True)
-        _WHISPER_CURSOR_FILE.write_text(json.dumps({"sess1": part1_size}))
-
-        # Append more turns
-        part2 = _make_transcript(6)
-        with open(transcript, "a") as f:
-            f.write(part2)
-
-        captured_bodies = []
-
-        def handler(request):
-            captured_bodies.append(json.loads(request.content))
-            return _mock_response({"status": "processed", "extracted": 1, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
-            "session_id": "sess1",
-            "trigger": "auto",
-        })
-
-        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-        assert len(captured_bodies) == 1
-
-        # The sent content should NOT contain part1's text
-        sent_content = captured_bodies[0]["content"]
-        assert "User message 0" not in sent_content or sent_content.count("User message 0") == 1
-        # But should contain the new turns (part2 also starts at message 0,
-        # so just verify it's much smaller than the full transcript)
-        from ormah.transcript.parser import parse_transcript
-        full = parse_transcript(transcript)
-        assert len(sent_content) < len(full.conversation)
-
-    def test_cursor_not_advanced_on_extraction_error(self, monkeypatch, tmp_path):
-        """Server responds HTTP 200 with {"status":"error"} (e.g. claude_cli extraction
-        failed on timeout/is_error) — cursor must NOT advance so the slice is retried,
-        unlike a legitimate empty extraction (status:"processed", extracted:0)."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        def handler(request):
-            return _mock_response(
-                {"status": "error", "result": "boom", "extracted": 0, "memories": []}
-            )
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
-            "session_id": "sess1",
-            "trigger": "auto",
-        })
-
-        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
-        assert not _WHISPER_CURSOR_FILE.exists()
-
-    def test_cursor_advances_on_empty_processed_extraction(self, monkeypatch, tmp_path):
-        """status:"processed" with extracted==0 is a legitimate empty extraction and MUST
-        still advance the cursor, else the same slice reprocesses forever."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        def handler(request):
-            return _mock_response({"status": "processed", "extracted": 0, "memories": []})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
-            "session_id": "sess1",
-            "trigger": "auto",
-        })
-
-        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
-        cursors = json.loads(_WHISPER_CURSOR_FILE.read_text())
-        assert cursors["sess1"] == transcript.stat().st_size
-
-    def test_non_dict_200_body_does_not_crash_or_advance(self, monkeypatch, tmp_path):
-        """A rogue proxy may return HTTP 200 with a valid-but-non-object JSON body
-        (null / list / number). The hook must not raise (its contract is 'never block
-        compaction, exit silently') and must not advance the cursor (unconfirmed success)."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        def handler(request):
-            # A literal JSON null body: r.json() returns None (not an object), so
-            # resp.get("status") would raise AttributeError unless guarded.
-            return httpx.Response(200, content=b"null", headers={"content-type": "application/json"})
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
-            "session_id": "sess1",
-            "trigger": "auto",
-        })
-
-        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
-        assert not _WHISPER_CURSOR_FILE.exists()
-
-    @pytest.mark.parametrize("body", [
-        {"extracted": 0, "memories": []},            # missing status
-        {"status": "queued", "extracted": 0},         # unrecognized status
-        {"status": None},                              # null status
-    ])
-    def test_cursor_not_advanced_on_unknown_200_status(self, monkeypatch, tmp_path, body):
-        """Only status:"processed" advances the cursor. A 200 dict with a missing or
-        unrecognized status is not a confirmed success — do NOT advance, so the slice is
-        retried rather than silently lost."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        transport = httpx.MockTransport(lambda request: _mock_response(body))
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-        hook_input = json.dumps({
-            "transcript_path": str(transcript), "cwd": "/tmp",
-            "session_id": "sess1", "trigger": "auto",
-        })
-        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
-        assert not _WHISPER_CURSOR_FILE.exists()
-
-    def test_cursor_not_advanced_on_client_timeout(self, monkeypatch, tmp_path):
-        """If the ingest POST itself times out (claude_cli extraction outran the client
-        budget), the hook exits silently and the cursor is NOT advanced, so the slice is
-        retried on the next run instead of being lost."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        def handler(request):
-            raise httpx.ReadTimeout("extraction outran the client timeout", request=request)
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-        hook_input = json.dumps({
-            "transcript_path": str(transcript), "cwd": "/tmp",
-            "session_id": "sess1", "trigger": "auto",
-        })
-        code, _, _ = _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-        assert code == 0
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
-        assert not _WHISPER_CURSOR_FILE.exists()
-
-    def test_cursor_not_saved_on_error(self, monkeypatch, tmp_path):
-        """On HTTP error, cursor is NOT updated."""
-        transcript = tmp_path / "session.jsonl"
-        transcript.write_text(_make_transcript(6))
-
-        def handler(request):
-            raise httpx.ConnectError("Connection refused")
-
-        transport = httpx.MockTransport(handler)
-        monkeypatch.setattr(
-            "ormah.adapters.cli_adapter._whisper_store_client",
-            lambda: httpx.Client(transport=transport, base_url="http://test"),
-        )
-
-        hook_input = json.dumps({
-            "transcript_path": str(transcript),
-            "cwd": "/tmp",
-            "session_id": "sess1",
-            "trigger": "auto",
-        })
-
-        _run_cli(["whisper", "store"], monkeypatch, stdin_text=hook_input)
-
-        from ormah.adapters.cli_adapter import _WHISPER_CURSOR_FILE
-        assert not _WHISPER_CURSOR_FILE.exists()
 
 
 class TestIngestEndpointExtraTags:
@@ -811,32 +426,31 @@ class TestIngestEndpointExtraTags:
 
 class TestWhisperSetup:
     def test_whisper_setup_includes_precompact(self, monkeypatch, tmp_path):
-        """Setup generates both UserPromptSubmit and PreCompact hooks when whisper_out_enabled."""
+        """Setup generates both UserPromptSubmit and PreCompact hooks when whisper_out_enabled.
+
+        HOME is isolated: `whisper setup --global` WRITES to ~/.claude/settings.json."""
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(
             "ormah.adapters.cli_adapter.settings",
             MagicMock(port=8787, whisper_out_enabled=True),
         )
 
-        code, out, err = _run_cli(
-            ["whisper", "setup", "--global"],
-            monkeypatch,
-        )
+        code, out, err = _run_cli(["whisper", "setup", "--global"], monkeypatch)
 
         assert code == 0
         assert "PreCompact" in out
         assert "UserPromptSubmit" in out
 
     def test_whisper_setup_always_registers_precompact(self, monkeypatch, tmp_path):
-        """Setup always registers PreCompact hook (runtime flag gates execution, not registration)."""
+        """Setup always registers PreCompact hook (runtime flag gates execution, not
+        registration). HOME is isolated: --global writes to ~/.claude/settings.json."""
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(
             "ormah.adapters.cli_adapter.settings",
             MagicMock(port=8787, whisper_out_enabled=False, whisper_out_min_turns=5),
         )
 
-        code, out, err = _run_cli(
-            ["whisper", "setup", "--global"],
-            monkeypatch,
-        )
+        code, out, err = _run_cli(["whisper", "setup", "--global"], monkeypatch)
 
         assert code == 0
         assert "PreCompact" in out

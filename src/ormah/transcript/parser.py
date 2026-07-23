@@ -204,7 +204,10 @@ def _conversation_from_turns(turns: list[TranscriptTurn]) -> str:
 
 
 def parse_transcript(
-    path: Path, start_offset: int = 0, max_bytes: int | None = None
+    path: Path,
+    start_offset: int = 0,
+    max_bytes: int | None = None,
+    stop_offset: int | None = None,
 ) -> TranscriptResult:
     """Parse a supported JSONL transcript into cleaned conversation text.
 
@@ -221,6 +224,14 @@ def parse_transcript(
     slice never exceeds max_bytes. The caller re-parses from the new ``safe_end_offset``
     to drain the rest. A single turn larger than max_bytes is committed anyway (there is
     no smaller slice to make progress with).
+
+    When *stop_offset* is set it is an ABSOLUTE hard ceiling, not a budget: no turn is
+    committed whose end exceeds it, and ``safe_end_offset`` is never returned beyond it.
+    ``max_bytes`` alone commits an oversized single turn anyway (see above); ``stop_offset``
+    refuses it. This is the consent boundary a nudge measured (ADR-0004): a PreCompact nudge
+    fires on a live, still-growing session, so bytes appended after acceptance must never be
+    ingested. It only bounds the output — it does not change how the safe boundary is
+    computed. Leave it ``None`` (the non-nudge lane) for the parser's prior behaviour exactly.
     """
     path = Path(path)
     total_chars = path.stat().st_size
@@ -250,11 +261,21 @@ def parse_transcript(
             and (new_safe_end - start_offset) > max_bytes
         )
 
+    def _exceeds_ceiling(new_safe_end: int) -> bool:
+        # ABSOLUTE limit, unlike max_bytes: it refuses even the first turn of a slice, so a
+        # single oversized turn that grew past the accepted boundary is never committed.
+        return stop_offset is not None and new_safe_end > stop_offset
+
     with open(path) as f:
         if start_offset > 0:
             f.seek(start_offset)
         while True:
             pos_before = f.tell()  # byte offset at the start of this line
+            # Hard ceiling: never read a line that starts at or beyond the accepted
+            # boundary. A line straddling the ceiling (nudge caught a record mid-write) is
+            # still read here and refused at its commit site below. Bounds the output only.
+            if stop_offset is not None and pos_before >= stop_offset:
+                break
             line = f.readline()
             if not line:
                 break
@@ -275,6 +296,8 @@ def parse_transcript(
                 # Codex end-of-turn: the open response is complete, advance the closed
                 # boundary past it (so a multi-record Codex turn is never split).
                 if _seen_assistant_text:
+                    if _exceeds_ceiling(f.tell()):
+                        break  # ceiling: absolute, never advance the boundary past it
                     if _would_overshoot(f.tell()):
                         _capped = True
                         break
@@ -304,6 +327,8 @@ def parse_transcript(
                     # advances to the start of this user line. This never splits a
                     # response — the whole prior block is on the closed side.
                     if _seen_assistant_text:
+                        if _exceeds_ceiling(pos_before):
+                            break  # ceiling: absolute, never advance past it
                         if _would_overshoot(pos_before):
                             _capped = True
                             break
@@ -326,6 +351,8 @@ def parse_transcript(
                 if text and not _saw_user_record and start_offset > 0:
                     _leading_orphan = True
                 if text and user_turn_count > 0:
+                    if _assistant_is_terminal(entry) and _exceeds_ceiling(f.tell()):
+                        break  # ceiling: refuse an oversized/grew-after turn entirely
                     if _assistant_is_terminal(entry) and _would_overshoot(f.tell()):
                         _capped = True
                         break
