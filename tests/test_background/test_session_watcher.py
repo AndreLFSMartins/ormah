@@ -20,7 +20,6 @@ from ormah.background.session_watcher import (
     _load_state,
     _record_whisper_usage_signals,
     _save_state,
-    _scan_sessions,
     _space_from_encoded_dir,
     _expand_watch_dir,
     run_session_reconcile,
@@ -557,26 +556,6 @@ def test_subagent_transcript_is_not_ingested(engine, tmp_path):
     assert state == {}
 
 
-def test_scan_skips_subagents_keeps_primary(engine, tmp_path):
-    """A scan ingests the primary session transcript but skips sibling subagent transcripts."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-myproject"
-    sub_dir = project_dir / "abc123" / "subagents"
-    sub_dir.mkdir(parents=True)
-    primary = project_dir / "abc123.jsonl"
-    _make_jsonl(primary, user_turns=6)
-    _mark_idle(primary)  # finished session, below flush_bytes → idle flush
-    _make_jsonl(sub_dir / "agent-deadbeef.jsonl", user_turns=6)
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        ingested = _scan_sessions(engine, watch_dir, min_turns=5, lookback_hours=9999)
-
-    assert ingested == 1
-    state = _load_state(watch_dir)
-    sub_rel = str((sub_dir / "agent-deadbeef.jsonl").relative_to(watch_dir))
-    assert sub_rel not in state
-
-
 def test_ingest_codex_session_resolves_rollout_session_id_and_space(engine, tmp_path):
     """Codex rollout filenames are matched back to the whisper_log hook session id."""
     watch_dir = tmp_path / ".codex" / "sessions"
@@ -1089,33 +1068,6 @@ def test_unchanged_session_skipped(engine, tmp_path):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.NO_PROGRESS
 
-
-# --- Test 5: Scan respects lookback ---
-
-def test_scan_respects_lookback(engine, tmp_path):
-    """Old files are skipped during catch-up scan, recent ones ingested."""
-    watch_dir = tmp_path / "projects"
-    project_dir = watch_dir / "-Users-alice-Code-proj"
-    project_dir.mkdir(parents=True)
-
-    recent = project_dir / "recent.jsonl"
-    _make_jsonl(recent, user_turns=6)
-    _mark_idle(recent)  # finished session, below flush_bytes → idle flush
-
-    old = project_dir / "old.jsonl"
-    _make_jsonl(old, user_turns=6)
-    # Set mtime to 200 hours ago (beyond 72h lookback)
-    import os
-    old_time = time.time() - (200 * 3600)
-    os.utime(old, (old_time, old_time))
-
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        count = _scan_sessions(engine, watch_dir, min_turns=5, lookback_hours=72)
-
-    assert count == 1  # only recent
-    state = _load_state(watch_dir)
-    assert str(recent.relative_to(watch_dir)) in state
-    assert str(old.relative_to(watch_dir)) not in state
 
 
 # --- Test 6: Debounce coalesces writes ---
@@ -2306,6 +2258,61 @@ def test_reconcile_ingests_file_the_live_path_missed(engine, tmp_path):
         _drain_all(handler)
     assert rel in handler._state
     assert handler._state[rel]["user_turns"] == 6
+
+
+def test_reconcile_skips_subagents_keeps_primary(engine, tmp_path):
+    """reconcile's discovery walk enqueues the primary session transcript but skips sibling
+    subagent transcripts. Migrated from the dead direct-ingest catch-up scan (ADR-0004
+    R12 cleanup) — same assertion, driven through reconcile()+drain instead of the
+    orphaned function."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    sub_dir = project_dir / "abc123" / "subagents"
+    sub_dir.mkdir(parents=True)
+    primary = project_dir / "abc123.jsonl"
+    _make_jsonl(primary, user_turns=6)
+    _mark_idle(primary)  # finished session, below flush_bytes → idle flush
+    _make_jsonl(sub_dir / "agent-deadbeef.jsonl", user_turns=6)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1  # only the primary is a candidate
+        _drain_all(handler)
+
+    rel = str(primary.relative_to(watch_dir))
+    sub_rel = str((sub_dir / "agent-deadbeef.jsonl").relative_to(watch_dir))
+    assert rel in handler._state
+    assert sub_rel not in handler._state
+
+
+def test_reconcile_respects_lookback_for_never_seen_files(engine, tmp_path):
+    """A positive lookback cutoff excludes an old never-seen file from the reconcile sweep
+    while a recent never-seen file is enqueued and ingested. Migrated from the dead
+    direct-ingest catch-up scan (ADR-0004 R12 cleanup) — reconcile's lookback_hours>0
+    cutoff branch (as opposed to the lookback_hours<0 disabled case already covered by
+    test_reconcile_skips_never_seen_when_lookback_negative) had no direct test before this."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-proj"
+    project_dir.mkdir(parents=True)
+
+    recent = project_dir / "recent.jsonl"
+    _make_jsonl(recent, user_turns=6)
+    _mark_idle(recent)  # finished session, below flush_bytes → idle flush
+
+    old = project_dir / "old.jsonl"
+    _make_jsonl(old, user_turns=6)
+    old_time = time.time() - (200 * 3600)  # beyond the 72h lookback below
+    os.utime(old, (old_time, old_time))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool", lookback_hours=72)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1  # only recent enqueued
+        _drain_all(handler)
+
+    rel_recent = str(recent.relative_to(watch_dir))
+    rel_old = str(old.relative_to(watch_dir))
+    assert rel_recent in handler._state
+    assert rel_old not in handler._state
 
 
 def test_reconcile_skips_fully_consumed_file_on_second_pass(engine, tmp_path):

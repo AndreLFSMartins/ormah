@@ -668,21 +668,6 @@ def _expand_watch_dir(path: Path) -> Path:
     return Path(path).expanduser().resolve()
 
 
-def _session_watch_dirs(settings) -> list[Path]:
-    """Return existing transcript watch directories for the current settings."""
-    primary = _expand_watch_dir(settings.session_watcher_dir)
-    candidates = [primary]
-
-    if primary == _expand_watch_dir(_DEFAULT_SESSION_WATCHER_DIR):
-        candidates.append(_expand_watch_dir(_CODEX_SESSION_WATCHER_DIR))
-
-    watch_dirs: list[Path] = []
-    for candidate in candidates:
-        if candidate.exists() and candidate not in watch_dirs:
-            watch_dirs.append(candidate)
-    return watch_dirs
-
-
 def _default_acceptance_roots() -> list[Path]:
     """The standard hook locations a nudge may target regardless of discovery config.
 
@@ -699,9 +684,9 @@ def _default_acceptance_roots() -> list[Path]:
 
 
 def _configured_watch_roots(settings) -> list[Path]:
-    """Discovery roots — the same candidates as ``_session_watch_dirs`` WITHOUT the
-    ``exists()`` filter (council R4/R5), so an absent configured dir still yields a handler
-    and a later nudge for a transcript under it is accepted instead of 422'd forever."""
+    """Discovery roots for the current settings, WITHOUT an ``exists()`` filter (council
+    R4/R5), so an absent configured dir still yields a handler and a later nudge for a
+    transcript under it is accepted instead of 422'd forever."""
     primary = _expand_watch_dir(settings.session_watcher_dir)
     roots = [primary]
     if primary == _expand_watch_dir(_DEFAULT_SESSION_WATCHER_DIR):
@@ -1099,59 +1084,6 @@ def _ingest_session(
     return IngestResult.OK
 
 
-def _scan_sessions(
-    engine: MemoryEngine,
-    watch_dir: Path,
-    min_turns: int,
-    lookback_hours: int,
-) -> int:
-    """Scan for new/changed JSONL transcripts. Returns count ingested."""
-    state = _load_state(watch_dir)
-    ingested = 0
-
-    # Read from settings so a tuned flush_bytes/idle_threshold is honored at catch-up too,
-    # not just _ingest_session's hardcoded defaults.
-    flush_bytes = getattr(engine.settings, "session_watcher_flush_bytes", 60000)
-    idle_threshold = getattr(engine.settings, "session_watcher_idle_threshold", 600.0)
-
-    now = time.time()
-    cutoff = now - (lookback_hours * 3600) if lookback_hours > 0 else 0
-
-    for jsonl_file in sorted(watch_dir.rglob("*.jsonl")):
-        rel = str(jsonl_file.relative_to(watch_dir))
-
-        # Lookback cutoff applies only to never-ingested files
-        if rel not in state and lookback_hours >= 0 and cutoff > 0:
-            try:
-                mtime = jsonl_file.stat().st_mtime
-            except OSError:
-                continue
-            if mtime < cutoff:
-                continue
-
-        # lookback_hours == -1 means skip all never-ingested files (no catch-up)
-        if rel not in state and lookback_hours < 0:
-            continue
-
-        if _ingest_session(
-            engine, jsonl_file, state, watch_dir, min_turns,
-            idle_threshold=idle_threshold, flush_bytes=flush_bytes,
-        ) == IngestResult.OK:
-            ingested += 1
-
-    # Clean stale state entries for deleted files
-    stale_keys = [
-        rel for rel in list(state.keys())
-        if not (watch_dir / rel).exists()
-    ]
-    for key in stale_keys:
-        del state[key]
-    if stale_keys:
-        _save_state(watch_dir, state)
-
-    return ingested
-
-
 class SessionHandler(FileSystemEventHandler):
     """Watches for .jsonl file create/modify events with debouncing."""
 
@@ -1379,7 +1311,7 @@ class SessionHandler(FileSystemEventHandler):
             rel = str(jsonl_file.relative_to(self.watch_dir))
             entry = self._state.get(rel)
             if entry is None:
-                # Never-seen: mirror _scan_sessions catch-up rules.
+                # Never-seen: mirror the lookback catch-up rules below.
                 if self.lookback_hours < 0:
                     continue  # catch-up disabled -> skip never-seen files
                 if cutoff > 0 and st.st_mtime < cutoff:
@@ -1432,7 +1364,8 @@ def _run_startup_discovery(handler: SessionHandler) -> None:
     interval after a restart to re-enqueue transcripts whose cursor is behind EOF.
 
     ``reconcile`` only ENQUEUES (no DB writes), so this may run on a daemon thread off the
-    bind path — the original bind-blocking bug was ``_scan_sessions`` ingesting synchronously.
+    bind path — the original bind-blocking bug was the old catch-up scan ingesting
+    synchronously.
     """
     try:
         handler.reconcile()
