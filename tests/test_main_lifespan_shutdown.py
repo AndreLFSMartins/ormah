@@ -377,3 +377,84 @@ async def test_lifespan_shutdown_drains_always_on_worker(monkeypatch, tmp_path):
         assert app.state.session_watches is sentinel
     assert stopped == [sentinel], "shutdown must drain the always-on worker"
 
+
+# ---------------------------------------------------------------------------
+# 6. ADR-0004 slice 2: resume_llm_adapters() at lifespan startup
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_second_lifespan_can_generate_after_a_cancelled_first(tmp_path, monkeypatch):
+    """council R4/R7: a cancellation event must not survive past the lifespan that set it.
+    main.lifespan calls resume_llm_adapters() early in startup (right after engine.startup()),
+    so a second in-process lifespan (the repo already exercises this double-lifespan pattern)
+    can generate again even though the module-level llm_client adapter caches outlive a single
+    lifespan execution."""
+    import sys
+
+    from ormah.background import llm_client
+    from ormah.background.llm_errors import LlmCancelledError
+
+    class _FakeEngine:
+        def startup(self): pass
+        def shutdown(self): pass
+
+    class _FakeScheduler:
+        def shutdown(self, wait=True): pass
+
+    class _FakeTracker:
+        pass
+
+    def _fake_start_scheduler(engine, stop_event=None):
+        return _FakeScheduler(), _FakeTracker()
+
+    monkeypatch.setattr("ormah.main.MemoryEngine", lambda settings: _FakeEngine())
+    monkeypatch.setattr(
+        "ormah.main.settings",
+        type("S", (), {"port": 8787, "memory_dir": str(tmp_path)})(),
+    )
+    monkeypatch.setattr("ormah.main.MaintenanceManager", lambda *a, **kw: object())
+
+    _fake_hippocampus = type(sys)("_fake_hippo")
+    _fake_hippocampus.start_hippocampus = lambda engine: []
+    _fake_hippocampus.stop_hippocampus = lambda obs: None
+    monkeypatch.setitem(sys.modules, "ormah.background.hippocampus", _fake_hippocampus)
+
+    _fake_session_watcher = type(sys)("_fake_sw")
+    _fake_session_watcher.start_session_watcher = lambda engine: []
+    _fake_session_watcher.stop_session_watcher = lambda obs: None
+    monkeypatch.setitem(sys.modules, "ormah.background.session_watcher", _fake_session_watcher)
+
+    _fake_scheduler_mod = type(sys)("_fake_sched")
+    _fake_scheduler_mod.start_scheduler = _fake_start_scheduler
+    monkeypatch.setitem(sys.modules, "ormah.background.scheduler", _fake_scheduler_mod)
+
+    class _FakeAdapter:
+        def __init__(self):
+            self._cancelled = False
+        def cancel_active(self):
+            self._cancelled = True
+            return 1
+        def resume(self):
+            self._cancelled = False
+        def generate(self, *a, **k):
+            if self._cancelled:
+                raise LlmCancelledError("still cancelled")
+            return "ok"
+
+    fake = _FakeAdapter()
+    monkeypatch.setattr(llm_client, "_cached_adapter", fake)
+    monkeypatch.setattr(llm_client, "_adapter_initialised", True)
+
+    app = FastAPI(lifespan=main.lifespan)
+
+    # --- first lifespan: something cancels the adapter mid-flight (e.g. a shutdown-time
+    # cancel_active_llm_calls() call) and the lifespan ends without anyone resuming it ---
+    async with main.lifespan(app):
+        fake.cancel_active()
+    assert fake._cancelled is True, "sanity: the adapter is left cancelled after the first lifespan"
+
+    # --- second lifespan (in-process reload): must resume_llm_adapters() at startup ---
+    async with main.lifespan(app):
+        assert fake._cancelled is False, "resume_llm_adapters() must run at lifespan startup"
+        assert llm_client.llm_generate(main.settings, "prompt") == "ok"
+

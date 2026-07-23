@@ -142,3 +142,26 @@ def llm_generate(
         )
     except (LlmCancelledError, LlmTimeoutError):
         return None
+
+
+def cancel_active_llm_calls() -> int:
+    """Best-effort cancellation of in-flight LLM calls at shutdown.
+
+    Adapters opt in by defining cancel_active(); adapters without it (upstream, non-claude_cli
+    providers) are skipped so the drain there stays bounded only by their own HTTP timeouts."""
+    total = 0
+    for name in ("_cached_adapter", "_cached_ingest_adapter"):
+        adapter = globals().get(name)  # the ingest cache exists only on the Beta
+        cancel = getattr(adapter, "cancel_active", None)
+        if callable(cancel):
+            total += cancel()
+    return total
+
+
+def resume_llm_adapters() -> None:
+    """Re-arm cancelled adapters. Called at lifespan startup and after a recoverable startup
+    rollback — the module-level caches outlive a single lifespan (council R7)."""
+    for name in ("_cached_adapter", "_cached_ingest_adapter"):
+        resume = getattr(globals().get(name), "resume", None)
+        if callable(resume):
+            resume()

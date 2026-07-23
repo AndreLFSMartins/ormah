@@ -1,6 +1,7 @@
 """Claude CLI LLM adapter — headless `claude -p` via subscription auth (no paid API)."""
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -9,9 +10,11 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from ormah.background.llm.base import LLMAdapter
+from ormah.background.llm_errors import LlmCancelledError
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +103,41 @@ class ClaudeCliAdapter(LLMAdapter):
         self.timeout = timeout
         self.bin_path = bin_path or shutil.which("claude") or "claude"
         self.max_concurrency = max(1, max_concurrency)
+        # ADR-0004 slice 2: instance-scoped (never module-global — council R6). A module-level
+        # flag would survive the shutdown that set it (main.lifespan catches a watcher startup
+        # failure and keeps serving; nothing calls reset_adapter() on startup), poisoning every
+        # later ingest/maintenance call for the life of the process.
+        self._cancel_event = threading.Event()
+        self._active_procs: set = set()
+        self._active_lock = threading.Lock()
+
+    def cancel_active(self) -> int:
+        """Terminate this adapter's in-flight children; new calls abort until resume().
+
+        Returns the number of processes terminated (0 when idle)."""
+        self._cancel_event.set()
+        return self._cancel_tracked_procs()
+
+    def resume(self) -> None:
+        """Re-arm after a RECOVERABLE cancellation (startup rollback keeps serving) or at the
+        next lifespan startup (the adapter cache is module-level and outlives a reload)."""
+        self._cancel_event.clear()
+
+    def _cancel_tracked_procs(self) -> int:
+        with self._active_lock:
+            procs = list(self._active_procs)
+        for p in procs:
+            with contextlib.suppress(Exception):
+                p.terminate()
+        deadline = time.monotonic() + 5.0
+        for p in procs:
+            with contextlib.suppress(Exception):
+                p.wait(timeout=max(0.1, deadline - time.monotonic()))
+        for p in procs:
+            if p.poll() is None:
+                with contextlib.suppress(Exception):
+                    p.kill()
+        return len(procs)
 
     def generate(
         self,
@@ -133,22 +171,57 @@ class ClaudeCliAdapter(LLMAdapter):
             argv += ["--json-schema", json.dumps(schema)]
         sem = _semaphore(self.max_concurrency)
         with sem:
+            if self._cancel_event.is_set():
+                # A waiter that acquired the semaphore AFTER the kill pass must not spawn a
+                # replacement child mid-shutdown.
+                raise LlmCancelledError("llm call aborted: shutdown in progress")
             try:
-                proc = subprocess.run(
-                    argv, input=prompt, capture_output=True, text=True,
-                    timeout=timeout, cwd=tempfile.gettempdir(), env=env,
+                proc = subprocess.Popen(
+                    argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, cwd=tempfile.gettempdir(), env=env,
                 )
-            except subprocess.TimeoutExpired:
-                logger.warning("claude -p timed out after %ss", timeout)
+            except Exception as e:  # binary missing, OSError, etc. -> FAST failure -> None,
+                logger.warning("claude -p failed to start: %s", e)  # never slice-specific
                 return None
-            except Exception as e:  # binary missing, OSError, etc.
+            with self._active_lock:
+                self._active_procs.add(proc)
+            if self._cancel_event.is_set():
+                # Closes the creation/registration race: if cancel_active() snapshotted the
+                # process set between our event check and the add() above, its kill pass never
+                # saw this child. Re-checking AFTER registration guarantees either the kill pass
+                # sees the proc, or we see the event.
+                with contextlib.suppress(Exception):
+                    proc.kill()
+                    proc.communicate()
+                with self._active_lock:
+                    self._active_procs.discard(proc)
+                raise LlmCancelledError("llm call aborted: shutdown in progress")
+            try:
+                stdout, stderr = proc.communicate(input=prompt, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                if self._cancel_event.is_set():
+                    # A shutdown kill can surface as TimeoutExpired. It must NOT be reported as
+                    # a provider timeout — slice 3 gives timeouts a failure-budget meaning, and
+                    # a restart must never spend it on a cancellation.
+                    raise LlmCancelledError("claude -p cancelled during shutdown") from None
+                logger.warning("claude -p timed out after %ss", timeout)
+                return None  # unchanged for now; slice 3 turns this into LlmTimeoutError
+            except Exception as e:  # I/O failure mid-flight — fast failure
                 logger.warning("claude -p failed to run: %s", e)
                 return None
+            finally:
+                with self._active_lock:
+                    self._active_procs.discard(proc)
+        if proc.returncode < 0 or (self._cancel_event.is_set() and proc.returncode != 0):
+            # killed by cancel_active (negative = signal): cancelled, NOT slice evidence.
+            raise LlmCancelledError(f"claude -p cancelled (rc={proc.returncode})")
         if proc.returncode != 0:
-            logger.warning("claude -p exited %s: %s", proc.returncode, proc.stderr[:300])
+            logger.warning("claude -p exited %s: %s", proc.returncode, stderr[:300])
             return None
         try:
-            envelope = json.loads(proc.stdout)
+            envelope = json.loads(stdout)
         except json.JSONDecodeError:
             logger.warning("claude -p returned a non-JSON envelope")
             return None

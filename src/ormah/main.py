@@ -192,6 +192,15 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     logger.info("Memory engine ready.")
 
+    # ADR-0004 slice 2: re-arm any adapter a prior lifespan's shutdown left cancelled. The
+    # llm_client adapter caches are module-level and outlive an in-process reload (the repo
+    # already exercises consecutive lifespans), so this must run before anything below can call
+    # llm_generate/ingest_llm_generate — otherwise a surviving cancelled adapter would raise
+    # LlmCancelledError on every later call for the life of this process.
+    from ormah.background.llm_client import resume_llm_adapters
+
+    resume_llm_adapters()
+
     # Per-lifespan stop event (R1): a fresh Event per lifespan so that a prior
     # lifespan's orphan worker (if shutdown timed out) can never be rearmed by
     # a new startup — there is nothing to clear(), each lifespan owns its own.

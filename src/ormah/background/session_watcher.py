@@ -20,7 +20,11 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from ormah.background.ingest_spool import IngestSpool, root_key, spool_root
-from ormah.background.llm_client import ingest_provider_configured
+from ormah.background.llm_client import (
+    cancel_active_llm_calls,
+    ingest_provider_configured,
+    resume_llm_adapters,
+)
 from ormah.engine.memory_engine import (
     EXTRACT_ERR_CALL_FAILED,
     EXTRACT_ERR_NO_PROVIDER,
@@ -1177,6 +1181,10 @@ class SessionHandler(FileSystemEventHandler):
         if self._drain_thread is not None:
             self._drain_thread.join(timeout)
 
+    def drain_alive(self) -> bool:
+        """True while the drain thread is still running (ADR-0004 slice 2 shutdown fence)."""
+        return self._drain_thread is not None and self._drain_thread.is_alive()
+
     def _drain_forever(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -1468,38 +1476,35 @@ def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
                 stop_event=stop_event, spool=spool,
             )
             handler.start_drain()  # the always-on worker
+            # HIGH-B (council R1, Codex): register the PROVISIONAL watch (observer=None) BEFORE
+            # observer.start() — so a failing observer.start() below still leaves this root's
+            # already-draining handler inside `watches`. Without this, the rollback except-block
+            # can never join_drain() it (an orphan drain thread could then touch the DB after
+            # engine.shutdown() closes it, #52). The observer is filled in only once started.
+            watch = SessionWatch(
+                watch_dir=watch_dir, handler=handler, observer=None,
+                spool=spool, discover=discover,
+            )
+            watches.append(watch)
             observer = None
             if discover:
                 observer = Observer()
                 observer.schedule(handler, str(watch_dir), recursive=True)
                 observer.start()
+                watch.observer = observer
                 # Off-bind startup sweep so a restart re-enqueues a behind-EOF cursor now,
                 # not one reconcile interval later. reconcile is DB-free, so daemon is safe.
                 Thread(
                     target=_run_startup_discovery, args=(handler,),
                     name="ormah-session-startup-discovery", daemon=True,
                 ).start()
-            watches.append(SessionWatch(
-                watch_dir=watch_dir, handler=handler, observer=observer,
-                spool=spool, discover=discover,
-            ))
             logger.info("Ingest worker started on %s (observer=%s)", watch_dir, bool(observer))
     except Exception:
-        # transactional startup: tear down everything already running — drain threads,
+        # Transactional startup: tear down everything already running — drain threads,
         # observers, timers, and any in-flight ingest — so a leaked, never-drained handler
-        # cannot write to the DB after engine.shutdown() closes it.
-        stop_event.set()
-        for w in watches:
-            w.handler.cancel_pending_timers()
-            w.handler.wake()
-            if w.observer is not None:
-                w.observer.stop()
-        for w in watches:
-            w.handler.join_drain()
-        _drain_handlers([w.handler for w in watches])
-        for w in watches:
-            if w.observer is not None:
-                w.observer.join(timeout=5)
+        # cannot write to the DB after engine.shutdown() closes it. HIGH-A: the process keeps
+        # serving after a caught rollback (main.lifespan), so re-arm any cancelled adapter.
+        _stop_and_drain(watches, rearm=True)
         raise
     return watches
 
@@ -1520,6 +1525,48 @@ def _drain_handlers(handlers: list["SessionHandler"]) -> None:
             waited = 0.0
 
 
+def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None:
+    """Shared shutdown/rollback sequence (ADR-0004 slice 2): stop, cancel, drain, rearm.
+
+    Cancelling in-flight LLM calls after ``wake()`` and before the join is what turns the
+    previously-uncapped ``join_drain()`` wait (up to the provider timeout, ~40min at the Beta's
+    sizing) into a bounded wait: a killed extraction raises ``LlmCancelledError``, which the
+    engine maps to a provider-wide transient (never the per-slice failure cap — see
+    ``memory_engine._extract_memories_llm``), so the slice is durably re-ingested on next boot.
+
+    HIGH-C (council R2, Codex): a single timed cancel pass cannot see an adapter built AFTER
+    the pass (a job that had already cleared ``_run_job``'s stop-check). Loop cancel + a bounded
+    join until every drain thread has actually exited — a late-built adapter registers its Popen
+    in time for the NEXT iteration's cancel, so shutdown is bounded by construction, not by a
+    fixed number of passes.
+
+    HIGH-A (council R1, Cursor): only the ROLLBACK caller passes ``rearm=True`` — the process
+    keeps serving after a caught startup failure (``main.lifespan``), so leaving the adapters
+    cancelled would poison every later maintenance/ingest LLM call until restart. A normal
+    shutdown must NEVER rearm — the DB is about to close.
+    """
+    for w in watches:
+        w.handler._stop_event.set()  # no NEW job starts (_run_job's stop-check refuses)
+    for w in watches:
+        if w.observer is not None:
+            w.observer.stop()
+        w.handler.cancel_pending_timers()
+        w.handler.wake()  # unblock the drain's idle wait so it exits promptly
+    cancelled = cancel_active_llm_calls()
+    if cancelled:
+        logger.info("Cancelled %d in-flight LLM call(s) for shutdown", cancelled)
+    while any(w.handler.drain_alive() for w in watches):
+        cancel_active_llm_calls()  # global (module-level adapter caches) -> also kills a
+        for w in watches:          # late-built adapter's fresh Popen on the NEXT iteration
+            w.handler.join_drain(timeout=0.2)
+    _drain_handlers([w.handler for w in watches])  # in_flight_count()==0 by now -> returns at once
+    for w in watches:
+        if w.observer is not None:
+            w.observer.join(timeout=5)
+    if rearm:
+        resume_llm_adapters()
+
+
 def stop_session_watcher(watches: list[SessionWatch]) -> None:
     """Stop observers and fully drain in-flight ingests before returning.
 
@@ -1527,20 +1574,10 @@ def stop_session_watcher(watches: list[SessionWatch]) -> None:
     ``_run_job`` rejects NEW ingests; we stop the drain thread and wait for any in-flight
     ingest to finish, so nothing touches the DB after db.close(). The wait is NOT capped — a
     deadline cap would re-open the use-after-close window by abandoning a running ingest (#52).
+    ``rearm`` stays False here (the default): the process is going away and the DB is about to
+    close, so adapters must never be resumed on this path.
     """
-    for w in watches:
-        w.handler._stop_event.set()
-    for w in watches:
-        if w.observer is not None:
-            w.observer.stop()
-        w.handler.cancel_pending_timers()
-        w.handler.wake()  # unblock the drain's idle wait so it exits promptly
-    for w in watches:
-        w.handler.join_drain()  # uncapped: waits out the one running ingest, then the thread exits
-    _drain_handlers([w.handler for w in watches])
-    for w in watches:
-        if w.observer is not None:
-            w.observer.join(timeout=5)
+    _stop_and_drain(watches)
     if watches:
         logger.info("Session watcher stopped")
 

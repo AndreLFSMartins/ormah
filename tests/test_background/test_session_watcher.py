@@ -488,6 +488,36 @@ def test_provider_wide_call_failure_never_skips_slice(engine, tmp_path):
     assert "skipped_slices" not in entry       # nothing skipped -> no data loss
 
 
+def test_repeated_cancellations_never_skip_a_slice(engine, tmp_path):
+    """ADR-0004 slice 2, Step 3b: a shutdown-cancelled extraction (LlmCancelledError) must map
+    to EXTRACT_ERR_CALL_FAILED -> TRANSIENT and NEVER count toward the per-slice cap, even
+    across many restarts hitting the same offset -- otherwise repeated restarts during the same
+    slice's extraction would eventually SKIP a healthy slice (data loss)."""
+    from ormah.background.llm_errors import LlmCancelledError
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    def _raise(*a, **k):
+        raise LlmCancelledError("shutdown")
+
+    with patch(_LLM_PATCH, side_effect=_raise), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for _ in range(MAX_EXTRACT_FAILURES + 3):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+
+    entry = state.get(rel, {})
+    assert entry.get("end_offset", 0) == 0    # cursor never advanced across restarts
+    assert "extract_fail_count" not in entry  # a cancel never counts toward the cap
+    assert "skipped_slices" not in entry       # nothing skipped -> no data loss
+
+
 def test_ingest_valid_empty_memories_advances(engine, tmp_path):
     """A valid {"memories": []} extraction is a SUCCESS: the slice is consumed and the
     cursor advances, so session_watcher never re-processes a no-memory turn forever."""
@@ -2921,6 +2951,189 @@ def test_stop_session_watcher_drains_inflight_ingest(engine, tmp_path):
         assert stop_returned.wait(5)               # now the drain completes and stop returns
         s.join(5)
     assert handler.in_flight_count() == 0
+
+
+# --- ADR-0004 slice 2: bounded shutdown (cancel in-flight LLM extractions) -------------
+
+def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
+    """HIGH-C (council R2, Codex): a job that starts AFTER the first cancel pass lazily builds
+    a fresh (clean, instance-scoped) adapter and only becomes cancellable once _stop_and_drain's
+    fence loop cancels it AGAIN. The loop must still terminate in bounded time — not rely on a
+    fixed number of passes. Simulated with a fake handler whose drain only "dies" once the
+    SECOND cancel_active_llm_calls() call fires."""
+    from ormah.background.session_watcher import SessionWatch, _stop_and_drain
+
+    calls = {"cancel": 0}
+    alive = {"value": True}
+
+    class _FakeHandler:
+        def __init__(self):
+            self._stop_event = threading.Event()
+
+        def cancel_pending_timers(self):
+            pass
+
+        def wake(self):
+            pass
+
+        def drain_alive(self):
+            return alive["value"]
+
+        def join_drain(self, timeout=None):
+            time.sleep(min(timeout or 0, 0.05))
+
+    def _fake_cancel_active_llm_calls():
+        calls["cancel"] += 1
+        if calls["cancel"] >= 2:
+            alive["value"] = False  # the late-built adapter is now cancelled -> drain exits
+        return 1
+
+    monkeypatch.setattr(
+        "ormah.background.session_watcher.cancel_active_llm_calls", _fake_cancel_active_llm_calls
+    )
+    monkeypatch.setattr("ormah.background.session_watcher.resume_llm_adapters", lambda: None)
+    monkeypatch.setattr("ormah.background.session_watcher._drain_handlers", lambda handlers: None)
+
+    handler = _FakeHandler()
+    watch = SessionWatch(watch_dir=Path("/tmp/late-adapter"), handler=handler, observer=None,
+                          spool=None, discover=False)
+
+    start = time.monotonic()
+    _stop_and_drain([watch])
+    elapsed = time.monotonic() - start
+
+    assert calls["cancel"] >= 2, "a second cancel pass was needed to catch the late-built adapter"
+    assert elapsed < 5.0, "the fence loop must be bounded, not wait out a full extraction budget"
+
+
+def test_startup_rollback_drains_failing_roots_own_inflight_extraction(engine, tmp_path, monkeypatch):
+    """HIGH-B (council R1, Codex): start_session_watcher registers a PROVISIONAL SessionWatch
+    for each root BEFORE observer.start() -- so when a later root's Observer.start() raises,
+    BOTH the earlier, fully-started root AND the failing root's own already-draining handler
+    are still inside `watches`. Without this, an observer.start() failure would strand a
+    draining handler outside the list the rollback drains -- an orphan drain thread could then
+    touch the DB after engine.shutdown() closes it (#52)."""
+    import ormah.background.session_watcher as sw_mod
+
+    root1 = tmp_path / "root1"
+    root2 = tmp_path / "root2"
+    root1.mkdir()
+    root2.mkdir()
+    monkeypatch.setattr(
+        "ormah.background.session_watcher._resolve_acceptance_roots",
+        lambda settings: [(root1, True), (root2, True)],
+    )
+
+    captured = {}
+    real_stop_and_drain = sw_mod._stop_and_drain
+
+    def _spy(watches, **kw):
+        captured["watches"] = list(watches)
+        captured["kwargs"] = kw
+        return real_stop_and_drain(watches, **kw)
+
+    monkeypatch.setattr("ormah.background.session_watcher._stop_and_drain", _spy)
+
+    class _FailingObserver:
+        _n = 0
+
+        def __init__(self):
+            type(self)._n += 1
+            self._fail = type(self)._n == 2  # the SECOND root's Observer fails to start
+
+        def schedule(self, *a, **k):
+            pass
+
+        def start(self):
+            if self._fail:
+                raise RuntimeError("observer boom")
+
+        def stop(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+    with patch("ormah.background.session_watcher.Observer", _FailingObserver):
+        with pytest.raises(RuntimeError):
+            start_session_watcher(engine)
+
+    assert len(captured["watches"]) == 2, (
+        "both root1 (fully started) and root2 (whose Observer.start() failed) must be in "
+        "`watches` -- a provisional registration must own the root it is constructing"
+    )
+    by_dir = {w.watch_dir: w for w in captured["watches"]}
+    assert by_dir[root1].observer is not None   # root1's own observer started fine
+    assert by_dir[root2].observer is None       # root2's observer never got assigned, but its
+    # handler (start_drain() already called before the failure) is present and gets drained.
+    assert captured["kwargs"].get("rearm") is True
+
+
+def test_startup_rollback_rearms_adapters_and_serves(engine, tmp_path, monkeypatch):
+    """HIGH-A (council R1, Cursor): the transactional startup rollback must
+    resume_llm_adapters() -- the process keeps serving after a rollback (main.lifespan catches
+    the failure), so leaving an adapter cancelled would poison every later maintenance/ingest
+    LLM call until restart. A normal shutdown must NEVER do this (rearm=False by default)."""
+    from ormah.background import llm_client
+    from ormah.background.llm_errors import LlmCancelledError
+
+    class _FakeAdapter:
+        def __init__(self):
+            self._cancelled = False
+
+        def cancel_active(self):
+            self._cancelled = True
+            return 1
+
+        def resume(self):
+            self._cancelled = False
+
+        def generate(self, *a, **k):
+            if self._cancelled:
+                raise LlmCancelledError("still cancelled")
+            return "ok"
+
+    fake = _FakeAdapter()
+    fake.cancel_active()  # seed: a call already cancelled this adapter before the rollback runs
+    assert fake._cancelled is True
+    monkeypatch.setattr(llm_client, "_cached_adapter", fake)
+    monkeypatch.setattr(llm_client, "_adapter_initialised", True)
+
+    root1 = tmp_path / "root1"
+    root2 = tmp_path / "root2"
+    root1.mkdir()
+    root2.mkdir()
+    monkeypatch.setattr(
+        "ormah.background.session_watcher._resolve_acceptance_roots",
+        lambda settings: [(root1, True), (root2, True)],
+    )
+
+    class _FailingObserver:
+        _n = 0
+
+        def __init__(self):
+            type(self)._n += 1
+            self._fail = type(self)._n == 2
+
+        def schedule(self, *a, **k):
+            pass
+
+        def start(self):
+            if self._fail:
+                raise RuntimeError("observer boom")
+
+        def stop(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+    with patch("ormah.background.session_watcher.Observer", _FailingObserver):
+        with pytest.raises(RuntimeError):
+            start_session_watcher(engine)
+
+    assert fake._cancelled is False, "the adapter must be RE-ARMED after a rollback (HIGH-A)"
+    assert llm_client.llm_generate(engine.settings, "prompt") == "ok"
 
 
 def test_start_session_watcher_recovers_backlog_off_bind(engine, tmp_path):
