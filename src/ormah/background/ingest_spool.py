@@ -109,7 +109,7 @@ class IngestSpool:
         path's files into it (measured: 0 overlaps at 4 workers).
         """
         now = time.time()
-        for name in sorted(os.listdir(self.root / _PENDING)):
+        for name in sorted(n for n in os.listdir(self.root / _PENDING) if n.endswith(".json")):
             try:
                 os.rename(self.root / _PENDING / name, self.root / _RUNNING / name)
             except FileNotFoundError:
@@ -223,7 +223,16 @@ class IngestSpool:
 
     def recover(self) -> int:
         """Return every job left in running/ (a crash mid-ingest) back to pending/.
-        Call once at startup, before any worker claims. Returns the count recovered."""
+        Call once at startup, before any worker claims. Returns the count recovered.
+
+        Narrow window: requeue() writes the new pending/ copy (bumped `attempts`,
+        pushed-out `not_before`) BEFORE unlinking the old running/ copy, so the same
+        job can briefly exist in both directories. If the process crashes inside that
+        exact window, this rename-by-filename clobbers the freshly-persisted backoff
+        with the pre-requeue payload, resetting the retry timer one step early. No job
+        is lost (consistent with H1) -- worst case is one wasted claim against a
+        provider that is presumably still down.
+        """
         count = 0
         for name in os.listdir(self.root / _RUNNING):
             try:
@@ -234,7 +243,7 @@ class IngestSpool:
         return count
 
     def pending_count(self) -> int:
-        return len(os.listdir(self.root / _PENDING))
+        return sum(1 for n in os.listdir(self.root / _PENDING) if n.endswith(".json"))
 
 
 def spool_root(settings) -> Path:

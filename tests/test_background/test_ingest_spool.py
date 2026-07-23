@@ -116,3 +116,119 @@ def test_corrupt_job_file_is_quarantined_not_fatal(tmp_path):
     (spool.root / "pending" / "deadbeef.00000000000000000001.json").write_text("{not json")
     assert spool.claim_next() is None      # skipped, not raised
     assert spool.pending_count() == 0      # and not retried forever
+
+
+def test_stray_non_json_file_in_pending_is_ignored(tmp_path):
+    """An editor swap file or sidecar dropped in pending/ must never be scanned or
+    claimed -- claim_next and pending_count only look at *.json entries, matching the
+    corrupt-.json dead-letter path which must still fire for a malformed FILE THAT ENDS
+    IN .json."""
+    spool = IngestSpool(tmp_path / "queue")
+    spool.enqueue(Path("/x/s.jsonl"), boundary=1, reason="nudge")
+    (spool.root / "pending" / ".s.jsonl.swp").write_text("not a job")
+
+    assert spool.pending_count() == 1, "the stray non-.json file must not be counted"
+    job = spool.claim_next()
+    assert job is not None and job.boundary == 1
+    # untouched: never claimed, never dead-lettered
+    assert (spool.root / "pending" / ".s.jsonl.swp").exists()
+
+
+def test_claim_next_gates_on_not_before_even_when_only_pending_job(tmp_path):
+    """A job whose not_before is in the future must be skipped by claim_next() even
+    when it is the only pending job -- this guards against provider-stampede on
+    restart mid-outage. Once not_before has elapsed the same job becomes claimable."""
+    spool = IngestSpool(tmp_path / "queue")
+    future = time.time() + 100
+    payload = {
+        "path": "/x/s.jsonl",
+        "boundary": 1,
+        "reason": "nudge",
+        "at": "2026-01-01T00:00:00+00:00",
+        "attempts": 3,
+        "not_before": future,
+    }
+    job_file = spool.root / "pending" / "abc123.00000000000000000001.json"
+    job_file.write_text(json.dumps(payload))
+
+    assert spool.claim_next() is None, "not_before in the future must gate the claim"
+    assert spool.pending_count() == 1, "the gated job must remain pending, not lost"
+
+    # elapse the backoff by rewriting not_before into the past -- now claimable
+    payload["not_before"] = time.time() - 1
+    job_file.write_text(json.dumps(payload))
+    job = spool.claim_next()
+    assert job is not None
+    assert job.boundary == 1
+    assert job.attempts == 3
+
+
+def test_requeue_external_retries_forever_with_persisted_growing_backoff(tmp_path):
+    """H1: an external (transient) failure must retry forever with an ever-growing
+    backoff persisted in the job payload -- never a cap, never a dead-letter. The
+    persistence (not an in-memory counter) is what stops a restart mid-outage from
+    resetting every backoff to zero and stampeding the provider."""
+    spool = IngestSpool(tmp_path / "queue")
+    spool.enqueue(Path("/x/s.jsonl"), boundary=1, reason="nudge")
+    job = spool.claim_next()
+    assert job is not None and job.attempts == 0
+
+    before = time.time()
+    spool.requeue(job, failure_class="external")
+
+    # back in pending/, not lost, not dead-lettered
+    assert spool.pending_count() == 1
+    assert list((spool.root / "running").iterdir()) == []
+    assert list((spool.root / "failed").glob("*.json")) == []
+
+    # not immediately claimable right after requeue -- the persisted not_before gates it
+    assert spool.claim_next() is None
+
+    pending_files = list((spool.root / "pending").glob("*.json"))
+    assert len(pending_files) == 1
+    data1 = json.loads(pending_files[0].read_text())
+    assert data1["attempts"] == 1, "attempts must be persisted on disk, not just in memory"
+    first_delay = data1["not_before"] - before
+    assert 1.5 < first_delay <= 2.5, "first backoff must be ~_BACKOFF_BASE_SECONDS (2s)"
+
+    # elapse the backoff by rewriting not_before, without sleeping, and requeue again
+    data1["not_before"] = 0.0
+    pending_files[0].write_text(json.dumps(data1))
+    job2 = spool.claim_next()
+    assert job2 is not None and job2.attempts == 1
+
+    before2 = time.time()
+    spool.requeue(job2, failure_class="external")
+    pending_files2 = list((spool.root / "pending").glob("*.json"))
+    assert len(pending_files2) == 1
+    data2 = json.loads(pending_files2[0].read_text())
+    assert data2["attempts"] == 2
+    second_delay = data2["not_before"] - before2
+    assert second_delay > first_delay, "backoff must grow monotonically with attempts"
+    assert list((spool.root / "failed").glob("*.json")) == [], (
+        "an external failure must never be dead-lettered, no matter how many attempts"
+    )
+
+
+def test_requeue_deterministic_failure_dead_letters_with_original_bytes(tmp_path):
+    """Any failure_class other than 'external' is deterministic: a retry cannot change
+    the outcome, so the job is dead-lettered immediately, with its original bytes plus
+    the error class recorded -- and it must never simply be unlinked."""
+    spool = IngestSpool(tmp_path / "queue")
+    spool.enqueue(Path("/x/gone.jsonl"), boundary=42, reason="nudge")
+    job = spool.claim_next()
+    assert job is not None
+    original_bytes = job._file.read_bytes()
+
+    spool.requeue(job, failure_class="path_not_watched")
+
+    assert spool.pending_count() == 0
+    assert list((spool.root / "running").iterdir()) == []
+    failed_files = list((spool.root / "failed").glob("*.json"))
+    assert len(failed_files) == 1
+    assert failed_files[0].read_bytes() == original_bytes, (
+        "the dead-lettered job must keep its original bytes, never re-serialized"
+    )
+    error_sidecar = spool.root / "failed" / f"{failed_files[0].name}.error"
+    assert error_sidecar.exists()
+    assert "path_not_watched" in error_sidecar.read_text()
