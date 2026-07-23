@@ -81,6 +81,12 @@ def test_ingest_path_generate_carries_no_session_persistence(monkeypatch):
         def communicate(self, input=None, timeout=None):
             return json.dumps({"is_error": False, "result": "{}"}), ""
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
     def fake_popen(argv, **kwargs):
         captured["argv"] = argv
         return _FakeProc()

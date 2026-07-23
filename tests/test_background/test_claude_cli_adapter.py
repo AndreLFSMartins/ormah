@@ -27,7 +27,10 @@ def _wait_until(predicate, timeout=5.0, interval=0.02):
 class _FakeProc:
     """Minimal fake Popen result. Mirrors real subprocess.Popen semantics closely enough for
     the adapter: communicate() may raise ONLY on its first call (matching real behaviour — a
-    process killed after a TimeoutExpired still answers a follow-up communicate() cleanly)."""
+    process killed after a TimeoutExpired still answers a follow-up communicate() cleanly), and
+    it supports the context-manager protocol (real Popen.__exit__ closes the pipes and reaps via
+    wait() — the adapter now runs the communicate()/timeout/exception handling inside `with
+    proc:`, B-2)."""
 
     def __init__(self, returncode=0, stdout="", stderr="err", communicate_raises=None):
         self.returncode = returncode
@@ -39,6 +42,8 @@ class _FakeProc:
         self.timeout = None
         self.terminated = False
         self.killed = False
+        self.wait_calls = 0
+        self.exited = False
 
     def communicate(self, input=None, timeout=None):
         self._communicate_calls += 1
@@ -55,10 +60,19 @@ class _FakeProc:
         self.killed = True
 
     def wait(self, timeout=None):
+        self.wait_calls += 1
         return self.returncode
 
     def poll(self):
         return self.returncode
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.exited = True
+        self.wait()
+        return False
 
 
 def _fake_popen(stdout="", returncode=0, communicate_raises=None, construct_raises=None):
@@ -108,6 +122,13 @@ class _BlockingFakeProc:
     def wait(self, timeout=None):
         self._done.wait(timeout=timeout)
         return self.returncode
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.wait()
+        return False
 
     def poll(self):
         return self.returncode if self._done.is_set() else None
@@ -189,6 +210,61 @@ def test_generate_returns_none_on_timeout(monkeypatch):
         _fake_popen(communicate_raises=subprocess.TimeoutExpired(cmd="claude", timeout=1)),
     )
     assert ClaudeCliAdapter(model="haiku").generate("hi") is None
+
+
+def test_timeout_reaps_via_wait_not_a_second_communicate(monkeypatch):
+    """B-1: base subprocess.run's timeout path does process.kill(); process.wait() -- it REAPS
+    the child, it never waits for pipe EOF. communicate() (no timeout arg) blocks until EOF on
+    BOTH pipes; if a grandchild inherited our stdout/stderr, that can never arrive and the ingest
+    drain thread would hang forever on the live single-process Beta. The fake's second
+    communicate() call raises loudly instead of actually hanging the test suite, proving the
+    adapter reaps via wait() -- not a second communicate() -- on this path."""
+
+    class _FailsOnSecondCommunicate:
+        def __init__(self):
+            self.returncode = None
+            self.communicate_calls = 0
+            self.wait_calls = 0
+            self.killed = False
+
+        def communicate(self, input=None, timeout=None):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+            # A second call would block indefinitely on pipe EOF in the real world (B-1) --
+            # fail loudly here instead of actually hanging the test suite.
+            raise AssertionError("communicate() must not be called a second time on the timeout path")
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            self.returncode = -9
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.wait()
+            return False
+
+    proc = _FailsOnSecondCommunicate()
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: proc)
+
+    start = time.monotonic()
+    result = ClaudeCliAdapter(model="haiku").generate("hi")
+    elapsed = time.monotonic() - start
+
+    assert result is None
+    assert elapsed < 2.0, "the timeout path must reap via wait(), not block on a second communicate()"
+    assert proc.killed
+    assert proc.wait_calls >= 1, "the timeout path must call wait() to reap the killed child"
+    assert proc.communicate_calls == 1, "communicate() must be called exactly once on the timeout path"
 
 
 def test_generate_respects_timeout_hint(monkeypatch):

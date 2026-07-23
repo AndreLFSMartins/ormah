@@ -190,32 +190,57 @@ class ClaudeCliAdapter(LLMAdapter):
                 # process set between our event check and the add() above, its kill pass never
                 # saw this child. Re-checking AFTER registration guarantees either the kill pass
                 # sees the proc, or we see the event.
+                # B-3: kill() and wait() get their OWN suppress blocks — a single shared one
+                # means a raising kill() (already-dead race) skips the reap entirely, leaking
+                # the pipe fds on that path. wait() (not communicate()) matches base's
+                # subprocess.run reap-only semantics: no pipe-EOF wait, just a status collect.
                 with contextlib.suppress(Exception):
                     proc.kill()
-                    proc.communicate()
+                with contextlib.suppress(Exception):
+                    proc.wait()
                 with self._active_lock:
                     self._active_procs.discard(proc)
                 raise LlmCancelledError("llm call aborted: shutdown in progress")
-            try:
-                stdout, stderr = proc.communicate(input=prompt, timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                if self._cancel_event.is_set():
-                    # A shutdown kill can surface as TimeoutExpired. It must NOT be reported as
-                    # a provider timeout — slice 3 gives timeouts a failure-budget meaning, and
-                    # a restart must never spend it on a cancellation.
-                    raise LlmCancelledError("claude -p cancelled during shutdown") from None
-                logger.warning("claude -p timed out after %ss", timeout)
-                return None  # unchanged for now; slice 3 turns this into LlmTimeoutError
-            except Exception as e:  # I/O failure mid-flight — fast failure
-                logger.warning("claude -p failed to run: %s", e)
-                return None
-            finally:
-                with self._active_lock:
-                    self._active_procs.discard(proc)
-        if proc.returncode < 0 or (self._cancel_event.is_set() and proc.returncode != 0):
+            # B-2: `with proc:` restores the base `subprocess.run` contract (it runs inside
+            # `with Popen(...) as process:`) — __exit__ closes stdin/stdout/stderr and reaps via
+            # wait() on EVERY exit path (return or exception), so a mid-flight OSError/ValueError
+            # from communicate() can no longer orphan the child and retain the pipe fds. wait()
+            # inside __exit__ never blocks here because every path that reaches it has already
+            # killed (timeout/generic-exception) or fully drained (success) the child.
+            with proc:
+                try:
+                    stdout, stderr = proc.communicate(input=prompt, timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    # B-1: base's subprocess.run does process.kill(); process.wait() on a
+                    # timeout — it REAPS, it never waits for pipe EOF. communicate() here (no
+                    # timeout arg) blocks until EOF on both pipes; if a grandchild inherited our
+                    # stdout/stderr, that can never arrive and the drain thread hangs forever —
+                    # exactly the unbounded wait this slice exists to remove. wait() only waits
+                    # for the process itself to exit, which kill() already guarantees promptly.
+                    proc.kill()
+                    proc.wait()
+                    if self._cancel_event.is_set():
+                        # A shutdown kill can surface as TimeoutExpired. It must NOT be reported
+                        # as a provider timeout — slice 3 gives timeouts a failure-budget
+                        # meaning, and a restart must never spend it on a cancellation.
+                        raise LlmCancelledError("claude -p cancelled during shutdown") from None
+                    logger.warning("claude -p timed out after %ss", timeout)
+                    return None  # unchanged for now; slice 3 turns this into LlmTimeoutError
+                except Exception as e:  # I/O failure mid-flight — fast failure
+                    # B-2: base's subprocess.run does `except: process.kill(); raise` here —
+                    # kill before the child is orphaned. Suppressed: an already-dead process
+                    # (the failure that got us here) can make kill() itself raise.
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+                    logger.warning("claude -p failed to run: %s", e)
+                    return None
+                finally:
+                    with self._active_lock:
+                        self._active_procs.discard(proc)
+        if (proc.returncode or 0) < 0 or (self._cancel_event.is_set() and proc.returncode != 0):
             # killed by cancel_active (negative = signal): cancelled, NOT slice evidence.
+            # F-4: `or 0` guards a (currently unreachable with a real Popen) None returncode —
+            # a bare TypeError here would escape as a generic string and burn the per-slice cap.
             raise LlmCancelledError(f"claude -p cancelled (rc={proc.returncode})")
         if proc.returncode != 0:
             logger.warning("claude -p exited %s: %s", proc.returncode, stderr[:300])
