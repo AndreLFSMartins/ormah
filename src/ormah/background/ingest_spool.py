@@ -182,6 +182,12 @@ class IngestSpool:
                 logger.error("Spool claim failed on %s: %s", name, e)
                 return None                  # back off; do NOT spin over a broken FS
             claimed = self.root / _RUNNING / name
+            # Stamp the claim time onto the running/ file so recover(min_age_seconds=...) can
+            # tell a fresh claim from a stale orphan (os.rename preserves the old mtime, which
+            # would otherwise read as the enqueue time). Best-effort: a failed utime only makes
+            # the age-gate treat the file as older, never younger, so it never steals a claim.
+            with contextlib.suppress(OSError):
+                os.utime(claimed, None)
             try:
                 raw = claimed.read_text(encoding="utf-8")
             except OSError as e:
@@ -239,6 +245,19 @@ class IngestSpool:
         if failure_class == "external":
             attempts = job.attempts + 1
             delay = min(_BACKOFF_BASE_SECONDS * (2 ** (attempts - 1)), _BACKOFF_MAX_SECONDS)
+            name = f"{self._key(job.path)}.{int(job.boundary):020d}.json"
+            # OR the force_flush of a pending TWIN (council-pr R3 F1): while this job was
+            # claimed in running/, a nudge may have created pending/<name> with force_flush=True
+            # (create-if-absent guards only pending/). This os.replace would otherwise overwrite
+            # that twin with our stale force_flush, erasing an acknowledged nudge. Reading the
+            # twin here closes the common interleaving; the fully race-free fix is the #150
+            # claim-ownership redesign.
+            force_flush = bool(job.force_flush)
+            try:
+                twin = json.loads((self.root / _PENDING / name).read_text(encoding="utf-8"))
+                force_flush = force_flush or bool(twin.get("force_flush"))
+            except (OSError, json.JSONDecodeError):
+                pass
             payload = {
                 "path": str(job.path),
                 "boundary": int(job.boundary),
@@ -246,9 +265,8 @@ class IngestSpool:
                 "at": _utcnow_iso(),
                 "attempts": attempts,
                 "not_before": time.time() + delay,
-                "force_flush": bool(job.force_flush),  # a retry must not lose the nudge intent
+                "force_flush": force_flush,  # a retry must not lose the nudge intent
             }
-            name = f"{self._key(job.path)}.{int(job.boundary):020d}.json"
             # write the requeued job to pending/ BEFORE removing it from running/ -- the
             # job must never be lost between the two steps.
             self._write_job(name, payload, _PENDING)
@@ -284,22 +302,39 @@ class IngestSpool:
         with contextlib.suppress(OSError):
             (self.root / _FAILED / f"{name}.error").write_text(error, encoding="utf-8")
 
-    def recover(self) -> int:
-        """Return every job left in running/ (a crash mid-ingest) back to pending/.
-        Call once at startup, before any worker claims. Returns the count recovered.
+    def recover(self, min_age_seconds: float = 0.0) -> int:
+        """Return jobs left in running/ (a crash mid-ingest, or a requeue that itself failed)
+        back to pending/. Returns the count recovered.
 
-        Narrow window: requeue() writes the new pending/ copy (bumped `attempts`,
-        pushed-out `not_before`) BEFORE unlinking the old running/ copy, so the same
-        job can briefly exist in both directories. If the process crashes inside that
-        exact window, this rename-by-filename clobbers the freshly-persisted backoff
-        with the pre-requeue payload, resetting the retry timer one step early. No job
-        is lost (consistent with H1) -- worst case is one wasted claim against a
-        provider that is presumably still down.
+        Called two ways:
+          - at startup with the default ``min_age_seconds=0.0``: every running/ file is
+            definitionally an orphan (this process has claimed nothing yet), so recover all;
+          - from the live drain's idle branch with a positive ``min_age_seconds``: only reclaim
+            claims OLDER than that (council-pr R3 F3). A younger file may be legitimately
+            in-flight (another process sharing this spool, #150) or inside a fresh requeue's
+            sub-millisecond two-copy window, and stealing it would double-ingest or reset the
+            backoff. The claim time is the running/ file's mtime, stamped by claim_next.
+
+        Narrow window (startup path only): requeue() writes the new pending/ copy (bumped
+        `attempts`, pushed-out `not_before`) BEFORE unlinking the old running/ copy, so the same
+        job can briefly exist in both directories. A crash inside that exact window lets this
+        rename-by-filename clobber the freshly-persisted backoff with the pre-requeue payload,
+        resetting the retry timer one step early. No job is lost (H1) -- worst case is one wasted
+        claim against a provider that is presumably still down. The idle path's age-gate keeps it
+        clear of that window entirely.
         """
+        now = time.time()
         count = 0
         for name in os.listdir(self.root / _RUNNING):
+            src = self.root / _RUNNING / name
+            if min_age_seconds > 0.0:
+                try:
+                    if now - src.stat().st_mtime < min_age_seconds:
+                        continue        # too fresh to be an orphan -- leave it claimed
+                except OSError:
+                    continue
             try:
-                os.rename(self.root / _RUNNING / name, self.root / _PENDING / name)
+                os.rename(src, self.root / _PENDING / name)
             except FileNotFoundError:
                 continue
             count += 1

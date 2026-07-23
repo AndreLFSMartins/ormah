@@ -2779,6 +2779,7 @@ def test_live_drain_recovers_a_job_stranded_in_running(engine, tmp_path):
     assert claimed is not None and spool.pending_count() == 0
     # deliberately do NOT complete/requeue -> stranded in running/, invisible to a pending scan
     handler._idle_poll_seconds = 0.05          # tick the idle recover fast for the test
+    handler._recover_stale_seconds = 0.0       # recover regardless of age (default 60s gate)
 
     try:
         with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):

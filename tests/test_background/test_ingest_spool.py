@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -249,6 +250,54 @@ def test_enqueue_upgrades_an_existing_non_forcing_job_to_force_flush(tmp_path):
         "a forcing enqueue must upgrade an existing non-forcing job for the same boundary"
     )
     assert spool.claim_next() is None, "the upgrade must stay ONE job, not spawn a duplicate"
+
+
+def test_requeue_ors_force_flush_from_a_pending_twin(tmp_path):
+    """council-pr R3 F1: a nudge (force_flush=True) can create a pending TWIN while the same
+    (path, boundary) job is already claimed in running/ (create-if-absent guards only pending/).
+    When that in-flight job requeues, requeue() must OR the twin's force_flush, not overwrite it
+    with its own stale force_flush=False -- otherwise the acknowledged nudge intent is erased."""
+    spool = IngestSpool(tmp_path / "queue")
+    p = Path("/x/s.jsonl")
+    spool.enqueue(p, boundary=900, reason="observer", force_flush=False)
+    job = spool.claim_next()                          # -> running/, pending/ now empty
+    assert job is not None and job.force_flush is False
+    spool.enqueue(p, boundary=900, reason="nudge", force_flush=True)   # nudge twin in pending/
+
+    spool.requeue(job, failure_class="external")      # must OR the twin, not clobber it
+
+    files = list((spool.root / "pending").glob("*.json"))
+    assert len(files) == 1, "one job per (path, boundary) after requeue merges with the twin"
+    data = json.loads(files[0].read_text())
+    assert data["boundary"] == 900
+    assert data["force_flush"] is True, "requeue must preserve the nudge twin's force_flush"
+
+
+def test_recover_age_gate_leaves_fresh_claims_reclaims_stale(tmp_path):
+    """council-pr R3 F3: the idle recover() must not steal a claim younger than the stale
+    threshold -- it may be legitimately in-flight (another process) or inside a fresh requeue's
+    sub-ms two-copy window. A genuinely stale orphan IS recovered; startup recover() (min_age 0)
+    still recovers regardless of age."""
+    spool = IngestSpool(tmp_path / "queue")
+    spool.enqueue(Path("/x/a.jsonl"), boundary=10, reason="nudge", force_flush=True)
+    job = spool.claim_next()                          # into running/, mtime stamped ~now
+    assert job is not None
+
+    # a large min_age must NOT reclaim a just-claimed job
+    assert spool.recover(min_age_seconds=1000) == 0
+    assert spool.pending_count() == 0
+
+    # backdate the running/ file to simulate a stale orphan -> now it IS recovered
+    running_file = next((spool.root / "running").glob("*.json"))
+    old = time.time() - 5000
+    os.utime(running_file, (old, old))
+    assert spool.recover(min_age_seconds=1000) == 1
+    assert spool.pending_count() == 1
+
+    # startup semantics: min_age 0 recovers regardless of age
+    job2 = spool.claim_next()
+    assert job2 is not None
+    assert spool.recover() == 1                        # default min_age 0.0 -> reclaim the fresh claim
 
 
 def test_requeue_deterministic_failure_dead_letters_with_original_bytes(tmp_path):

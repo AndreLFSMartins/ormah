@@ -1122,6 +1122,10 @@ class SessionHandler(FileSystemEventHandler):
         self._wake = Event()
         self._drain_thread: Thread | None = None
         self._idle_poll_seconds = 2.0  # belt-and-braces: covers any missed wake() signal
+        # Idle-branch recover() only reclaims running/ claims older than this, so it never
+        # steals a legitimately in-flight claim or races a fresh requeue's two-copy window
+        # (council-pr R3 F3). Longer than any healthy _run_job extraction; orphans are rare.
+        self._recover_stale_seconds = 60.0
 
     # --- Producer side: the Observer debounces file events into the spool -----------------
 
@@ -1183,13 +1187,14 @@ class SessionHandler(FileSystemEventHandler):
             if job is None:
                 # council-pr R2 F1: a job orphaned in running/ (a requeue that itself failed on
                 # an FS fault, below) is invisible to claim_next, which scans only pending/, and
-                # startup recover() will not run again until the NEXT restart. Sweep running/
-                # back to pending/ here so it self-heals live. Safe: the worker is serial and
-                # this branch means nothing is in-flight, and each watch root owns its spool, so
-                # this never resurrects another root's claim. recover() no-ops on an empty
-                # running/ (the steady state), so this is a cheap listdir per idle tick.
+                # startup recover() will not run again until the NEXT restart. Sweep STALE
+                # running/ claims back to pending/ here so they self-heal live. Age-gated
+                # (council-pr R3 F3): only claims older than _recover_stale_seconds are reclaimed,
+                # so this never steals a legitimately in-flight claim (another process sharing the
+                # spool, #150) nor races a fresh requeue's sub-ms two-copy window. recover()
+                # no-ops on an empty running/ (the steady state) -- a cheap listdir per idle tick.
                 with contextlib.suppress(Exception):
-                    self.spool.recover()
+                    self.spool.recover(min_age_seconds=self._recover_stale_seconds)
                 self._wake.wait(timeout=self._idle_poll_seconds)
                 self._wake.clear()
                 continue
