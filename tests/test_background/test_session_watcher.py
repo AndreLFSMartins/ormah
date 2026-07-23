@@ -2763,3 +2763,87 @@ def test_run_session_reconcile_skips_observer_recreation_when_none(engine, tmp_p
     finally:
         stop_session_watcher(watches)
 
+
+# --- ADR-0004 Task 3: force-flush + the accepted-boundary hard ceiling ---
+
+
+def test_force_flush_ingests_fresh_small_transcript(engine, tmp_path):
+    """A JUST-written transcript (not idle) with fewer than min_turns user turns is
+    ingested when a boundary is present, and is NOT ingested without one — that gap is
+    what makes a SessionEnd nudge useless otherwise."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=2)          # below min_turns, and NOT _mark_idle'd
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert _ingest_session(
+            engine, jsonl, {}, watch_dir, min_turns=5) != IngestResult.OK
+        assert _ingest_session(
+            engine, jsonl, {}, watch_dir, min_turns=5,
+            boundary=jsonl.stat().st_size) == IngestResult.OK
+
+
+def test_ingest_never_reads_past_the_accepted_boundary(engine, tmp_path):
+    """council R11: PreCompact nudges a LIVE session. If the transcript grows between the
+    nudge and the worker running it, turns nobody nudged must not be ingested — that is
+    the consent violation, and parse_transcript has no absolute ceiling of its own."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    _make_jsonl(jsonl, user_turns=4)
+    boundary = jsonl.stat().st_size
+    _make_jsonl(jsonl, user_turns=12)         # grew AFTER the nudge was accepted
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _ingest_session(engine, jsonl, state, watch_dir, min_turns=5, boundary=boundary)
+    assert state[rel]["end_offset"] <= boundary
+
+
+# NOTE: the capped-drain case is owned by Task 2 and is implemented there as
+# test_a_capped_batch_re_enqueues_the_remainder — do not duplicate it here.
+
+
+def test_rewind_recovery_honours_the_accepted_boundary(engine, tmp_path, caplog):
+    """The ADR-0003 orphan-recovery rewind (re-parse from offset 0) must carry the same
+    ceiling as the happy path — otherwise the recovery path becomes the consent leak.
+    A genuine legacy mid-response cursor triggers the rewind; the file ALSO has closed
+    turns past the accepted boundary that must NOT be re-ingested."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    records = [
+        {"type": "user", "message": {"content": "Prompt about the architecture decision"}},
+        {"type": "assistant", "message": {"stop_reason": "tool_use",
+            "content": [{"type": "text", "text": "First part"}]}},
+        {"type": "assistant", "message": {"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Second part closing the first turn"}]}},
+        {"type": "user", "message": {"content": "A LATER prompt appended after the nudge"}},
+        {"type": "assistant", "message": {"stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "A later answer nobody nudged"}]}},
+    ]
+    with open(jsonl, "w") as f:
+        for line in records:
+            f.write(json.dumps(line) + "\n")
+    raw = jsonl.read_bytes().splitlines(keepends=True)
+    mid = len(raw[0]) + len(raw[1])            # cursor parked mid-response by an older version
+    boundary = mid + len(raw[2])               # accepted EOF = end of the first closed turn
+    _mark_idle(jsonl)
+
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {rel: {"end_offset": mid, "hash": "stale", "user_turns": 1, "node_ids": []}}
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as mock_llm, \
+         caplog.at_level(logging.INFO, logger="ormah.background.session_watcher"):
+        r1 = _ingest_session(engine, jsonl, state, watch_dir, 1, boundary=boundary)
+    assert r1 == IngestResult.OK
+    assert "recovering legacy mid-response cursor" in caplog.text     # the rewind ran
+    prompt = str(mock_llm.call_args_list[0])
+    assert "Prompt about the architecture decision" in prompt         # re-paired from 0
+    assert "A LATER prompt appended after the nudge" not in prompt     # past the ceiling
+    assert "A later answer nobody nudged" not in prompt               # never ingested
+    assert state[rel]["end_offset"] <= boundary
+

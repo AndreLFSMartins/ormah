@@ -818,9 +818,15 @@ def _ingest_session(
 ) -> IngestResult:
     """Ingest a single JSONL session transcript if changed.
 
-    ``boundary`` is the accepted EOF the drain forwards from the spool job. In this slice it
-    is a pass-through only: the stop_offset CEILING (never read past the accepted boundary)
-    is Task 3. It is accepted here so the drain has one signature to call.
+    ``boundary`` is the accepted EOF the drain forwards from the spool job (ADR-0004 Task 3).
+    When present it does two narrow things, and nothing else: (1) it is an absolute
+    ``stop_offset`` ceiling passed to EVERY parse in this lane — the happy path, the
+    orphan-recovery rewind probe, and the rewind re-parse — so ingestion never reads past the
+    bytes the nudge measured (PreCompact nudges a LIVE, still-growing session); (2) it
+    FORCE-FLUSHES, bypassing ONLY the idle-threshold and the ``min_turns`` gate, so a short
+    just-ended session is not stranded. It must NOT touch the safe-boundary rule or any
+    cap/quarantine rule: an ended session is final, but a response still being written must
+    never be split from its prompt.
 
     Returns:
         IngestResult.OK         — new content was committed.
@@ -857,8 +863,15 @@ def _ingest_session(
     if prev_offset > size:
         prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
 
+    # A nudge FORCE-FLUSHES (bypasses idle + min_turns) and pins an absolute ceiling: the
+    # accepted boundary. Both are gated on `boundary is not None` so the non-nudge lane is
+    # untouched (stop_offset=None parses exactly as before).
+    force_flush = boundary is not None
+
     try:
-        result = parse_transcript(path, start_offset=prev_offset, max_bytes=flush_bytes)
+        result = parse_transcript(
+            path, start_offset=prev_offset, max_bytes=flush_bytes, stop_offset=boundary
+        )
         if should_rewind(result, prev_offset):
             # Orphan with NO forward progress: a genuine cursor left mid-response by an
             # older version. Re-parse the whole file so the dropped tail is re-paired with
@@ -871,7 +884,9 @@ def _ingest_session(
             # Uncapped probe: decide progress on the true whole-file boundary. A capped
             # re-parse can stop before the parked cursor even when recoverable closed
             # content exists past it, which would mis-park a recoverable file forever.
-            result = parse_transcript(path, start_offset=0)
+            # The stop_offset ceiling still applies: the recovery path must honour the same
+            # accepted boundary as the happy path, or it becomes the consent leak.
+            result = parse_transcript(path, start_offset=0, stop_offset=boundary)
             if result.safe_end_offset <= original_offset:
                 # The rewind itself made no progress: the "orphan" tail is a still-open
                 # in-flight response, not a recoverable one. ADR-0003: a no-progress
@@ -879,7 +894,9 @@ def _ingest_session(
                 return IngestResult.NO_PROGRESS
             # There is something to recover: drain capped as usual so the ingest slice
             # honours flush_bytes; later ticks continue incrementally from the new cursor.
-            result = parse_transcript(path, start_offset=0, max_bytes=flush_bytes)
+            result = parse_transcript(
+                path, start_offset=0, max_bytes=flush_bytes, stop_offset=boundary
+            )
     except Exception as e:
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return IngestResult.NO_PROGRESS
@@ -905,7 +922,9 @@ def _ingest_session(
 
     # Salience: don't extract from a below-threshold window unless the session is finished (idle).
     # A short but complete session is still captured; a short ACTIVE window defers to accumulate.
-    if not is_idle and payload_users < min_turns:
+    # A nudge force-flushes: a SessionEnd/PreCompact on a short session is an explicit ask, so
+    # the min_turns accumulation gate does not apply.
+    if not is_idle and not force_flush and payload_users < min_turns:
         if on_defer_active is not None:
             on_defer_active()
         return IngestResult.TRANSIENT
@@ -921,8 +940,8 @@ def _ingest_session(
 
     # Batch gate: flush once idle, or once the parser filled a full flush_bytes batch
     # (result.capped). Below that, defer so a Batch accumulates instead of round-tripping
-    # the LLM per turn.
-    if not _should_flush(is_idle, result.capped):
+    # the LLM per turn. A nudge force-flushes past this too: it authorised these exact bytes.
+    if not force_flush and not _should_flush(is_idle, result.capped):
         if on_defer_active is not None:
             on_defer_active()  # schedule a retry so the tail is not lost
         return IngestResult.TRANSIENT
