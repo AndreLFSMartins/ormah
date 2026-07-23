@@ -2548,6 +2548,143 @@ def test_idle_file_with_no_safe_boundary_is_dead_lettered(engine, tmp_path):
     assert errs and "no_safe_boundary" in errs[0].read_text()
 
 
+def test_frozen_prefix_advance_never_passes_the_accepted_boundary(engine, tmp_path):
+    """council-pr F1: a nudge accepted boundary B; the live file then grew to S>B, still an
+    unterminated single turn, and went idle. The frozen-prefix advance must stop the cursor
+    at B (the accepted boundary), NEVER at raw EOF S -- bytes [B,S] were never accepted nor
+    extracted, so a later nudge at S must still be able to re-examine them."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "partial.jsonl"
+
+    def _user(t):
+        return json.dumps({"type": "user", "message": {"content": t}})
+
+    def _asst_open(t):  # no stop_reason, no following user -> never a safe boundary
+        return json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}
+        )
+
+    prefix = _user("prompt one long enough to parse here") + "\n" \
+        + _asst_open("answer one still streaming and open") + "\n"
+    jsonl.write_text(prefix)
+    boundary = jsonl.stat().st_size          # B: exactly what the nudge measured
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    spool.enqueue(jsonl, boundary=boundary, reason="nudge")   # the nudge accepted exactly B
+
+    # the LIVE session grew PAST the accepted boundary, still with no safe boundary anywhere
+    jsonl.write_text(
+        prefix + _asst_open("more streaming tokens appended after the boundary") + "\n"
+    )
+    size = jsonl.stat().st_size               # S
+    assert size > boundary
+    _mark_idle(jsonl)                         # ...then went idle with the turn still open
+
+    rel = str(jsonl.relative_to(watch_dir))
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _drain_all(handler)
+
+    cursor = _load_state(watch_dir).get(rel, {}).get("end_offset", 0)
+    assert cursor <= boundary, (
+        f"frozen-prefix advance jumped the cursor to {cursor} (S={size}); it must never "
+        f"pass the accepted boundary B={boundary}, or bytes [B,S] are skipped forever"
+    )
+    # [B,S] was not permanently consumed: a second nudge at S can still claim it for work.
+    spool.enqueue(jsonl, boundary=size, reason="nudge")
+    assert spool.claim_next() is not None, "the second nudge at S must be claimable"
+
+
+def test_unexpected_exception_requeues_instead_of_stranding_in_running(engine, tmp_path):
+    """council-pr F2: an unexpected exception AFTER the job is claimed into running/ must not
+    strand it there until the next restart's recover(). The drain loop requeues it as an
+    EXTERNAL failure (persisted backoff) so it returns to pending/ and retries -- never
+    dead-lettered (H1)."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+
+    orig_run = SessionHandler._run_job
+    state = {"raised": False}
+
+    def flaky(self, job):
+        if not state["raised"]:
+            state["raised"] = True
+            raise RuntimeError("unexpected mid-ingest failure after the claim")
+        return orig_run(self, job)
+
+    running = spool.root / "running"
+
+    def running_json():
+        return [p for p in running.iterdir() if p.name.endswith(".json")]
+
+    try:
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+             patch.object(SessionHandler, "_run_job", flaky):
+            handler.start_drain()
+            handler.wake()
+            assert _wait_until(
+                lambda: state["raised"] and not running_json(), timeout=8
+            ), "the claimed job was stranded in running/ after an unexpected exception"
+            assert _wait_until(lambda: spool.pending_count() >= 1, timeout=8), \
+                "the job must be back in pending/ (requeued with backoff), not lost"
+            assert not list((spool.root / "failed").iterdir()), \
+                "a transient/unexpected error must never dead-letter accepted work (H1)"
+    finally:
+        handler._stop_event.set()
+        handler.wake()
+        handler.join_drain(timeout=5)
+
+
+def test_observer_job_respects_min_turns_but_nudge_force_flushes(engine, tmp_path):
+    """council-pr F3: force-flush is the NUDGE's intent, not every producer's. An Observer
+    job for a fresh, below-min_turns, NON-idle transcript must NOT bypass the min_turns gate
+    (it would fragment an active session); the same transcript via a NUDGE job DOES
+    force-flush and ingest a short just-ended session."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+
+    # Fresh (NOT idle) + below min_turns=5 -> the min_turns accumulation gate applies.
+    obs_file = proj / "obs.jsonl"
+    _make_jsonl(obs_file, user_turns=2)       # 2 < 5, mtime is now -> active
+    rel_obs = str(obs_file.relative_to(watch_dir))
+    spool.enqueue(obs_file, boundary=obs_file.stat().st_size, reason="observer")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as llm:
+        _drain_all(handler)
+    assert rel_obs not in _load_state(watch_dir), \
+        "an Observer job must not force-flush past the min_turns gate on an active session"
+    assert not llm.called, "no extraction may run for a deferred below-min_turns Observer job"
+
+    # The SAME shape via a NUDGE force-flushes: a SessionEnd/PreCompact is an explicit ask.
+    nudge_file = proj / "nudge.jsonl"
+    _make_jsonl(nudge_file, user_turns=2)     # also below min_turns and active
+    rel_nudge = str(nudge_file.relative_to(watch_dir))
+    spool.enqueue(nudge_file, boundary=nudge_file.stat().st_size, reason="nudge")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        _drain_all(handler)
+    assert rel_nudge in _load_state(watch_dir), \
+        "a nudge job must force-flush a short just-ended session past the min_turns gate"
+
+
 # --- Debounce coalescing now happens on the producer (enqueue), not the ingest ---------
 
 def test_debounce_coalesces_writes(engine, tmp_path):
@@ -2775,20 +2912,25 @@ def test_run_session_reconcile_skips_observer_recreation_when_none(engine, tmp_p
 
 
 def test_force_flush_ingests_fresh_small_transcript(engine, tmp_path):
-    """A JUST-written transcript (not idle) with fewer than min_turns user turns is
-    ingested when a boundary is present, and is NOT ingested without one — that gap is
-    what makes a SessionEnd nudge useless otherwise."""
+    """A JUST-written transcript (not idle) with fewer than min_turns user turns is ingested
+    when force_flush is set (the nudge's intent), and is NOT ingested without it — that gap
+    is what makes a SessionEnd nudge useless otherwise. force_flush is now decoupled from the
+    boundary ceiling (council-pr F3): the boundary caps how far a parse reads; only the
+    explicit force_flush bypasses the min_turns/idle gate."""
     watch_dir = tmp_path / "projects"
     project_dir = watch_dir / "-Users-alice-Code-myproject"
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "abc123.jsonl"
     _make_jsonl(jsonl, user_turns=2)          # below min_turns, and NOT _mark_idle'd
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        assert _ingest_session(
-            engine, jsonl, {}, watch_dir, min_turns=5) != IngestResult.OK
+        # A boundary ALONE (Observer/reconcile job) must not force past the min_turns gate.
         assert _ingest_session(
             engine, jsonl, {}, watch_dir, min_turns=5,
-            boundary=jsonl.stat().st_size) == IngestResult.OK
+            boundary=jsonl.stat().st_size) != IngestResult.OK
+        # The nudge lane force-flushes: below min_turns and not idle, it still ingests.
+        assert _ingest_session(
+            engine, jsonl, {}, watch_dir, min_turns=5,
+            boundary=jsonl.stat().st_size, force_flush=True) == IngestResult.OK
 
 
 def test_ingest_never_reads_past_the_accepted_boundary(engine, tmp_path):
@@ -2805,7 +2947,10 @@ def test_ingest_never_reads_past_the_accepted_boundary(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        _ingest_session(engine, jsonl, state, watch_dir, min_turns=5, boundary=boundary)
+        _ingest_session(
+            engine, jsonl, state, watch_dir, min_turns=5,
+            boundary=boundary, force_flush=True,   # the nudge lane: force-flush + ceiling
+        )
     assert state[rel]["end_offset"] <= boundary
 
 

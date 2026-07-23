@@ -800,6 +800,7 @@ def _ingest_session(
     on_defer_active=None,
     state_lock=None,
     boundary: int | None = None,
+    force_flush: bool = False,
 ) -> IngestResult:
     """Ingest a single JSONL session transcript if changed.
 
@@ -848,11 +849,12 @@ def _ingest_session(
     if prev_offset > size:
         prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
 
-    # A nudge FORCE-FLUSHES (bypasses idle + min_turns) and pins an absolute ceiling: the
-    # accepted boundary. Both are gated on `boundary is not None` so the non-nudge lane is
-    # untouched (stop_offset=None parses exactly as before).
-    force_flush = boundary is not None
-
+    # Two INDEPENDENT effects of a nudge, decoupled (council-pr F3): the `boundary`
+    # stop_offset ceiling applies to EVERY producer's job (never read past accepted bytes),
+    # but the FORCE-FLUSH intent (bypass idle + min_turns) belongs ONLY to an explicit nudge.
+    # Deriving force_flush from `boundary is not None` leaked the bypass to Observer/reconcile
+    # jobs (which also carry a boundary), fragmenting active sessions. The caller now passes
+    # force_flush from the job's reason; boundary keeps pinning the ceiling for all jobs.
     try:
         result = parse_transcript(
             path, start_offset=prev_offset, max_bytes=flush_bytes, stop_offset=boundary
@@ -1184,6 +1186,18 @@ class SessionHandler(FileSystemEventHandler):
                 self._run_job(job)
             except Exception as e:  # one bad job must not kill the worker
                 logger.warning("Ingest drain run error on %s: %s", self.watch_dir, e)
+                # council-pr F2: the job was already claimed into running/ by claim_next.
+                # An unexpected error here (OSError from _commit_state/complete, an
+                # _ingest_session raise, ...) would otherwise strand it in running/ until the
+                # NEXT restart's recover() -- the live drain only scans pending/. Requeue it
+                # as an EXTERNAL failure (persisted backoff), retried forever, never
+                # dead-lettered (H1: an unexpected error is treated as transient). Guard the
+                # double-dispose: if _run_job already completed/requeued the job its running/
+                # file is gone, so resurrecting it would duplicate-extract -- skip then. A
+                # requeue that itself raises must not kill the worker either.
+                with contextlib.suppress(Exception):
+                    if job._file.exists():
+                        self.spool.requeue(job, failure_class="external")
 
     @contextlib.contextmanager
     def _ingesting_guard(self, path: Path):
@@ -1208,11 +1222,16 @@ class SessionHandler(FileSystemEventHandler):
             return
         path = job.path
         rel = str(path.relative_to(self.watch_dir))
+        # Force-flush is the explicit nudge's intent -- and the capped-remainder "drain"
+        # continuation it spawned -- NOT every producer's (council-pr F3). Observer and
+        # reconcile jobs pass the boundary CEILING but do not force-flush, so an active,
+        # below-min_turns session keeps accumulating instead of fragmenting per file event.
+        force_flush = job.reason in ("nudge", "drain")
         with self._ingesting_guard(path):
             result = _ingest_session(
                 self.engine, path, self._state, self.watch_dir, self.min_turns,
                 idle_threshold=self.idle_threshold, flush_bytes=self.flush_bytes,
-                boundary=job.boundary, state_lock=self._state_lock,
+                boundary=job.boundary, force_flush=force_flush, state_lock=self._state_lock,
             )
         if result is IngestResult.TRANSIENT:
             # External failure class -> retried forever with persisted backoff, never
@@ -1228,21 +1247,25 @@ class SessionHandler(FileSystemEventHandler):
             self.spool.complete(job)
             return
         # NO_PROGRESS: the closed delta at the safe boundary is empty.
-        if self._idle_with_unsafe_tail(path, rel):
+        if self._idle_with_unsafe_tail(path, rel, job.boundary):
             # An idle transcript whose bytes never reach a safe boundary (a single
             # unterminated turn): completing would strand those bytes forever. Advance the
             # cursor past the frozen prefix so the sweep stops re-selecting it, and keep a
             # dead-letter record with a distinct reason (slice 3 owns the real policy) —
             # never a silent complete.
-            self._mark_frozen_prefix_consumed(path, rel)
+            self._mark_frozen_prefix_consumed(path, rel, job.boundary)
             self.spool.requeue(job, failure_class="no_safe_boundary")
             return
         self.spool.complete(job)
 
-    def _idle_with_unsafe_tail(self, path: Path, rel: str) -> bool:
+    def _idle_with_unsafe_tail(self, path: Path, rel: str, boundary: int | None = None) -> bool:
         """True when the file is idle, has bytes past the cursor, yet the parser closes
         nothing there (a single unterminated turn). Non-idle files keep being retried
-        (re-enqueued as they grow); an unparseable/empty delta is the file's own fault."""
+        (re-enqueued as they grow); an unparseable/empty delta is the file's own fault.
+
+        The parse honours the accepted ``boundary`` as a ``stop_offset`` ceiling (council-pr
+        F1): a still-growing session can have bytes past the boundary that the nudge never
+        accepted, and examining them here would decide "frozen" on unaccepted content."""
         try:
             st = path.stat()
         except OSError:
@@ -1253,20 +1276,26 @@ class SessionHandler(FileSystemEventHandler):
         if st.st_size <= cursor:
             return False
         try:
-            parsed = parse_transcript(path, start_offset=cursor)
+            parsed = parse_transcript(path, start_offset=cursor, stop_offset=boundary)
         except Exception:
             return False
         return parsed.safe_end_offset <= cursor
 
-    def _mark_frozen_prefix_consumed(self, path: Path, rel: str) -> None:
-        """Advance the cursor to EOF for a dead-lettered frozen prefix so reconcile stops
-        re-selecting it. If the file later grows, the new size re-opens it for examination."""
+    def _mark_frozen_prefix_consumed(
+        self, path: Path, rel: str, boundary: int | None = None
+    ) -> None:
+        """Advance the cursor over a dead-lettered frozen prefix so reconcile stops
+        re-selecting it — but NEVER past the accepted ``boundary`` (council-pr F1). Jumping to
+        raw EOF would mark bytes [boundary, size] consumed even though no nudge accepted them,
+        so a later nudge at a higher boundary would skip them. If the file later grows past a
+        new, higher boundary, that new nudge re-opens the remainder for examination."""
         try:
             size = path.stat().st_size
         except OSError:
             return
+        end_offset = min(boundary, size) if boundary is not None else size
         entry = dict(self._state.get(rel, {}))
-        entry["end_offset"] = size
+        entry["end_offset"] = end_offset
         _commit_state(self._state, rel, entry, self._state_lock, self.watch_dir)
 
     def cancel_pending_timers(self) -> None:
