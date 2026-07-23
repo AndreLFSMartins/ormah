@@ -2667,7 +2667,7 @@ def test_observer_job_respects_min_turns_but_nudge_force_flushes(engine, tmp_pat
     obs_file = proj / "obs.jsonl"
     _make_jsonl(obs_file, user_turns=2)       # 2 < 5, mtime is now -> active
     rel_obs = str(obs_file.relative_to(watch_dir))
-    spool.enqueue(obs_file, boundary=obs_file.stat().st_size, reason="observer")
+    spool.enqueue(obs_file, boundary=obs_file.stat().st_size, reason="observer", force_flush=False)
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as llm:
         _drain_all(handler)
     assert rel_obs not in _load_state(watch_dir), \
@@ -2678,11 +2678,119 @@ def test_observer_job_respects_min_turns_but_nudge_force_flushes(engine, tmp_pat
     nudge_file = proj / "nudge.jsonl"
     _make_jsonl(nudge_file, user_turns=2)     # also below min_turns and active
     rel_nudge = str(nudge_file.relative_to(watch_dir))
-    spool.enqueue(nudge_file, boundary=nudge_file.stat().st_size, reason="nudge")
+    spool.enqueue(nudge_file, boundary=nudge_file.stat().st_size, reason="nudge", force_flush=True)
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         _drain_all(handler)
     assert rel_nudge in _load_state(watch_dir), \
         "a nudge job must force-flush a short just-ended session past the min_turns gate"
+
+
+def test_frozen_prefix_advance_never_moves_the_cursor_backward(engine, tmp_path):
+    """council-pr R2 F2: _mark_frozen_prefix_consumed must be monotonic. A stale or
+    out-of-order boundary job (boundary < the current cursor) must NEVER rewind the cursor --
+    that would re-open already-consumed bytes for duplicate extraction. The prior
+    ``end_offset = min(boundary, size)`` wrote the lower boundary directly."""
+    from ormah.background.ingest_spool import IngestSpool
+    from ormah.background.session_watcher import _commit_state
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    jsonl.write_text("x" * 5000)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    # cursor already well past, persisted to BOTH memory and disk
+    _commit_state(handler._state, rel, {"end_offset": 4000}, handler._state_lock, watch_dir)
+
+    handler._mark_frozen_prefix_consumed(jsonl, rel, boundary=1000)   # stale, LOWER boundary
+    assert handler._state[rel]["end_offset"] == 4000, (
+        "a boundary below the current cursor must never rewind it (duplicate re-ingestion)"
+    )
+    assert _load_state(watch_dir).get(rel, {}).get("end_offset") == 4000, (
+        "the rewind must not be persisted to disk either"
+    )
+
+
+def test_capped_continuation_inherits_the_producer_force_flush(engine, tmp_path):
+    """council-pr R2 F4: a capped batch's 'drain' continuation must inherit the ORIGINATING
+    producer's force_flush, not force-flush unconditionally. An Observer's capped remainder
+    must continue NON-forcing (else it fragments an active session past its gates); a nudge's
+    remainder stays forcing."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool", min_turns=1)
+    handler.flush_bytes = 300      # small -> the first closed batch caps (content past it)
+    spool = handler.spool
+
+    obs_file = proj / "obs.jsonl"
+    _make_jsonl(obs_file, user_turns=12)       # large -> flush_bytes=300 caps the first batch
+    _mark_idle(obs_file)
+    spool.enqueue(obs_file, boundary=obs_file.stat().st_size, reason="observer", force_flush=False)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        job = spool.claim_next()
+        handler._run_job(job)                  # OK + capped -> enqueues a 'drain' continuation
+    conts = [json.loads(p.read_text()) for p in (spool.root / "pending").glob("*.json")]
+    assert conts, "a capped Observer batch must enqueue a drain continuation"
+    assert all(c["reason"] == "drain" for c in conts)
+    assert all(c["force_flush"] is False for c in conts), (
+        "an Observer-originated continuation must NOT force-flush the remainder"
+    )
+
+    nudge_file = proj / "nudge.jsonl"
+    _make_jsonl(nudge_file, user_turns=12)
+    spool.enqueue(nudge_file, boundary=nudge_file.stat().st_size, reason="nudge", force_flush=True)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        job = spool.claim_next()
+        handler._run_job(job)
+    n_conts = [
+        json.loads(p.read_text())
+        for p in (spool.root / "pending").glob("*.json")
+        if "nudge" in Path(json.loads(p.read_text())["path"]).name
+    ]
+    assert n_conts, "a capped nudge batch must enqueue a drain continuation"
+    assert all(c["force_flush"] is True for c in n_conts), (
+        "a nudge-originated continuation must keep force-flushing the remainder"
+    )
+
+
+def test_live_drain_recovers_a_job_stranded_in_running(engine, tmp_path):
+    """council-pr R2 F1: a job orphaned in running/ (a requeue that itself failed on an FS
+    fault) is invisible to claim_next, which scans only pending/. The live drain must
+    periodically recover running/ back to pending/ WITHOUT waiting for a process restart."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "s.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge", force_flush=True)
+    claimed = spool.claim_next()               # moves it into running/
+    assert claimed is not None and spool.pending_count() == 0
+    # deliberately do NOT complete/requeue -> stranded in running/, invisible to a pending scan
+    handler._idle_poll_seconds = 0.05          # tick the idle recover fast for the test
+
+    try:
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            handler.start_drain()
+            handler.wake()
+            assert _wait_until(
+                lambda: _spool_idle(spool) and rel in _load_state(watch_dir), timeout=8
+            ), "the stranded running/ job was never recovered and ingested by the live drain"
+    finally:
+        handler._stop_event.set()
+        handler.wake()
+        handler.join_drain(timeout=5)
 
 
 # --- Debounce coalescing now happens on the producer (enqueue), not the ingest ---------

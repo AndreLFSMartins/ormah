@@ -41,7 +41,9 @@ def ingest_nudge(req: NudgeRequest, request: Request):
         try:
             # DURABLE BEFORE THE 202: the hook drops its outbox record on this response
             # and never retries, so an unrecorded nudge is a lost session.
-            w.spool.enqueue(path, boundary=boundary, reason="nudge")
+            # force_flush=True: a nudge is an explicit SessionEnd/PreCompact ask -- it must
+            # flush a short just-ended session past the min_turns/idle gates (council-pr R2).
+            w.spool.enqueue(path, boundary=boundary, reason="nudge", force_flush=True)
         except OSError as e:
             raise HTTPException(status_code=503, detail=f"could not accept nudge: {e}")
         w.handler.wake()          # Task 2: nudge the worker loop; never blocks

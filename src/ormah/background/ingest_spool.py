@@ -48,6 +48,7 @@ class SpoolJob:
     reason: str
     attempts: int      # drives the persisted backoff -- NEVER a dead-letter cap
     _file: Path        # the claimed file under running/, for complete()/requeue()
+    force_flush: bool = False  # the explicit-nudge intent, persisted so a dedup can't erase it
 
 
 class IngestSpool:
@@ -83,10 +84,39 @@ class IngestSpool:
                 os.unlink(tmp)
             raise
 
-    def enqueue(self, path: Path, boundary: int, reason: str) -> None:
+    def _create_job_if_absent(self, name: str, payload: dict) -> bool:
+        """Atomically create pending/<name> ONLY if it is absent. Returns True if created,
+        False if a job for this (path, boundary) already existed.
+
+        os.link is the atomic create-if-absent primitive -- os.replace/os.rename would clobber
+        an existing job (that clobber, resetting attempts/not_before and dropping force_flush,
+        is the council-pr R2 F3 defect). The content is fully staged in tmp/ first, so a reader
+        never sees a torn file (same guarantee as _write_job)."""
+        data = json.dumps(payload).encode("utf-8")
+        fd, tmp = tempfile.mkstemp(dir=self.root / _TMP)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            try:
+                os.link(tmp, self.root / _PENDING / name)
+                return True
+            except FileExistsError:
+                return False
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+    def enqueue(self, path: Path, boundary: int, reason: str, force_flush: bool = False) -> None:
         """Enqueue a job. The boundary lives in the filename: a second, slower nudge for
         the same path must never overwrite a higher boundary already queued (measured:
-        45% loss rate with overwrite-in-place, 0% with the boundary in the name)."""
+        45% loss rate with overwrite-in-place, 0% with the boundary in the name).
+
+        ``force_flush`` is the explicit-nudge intent (a SessionEnd/PreCompact must flush a
+        short just-ended session past the min_turns/idle gates). It is persisted in the job so
+        the drain reads it back -- NEVER re-derived from ``reason`` (council-pr R2 F4), and
+        NEVER erased when two producers race the same (path, boundary): intent is monotonic
+        (OR), and a duplicate enqueue preserves the existing persisted backoff (council-pr R2
+        F3)."""
         payload = {
             "path": str(path),
             "boundary": int(boundary),
@@ -94,9 +124,40 @@ class IngestSpool:
             "at": _utcnow_iso(),
             "attempts": 0,
             "not_before": 0.0,
+            "force_flush": bool(force_flush),
         }
         name = f"{self._key(path)}.{int(boundary):020d}.json"
-        self._write_job(name, payload, _PENDING)
+        if self._create_job_if_absent(name, payload):
+            return
+        # A job for this (path, boundary) already exists.
+        if not force_flush:
+            # Non-forcing (observer/reconcile/drain-of-a-non-forcing-parent): the existing job
+            # already carries >= this intent AND its own persisted backoff. Leave it untouched
+            # -- an atomic no-op, never a clobber.
+            return
+        # Forcing (nudge, or a forced parent's continuation): monotonically UPGRADE the
+        # existing job to force_flush, PRESERVING its persisted backoff. Never reset
+        # attempts/not_before -- a blind rewrite is exactly the R2 F3 defect. This
+        # read-modify-write races claim_next/requeue in a narrow window (same class as the
+        # recover() clobber documented below): worst case is one wasted claim or a
+        # backoff reset by one step, never data loss, and the force intent only ever rises.
+        dest = self.root / _PENDING / name
+        try:
+            existing = json.loads(dest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if existing.get("force_flush"):
+            return  # already forced -- nothing to upgrade
+        merged = {
+            "path": str(path),
+            "boundary": int(boundary),
+            "reason": reason,
+            "at": _utcnow_iso(),
+            "attempts": int(existing.get("attempts", 0) or 0),
+            "not_before": float(existing.get("not_before", 0.0) or 0.0),
+            "force_flush": True,
+        }
+        self._write_job(name, merged, _PENDING)
 
     def claim_next(self) -> SpoolJob | None:
         """Claim the oldest due pending job. The rename IS the mutual exclusion.
@@ -144,6 +205,7 @@ class IngestSpool:
                     str(data.get("reason", "unknown")),
                     int(data.get("attempts", 0)),
                     claimed,
+                    force_flush=bool(data.get("force_flush", False)),
                 )
             except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
                 # DETERMINISTIC corruption: re-reading will never help. Move to failed/
@@ -184,6 +246,7 @@ class IngestSpool:
                 "at": _utcnow_iso(),
                 "attempts": attempts,
                 "not_before": time.time() + delay,
+                "force_flush": bool(job.force_flush),  # a retry must not lose the nudge intent
             }
             name = f"{self._key(job.path)}.{int(job.boundary):020d}.json"
             # write the requeued job to pending/ BEFORE removing it from running/ -- the

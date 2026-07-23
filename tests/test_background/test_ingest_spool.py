@@ -210,6 +210,47 @@ def test_requeue_external_retries_forever_with_persisted_growing_backoff(tmp_pat
     )
 
 
+def test_enqueue_merges_force_flush_intent_and_preserves_backoff(tmp_path):
+    """council-pr R2 F3: two producers racing the SAME (path, boundary) must not let a
+    non-forcing enqueue erase a forcing one, nor reset a persisted backoff. Intent is
+    monotonic (OR); a duplicate enqueue leaves attempts/not_before untouched. The prior
+    os.replace-unconditionally overwrote both, silently demoting a nudge and stampeding the
+    provider by resetting its backoff to zero."""
+    spool = IngestSpool(tmp_path / "queue")
+    p = Path("/x/s.jsonl")
+    # a forcing nudge lands first, then earns a backoff via an external requeue
+    spool.enqueue(p, boundary=900, reason="nudge", force_flush=True)
+    job = spool.claim_next()
+    assert job is not None and job.force_flush is True
+    spool.requeue(job, failure_class="external")     # attempts -> 1, not_before -> future
+    data = json.loads(next((spool.root / "pending").glob("*.json")).read_text())
+    assert data["attempts"] == 1 and data["force_flush"] is True
+    saved_not_before = data["not_before"]
+
+    # a LATER, NON-forcing observer enqueue for the same (path, boundary) must neither erase
+    # the force intent nor reset the persisted backoff
+    spool.enqueue(p, boundary=900, reason="observer", force_flush=False)
+    data2 = json.loads(next((spool.root / "pending").glob("*.json")).read_text())
+    assert data2["force_flush"] is True, "a non-forcing enqueue must not erase nudge intent"
+    assert data2["attempts"] == 1, "a duplicate enqueue must not reset the persisted backoff"
+    assert data2["not_before"] == saved_not_before, "backoff not_before must be preserved"
+
+
+def test_enqueue_upgrades_an_existing_non_forcing_job_to_force_flush(tmp_path):
+    """council-pr R2 F3 (the other direction): a forcing nudge arriving after a non-forcing
+    observer job for the same (path, boundary) must UPGRADE it to force_flush (monotonic OR),
+    not create a silent duplicate that the drain might process without the intent."""
+    spool = IngestSpool(tmp_path / "queue")
+    p = Path("/x/s.jsonl")
+    spool.enqueue(p, boundary=900, reason="observer", force_flush=False)
+    spool.enqueue(p, boundary=900, reason="nudge", force_flush=True)   # nudge upgrades in place
+    job = spool.claim_next()
+    assert job is not None and job.force_flush is True, (
+        "a forcing enqueue must upgrade an existing non-forcing job for the same boundary"
+    )
+    assert spool.claim_next() is None, "the upgrade must stay ONE job, not spawn a duplicate"
+
+
 def test_requeue_deterministic_failure_dead_letters_with_original_bytes(tmp_path):
     """Any failure_class other than 'external' is deterministic: a retry cannot change
     the outcome, so the job is dead-lettered immediately, with its original bytes plus

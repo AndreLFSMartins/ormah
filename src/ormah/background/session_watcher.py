@@ -1150,7 +1150,9 @@ class SessionHandler(FileSystemEventHandler):
             boundary = path.stat().st_size
         except OSError:
             return
-        self.spool.enqueue(path, boundary=boundary, reason=reason)
+        # force_flush=False: the Observer/idle-retry lane is discovery, never an explicit ask;
+        # it must respect min_turns/idle so an active session is not fragmented (council-pr R2).
+        self.spool.enqueue(path, boundary=boundary, reason=reason, force_flush=False)
         self.wake()
 
     # --- Consumer side: the one serial drain thread ---------------------------------------
@@ -1179,6 +1181,15 @@ class SessionHandler(FileSystemEventHandler):
                 logger.warning("Ingest drain claim error on %s: %s", self.watch_dir, e)
                 job = None
             if job is None:
+                # council-pr R2 F1: a job orphaned in running/ (a requeue that itself failed on
+                # an FS fault, below) is invisible to claim_next, which scans only pending/, and
+                # startup recover() will not run again until the NEXT restart. Sweep running/
+                # back to pending/ here so it self-heals live. Safe: the worker is serial and
+                # this branch means nothing is in-flight, and each watch root owns its spool, so
+                # this never resurrects another root's claim. recover() no-ops on an empty
+                # running/ (the steady state), so this is a cheap listdir per idle tick.
+                with contextlib.suppress(Exception):
+                    self.spool.recover()
                 self._wake.wait(timeout=self._idle_poll_seconds)
                 self._wake.clear()
                 continue
@@ -1222,11 +1233,12 @@ class SessionHandler(FileSystemEventHandler):
             return
         path = job.path
         rel = str(path.relative_to(self.watch_dir))
-        # Force-flush is the explicit nudge's intent -- and the capped-remainder "drain"
-        # continuation it spawned -- NOT every producer's (council-pr F3). Observer and
-        # reconcile jobs pass the boundary CEILING but do not force-flush, so an active,
-        # below-min_turns session keeps accumulating instead of fragmenting per file event.
-        force_flush = job.reason in ("nudge", "drain")
+        # Force-flush is the explicit nudge's intent, persisted on the job and read back here
+        # -- NEVER re-derived from job.reason (council-pr R2 F4: deriving it from a shared
+        # "drain" reason force-flushed every producer's capped remainder, including Observer's).
+        # Observer and reconcile jobs pass the boundary CEILING but do NOT force-flush, so an
+        # active, below-min_turns session keeps accumulating instead of fragmenting per event.
+        force_flush = job.force_flush
         with self._ingesting_guard(path):
             result = _ingest_session(
                 self.engine, path, self._state, self.watch_dir, self.min_turns,
@@ -1243,7 +1255,11 @@ class SessionHandler(FileSystemEventHandler):
                 # Capped batch: the boundary is not drained yet. ENQUEUE the remainder
                 # FIRST, COMPLETE SECOND (council R12) — the reverse order loses the intent
                 # if the process dies between the two calls; a duplicate job is a no-op.
-                self.spool.enqueue(path, boundary=job.boundary, reason="drain")
+                # The continuation INHERITS this job's force_flush (council-pr R2 F4): an
+                # Observer's remainder stays non-forcing, a nudge's remainder stays forcing.
+                self.spool.enqueue(
+                    path, boundary=job.boundary, reason="drain", force_flush=job.force_flush
+                )
             self.spool.complete(job)
             return
         # NO_PROGRESS: the closed delta at the safe boundary is empty.
@@ -1285,17 +1301,23 @@ class SessionHandler(FileSystemEventHandler):
         self, path: Path, rel: str, boundary: int | None = None
     ) -> None:
         """Advance the cursor over a dead-lettered frozen prefix so reconcile stops
-        re-selecting it — but NEVER past the accepted ``boundary`` (council-pr F1). Jumping to
-        raw EOF would mark bytes [boundary, size] consumed even though no nudge accepted them,
-        so a later nudge at a higher boundary would skip them. If the file later grows past a
-        new, higher boundary, that new nudge re-opens the remainder for examination."""
+        re-selecting it — but NEVER past the accepted ``boundary`` (council-pr F1), and NEVER
+        BACKWARD past the current cursor (council-pr R2 F2). Jumping to raw EOF would mark bytes
+        [boundary, size] consumed even though no nudge accepted them; writing a boundary below
+        the current cursor (a stale/out-of-order job) would rewind it and re-open already-
+        consumed bytes for duplicate extraction. If the file later grows past a new, higher
+        boundary, that new nudge re-opens the remainder for examination."""
         try:
             size = path.stat().st_size
         except OSError:
             return
-        end_offset = min(boundary, size) if boundary is not None else size
+        cursor = self._state.get(rel, {}).get("end_offset") or 0
+        target = min(boundary, size) if boundary is not None else size
+        if target <= cursor:
+            # stale/out-of-order boundary, or nothing new to skip -- monotonic: never rewind.
+            return
         entry = dict(self._state.get(rel, {}))
-        entry["end_offset"] = end_offset
+        entry["end_offset"] = target
         _commit_state(self._state, rel, entry, self._state_lock, self.watch_dir)
 
     def cancel_pending_timers(self) -> None:
@@ -1354,7 +1376,9 @@ class SessionHandler(FileSystemEventHandler):
         candidates.sort(key=lambda t: t[0])
         enqueued = 0
         for _mtime, jsonl_file, size in candidates[:cap]:
-            self.spool.enqueue(jsonl_file, boundary=size, reason="reconcile")
+            # force_flush=False: reconcile is a disk-truth safety net, not an explicit ask --
+            # it must respect min_turns/idle so it never fragments an active session (R2 F4).
+            self.spool.enqueue(jsonl_file, boundary=size, reason="reconcile", force_flush=False)
             enqueued += 1
         if enqueued:
             self.wake()
