@@ -322,3 +322,58 @@ async def test_each_lifespan_gets_its_own_stop_event(tmp_path, monkeypatch):
     # Invariant 3: both events were signalled during their respective shutdowns
     assert sched_ev1.is_set(), "First lifespan stop event must be set after its shutdown"
     assert sched_ev2.is_set(), "Second lifespan stop event must be set after its shutdown"
+
+
+# ---------------------------------------------------------------------------
+# 5. Always-on worker: shutdown drains the exact list startup stored (R1)
+# ---------------------------------------------------------------------------
+
+async def test_lifespan_shutdown_drains_always_on_worker(monkeypatch, tmp_path):
+    """council R1: with the always-on worker, start_session_watcher returns a non-empty list
+    even when disabled. The lifespan must store it on app.state.session_watches and shutdown
+    must hand EXACTLY that list to stop_session_watcher — the bug this guards is startup
+    writing the new app.state attribute while shutdown still reads the old observers one."""
+    import sys
+
+    class _FakeEngine:
+        def startup(self): pass
+        def shutdown(self): pass
+
+    class _FakeScheduler:
+        def shutdown(self, wait=True): pass
+
+    class _FakeTracker:
+        pass
+
+    def _fake_start_scheduler(engine, stop_event=None):
+        return _FakeScheduler(), _FakeTracker()
+
+    monkeypatch.setattr("ormah.main.MemoryEngine", lambda settings: _FakeEngine())
+    monkeypatch.setattr(
+        "ormah.main.settings",
+        type("S", (), {"port": 8787, "memory_dir": str(tmp_path)})(),
+    )
+    monkeypatch.setattr("ormah.main.MaintenanceManager", lambda *a, **kw: object())
+
+    _fake_hippocampus = type(sys)("_fake_hippo")
+    _fake_hippocampus.start_hippocampus = lambda engine: []
+    _fake_hippocampus.stop_hippocampus = lambda obs: None
+    monkeypatch.setitem(sys.modules, "ormah.background.hippocampus", _fake_hippocampus)
+
+    _fake_scheduler_mod = type(sys)("_fake_sched")
+    _fake_scheduler_mod.start_scheduler = _fake_start_scheduler
+    monkeypatch.setitem(sys.modules, "ormah.background.scheduler", _fake_scheduler_mod)
+
+    sentinel = ["watch-sentinel"]
+    stopped = []
+    _fake_session_watcher = type(sys)("_fake_sw")
+    _fake_session_watcher.start_session_watcher = lambda engine: sentinel
+    _fake_session_watcher.stop_session_watcher = lambda w: stopped.append(w)
+    _fake_session_watcher.run_session_reconcile = lambda w: 0
+    monkeypatch.setitem(sys.modules, "ormah.background.session_watcher", _fake_session_watcher)
+
+    app = FastAPI(lifespan=main.lifespan)
+    async with main.lifespan(app):
+        assert app.state.session_watches is sentinel
+    assert stopped == [sentinel], "shutdown must drain the always-on worker"
+

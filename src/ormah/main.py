@@ -244,13 +244,24 @@ async def lifespan(app: FastAPI):
         from ormah.background.session_watcher import start_session_watcher, stop_session_watcher
 
         session_watches = start_session_watcher(engine)
-        app.state.session_watcher_observers = session_watches
-        if hasattr(app.state, "scheduler"):
-            from ormah.background.scheduler import register_session_reconcile_job
-            register_session_reconcile_job(
-                app.state.scheduler, app.state.job_tracker, session_watches,
-                engine.settings.session_watcher_reconcile_interval_minutes,
-            )
+        # One canonical attribute (council R1): startup writes it and shutdown reads it, so
+        # stop_session_watcher always runs — even when the watcher is disabled, since the
+        # ingest worker is now always on.
+        app.state.session_watches = session_watches
+        # The periodic reconcile sweep is a producer that only matters for discovery roots;
+        # crash recovery is spool.recover() at startup, not a periodic tree walk.
+        if any(getattr(w, "discover", False) for w in session_watches):
+            if hasattr(app.state, "scheduler"):
+                from ormah.background.scheduler import register_session_reconcile_job
+                register_session_reconcile_job(
+                    app.state.scheduler, app.state.job_tracker, session_watches,
+                    engine.settings.session_watcher_reconcile_interval_minutes,
+                )
+            else:
+                logger.warning(
+                    "Ingest recovery degraded: scheduler unavailable, periodic reconcile "
+                    "disabled — backlog beyond the startup drain waits for a restart"
+                )
     except Exception as e:
         logger.warning("Session watcher not started: %s", e)
 
@@ -279,8 +290,8 @@ async def lifespan(app: FastAPI):
         stop_ev.set()
 
     # Shutdown — stop session watcher first
-    if hasattr(app.state, "session_watcher_observers"):
-        stop_session_watcher(app.state.session_watcher_observers)
+    if hasattr(app.state, "session_watches"):
+        stop_session_watcher(app.state.session_watches)
 
     # Shutdown — stop hippocampus watchers
     if hasattr(app.state, "hippocampus_observers"):
