@@ -734,3 +734,85 @@ class TestShouldRewind:
         assert "Second part" not in result.safe_conversation   # the accepted, bounded loss
         assert "Prompt two" in result.safe_conversation        # later turn fully usable
         assert "Answer two" in result.safe_conversation
+
+
+class TestStopOffsetCeiling:
+    """ADR-0004 Task 3: ``stop_offset`` is an ABSOLUTE hard ceiling — no turn is committed
+    whose end exceeds it, and ``safe_end_offset`` is never returned beyond it. A nudge
+    (PreCompact/SessionEnd) authorises exactly the bytes it measured, and not one more, even
+    though the live session keeps growing after the nudge is accepted."""
+
+    def _byte_len(self, lines: list[dict], upto: int) -> int:
+        """Byte offset after the first ``upto`` records, matching ``_write_jsonl``'s layout."""
+        return sum(len((json.dumps(line) + "\n").encode()) for line in lines[:upto])
+
+    def test_stop_offset_rejects_an_oversized_turn_past_the_ceiling(self, tmp_path):
+        """The flagged leak: ``max_bytes`` commits an oversized FIRST turn anyway (its own
+        docstring), so a single turn that grew past the accepted boundary would ship to a
+        remote extractor. The ceiling refuses it even when ``max_bytes`` would allow it."""
+        lines = [
+            {"type": "user", "message": {"content": "prompt"}},
+            {"type": "assistant", "message": {"stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "X" * 5000}]}},
+        ]
+        path = _write_jsonl(tmp_path, lines)
+        full = parse_transcript(path)                         # no ceiling: terminal → EOF
+        assert full.safe_end_offset == full.end_offset
+        assert len(full.safe_turns) == 2
+
+        ceiling = full.safe_end_offset - 1                    # the oversized turn ends past it
+        bounded = parse_transcript(path, max_bytes=10, stop_offset=ceiling)
+        assert bounded.safe_end_offset <= ceiling
+        assert not any(t.text.startswith("X") for t in bounded.safe_turns)
+
+    def test_stop_offset_commits_up_to_the_ceiling_and_no_further(self, tmp_path):
+        """Everything closed at or before the ceiling is committed; the first turn that
+        starts at the ceiling (grew-after content) is never read into the safe payload."""
+        lines = [
+            {"type": "user", "message": {"content": "u0"}},
+            {"type": "assistant", "message": {"stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "a0"}]}},
+            {"type": "user", "message": {"content": "u1"}},
+            {"type": "assistant", "message": {"stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "a1"}]}},
+        ]
+        path = _write_jsonl(tmp_path, lines)
+        assert len(parse_transcript(path).safe_turns) == 4    # unbounded: all four turns
+
+        ceiling = self._byte_len(lines, 2)                    # boundary = after u0/a0
+        bounded = parse_transcript(path, stop_offset=ceiling)
+        assert bounded.safe_end_offset == ceiling
+        assert [t.text for t in bounded.safe_turns] == ["u0", "a0"]
+        assert "u1" not in bounded.safe_conversation
+        assert "a1" not in bounded.safe_conversation
+
+    def test_stop_offset_none_is_a_no_op(self, tmp_path):
+        """The non-nudge lane passes ``stop_offset=None`` and must parse exactly as before."""
+        lines = [
+            {"type": "user", "message": {"content": "hello"}},
+            {"type": "assistant", "message": {"stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "world"}]}},
+        ]
+        path = _write_jsonl(tmp_path, lines)
+        a = parse_transcript(path)
+        b = parse_transcript(path, stop_offset=None)
+        assert a.safe_end_offset == b.safe_end_offset
+        assert a.safe_conversation == b.safe_conversation
+        assert a.end_offset == b.end_offset
+
+    def test_stop_offset_bounds_a_codex_task_complete_boundary(self, tmp_path):
+        """The ceiling must also clamp the Codex ``task_complete`` closure site, not only
+        the Claude terminal-stop_reason and next-user-turn sites."""
+        lines = [
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "codex prompt"}]}},
+            {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "codex answer"}]}},
+            {"type": "event_msg", "payload": {"type": "task_complete"}},
+        ]
+        path = _write_jsonl(tmp_path, lines)
+        assert parse_transcript(path).safe_user_turn_count == 1  # unbounded: turn closed
+
+        ceiling = self._byte_len(lines, 3) - 1                   # just before task_complete ends
+        bounded = parse_transcript(path, stop_offset=ceiling)
+        assert bounded.safe_end_offset <= ceiling
