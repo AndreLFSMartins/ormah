@@ -56,6 +56,10 @@ def test_nudge_enqueues_and_accepts(client, app, tmp_path):
     assert job.path == t.resolve()
     assert job.boundary == t.stat().st_size, "the boundary is the EOF at acceptance"
     assert job.reason == "nudge"
+    assert job.force_flush is True, (
+        "a nudge is an explicit SessionEnd/PreCompact ask -- it must enqueue force_flush=True "
+        "so a short just-ended session flushes past the min_turns/idle gates (council-pr R4)"
+    )
 
 
 def test_the_job_is_durable_BEFORE_the_202(client, app, tmp_path):
