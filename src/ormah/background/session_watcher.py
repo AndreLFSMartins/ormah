@@ -1490,8 +1490,12 @@ def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
             if discover:
                 observer = Observer()
                 observer.schedule(handler, str(watch_dir), recursive=True)
-                observer.start()
+                # M-3: assign onto the watch BEFORE start() — watchdog can spin up emitter
+                # threads before raising, and a raise here must still leave `watch.observer`
+                # populated so the rollback's _stop_and_drain stops/joins it instead of
+                # leaking a half-started Observer.
                 watch.observer = observer
+                observer.start()
                 # Off-bind startup sweep so a restart re-enqueues a behind-EOF cursor now,
                 # not one reconcile interval later. reconcile is DB-free, so daemon is safe.
                 Thread(

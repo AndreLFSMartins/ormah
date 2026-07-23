@@ -2959,8 +2959,11 @@ def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
     """HIGH-C (council R2, Codex): a job that starts AFTER the first cancel pass lazily builds
     a fresh (clean, instance-scoped) adapter and only becomes cancellable once _stop_and_drain's
     fence loop cancels it AGAIN. The loop must still terminate in bounded time — not rely on a
-    fixed number of passes. Simulated with a fake handler whose drain only "dies" once the
-    SECOND cancel_active_llm_calls() call fires."""
+    FIXED number of passes: the fake here only reports the drain dead on the THIRD
+    cancel_active_llm_calls() call, which a hardcoded two-pass "cancel; join; cancel; join"
+    implementation (the design HIGH-C rejected) cannot satisfy — only a real while-loop that
+    keeps cancelling until the drain is actually dead can. See I-1 discrimination proof in the
+    task-2 report for a run of this exact test against a rejected two-pass implementation."""
     from ormah.background.session_watcher import SessionWatch, _stop_and_drain
 
     calls = {"cancel": 0}
@@ -2984,7 +2987,7 @@ def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
 
     def _fake_cancel_active_llm_calls():
         calls["cancel"] += 1
-        if calls["cancel"] >= 2:
+        if calls["cancel"] >= 3:
             alive["value"] = False  # the late-built adapter is now cancelled -> drain exits
         return 1
 
@@ -3002,18 +3005,25 @@ def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
     _stop_and_drain([watch])
     elapsed = time.monotonic() - start
 
-    assert calls["cancel"] >= 2, "a second cancel pass was needed to catch the late-built adapter"
+    assert calls["cancel"] >= 3, (
+        "at least a THIRD cancel pass was needed to catch the late-built adapter -- a fixed "
+        "two-pass implementation (cancel; join; cancel; join) cannot reach this, only a real "
+        "while-loop that keeps cancelling until drain_alive() reports dead can"
+    )
     assert elapsed < 5.0, "the fence loop must be bounded, not wait out a full extraction budget"
 
 
 def test_startup_rollback_drains_failing_roots_own_inflight_extraction(engine, tmp_path, monkeypatch):
     """HIGH-B (council R1, Codex): start_session_watcher registers a PROVISIONAL SessionWatch
     for each root BEFORE observer.start() -- so when a later root's Observer.start() raises,
-    BOTH the earlier, fully-started root AND the failing root's own already-draining handler
-    are still inside `watches`. Without this, an observer.start() failure would strand a
-    draining handler outside the list the rollback drains -- an orphan drain thread could then
-    touch the DB after engine.shutdown() closes it (#52)."""
+    the FAILING root's own already-draining handler (genuinely mid-extraction, not just
+    registered) is still inside `watches`: the rollback CANCELS it, JOINS its drain thread, and
+    nothing touches the engine again afterward (#52 use-after-close). A pre-seeded, blocked
+    extraction on root2 -- root2 is the root whose OWN Observer.start() raises -- proves the
+    rollback actually drains, not merely registers: a no-op `_stop_and_drain` would leave
+    drain_alive()/in_flight_count() nonzero and would not need to wait for `release`."""
     import ormah.background.session_watcher as sw_mod
+    from ormah.background.ingest_spool import IngestSpool, root_key, spool_root
 
     root1 = tmp_path / "root1"
     root2 = tmp_path / "root2"
@@ -3023,6 +3033,28 @@ def test_startup_rollback_drains_failing_roots_own_inflight_extraction(engine, t
         "ormah.background.session_watcher._resolve_acceptance_roots",
         lambda settings: [(root1, True), (root2, True)],
     )
+
+    # Pre-seed root2's spool with a job BEFORE start_session_watcher runs, so root2's drain
+    # thread claims and starts extracting it the instant handler.start_drain() fires -- racing
+    # root2's own (later, in the same loop iteration) Observer.start() failure.
+    proj = root2 / "-Users-alice-Code-proj"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc.jsonl"
+    _make_jsonl(jsonl)
+    _mark_idle(jsonl)
+    seed_spool = IngestSpool(spool_root(engine.settings) / root_key(root2))
+    seed_spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge", force_flush=True)
+
+    entered = threading.Event()   # the pre-seeded job is now genuinely mid-extraction on root2
+    release = threading.Event()   # let the blocked extraction return
+
+    ingest_calls = []
+
+    def _blocking_ingest(*a, **k):
+        ingest_calls.append(1)
+        entered.set()
+        release.wait(5)
+        return IngestResult.OK
 
     captured = {}
     real_stop_and_drain = sw_mod._stop_and_drain
@@ -3039,13 +3071,16 @@ def test_startup_rollback_drains_failing_roots_own_inflight_extraction(engine, t
 
         def __init__(self):
             type(self)._n += 1
-            self._fail = type(self)._n == 2  # the SECOND root's Observer fails to start
+            self._fail = type(self)._n == 2  # the SECOND root's (root2's own) Observer fails
 
         def schedule(self, *a, **k):
             pass
 
         def start(self):
             if self._fail:
+                # root2's own extraction must be genuinely in-flight before its Observer fails
+                # -- otherwise this would not exercise a real drain/join race at all.
+                assert entered.wait(5), "root2's in-flight extraction never started"
                 raise RuntimeError("observer boom")
 
         def stop(self):
@@ -3054,19 +3089,59 @@ def test_startup_rollback_drains_failing_roots_own_inflight_extraction(engine, t
         def join(self, timeout=None):
             pass
 
-    with patch("ormah.background.session_watcher.Observer", _FailingObserver):
-        with pytest.raises(RuntimeError):
-            start_session_watcher(engine)
+    outcome = {}
 
+    def _run():
+        try:
+            with patch(
+                "ormah.background.session_watcher._ingest_session", side_effect=_blocking_ingest
+            ), patch("ormah.background.session_watcher.Observer", _FailingObserver):
+                start_session_watcher(engine)
+        except RuntimeError as e:
+            outcome["exc"] = e
+
+    t = threading.Thread(target=_run)
+    t.start()
+
+    assert entered.wait(5), "root2's pre-seeded job never reached the blocking ingest"
+    # The rollback has now been entered (Observer.start() raised right after seeing `entered`)
+    # and _stop_and_drain is inside its fence loop, waiting on this exact drain thread.
+    assert _wait_until(lambda: "watches" in captured, timeout=5)
+    by_dir = {w.watch_dir: w for w in captured["watches"]}
+    root2_handler = by_dir[root2].handler
+    # The extraction is STILL genuinely in-flight while the rollback is (supposedly) draining
+    # it -- proves the rollback is actually waiting on it, not a no-op that already returned.
+    assert root2_handler.in_flight_count() == 1
+    assert root2_handler.drain_alive() is True
+    # The sharpest discriminator: start_session_watcher (running on `t`) must still be BLOCKED
+    # inside the rollback at this point -- a no-join `_stop_and_drain` would already have
+    # returned and raised, and `t` would already be dead, well before we ever release the
+    # extraction below.
+    assert t.is_alive(), (
+        "the rollback must still be draining root2's in-flight extraction -- it must not have "
+        "already returned/raised before the extraction was even released"
+    )
+
+    release.set()  # let the blocked extraction finish
+    t.join(timeout=10)
+
+    assert not t.is_alive(), "start_session_watcher must return once the drain is fully joined"
+    assert isinstance(outcome.get("exc"), RuntimeError)
     assert len(captured["watches"]) == 2, (
         "both root1 (fully started) and root2 (whose Observer.start() failed) must be in "
         "`watches` -- a provisional registration must own the root it is constructing"
     )
-    by_dir = {w.watch_dir: w for w in captured["watches"]}
     assert by_dir[root1].observer is not None   # root1's own observer started fine
-    assert by_dir[root2].observer is None       # root2's observer never got assigned, but its
-    # handler (start_drain() already called before the failure) is present and gets drained.
+    # M-3: the observer is assigned onto the watch BEFORE start() is called, so even though
+    # root2's own start() raised, `watch.observer` is still populated -- the rollback's
+    # _stop_and_drain can stop()/join() it instead of leaking a half-started Observer.
+    assert by_dir[root2].observer is not None
     assert captured["kwargs"].get("rearm") is True
+
+    # The rollback actually DRAINED root2's in-flight extraction, not just registered it:
+    assert root2_handler.drain_alive() is False, "root2's drain thread must be joined by rollback"
+    assert root2_handler.in_flight_count() == 0, "no in-flight ingest may survive the rollback"
+    assert len(ingest_calls) == 1, "no extraction may run again after the stop event is set (#52)"
 
 
 def test_startup_rollback_rearms_adapters_and_serves(engine, tmp_path, monkeypatch):
