@@ -12,6 +12,7 @@ import logging
 import re
 
 from ormah.background.llm import LLMAdapter, get_adapter
+from ormah.background.llm_errors import LlmCancelledError, LlmTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -130,11 +131,14 @@ def llm_generate(
     adapter = _get_or_create_adapter(settings)
     if adapter is None:
         return None
-    return adapter.generate(
-        prompt,
-        json_mode=json_mode,
-        response_format=response_format,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        timeout_hint_seconds=timeout_hint_seconds,
-    )
+    try:
+        return adapter.generate(
+            prompt,
+            json_mode=json_mode,
+            response_format=response_format,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout_hint_seconds=timeout_hint_seconds,
+        )
+    except (LlmCancelledError, LlmTimeoutError):
+        return None

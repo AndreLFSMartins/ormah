@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from ormah.background.llm.claude_cli_adapter import ClaudeCliAdapter
+from ormah.background.llm_errors import LlmCancelledError, LlmTimeoutError
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "claude_cli_envelope.json"
 
@@ -296,6 +297,19 @@ def test_real_claude_json_schema_returns_structured_output():
         response_format={"type": "json_schema", "json_schema": {"schema": schema}})
     import json
     assert json.loads(raw) == {"n": 7}
+
+
+def test_llm_generate_swallows_cancel_and_timeout(monkeypatch):
+    """The maintenance path keeps its None-on-failure contract, so consolidator,
+    auto_linker & co. are untouched by the new exception types."""
+    from ormah.background import llm_client
+
+    for exc in (LlmCancelledError("stopped"), LlmTimeoutError("slow")):
+        class _Raising:
+            def generate(self, *a, **k):
+                raise exc
+        monkeypatch.setattr(llm_client, "_get_or_create_adapter", lambda s: _Raising())
+        assert llm_client.llm_generate(object(), "prompt") is None
 
 
 @pytest.mark.integration
