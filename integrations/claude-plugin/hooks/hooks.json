@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/bin/ormah-whisper-store",
-            "timeout": 300,
+            "timeout": 30,
             "async": true
           }
         ]
@@ -30,7 +30,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/bin/ormah-whisper-store",
-            "timeout": 300
+            "timeout": 30
           }
         ]
       }

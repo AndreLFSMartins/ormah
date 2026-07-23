@@ -512,9 +512,9 @@ def test_whisper_inject_empty_context(monkeypatch):
         "ormah.adapters.cli_adapter.detect_space_from_dir",
         lambda path: "proj",
     )
-    # Isolate from real cursor file to prevent flaky nudge triggers
-    monkeypatch.setattr("ormah.adapters.cli_adapter._load_cursors", lambda: {})
-    monkeypatch.setattr("ormah.adapters.cli_adapter._save_cursors", lambda c: None)
+    # Isolate from real counter file to prevent flaky nudge triggers
+    monkeypatch.setattr("ormah.adapters.cli_adapter._load_nudge_counters", lambda: {})
+    monkeypatch.setattr("ormah.adapters.cli_adapter._save_nudge_counters", lambda c: None)
     hook_input = json.dumps({"prompt": "hello", "cwd": "/path", "session_id": "test"})
     code, out, err = _run_cli(["whisper", "inject"], monkeypatch, stdin_text=hook_input)
     assert code == 0
@@ -547,9 +547,9 @@ def test_whisper_inject_no_cwd(monkeypatch):
 
 def test_whisper_inject_nudge_at_interval(monkeypatch, tmp_path):
     """Nudge appears at the Nth prompt (default 10)."""
-    cursor_file = tmp_path / "whisper-cursors.json"
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_FILE", cursor_file)
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_DIR", tmp_path)
+    counter_file = tmp_path / "whisper-nudge-counters.json"
+    monkeypatch.setattr("ormah.adapters.cli_adapter._NUDGE_COUNTER_FILE", counter_file)
+    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CACHE_DIR", tmp_path)
     monkeypatch.setattr("ormah.config.settings.whisper_nudge_interval", 3)
 
     def handler(request):
@@ -584,9 +584,9 @@ def test_whisper_inject_nudge_at_interval(monkeypatch, tmp_path):
 
 def test_whisper_inject_nudge_disabled(monkeypatch, tmp_path):
     """Nudge never appears when interval is 0."""
-    cursor_file = tmp_path / "whisper-cursors.json"
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_FILE", cursor_file)
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_DIR", tmp_path)
+    counter_file = tmp_path / "whisper-nudge-counters.json"
+    monkeypatch.setattr("ormah.adapters.cli_adapter._NUDGE_COUNTER_FILE", counter_file)
+    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CACHE_DIR", tmp_path)
     monkeypatch.setattr("ormah.config.settings.whisper_nudge_interval", 0)
 
     def handler(request):
@@ -613,9 +613,9 @@ def test_whisper_inject_nudge_disabled(monkeypatch, tmp_path):
 
 def test_whisper_inject_nudge_resets_per_session(monkeypatch, tmp_path):
     """Each session_id gets its own counter."""
-    cursor_file = tmp_path / "whisper-cursors.json"
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_FILE", cursor_file)
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_DIR", tmp_path)
+    counter_file = tmp_path / "whisper-nudge-counters.json"
+    monkeypatch.setattr("ormah.adapters.cli_adapter._NUDGE_COUNTER_FILE", counter_file)
+    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CACHE_DIR", tmp_path)
     monkeypatch.setattr("ormah.config.settings.whisper_nudge_interval", 2)
 
     def handler(request):
@@ -660,9 +660,9 @@ def test_whisper_inject_nudge_resets_per_session(monkeypatch, tmp_path):
 
 def test_whisper_inject_nudge_on_empty_whisper(monkeypatch, tmp_path):
     """Nudge appears even when the server returns empty whisper context."""
-    cursor_file = tmp_path / "whisper-cursors.json"
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_FILE", cursor_file)
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_DIR", tmp_path)
+    counter_file = tmp_path / "whisper-nudge-counters.json"
+    monkeypatch.setattr("ormah.adapters.cli_adapter._NUDGE_COUNTER_FILE", counter_file)
+    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CACHE_DIR", tmp_path)
     monkeypatch.setattr("ormah.config.settings.whisper_nudge_interval", 1)
 
     def handler(request):
@@ -728,33 +728,9 @@ def test_whisper_setup_merges_existing(monkeypatch, tmp_path):
     assert "hooks" in data  # added
 
 
-# --- whisper store client timeout ---
-
-
-def test_whisper_store_timeout_covers_claude_cli_extraction_budget():
-    """Server-side claude_cli extraction can run up to claude_cli_timeout_seconds; the
-    client timeout must cover that budget (plus margin) or it fires first and the
-    cursor never advances (permanent stall on the same slice)."""
-    from ormah.adapters.cli_adapter import _whisper_store_timeout
-    from ormah.config import Settings
-
-    s = Settings(
-        llm_provider="ollama",
-        ingest_llm_provider="claude_cli",
-        ingest_llm_model="haiku",
-        claude_cli_timeout_seconds=120,
-    )
-    assert _whisper_store_timeout(s) >= 120 + 15
-
-
-def test_whisper_store_timeout_stays_fast_for_ollama():
-    """Non-claude_cli ingest providers keep the fast fail-fast timeout — don't make
-    ollama users wait on a hung server."""
-    from ormah.adapters.cli_adapter import _whisper_store_timeout
-    from ormah.config import Settings
-
-    s = Settings(llm_provider="ollama")
-    assert _whisper_store_timeout(s) == 60.0
+# The store-client-timeout tests were deleted with ADR-0004: the store hook is now a pure
+# /ingest/nudge trigger with a fixed short client timeout (server-side extraction no longer
+# runs synchronously behind the hook), so there is no provider-dependent budget to cover.
 
 
 # --- argparse ---

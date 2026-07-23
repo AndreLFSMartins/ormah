@@ -357,7 +357,7 @@ def configure_claude_hooks(ormah_bin: str) -> None:
                 {
                     "type": "command",
                     "command": f"{ormah_bin} whisper store",
-                    "timeout": 300,
+                    "timeout": 30,
                     "async": True,
                 }
             ]
@@ -369,7 +369,7 @@ def configure_claude_hooks(ormah_bin: str) -> None:
                 {
                     "type": "command",
                     "command": f"{ormah_bin} whisper store",
-                    "timeout": 300,
+                    "timeout": 30,
                 }
             ]
         }
@@ -477,7 +477,7 @@ def configure_codex_hooks(ormah_bin: str) -> None:
                     {
                         "type": "command",
                         "command": f"{ormah_bin} whisper store",
-                        "timeout": 300,
+                        "timeout": 30,
                     }
                 ]
             }
