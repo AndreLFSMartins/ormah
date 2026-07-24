@@ -20,6 +20,7 @@ exercise the decision logic via:
 """
 from __future__ import annotations
 
+import contextlib
 import threading as _threading
 import time as _time
 
@@ -379,23 +380,14 @@ async def test_lifespan_shutdown_drains_always_on_worker(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 6. ADR-0004 slice 2: begin_llm_lifespan() at lifespan startup
+# 6. ADR-0004 slice 2: LLM-cancellation ownership lives in the lifespan (council R7 HIGH-2 /
+#    R1 HIGH-1), not in the watcher's shutdown/rollback sequence.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_second_lifespan_can_generate_after_a_cancelled_first(tmp_path, monkeypatch):
-    """council R4/R7: a cancellation event must not survive past the lifespan that set it.
-    main.lifespan calls begin_llm_lifespan() early in startup (right after engine.startup()), so
-    a second in-process lifespan (the repo already exercises this double-lifespan pattern) can
-    generate again even though the module-level llm_cancel epoch outlives a single lifespan
-    execution — including a FINAL cancel, which resume_llm_adapters() alone cannot clear (R4).
-
-    ADR-0004 slice 2: cancellation is the module-level llm_cancel epoch now, not a per-adapter
-    flag the facade toggles — the fake adapter below is deliberately dumb (it always succeeds);
-    the FACADE's _guarded_generate is what rejects a call made while the epoch is cancelled."""
+@contextlib.contextmanager
+def _fake_lifespan_deps(tmp_path, monkeypatch, *, watcher_raises: bool = False):
+    """Patch main.lifespan's heavy dependencies. Mirrors the fakes at L249-288."""
     import sys
-
-    from ormah.background import llm_cancel, llm_client
 
     class _FakeEngine:
         def startup(self): pass
@@ -403,12 +395,6 @@ async def test_second_lifespan_can_generate_after_a_cancelled_first(tmp_path, mo
 
     class _FakeScheduler:
         def shutdown(self, wait=True): pass
-
-    class _FakeTracker:
-        pass
-
-    def _fake_start_scheduler(engine, stop_event=None):
-        return _FakeScheduler(), _FakeTracker()
 
     monkeypatch.setattr("ormah.main.MemoryEngine", lambda settings: _FakeEngine())
     monkeypatch.setattr(
@@ -422,38 +408,104 @@ async def test_second_lifespan_can_generate_after_a_cancelled_first(tmp_path, mo
     _fake_hippocampus.stop_hippocampus = lambda obs: None
     monkeypatch.setitem(sys.modules, "ormah.background.hippocampus", _fake_hippocampus)
 
+    def _raise(engine):
+        raise RuntimeError("watcher down")
+
     _fake_session_watcher = type(sys)("_fake_sw")
-    _fake_session_watcher.start_session_watcher = lambda engine: []
+    _fake_session_watcher.start_session_watcher = _raise if watcher_raises else (lambda engine: [])
     _fake_session_watcher.stop_session_watcher = lambda obs: None
     monkeypatch.setitem(sys.modules, "ormah.background.session_watcher", _fake_session_watcher)
 
     _fake_scheduler_mod = type(sys)("_fake_sched")
-    _fake_scheduler_mod.start_scheduler = _fake_start_scheduler
+    _fake_scheduler_mod.start_scheduler = lambda engine, stop_event=None: (
+        _FakeScheduler(), object()
+    )
     monkeypatch.setitem(sys.modules, "ormah.background.scheduler", _fake_scheduler_mod)
+    yield
 
-    class _FakeAdapter:
-        def generate(self, *a, **k):
-            return "ok"
 
-    monkeypatch.setattr(llm_client, "_cached_adapter", _FakeAdapter())
-    monkeypatch.setattr(llm_client, "_adapter_initialised", True)
+@pytest.mark.asyncio
+async def test_shutdown_cancels_llm_calls_even_when_the_watcher_failed_to_start(
+    tmp_path, monkeypatch
+):
+    """R7 HIGH-2 regression.
 
-    app = FastAPI(lifespan=main.lifespan)
+    When start_session_watcher() raises, main.lifespan catches it at L274 and
+    app.state.session_watches is never assigned — so the `if hasattr(...)` guard at L302
+    skips stop_session_watcher(), which used to be the ONLY path calling
+    cancel_active_llm_calls(). A scheduler-owned maintenance call then ran to its full
+    provider timeout. The scheduler is an independent consumer of LLM calls; global
+    cancellation must not depend on the watcher.
+    """
+    cancels: list[bool] = []
 
-    try:
-        # --- first lifespan: a real shutdown-time cancel_active_llm_calls() call lands (FINAL
-        # by default) and the lifespan ends without anyone resuming it ---
+    def _record_cancel(*, final: bool = True) -> int:
+        cancels.append(final)
+        return 0
+
+    monkeypatch.setattr(
+        "ormah.background.llm_client.cancel_active_llm_calls", _record_cancel
+    )
+
+    with _fake_lifespan_deps(tmp_path, monkeypatch, watcher_raises=True):
+        app = FastAPI(lifespan=main.lifespan)
         async with main.lifespan(app):
-            llm_cancel.begin_cancel(final=True)
-        assert llm_cancel.snapshot()[1] is True, \
-            "sanity: the world is left cancelled after the first lifespan"
+            assert not hasattr(app.state, "session_watches"), (
+                "the fake watcher was supposed to raise before the assignment"
+            )
 
-        # --- second lifespan (in-process reload): must begin_llm_lifespan() at startup, since
-        # resume_llm_adapters() alone is a no-op against a FINAL cancel (R4) ---
+    assert cancels, "shutdown never cancelled in-flight LLM calls"
+    assert cancels[0] is True, "the lifespan's shutdown cancel must be final"
+
+
+@pytest.mark.asyncio
+async def test_a_second_lifespan_can_still_run_llm_calls(tmp_path, monkeypatch):
+    """The adapter caches and the cancellation epoch are module-level and outlive a
+    lifespan. A final cancel from the first shutdown must not poison the second."""
+    from ormah.background import llm_cancel
+
+    with _fake_lifespan_deps(tmp_path, monkeypatch):
+        app = FastAPI(lifespan=main.lifespan)
+
         async with main.lifespan(app):
-            assert llm_cancel.snapshot()[1] is False, \
-                "begin_llm_lifespan() must run at lifespan startup"
-            assert llm_client.llm_generate(main.settings, "prompt") == "ok"
-    finally:
-        llm_cancel.begin_lifespan()
+            pass
+        _, cancelled_after_first = llm_cancel.snapshot()
+        assert cancelled_after_first is True, "the first shutdown never cancelled"
+
+        async with main.lifespan(app):
+            _, cancelled_in_second = llm_cancel.snapshot()
+            assert cancelled_in_second is False, (
+                "the second lifespan started with a poisoned cancellation epoch"
+            )
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_llm_calls_when_the_lifespan_body_raises(tmp_path, monkeypatch):
+    """Council R1 HIGH-1 regression.
+
+    @asynccontextmanager throws a body exception at the `yield`, so teardown after a BARE yield is
+    skipped. The cancel must sit in a `finally` so it still runs on the abnormal-shutdown path —
+    exactly when a bounded shutdown matters. A bare-yield placement passes the normal-exit tests
+    above and silently fails here."""
+    cancels: list[bool] = []
+
+    def _record_cancel(*, final: bool = True) -> int:
+        cancels.append(final)
+        return 0
+
+    monkeypatch.setattr(
+        "ormah.background.llm_client.cancel_active_llm_calls", _record_cancel
+    )
+
+    class _Boom(RuntimeError):
+        pass
+
+    with _fake_lifespan_deps(tmp_path, monkeypatch):
+        app = FastAPI(lifespan=main.lifespan)
+        with pytest.raises(_Boom):
+            async with main.lifespan(app):
+                raise _Boom("the app crashed mid-serve")
+
+    assert cancels, "an abnormal shutdown skipped the LLM cancel (cancel not in a finally)"
+    assert cancels[0] is True
 

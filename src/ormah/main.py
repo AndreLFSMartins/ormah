@@ -276,7 +276,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Session watcher not started: %s", e)
 
-    yield
+    try:
+        yield
+    finally:
+        # ADR-0004 slice 2 (council R7 HIGH-2 + council R1 HIGH-1): cancel in-flight LLM calls
+        # FIRST and UNCONDITIONALLY — even if the lifespan body raised or was cancelled. This is
+        # the ONE piece of teardown that must survive an abnormal shutdown, and only a finally
+        # guarantees it. It used to live inside stop_session_watcher(), which the `hasattr` guard
+        # below skips when start_session_watcher() raised; the scheduler is an independent LLM
+        # consumer and must not depend on the watcher's lifecycle.
+        from ormah.background.llm_client import cancel_active_llm_calls
+
+        try:
+            invalidated = cancel_active_llm_calls(final=True)
+            if invalidated:
+                logger.info("Cancelled %d in-flight LLM call(s) for shutdown", invalidated)
+        except Exception as e:
+            logger.warning("Cancelling in-flight LLM calls for shutdown failed: %s", e)
 
     # Unschedule the reconcile job before stopping the watchers, to shrink the window where
     # a tick recreates an Observer that nothing then stops. remove_job() only cancels future

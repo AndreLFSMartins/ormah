@@ -1538,11 +1538,10 @@ def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None
     engine maps to a provider-wide transient (never the per-slice failure cap — see
     ``memory_engine._extract_memories_llm``), so the slice is durably re-ingested on next boot.
 
-    HIGH-C (council R2, Codex): a single timed cancel pass cannot see an adapter built AFTER
-    the pass (a job that had already cleared ``_run_job``'s stop-check). Loop cancel + a bounded
-    join until every drain thread has actually exited — a late-built adapter registers its Popen
-    in time for the NEXT iteration's cancel, so shutdown is bounded by construction, not by a
-    fixed number of passes.
+    HIGH-C (council R2, Codex) is now resolved by the epoch itself rather than by re-cancelling
+    every drain iteration: a single cancel bumps the ONE global ``llm_cancel`` epoch, and a late-
+    built adapter reads that cancelled epoch at ``generate()`` entry (ADR-0004 slice 2) — so one
+    cancel reaches every call, past and future, and the join below only needs to wait for exit.
 
     HIGH-3 (council-pr R3, Codex): ``cancel_active_llm_calls()`` is BEST-EFFORT and suppressed —
     the join fence after it is LOAD-BEARING and must never be skipped by a cancel failure (an
@@ -1574,25 +1573,26 @@ def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None
                     w.observer.stop()
             w.handler.cancel_pending_timers()
             w.handler.wake()  # unblock the drain's idle wait so it exits promptly
-        # HIGH-3 (council-pr R3, Codex): the cancel calls are BEST-EFFORT; the join fence below
-        # is LOAD-BEARING. A raising cancel used to jump straight to the finally, skipping the
-        # whole fence (join_drain / _drain_handlers / observer.join) and leaving an un-joined
-        # orphan drain thread that can touch the DB after engine.shutdown() closes it (#52).
-        try:
-            # ADR-0004 slice 2: ``final`` must track ``rearm`` — a rollback (rearm=True) needs a
-            # RECOVERABLE cancel, or the ``resume_llm_adapters()`` call in the finally below is a
-            # no-op against a final cancel (llm_cancel.resume() never undoes final=True) and the
-            # process would keep serving with every later LLM call permanently cancelled (HIGH-A).
-            cancelled = cancel_active_llm_calls(final=not rearm)
-            if cancelled:
-                logger.info("Cancelled %d in-flight LLM call(s) for shutdown", cancelled)
-        except Exception as e:
-            logger.debug("Cancelling in-flight LLM calls for shutdown failed: %s", e)
-        while any(w.handler.drain_alive() for w in watches):
+        # Cancel ONLY on the rollback path (council R1, Cursor MEDIUM 3). rearm=True means startup
+        # failed BEFORE the lifespan's shutdown finally ran, so nothing else has cancelled — and
+        # the process keeps serving, so it must be RECOVERABLE (final=False). On the NORMAL
+        # shutdown path (rearm=False) the lifespan's finally already issued the final cancel before
+        # calling us; re-bumping here is redundant and muddies the invalidated-count log.
+        if rearm:
             try:
-                cancel_active_llm_calls(final=not rearm)  # global epoch -> also kills a
-            except Exception as e:         # late-built adapter's fresh Popen on the NEXT iteration
-                logger.debug("Cancelling in-flight LLM calls for shutdown failed: %s", e)
+                invalidated = cancel_active_llm_calls(final=False)
+                if invalidated:
+                    logger.info("Cancelled %d in-flight LLM call(s) for rollback", invalidated)
+            except Exception as e:
+                logger.debug("Cancelling in-flight LLM calls for rollback failed: %s", e)
+        # The join fence below is LOAD-BEARING (HIGH-3, council-pr R3): an un-joined orphan drain
+        # thread can touch the DB after engine.shutdown() closes it (#52). It no longer re-cancels
+        # each turn — that existed for HIGH-C (council R2), to reach an adapter built AFTER the
+        # first pass. A globally-read epoch removes the reason: whoever cancelled (the lifespan
+        # finally on shutdown, or the `if rearm` above on rollback) bumped the ONE global epoch, and
+        # a late-built adapter reads that cancelled epoch at generate() entry — so one cancel reaches
+        # every call, past and future, and the fence only needs to join.
+        while any(w.handler.drain_alive() for w in watches):
             for w in watches:
                 w.handler.join_drain(timeout=0.2)
         _drain_handlers([w.handler for w in watches])  # in_flight_count()==0 -> returns at once

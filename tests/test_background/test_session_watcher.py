@@ -2961,18 +2961,38 @@ def test_stop_session_watcher_drains_inflight_ingest(engine, tmp_path):
 # --- ADR-0004 slice 2: bounded shutdown (cancel in-flight LLM extractions) -------------
 
 def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
-    """HIGH-C (council R2, Codex): a job that starts AFTER the first cancel pass lazily builds
-    a fresh (clean, instance-scoped) adapter and only becomes cancellable once _stop_and_drain's
-    fence loop cancels it AGAIN. The loop must still terminate in bounded time — not rely on a
-    FIXED number of passes: the fake here only reports the drain dead on the THIRD
-    cancel_active_llm_calls() call, which a hardcoded two-pass "cancel; join; cancel; join"
-    implementation (the design HIGH-C rejected) cannot satisfy — only a real while-loop that
-    keeps cancelling until the drain is actually dead can. See I-1 discrimination proof in the
-    task-2 report for a run of this exact test against a rejected two-pass implementation."""
+    """ADR-0004 slice 2 redesign: HIGH-C (council R2, Codex) used to be solved by a re-cancel
+    loop inside `_stop_and_drain` (cancel; join; cancel; join; ... until drain_alive() reports
+    dead). That loop is now REMOVED — cancellation is a single globally-read epoch
+    (`llm_cancel`), and a late-built adapter's `generate()` reads the CURRENT epoch at call
+    time, not a snapshot captured when the adapter was built. So a "late" adapter -- one whose
+    call is already in flight, polling the epoch, when the ONE upstream cancel lands -- is
+    still cancelled without `_stop_and_drain` ever calling `cancel_active_llm_calls` itself.
+
+    On the normal-shutdown path (`rearm=False`, the default), `_stop_and_drain` must not call
+    `cancel_active_llm_calls` at all: the lifespan's shutdown `finally` already issued the ONE
+    final cancel before `stop_session_watcher` -> `_stop_and_drain` is even entered (see the
+    ordering note in `_stop_and_drain`'s docstring). This test reproduces that ordering directly
+    against the real `llm_cancel` module (reset by the autouse `_clean_llm_cancel_epoch`
+    fixture) and proves the bound holds via a `Barrier`, never `sleep`, to synchronise the "late"
+    thread's start with the join fence."""
     from ormah.background.session_watcher import SessionWatch, _stop_and_drain
 
-    calls = {"cancel": 0}
-    alive = {"value": True}
+    cancel_calls = {"n": 0}
+
+    def _counting_cancel(*, final=True):
+        cancel_calls["n"] += 1
+        return 0
+
+    monkeypatch.setattr(
+        "ormah.background.session_watcher.cancel_active_llm_calls", _counting_cancel
+    )
+    monkeypatch.setattr("ormah.background.session_watcher.resume_llm_adapters", lambda: None)
+    monkeypatch.setattr("ormah.background.session_watcher._drain_handlers", lambda handlers: None)
+
+    gen, _ = llm_cancel.snapshot()
+    building = threading.Barrier(2)
+    dead = threading.Event()
 
     class _FakeHandler:
         def __init__(self):
@@ -2985,37 +3005,43 @@ def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
             pass
 
         def drain_alive(self):
-            return alive["value"]
+            return not dead.is_set()
 
         def join_drain(self, timeout=None):
             time.sleep(min(timeout or 0, 0.05))
 
-    def _fake_cancel_active_llm_calls(*, final=True):
-        calls["cancel"] += 1
-        if calls["cancel"] >= 3:
-            alive["value"] = False  # the late-built adapter is now cancelled -> drain exits
-        return 1
-
-    monkeypatch.setattr(
-        "ormah.background.session_watcher.cancel_active_llm_calls", _fake_cancel_active_llm_calls
-    )
-    monkeypatch.setattr("ormah.background.session_watcher.resume_llm_adapters", lambda: None)
-    monkeypatch.setattr("ormah.background.session_watcher._drain_handlers", lambda handlers: None)
+    def _late_built_adapter():
+        # Mirrors the facade's real generate()-entry check (llm_client._guarded_generate):
+        # reads the CURRENT global epoch, not one captured when the adapter/thread was built.
+        building.wait(timeout=5)
+        while not llm_cancel.epoch_changed(gen):
+            time.sleep(0.005)
+        dead.set()
 
     handler = _FakeHandler()
     watch = SessionWatch(watch_dir=Path("/tmp/late-adapter"), handler=handler, observer=None,
                           spool=None, discover=False)
 
+    t = threading.Thread(target=_late_built_adapter)
+    t.start()
+    building.wait(timeout=5)  # the "late" adapter is alive and polling the epoch now
+
+    # The lifespan-style cancel: ONE call, made BEFORE _stop_and_drain is entered -- exactly the
+    # ordering main.lifespan's shutdown finally guarantees ahead of stop_session_watcher().
+    llm_cancel.begin_cancel(final=True)
+
     start = time.monotonic()
     _stop_and_drain([watch])
     elapsed = time.monotonic() - start
+    t.join(5)
 
-    assert calls["cancel"] >= 3, (
-        "at least a THIRD cancel pass was needed to catch the late-built adapter -- a fixed "
-        "two-pass implementation (cancel; join; cancel; join) cannot reach this, only a real "
-        "while-loop that keeps cancelling until drain_alive() reports dead can"
+    assert elapsed < 5.0, "the join fence must be bounded by the epoch read, not by re-cancelling"
+    assert not handler.drain_alive(), "the late-built adapter must have observed the cancel"
+    assert cancel_calls["n"] == 0, (
+        "the normal-shutdown path (rearm=False) must not call cancel_active_llm_calls itself -- "
+        "the lifespan's finally already did, and re-cancelling here would just be the removed "
+        "HIGH-C loop in disguise"
     )
-    assert elapsed < 5.0, "the fence loop must be bounded, not wait out a full extraction budget"
 
 
 def test_startup_rollback_drains_failing_roots_own_inflight_extraction(engine, tmp_path, monkeypatch):
