@@ -1579,14 +1579,18 @@ def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None
         # whole fence (join_drain / _drain_handlers / observer.join) and leaving an un-joined
         # orphan drain thread that can touch the DB after engine.shutdown() closes it (#52).
         try:
-            cancelled = cancel_active_llm_calls()
+            # ADR-0004 slice 2: ``final`` must track ``rearm`` — a rollback (rearm=True) needs a
+            # RECOVERABLE cancel, or the ``resume_llm_adapters()`` call in the finally below is a
+            # no-op against a final cancel (llm_cancel.resume() never undoes final=True) and the
+            # process would keep serving with every later LLM call permanently cancelled (HIGH-A).
+            cancelled = cancel_active_llm_calls(final=not rearm)
             if cancelled:
                 logger.info("Cancelled %d in-flight LLM call(s) for shutdown", cancelled)
         except Exception as e:
             logger.debug("Cancelling in-flight LLM calls for shutdown failed: %s", e)
         while any(w.handler.drain_alive() for w in watches):
             try:
-                cancel_active_llm_calls()  # global (module-level adapter caches) -> also kills a
+                cancel_active_llm_calls(final=not rearm)  # global epoch -> also kills a
             except Exception as e:         # late-built adapter's fresh Popen on the NEXT iteration
                 logger.debug("Cancelling in-flight LLM calls for shutdown failed: %s", e)
             for w in watches:

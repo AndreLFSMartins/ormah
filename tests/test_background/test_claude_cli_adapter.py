@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from ormah.background import llm_cancel
 from ormah.background.llm.claude_cli_adapter import _CANCEL_POLL_INTERVAL, ClaudeCliAdapter
 from ormah.background.llm_errors import LlmCancelledError, LlmTimeoutError
 
@@ -147,47 +148,6 @@ class _NeverEofProc:
     def __exit__(self, exc_type, exc, tb):
         self.wait()
         return False
-
-
-class _BlockingFakeProc:
-    """communicate() blocks until terminate()/kill() is called — simulates a long-lived child
-    that cancel_active() must be able to interrupt within its 5s kill-fence."""
-
-    def __init__(self):
-        self.returncode = None
-        self._stop = threading.Event()
-        self._done = threading.Event()
-        self.terminated = False
-        self.killed = False
-
-    def communicate(self, input=None, timeout=None):
-        self._stop.wait(timeout=10)
-        if self.returncode is None:
-            self.returncode = -15 if self.terminated else -9
-        self._done.set()
-        return "", ""
-
-    def terminate(self):
-        self.terminated = True
-        self._stop.set()
-
-    def kill(self):
-        self.killed = True
-        self._stop.set()
-
-    def wait(self, timeout=None):
-        self._done.wait(timeout=timeout)
-        return self.returncode
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.wait()
-        return False
-
-    def poll(self):
-        return self.returncode if self._done.is_set() else None
 
 
 def test_prompt_goes_on_stdin_not_argv(monkeypatch):
@@ -458,51 +418,20 @@ def test_generate_schema_returns_none_when_structured_null_and_result_blank(monk
 # --- ADR-0004 slice 2: cancellation ------------------------------------------------------
 
 
-def test_cancel_active_terminates_running_generate(monkeypatch):
-    """Start generate() on a long-lived fake child; from another thread call
-    adapter.cancel_active(); generate() must raise LlmCancelledError (never LlmTimeoutError —
-    council R4: a cancel must stay uncapped) well under 10s, and cancel_active() must return 1."""
-    adapter = ClaudeCliAdapter(model="haiku")
-    proc = _BlockingFakeProc()
-    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: proc)
-
-    outcome = {}
-
-    def _run():
-        try:
-            adapter.generate("hi")
-        except LlmCancelledError as e:
-            outcome["exc"] = e
-
-    t = threading.Thread(target=_run)
-    t.start()
-    assert _wait_until(lambda: len(adapter._active_procs) == 1, timeout=5), \
-        "the child must be registered in _active_procs before cancel_active() can see it"
-
-    start = time.monotonic()
-    cancelled = adapter.cancel_active()
-    t.join(timeout=10)
-    elapsed = time.monotonic() - start
-
-    assert not t.is_alive()
-    assert elapsed < 10.0
-    assert cancelled == 1
-    assert isinstance(outcome.get("exc"), LlmCancelledError)
-    assert not isinstance(outcome.get("exc"), LlmTimeoutError)
-
-
 def test_cancel_set_raises_even_when_child_exits_cleanly(monkeypatch):
     """HIGH-1 (council-pr R3, Codex) DATA INTEGRITY: a child that HANDLES SIGTERM and exits 0
     inside the 5s kill fence returns partial/buffered JSON. The old guard only raised when
     `returncode != 0`, so that envelope was treated as SUCCESS and the engine ADVANCED THE
     CURSOR — violating this slice's central invariant ("a cancel never advances the cursor").
-    Whenever the cancel event is set, generate() must raise LlmCancelledError regardless of
-    returncode. Safe: _cancel_event is instance-scoped and only set on shutdown/rollback."""
+    Whenever a cancel has landed, generate() must raise LlmCancelledError regardless of
+    returncode. ADR-0004 slice 2: the cancel is now the module-level llm_cancel epoch, not an
+    instance-scoped flag."""
 
     adapter = ClaudeCliAdapter(model="haiku")
+    llm_cancel.begin_lifespan()
 
     class _CleanExitOnCancelProc:
-        """The shutdown cancel lands WHILE communicate() runs (as cancel_active() would); the
+        """The shutdown cancel lands WHILE communicate() runs (as begin_cancel() would); the
         child then exits 0 with partial buffered output instead of dying by signal."""
 
         def __init__(self):
@@ -510,9 +439,9 @@ def test_cancel_set_raises_even_when_child_exits_cleanly(monkeypatch):
             self.killed = False
 
         def communicate(self, input=None, timeout=None):
-            # The cancel lands mid-call, via the real public API — in production _cancel_event is
-            # only ever set inside cancel_active(), which also bumps the cancel generation.
-            adapter.cancel_active()
+            # The cancel lands mid-call, via the real public API — llm_cancel.begin_cancel()
+            # bumps the epoch and marks the world cancelled in one atomic critical section.
+            llm_cancel.begin_cancel(final=True)
             return json.dumps({"result": "partial buffered output"}), ""
 
         def terminate(self):
@@ -535,8 +464,11 @@ def test_cancel_set_raises_even_when_child_exits_cleanly(monkeypatch):
             return False
 
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: _CleanExitOnCancelProc())
-    with pytest.raises(LlmCancelledError):
-        adapter.generate("hi")
+    try:
+        with pytest.raises(LlmCancelledError):
+            adapter.generate("hi")
+    finally:
+        llm_cancel.begin_lifespan()
 
 
 def test_cancel_during_poll_loop_raises_within_a_poll_interval(monkeypatch):
@@ -550,6 +482,7 @@ def test_cancel_during_poll_loop_raises_within_a_poll_interval(monkeypatch):
     adapter = ClaudeCliAdapter(model="haiku", timeout=60)  # a deliberately long provider budget
     proc = _NeverEofProc()
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: proc)
+    llm_cancel.begin_lifespan()
 
     outcome = {}
 
@@ -567,7 +500,7 @@ def test_cancel_during_poll_loop_raises_within_a_poll_interval(monkeypatch):
         "generate() must reach the poll loop"
 
     start = time.monotonic()
-    adapter.cancel_active()
+    llm_cancel.begin_cancel(final=True)
     t.join(timeout=10)
     elapsed = time.monotonic() - start
 
@@ -577,6 +510,7 @@ def test_cancel_during_poll_loop_raises_within_a_poll_interval(monkeypatch):
     assert elapsed < 5.0, f"the cancel must land within ~a poll interval, took {elapsed:.2f}s"
     assert proc.inputs[0] == "hi" and all(i is None for i in proc.inputs[1:]), \
         "the prompt is handed over exactly once — CPython rejects re-sending it on a retry"
+    llm_cancel.begin_lifespan()
 
 
 def test_cancel_history_survives_a_resume_racing_the_final_gate(monkeypatch):
@@ -592,9 +526,10 @@ def test_cancel_history_survives_a_resume_racing_the_final_gate(monkeypatch):
     R3's HIGH-1 by another route: we traded "the returncode masks the cancel" for "another
     thread can erase the cancel".
 
-    A monotonic cancel generation captured per call fixes it: resume() re-opens the adapter for
-    NEW calls without erasing the history of calls already in flight."""
+    A monotonic cancel epoch (now the module-level llm_cancel authority) fixes it: resume()
+    re-opens admission for NEW calls without erasing the history of calls already in flight."""
     adapter = ClaudeCliAdapter(model="haiku")
+    llm_cancel.begin_lifespan()
 
     class _CancelThenResumeProc:
         """The rollback's cancel AND its finally-resume both land while this call is in flight;
@@ -604,8 +539,8 @@ def test_cancel_history_survives_a_resume_racing_the_final_gate(monkeypatch):
             self.returncode = 0
 
         def communicate(self, input=None, timeout=None):
-            adapter.cancel_active()   # the rollback cancels every cached adapter...
-            adapter.resume()          # ...and its finally re-arms them, clearing the event
+            llm_cancel.begin_cancel(final=False)  # the rollback cancels every in-flight call...
+            llm_cancel.resume()                   # ...and its finally re-admits new calls
             return json.dumps({"result": "partial buffered output"}), ""
 
         def terminate(self):
@@ -631,107 +566,10 @@ def test_cancel_history_survives_a_resume_racing_the_final_gate(monkeypatch):
     with pytest.raises(LlmCancelledError):
         adapter.generate("hi")
 
-    # ...and the resume genuinely re-opened the adapter: a NEW call must succeed.
+    # ...and the resume genuinely re-opened admission: a NEW call must succeed.
     monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout=json.dumps({"result": "ok"})))
     assert adapter.generate("hi") == "ok"
-
-
-def test_torn_cancel_state_cannot_let_a_cancelled_call_report_success(monkeypatch):
-    """council-pr R5 HIGH (Codex 0.99): cancel_active() bumps the generation and THEN sets the
-    event; generate() read both WITHOUT the lock. Reproduced interleaving:
-      1. cancel enters the lock and increments the generation (0->1) — event NOT set yet;
-      2. generate reads gen=1 (the NEW era!) and sees a CLEAR event -> proceeds;
-      3. generate spawns and REGISTERS the child;
-      4. cancel sets the event and SIGTERMs the (already registered) child;
-      5. the child handles SIGTERM and exits 0 with partial buffered JSON;
-      6. final gate: returncode == 0 AND generation (1) == gen (1) -> no raise -> the PARTIAL
-         output is accepted as SUCCESS.
-
-    Third round of the same data-integrity defect through a new door (R3: the returncode masked
-    the cancel; R4: a resume() erased the flag; R5: the torn read). The fix is that EVERY read of
-    the cancel state happens atomically under _cancel_lock, so "new generation + clear event" is
-    never observable. Synchronised entirely with Events — no sleeps — so it cannot go flaky."""
-    adapter = ClaudeCliAdapter(model="haiku", timeout=30)
-
-    entered_set = threading.Event()    # cancel is INSIDE _cancel_lock, generation already bumped
-    release_set = threading.Event()    # let cancel finish (Event.set + the kill pass)
-    child_running = threading.Event()  # the child got spawned+registered (only on the buggy path)
-    may_return = threading.Event()     # let the child hand back its partial JSON
-
-    real_set = adapter._cancel_event.set
-
-    def paused_set():
-        # We are inside _cancel_lock, right after `generation += 1`: hold here to open the window.
-        entered_set.set()
-        release_set.wait(timeout=10)
-        real_set()
-
-    adapter._cancel_event.set = paused_set   # adapter is test-local; no global state touched
-
-    class _SigtermHandlingProc:
-        """A child that HANDLES SIGTERM and exits 0 with partial buffered JSON."""
-
-        def __init__(self):
-            self.returncode = 0
-            self.pid = None       # _capture_pgid returns None -> per-PID fallback, no real signal
-
-        def communicate(self, input=None, timeout=None):
-            child_running.set()
-            may_return.wait(timeout=10)
-            return json.dumps({"result": "PARTIAL buffered output"}), ""
-
-        def terminate(self):
-            pass
-
-        def kill(self):
-            pass                  # handled the signal: returncode stays 0
-
-        def wait(self, timeout=None):
-            return 0
-
-        def poll(self):
-            return 0
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _SigtermHandlingProc())
-
-    outcome = {}
-
-    def _run_generate():
-        try:
-            outcome["result"] = adapter.generate("hi")
-        except LlmCancelledError as e:
-            outcome["raised"] = e
-        except Exception as e:  # noqa: BLE001
-            outcome["other"] = e
-
-    tc = threading.Thread(target=adapter.cancel_active, daemon=True)
-    tc.start()
-    assert entered_set.wait(timeout=5), "cancel never entered its critical section"
-    # The generation is bumped but the event is NOT set yet — the exact torn window.
-
-    tg = threading.Thread(target=_run_generate, daemon=True)
-    tg.start()
-    # On the BUGGY path generate sails through and registers a child; on the FIXED path it parks
-    # on _cancel_lock. Bounded either way — the assertions are on the OUTCOME, not on which ran.
-    child_spawned = child_running.wait(timeout=1.5)
-
-    release_set.set()   # cancel now sets the event and runs its kill pass
-    may_return.set()    # the child hands back its partial JSON with returncode 0
-    tc.join(timeout=10)
-    tg.join(timeout=10)
-
-    assert outcome.get("result") is None, (
-        f"a CANCELLED call reported SUCCESS with partial output: {outcome.get('result')!r} "
-        f"(child_spawned={child_spawned})"
-    )
-    assert isinstance(outcome.get("raised"), LlmCancelledError), \
-        f"a cancelled call must raise LlmCancelledError, got {outcome}"
+    llm_cancel.begin_lifespan()
 
 
 def test_previous_era_semaphore_waiter_never_spawns_after_cancel_resume(monkeypatch):
@@ -744,6 +582,7 @@ def test_previous_era_semaphore_waiter_never_spawns_after_cancel_resume(monkeypa
     Fixed by capturing the era at ENTRY (before the semaphore) plus an (a)+(b) admission check.
     Affects the maintenance path, which has semaphore waiters; ingest has a single drain thread."""
     adapter = ClaudeCliAdapter(model="haiku", max_concurrency=1, timeout=30)
+    llm_cancel.begin_lifespan()
 
     popen_calls = []
     a_running = threading.Event()
@@ -805,8 +644,8 @@ def test_previous_era_semaphore_waiter_never_spawns_after_cancel_resume(monkeypa
     time.sleep(0.2)
     assert "b" not in outcome, "call B should still be waiting on the semaphore (settle too short)"
 
-    adapter.cancel_active()   # ends B's era (and kills A's child)
-    adapter.resume()          # a rollback's finally re-arms, clearing the event
+    llm_cancel.begin_cancel(final=False)   # ends B's era (and A's era too)
+    llm_cancel.resume()                    # a rollback's finally re-admits new calls
 
     a_may_return.set()        # A finishes, handing the semaphore to B
     ta.join(timeout=10)
@@ -819,52 +658,7 @@ def test_previous_era_semaphore_waiter_never_spawns_after_cancel_resume(monkeypa
     # A was cancelled too (rc=0 but its era ended) — the R3/R4 invariant still holds.
     assert isinstance(outcome.get("a"), LlmCancelledError), \
         f"the cancelled in-flight call must also raise, got {outcome.get('a')!r}"
-
-
-def test_cancel_active_noop_when_idle():
-    adapter = ClaudeCliAdapter(model="haiku")
-    assert adapter.cancel_active() == 0
-
-
-def test_cancel_aborts_semaphore_waiter_without_spawning(monkeypatch):
-    """council R2: max_concurrency=1, one generate() live on a long child, a second blocked on
-    the semaphore. cancel_active() while both pending -> BOTH raise LlmCancelledError promptly
-    and no replacement process is spawned (count Popen calls)."""
-    adapter = ClaudeCliAdapter(model="haiku", max_concurrency=1)
-    proc1 = _BlockingFakeProc()
-    popen_calls = []
-
-    def popen(argv, **kwargs):
-        popen_calls.append(1)
-        return proc1
-
-    monkeypatch.setattr(subprocess, "Popen", popen)
-
-    outcome = {}
-
-    def _call(key):
-        try:
-            adapter.generate("hi")
-        except LlmCancelledError as e:
-            outcome[key] = e
-
-    t1 = threading.Thread(target=_call, args=("t1",))
-    t1.start()
-    assert _wait_until(lambda: len(adapter._active_procs) == 1, timeout=5)
-
-    t2 = threading.Thread(target=_call, args=("t2",))
-    t2.start()
-    time.sleep(0.2)  # best-effort: give t2 time to block on the semaphore before we cancel
-
-    cancelled = adapter.cancel_active()
-    t1.join(timeout=10)
-    t2.join(timeout=10)
-
-    assert not t1.is_alive() and not t2.is_alive()
-    assert isinstance(outcome.get("t1"), LlmCancelledError)
-    assert isinstance(outcome.get("t2"), LlmCancelledError)
-    assert cancelled == 1                # only t1's live proc was tracked
-    assert len(popen_calls) == 1, "t2 must never spawn a replacement process"
+    llm_cancel.begin_lifespan()
 
 
 def test_popen_creation_failure_is_fast_failure(monkeypatch):
@@ -879,24 +673,27 @@ def test_popen_creation_failure_is_fast_failure(monkeypatch):
 
 
 def test_adapter_generates_again_after_a_rollback_cancellation(monkeypatch):
-    """council R6: a recoverable cancellation (startup rollback) must not poison the surviving
-    cached adapter. cancel_active() then resume() -> generate() works."""
+    """council R6: a recoverable cancellation (startup rollback) must not poison the process —
+    begin_cancel(final=False) then resume() -> generate() works."""
+    llm_cancel.begin_lifespan()
     adapter = ClaudeCliAdapter(model="haiku")
-    adapter.cancel_active()
-    adapter.resume()
+    llm_cancel.begin_cancel(final=False)
+    llm_cancel.resume()
     monkeypatch.setattr(
         subprocess, "Popen", _fake_popen(stdout=json.dumps({"result": "ok"}))
     )
     assert adapter.generate("hi") == "ok"
+    llm_cancel.begin_lifespan()
 
 
 def test_cancel_between_creation_and_registration(monkeypatch):
-    """codex R3 race: generate() is paused between process creation and its registration in
-    _active_procs while cancel_active() runs to completion (seeing an empty set). generate()
-    must STILL raise LlmCancelledError promptly (post-registration event re-check) and the fake
-    child must be killed."""
+    """codex R3 race: generate() is paused between process creation (Popen returning) and the
+    post-spawn epoch re-check while a cancel lands and completes in that exact window. generate()
+    must STILL raise LlmCancelledError promptly (post-spawn epoch re-check) and the fake child
+    must be killed."""
+    llm_cancel.begin_lifespan()
     entered = threading.Barrier(2)   # rendezvous: Popen() has been called (creation underway)
-    release = threading.Event()      # cancel_active() has finished; let Popen() return the proc
+    release = threading.Event()      # the cancel has landed; let Popen() return the proc
     proc_holder = {}
 
     def popen(argv, **kwargs):
@@ -921,15 +718,14 @@ def test_cancel_between_creation_and_registration(monkeypatch):
     t.start()
 
     entered.wait(timeout=5)                    # Popen() has been entered
-    assert not adapter._active_procs, "must not be registered before Popen() returns"
-    cancelled = adapter.cancel_active()          # sees an EMPTY set -> returns 0
-    assert cancelled == 0
+    llm_cancel.begin_cancel(final=True)         # lands while still inside Popen()
     release.set()                                # let Popen() return; generate() re-checks
 
     t.join(timeout=5)
     assert not t.is_alive()
     assert isinstance(outcome.get("exc"), LlmCancelledError)
-    assert proc_holder["proc"].killed, "the post-registration re-check must still kill it"
+    assert proc_holder["proc"].killed, "the post-spawn re-check must still kill it"
+    llm_cancel.begin_lifespan()
 
 
 def test_llm_generate_swallows_cancel_and_timeout(monkeypatch):
@@ -964,6 +760,7 @@ def test_cancel_kills_whole_process_group_not_just_parent(tmp_path, monkeypatch)
 
     REAL subprocess (integration-marked). RED against the pre-fix per-PID kill: generate() does
     NOT return within 15s and the lingering grandchild survives the cancel."""
+    llm_cancel.begin_lifespan()
     marker = tmp_path / "marker"
     marker.mkdir()
     script = tmp_path / "fake_claude.sh"
@@ -996,11 +793,13 @@ def test_cancel_kills_whole_process_group_not_just_parent(tmp_path, monkeypatch)
         "the fake child never started"
     grandchild_pid = int((marker / "grandchild.pid").read_text().strip())
     assert _pid_alive(grandchild_pid), "grandchild must be live before the cancel"
-    assert _wait_until(lambda: len(adapter._active_procs) == 1, timeout=5), \
-        "the child must be registered before cancel_active() can see it"
+    # ADR-0004 slice 2: cancellation is now detected in-thread, from generate()'s own poll loop
+    # noticing llm_cancel.epoch_changed() — there is no external process registry to wait on, so
+    # settle briefly to make sure the thread is genuinely inside the poll loop before cancelling.
+    time.sleep(0.3)
 
     start = time.monotonic()
-    cancelled = adapter.cancel_active()
+    llm_cancel.begin_cancel(final=True)
     t.join(timeout=15)
     elapsed = time.monotonic() - start
 
@@ -1008,7 +807,6 @@ def test_cancel_kills_whole_process_group_not_just_parent(tmp_path, monkeypatch)
         assert not t.is_alive(), \
             "generate() did not return within 15s — a per-PID kill hangs on the grandchild"
         assert elapsed < 15.0
-        assert cancelled == 1
         assert isinstance(outcome.get("exc"), LlmCancelledError), \
             f"cancel must raise LlmCancelledError, got {outcome}"
         assert _wait_until(lambda: not _pid_alive(grandchild_pid), timeout=5), \
@@ -1017,6 +815,7 @@ def test_cancel_kills_whole_process_group_not_just_parent(tmp_path, monkeypatch)
         # Never leak the 60s sleeper if an assertion above failed (the RED path).
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(grandchild_pid, signal.SIGKILL)
+        llm_cancel.begin_lifespan()
 
 
 @pytest.mark.integration
@@ -1030,6 +829,7 @@ def test_group_sigkill_escalation_reaps_sigterm_ignoring_grandchild(tmp_path, mo
 
     REAL subprocess. RED against the pre-refine code (poll-gated + lazily-derived pgid):
     generate() does NOT return within 15s and the grandchild survives the cancel."""
+    llm_cancel.begin_lifespan()
     marker = tmp_path / "marker"
     marker.mkdir()
     script = tmp_path / "fake_claude_trap.sh"
@@ -1062,11 +862,13 @@ def test_group_sigkill_escalation_reaps_sigterm_ignoring_grandchild(tmp_path, mo
         "the fake child never started"
     grandchild_pid = int((marker / "grandchild.pid").read_text().strip())
     assert _pid_alive(grandchild_pid), "grandchild must be live before the cancel"
-    assert _wait_until(lambda: len(adapter._active_procs) == 1, timeout=5), \
-        "the child must be registered before cancel_active() can see it"
+    # ADR-0004 slice 2: cancellation is now detected in-thread, from generate()'s own poll loop
+    # noticing llm_cancel.epoch_changed() — there is no external process registry to wait on, so
+    # settle briefly to make sure the thread is genuinely inside the poll loop before cancelling.
+    time.sleep(0.3)
 
     start = time.monotonic()
-    cancelled = adapter.cancel_active()
+    llm_cancel.begin_cancel(final=True)
     t.join(timeout=15)
     elapsed = time.monotonic() - start
 
@@ -1074,7 +876,6 @@ def test_group_sigkill_escalation_reaps_sigterm_ignoring_grandchild(tmp_path, mo
         assert not t.is_alive(), \
             "generate() did not return within 15s — the SIGTERM-ignoring grandchild was not reaped"
         assert elapsed < 15.0
-        assert cancelled == 1
         assert isinstance(outcome.get("exc"), LlmCancelledError), \
             f"cancel must raise LlmCancelledError, got {outcome}"
         assert _wait_until(lambda: not _pid_alive(grandchild_pid), timeout=6), \
@@ -1082,6 +883,7 @@ def test_group_sigkill_escalation_reaps_sigterm_ignoring_grandchild(tmp_path, mo
     finally:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(grandchild_pid, signal.SIGKILL)
+        llm_cancel.begin_lifespan()
 
 
 @pytest.mark.integration
@@ -1098,6 +900,7 @@ def test_cancel_is_bounded_even_with_a_detached_setsid_grandchild(tmp_path, monk
     The detached grandchild is NOT reaped (only cgroups/job objects could) — it survives as an
     orphan whose writes now take EPIPE. That residual is accepted; what matters is that it no
     longer dams our shutdown."""
+    llm_cancel.begin_lifespan()
     marker = tmp_path / "marker"
     marker.mkdir()
     script = tmp_path / "fake_claude_setsid.sh"
@@ -1129,17 +932,16 @@ def test_cancel_is_bounded_even_with_a_detached_setsid_grandchild(tmp_path, monk
     assert _wait_until(lambda: (marker / "started").exists(), timeout=15), \
         "the fake child never started"
     grandchild_pid = int((marker / "grandchild.pid").read_text().strip())
-    assert _wait_until(lambda: len(adapter._active_procs) == 1, timeout=5)
     # Scenario integrity: the detached grandchild must really be alive and holding our stdout,
     # otherwise this test would pass vacuously on a child that simply exited.
     assert _pid_alive(grandchild_pid), "the setsid grandchild must be live before the cancel"
     # Settle so generate() is genuinely INSIDE the communicate() poll loop. Without this the
-    # cancel can land on the earlier post-registration re-check — a correct cancel, but it would
-    # not measure the poll-loop bound this test exists to prove.
+    # cancel can land on the earlier post-spawn re-check — a correct cancel, but it would not
+    # measure the poll-loop bound this test exists to prove.
     time.sleep(0.3)
 
     start = time.monotonic()
-    adapter.cancel_active()
+    llm_cancel.begin_cancel(final=True)
     t.join(timeout=30)          # generous: in RED we want to MEASURE the provider-timeout wait
     elapsed = time.monotonic() - start
 
@@ -1159,6 +961,7 @@ def test_cancel_is_bounded_even_with_a_detached_setsid_grandchild(tmp_path, monk
         # The detached grandchild is an accepted orphan — never leak it out of the test run.
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(grandchild_pid, signal.SIGKILL)
+        llm_cancel.begin_lifespan()
 
 
 @pytest.mark.integration
@@ -1336,3 +1139,55 @@ def test_real_claude_json_schema_recovers_prose_json_fallback():
         pytest.skip("claude CLI returned no output on either structured_output or result")
     parsed = json.loads(extract_json(raw))
     assert isinstance(parsed, dict) and isinstance(parsed.get("summary"), str) and parsed["summary"]
+
+
+def test_a_cancelled_call_never_has_its_partial_output_accepted(monkeypatch):
+    """R3 + R5 regression. A child that HANDLES SIGTERM and exits 0 emits partial
+    buffered JSON. Accepting it made the engine advance the cursor on a cancelled
+    extraction. The final gate must consult the epoch, not the return code."""
+    from ormah.background import llm_cancel
+    from ormah.background.llm import claude_cli_adapter as mod
+
+    llm_cancel.begin_lifespan()
+    adapter = mod.ClaudeCliAdapter(model="haiku", timeout=30)
+    spawned = threading.Event()
+    may_return = threading.Event()
+
+    class _SigtermHandlingProc:
+        returncode = 0
+        pid = None
+
+        def communicate(self, input=None, timeout=None):
+            spawned.set()
+            if not may_return.wait(timeout=5):
+                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout or 0)
+            return json.dumps({"result": "PARTIAL buffered output"}), ""
+
+        def terminate(self): pass
+        def kill(self): pass          # handled the signal: returncode stays 0
+        def wait(self, timeout=None): return 0
+        def poll(self): return 0
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(mod, "_capture_pgid", lambda proc: None)
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **kw: _SigtermHandlingProc())
+
+    outcome: dict = {}
+
+    def run():
+        try:
+            outcome["result"] = adapter.generate("hi")
+        except LlmCancelledError as e:
+            outcome["raised"] = e
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert spawned.wait(timeout=5), "the child never spawned"
+    llm_cancel.begin_cancel(final=True)
+    may_return.set()
+    t.join(timeout=10)
+    assert not t.is_alive()
+
+    assert "raised" in outcome, f"cancelled output was accepted: {outcome.get('result')!r}"
+    llm_cancel.begin_lifespan()

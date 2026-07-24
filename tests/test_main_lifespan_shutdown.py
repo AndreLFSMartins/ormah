@@ -379,20 +379,23 @@ async def test_lifespan_shutdown_drains_always_on_worker(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 6. ADR-0004 slice 2: resume_llm_adapters() at lifespan startup
+# 6. ADR-0004 slice 2: begin_llm_lifespan() at lifespan startup
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_second_lifespan_can_generate_after_a_cancelled_first(tmp_path, monkeypatch):
     """council R4/R7: a cancellation event must not survive past the lifespan that set it.
-    main.lifespan calls resume_llm_adapters() early in startup (right after engine.startup()),
-    so a second in-process lifespan (the repo already exercises this double-lifespan pattern)
-    can generate again even though the module-level llm_client adapter caches outlive a single
-    lifespan execution."""
+    main.lifespan calls begin_llm_lifespan() early in startup (right after engine.startup()), so
+    a second in-process lifespan (the repo already exercises this double-lifespan pattern) can
+    generate again even though the module-level llm_cancel epoch outlives a single lifespan
+    execution — including a FINAL cancel, which resume_llm_adapters() alone cannot clear (R4).
+
+    ADR-0004 slice 2: cancellation is the module-level llm_cancel epoch now, not a per-adapter
+    flag the facade toggles — the fake adapter below is deliberately dumb (it always succeeds);
+    the FACADE's _guarded_generate is what rejects a call made while the epoch is cancelled."""
     import sys
 
-    from ormah.background import llm_client
-    from ormah.background.llm_errors import LlmCancelledError
+    from ormah.background import llm_cancel, llm_client
 
     class _FakeEngine:
         def startup(self): pass
@@ -429,32 +432,28 @@ async def test_second_lifespan_can_generate_after_a_cancelled_first(tmp_path, mo
     monkeypatch.setitem(sys.modules, "ormah.background.scheduler", _fake_scheduler_mod)
 
     class _FakeAdapter:
-        def __init__(self):
-            self._cancelled = False
-        def cancel_active(self):
-            self._cancelled = True
-            return 1
-        def resume(self):
-            self._cancelled = False
         def generate(self, *a, **k):
-            if self._cancelled:
-                raise LlmCancelledError("still cancelled")
             return "ok"
 
-    fake = _FakeAdapter()
-    monkeypatch.setattr(llm_client, "_cached_adapter", fake)
+    monkeypatch.setattr(llm_client, "_cached_adapter", _FakeAdapter())
     monkeypatch.setattr(llm_client, "_adapter_initialised", True)
 
     app = FastAPI(lifespan=main.lifespan)
 
-    # --- first lifespan: something cancels the adapter mid-flight (e.g. a shutdown-time
-    # cancel_active_llm_calls() call) and the lifespan ends without anyone resuming it ---
-    async with main.lifespan(app):
-        fake.cancel_active()
-    assert fake._cancelled is True, "sanity: the adapter is left cancelled after the first lifespan"
+    try:
+        # --- first lifespan: a real shutdown-time cancel_active_llm_calls() call lands (FINAL
+        # by default) and the lifespan ends without anyone resuming it ---
+        async with main.lifespan(app):
+            llm_cancel.begin_cancel(final=True)
+        assert llm_cancel.snapshot()[1] is True, \
+            "sanity: the world is left cancelled after the first lifespan"
 
-    # --- second lifespan (in-process reload): must resume_llm_adapters() at startup ---
-    async with main.lifespan(app):
-        assert fake._cancelled is False, "resume_llm_adapters() must run at lifespan startup"
-        assert llm_client.llm_generate(main.settings, "prompt") == "ok"
+        # --- second lifespan (in-process reload): must begin_llm_lifespan() at startup, since
+        # resume_llm_adapters() alone is a no-op against a FINAL cancel (R4) ---
+        async with main.lifespan(app):
+            assert llm_cancel.snapshot()[1] is False, \
+                "begin_llm_lifespan() must run at lifespan startup"
+            assert llm_client.llm_generate(main.settings, "prompt") == "ok"
+    finally:
+        llm_cancel.begin_lifespan()
 

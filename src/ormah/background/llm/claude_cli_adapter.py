@@ -14,6 +14,7 @@ import threading
 import time
 from pathlib import Path
 
+from ormah.background import llm_cancel
 from ormah.background.llm.base import LLMAdapter
 from ormah.background.llm_errors import LlmCancelledError
 
@@ -174,101 +175,6 @@ class ClaudeCliAdapter(LLMAdapter):
         self.timeout = timeout
         self.bin_path = bin_path or shutil.which("claude") or "claude"
         self.max_concurrency = max(1, max_concurrency)
-        # ADR-0004 slice 2: instance-scoped (never module-global — council R6). A module-level
-        # flag would survive the shutdown that set it (main.lifespan catches a watcher startup
-        # failure and keeps serving; nothing calls reset_adapter() on startup), poisoning every
-        # later ingest/maintenance call for the life of the process.
-        self._cancel_event = threading.Event()
-        # ITEM 1 (council-pr R4, Codex): a MONOTONIC cancel generation. The event answers "are we
-        # in shutdown RIGHT NOW?" (it is cleared by resume()); the generation answers "was THIS
-        # in-flight call cancelled?" and is never rolled back, so a resume() on another thread
-        # cannot erase the history of a call already in flight. Reading the live event at the
-        # final gate let a rollback's finally-resume clear the cancel out from under an in-flight
-        # maintenance call, which then accepted a cancelled child's partial JSON as success.
-        self._cancel_generation = 0
-        self._cancel_lock = threading.Lock()
-        # HIGH-1 refine: map each in-flight proc to its pgid CAPTURED AT SPAWN, so the escalation
-        # SIGKILL can target the group even after the leader dies (a re-derived pgid would be gone).
-        self._active_procs: dict = {}
-        self._active_lock = threading.Lock()
-
-    def cancel_active(self) -> int:
-        """Terminate this adapter's in-flight children; new calls abort until resume().
-
-        Returns the number of processes terminated (0 when idle)."""
-        with self._cancel_lock:
-            # Bump the generation BEFORE setting the event, both under the lock: any reader that
-            # observes the event set is then guaranteed to observe the new generation too, so the
-            # two can never be seen in disagreement.
-            self._cancel_generation += 1
-            self._cancel_event.set()
-        return self._cancel_tracked_procs()
-
-    def resume(self) -> None:
-        """Re-arm after a RECOVERABLE cancellation (startup rollback keeps serving) or at the
-        next lifespan startup (the adapter cache is module-level and outlives a reload).
-
-        Clears the event ONLY — the generation is never rolled back. That asymmetry is the whole
-        point: NEW calls are allowed again, while calls already in flight keep observing the
-        cancel that hit them (ITEM 1). Serialised on ``_cancel_lock`` (R5) so the pair
-        (generation, event) is only ever mutated inside a critical section.
-        """
-        with self._cancel_lock:
-            self._cancel_event.clear()
-
-    # --- cancel-state reads: ALL of them locked (council-pr R5) ---------------------------------
-    # R5 root cause: the cancel state was WRITTEN atomically but READ non-atomically. Three rounds
-    # of the same data-integrity bug came through that gap (R3: returncode masked the cancel; R4: a
-    # resume() erased the flag; R5: the window between `generation += 1` and `Event.set()` let a
-    # call capture the NEW generation while still seeing a CLEAR event, so the final gate compared
-    # equal and accepted a cancelled child's partial JSON). Every read below therefore takes
-    # ``_cancel_lock``, so no intermediate state is ever observable. These helpers never nest
-    # ``_active_lock`` (and ``cancel_active`` releases ``_cancel_lock`` before touching it), so
-    # there is no lock-ordering hazard.
-
-    def _capture_era(self) -> tuple[int, bool]:
-        """ATOMICALLY capture this call's cancel generation AND whether we are shutting down NOW.
-
-        Both values come from ONE critical section: read separately, a call could observe the torn
-        intermediate "new generation + clear event" and then both adopt the post-cancel era AND
-        conclude it was not being cancelled — escaping the cancel entirely."""
-        with self._cancel_lock:
-            return self._cancel_generation, self._cancel_event.is_set()
-
-    def _cancelled_since(self, gen: int) -> bool:
-        """(b) Was THIS call cancelled? True when a cancel landed after the call captured ``gen``.
-        Immune to a later resume(), unlike reading the live event."""
-        with self._cancel_lock:
-            return self._cancel_generation != gen
-
-    def _aborted(self, gen: int) -> bool:
-        """(a)+(b) in one atomic read: is the world shutting down NOW, or did a cancel land since
-        this call captured ``gen``?
-
-        Used where BOTH questions matter: admission after the semaphore (a waiter from a previous
-        era must never spawn a replacement child, even if a resume() has since cleared the event —
-        the MEDIUM) and the post-registration re-check (a cancel pass may have snapshotted the
-        process set before our registration, so it never saw this child)."""
-        with self._cancel_lock:
-            return self._cancel_generation != gen or self._cancel_event.is_set()
-
-    def _cancel_tracked_procs(self) -> int:
-        with self._active_lock:
-            items = list(self._active_procs.items())  # (proc, pgid) snapshot
-        for p, pgid in items:
-            _terminate_group_or_proc(p, pgid)  # SIGTERM the whole group (no grandchild holds stdout)
-        deadline = time.monotonic() + 5.0
-        for p, _pgid in items:
-            with contextlib.suppress(Exception):
-                p.wait(timeout=max(0.1, deadline - time.monotonic()))
-        # HIGH-1 refine (council-pr R2): escalate the group SIGKILL using the STORED pgid,
-        # UNCONDITIONALLY — never gated on the direct child's poll(). If the leader already
-        # exited on SIGTERM but an in-group grandchild ignored it (or still holds our stdout),
-        # the group SIGKILL must still reap it; re-deriving the pgid from the dead leader would
-        # raise ProcessLookupError and skip the kill, leaking the descendant and hanging the drain.
-        for p, pgid in items:
-            _kill_group_or_proc(p, pgid)
-        return len(items)
 
     def generate(
         self,
@@ -285,7 +191,7 @@ class ClaudeCliAdapter(LLMAdapter):
         # the semaphore let a waiter that was already queued BEFORE a cancel (so a call the cancel
         # should have reached) adopt the post-cancel generation and spawn a fresh child. Atomic, so
         # "new generation + clear event" is never observable.
-        gen, shutting_down = self._capture_era()
+        gen, shutting_down = llm_cancel.snapshot()
         if shutting_down:
             raise LlmCancelledError("llm call aborted: shutdown in progress")
         # A batching caller can hint a longer budget for a fatter combined prompt; a plain
@@ -310,11 +216,11 @@ class ClaudeCliAdapter(LLMAdapter):
             argv += ["--json-schema", json.dumps(schema)]
         sem = _semaphore(self.max_concurrency)
         with sem:
-            if self._aborted(gen):
-                # (a) is the world in shutdown NOW? — a waiter that acquired the semaphore after
-                # the kill pass must not spawn a replacement child mid-shutdown. PLUS (b) did a
-                # cancel land while we sat on the semaphore? A waiter from the previous era must
-                # abort even if a resume() has since cleared the event (R5 MEDIUM).
+            if llm_cancel.aborted(gen):
+                # (a) is the world cancelled NOW — a waiter that acquired the semaphore after
+                # the cancel must not spawn a replacement child. PLUS (b) did a cancel land while
+                # we sat on the semaphore? A waiter from the previous era aborts even if a
+                # resume() has since re-admitted new calls.
                 raise LlmCancelledError("llm call aborted: shutdown in progress")
             try:
                 proc = subprocess.Popen(
@@ -329,27 +235,15 @@ class ClaudeCliAdapter(LLMAdapter):
             except Exception as e:  # binary missing, OSError, etc. -> FAST failure -> None,
                 logger.warning("claude -p failed to start: %s", e)  # never slice-specific
                 return None
-            pgid = _capture_pgid(proc)  # snapshot NOW, while the group leader is alive (HIGH-1)
-            with self._active_lock:
-                self._active_procs[proc] = pgid
-            if self._aborted(gen):
-                # Closes the creation/registration race: if cancel_active() snapshotted the
-                # process set between our check and the add() above, its kill pass never saw this
-                # child. Re-checking AFTER registration guarantees either the kill pass sees the
-                # proc, or we see the cancel.
-                # R5: this now also compares the GENERATION (the (b) reading), not just the event.
-                # Event-only, a cancel that landed during our spawn and was then cleared by a
-                # rollback's finally-resume was invisible here, so a child the kill pass had
-                # missed sailed on as a normal run.
-                # B-3: kill() and wait() get their OWN suppress blocks — a single shared one
-                # means a raising kill() (already-dead race) skips the reap entirely, leaking
-                # the pipe fds on that path. wait() (not communicate()) matches base's
-                # subprocess.run reap-only semantics: no pipe-EOF wait, just a status collect.
-                _kill_group_or_proc(proc, pgid)  # group SIGKILL — reach any grandchild too (HIGH-2)
+            pgid = _capture_pgid(proc)  # snapshot NOW, while the group leader is alive
+            if llm_cancel.aborted(gen):
+                # A cancel that landed during Popen() construction: kill the newborn child
+                # immediately rather than let the poll loop notice it a tick later. There is
+                # no creation/registration race left to close — nothing kills our child from
+                # another thread, so there is no cross-thread process set to miss it.
+                _kill_group_or_proc(proc, pgid)
                 with contextlib.suppress(Exception):
                     proc.wait()
-                with self._active_lock:
-                    self._active_procs.pop(proc, None)
                 raise LlmCancelledError("llm call aborted: shutdown in progress")
             # B-2: `with proc:` restores the base `subprocess.run` contract (it runs inside
             # `with Popen(...) as process:`) — __exit__ closes stdin/stdout/stderr and reaps via
@@ -389,7 +283,7 @@ class ClaudeCliAdapter(LLMAdapter):
                             # Any unwritten remainder keeps draining from the interpreter's own
                             # saved offset on the next call.
                             pending_input = None
-                            if self._cancelled_since(gen):  # (b) was THIS call cancelled?
+                            if llm_cancel.epoch_changed(gen):  # (b) was THIS call cancelled?
                                 # Abandon the read: a setsid grandchild never yields EOF. We kill
                                 # the group and reap the LEADER only — the detached grandchild is
                                 # NOT reaped (only cgroups/job objects could), it just survives as
@@ -421,10 +315,7 @@ class ClaudeCliAdapter(LLMAdapter):
                     _kill_group_or_proc(proc, pgid)
                     logger.warning("claude -p failed to run: %s", e)
                     return None
-                finally:
-                    with self._active_lock:
-                        self._active_procs.pop(proc, None)
-        if (proc.returncode or 0) < 0 or self._cancelled_since(gen):
+        if (proc.returncode or 0) < 0 or llm_cancel.epoch_changed(gen):
             # Killed by cancel_active (negative = signal): cancelled, NOT slice evidence.
             # HIGH-1 (council-pr R3, Codex) DATA INTEGRITY: the cancel ALONE is decisive — never
             # `and returncode != 0`. A child that HANDLES SIGTERM and exits 0 inside the 5s kill

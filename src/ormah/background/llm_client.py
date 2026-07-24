@@ -12,6 +12,7 @@ import logging
 import re
 import threading
 
+from ormah.background import llm_cancel
 from ormah.background.llm import LLMAdapter, get_adapter
 from ormah.background.llm_errors import LlmCancelledError, LlmTimeoutError
 
@@ -71,55 +72,15 @@ _ingest_adapter_initialised: bool = False
 # Holding the lock across check+construct+assign guarantees at most one adapter per cache.
 _adapter_lock = threading.Lock()
 
-# HIGH (council-pr R6, Codex): shutdown gate for the CACHE BOUNDARY. The sweep used to read the
-# cache globals without ``_adapter_lock``, but a factory HOLDS that lock across
-# ``get_adapter(settings)`` — and during that window the global is still None. A shutdown landing
-# there saw "no adapters", returned 0, the watcher's fence concluded there was nothing to cancel,
-# and the factory then published an UNCANCELLED adapter that went on to spawn `claude -p`.
-#
-# Taking the lock in the sweep + this gate partition every adapter into exactly two cases:
-#   * published BEFORE the sweep wins the lock -> it is in the snapshot -> the sweep cancels it;
-#   * built AFTER the gate went up             -> the factory sees the gate and cancels it at birth.
-# Nothing can be published "during" the sweep: both require ``_adapter_lock``. The sweep therefore
-# waits for an in-progress factory, which is bounded — ``get_adapter`` is pure object construction
-# (at worst a ``shutil.which``), never I/O.
-_shutdown_started: bool = False
-
-
-def _cancel_newborn_if_shutting_down(adapter) -> None:
-    """Cancel a freshly built adapter when shutdown already started. Call with the lock HELD.
-
-    Bounded: ``get_adapter`` returns a BRAND NEW instance whose tracked-process map is empty, so
-    ``cancel_active()`` here only flips the adapter's cancel flag and iterates nothing — it never
-    reaches the ``p.wait(timeout=5)`` kill fence. That is what makes it safe to run while holding
-    ``_adapter_lock``. Lock order is ``_adapter_lock -> _cancel_lock -> _active_lock``; the adapter
-    never calls back into this module from inside its own locks, so the order is strictly one-way.
-    """
-    cancel = getattr(adapter, "cancel_active", None)
-    if not _shutdown_started or not callable(cancel):
-        return
-    try:
-        cancel()
-    except Exception as e:
-        logger.warning("Cancelling a newly built adapter during shutdown failed: %s", e)
-
-
-def _snapshot_adapters() -> list[tuple[str, object]]:
-    """Names + instances of the cached adapters. Call with ``_adapter_lock`` HELD (R6)."""
-    return [(name, globals().get(name)) for name in ("_cached_adapter", "_cached_ingest_adapter")]
-
 
 def reset_adapter() -> None:
     """Clear the cached adapters (useful for test isolation)."""
     global _cached_adapter, _adapter_initialised, _cached_ingest_adapter, _ingest_adapter_initialised
-    global _shutdown_started
     with _adapter_lock:
         _cached_adapter = None
         _adapter_initialised = False
         _cached_ingest_adapter = None
         _ingest_adapter_initialised = False
-        # Also lower the gate: a leaked one would make every later adapter be born cancelled.
-        _shutdown_started = False
 
 
 def _get_or_create_adapter(settings) -> LLMAdapter | None:
@@ -128,8 +89,6 @@ def _get_or_create_adapter(settings) -> LLMAdapter | None:
         if not _adapter_initialised:
             _cached_adapter = get_adapter(settings)
             _adapter_initialised = True
-            # R6: born cancelled if shutdown started while we were building it.
-            _cancel_newborn_if_shutting_down(_cached_adapter)
         return _cached_adapter
 
 
@@ -151,18 +110,40 @@ def _get_or_create_ingest_adapter(settings) -> LLMAdapter | None:
                 model=_resolve_ingest_model(settings),
             )
             _ingest_adapter_initialised = True
-            # R6: born cancelled if shutdown started while we were building it.
-            _cancel_newborn_if_shutting_down(_cached_ingest_adapter)
         return _cached_ingest_adapter
 
 
+def _guarded_generate(adapter, prompt, **kwargs) -> str | None:
+    """Provider-independent cancellation seam. Admission at entry, in-flight accounting around
+    the call, and rejection of any output produced in a cancelled era.
+
+    Only the SUBPROCESS kill is claude-specific (the adapter does that from its own thread).
+    Ollama/LiteLLM are not interruptible mid-flight — they still block until their HTTP timeout,
+    unchanged — but this seam stops them RETURNING output that a shutdown already invalidated,
+    and stops a NEW call starting once shutdown began."""
+    gen, cancelled = llm_cancel.snapshot()
+    if cancelled:
+        raise LlmCancelledError("llm call aborted: shutdown in progress")
+    llm_cancel.note_call_started()
+    try:
+        result = adapter.generate(prompt, **kwargs)
+        if llm_cancel.epoch_changed(gen):
+            # An in-flight call whose era was superseded while it ran: reject its output for
+            # every provider (the claude adapter also rejects internally; this covers the rest).
+            raise LlmCancelledError("llm call cancelled: shutdown in progress")
+        return result
+    finally:
+        llm_cancel.note_call_finished()
+
+
 def ingest_llm_generate(settings, prompt: str, json_mode: bool = True, **kwargs) -> str | None:
-    """Generate for server-side extraction, using ingest_llm_provider/model (not the
-    maintenance-path llm_provider/llm_model)."""
+    """Ingest path: PROPAGATE LlmCancelledError. The engine maps it to a provider-wide transient
+    so a cancelled extraction never advances the cursor nor burns the per-slice failure cap — do
+    NOT swallow it here (that safety is the whole point of the slice)."""
     adapter = _get_or_create_ingest_adapter(settings)
     if adapter is None:
         return None
-    return adapter.generate(prompt, json_mode=json_mode, **kwargs)
+    return _guarded_generate(adapter, prompt, json_mode=json_mode, **kwargs)
 
 
 def ingest_provider_configured(settings) -> bool:
@@ -184,74 +165,47 @@ def llm_generate(
     max_tokens: int | None = None,
     timeout_hint_seconds: float | None = None,
 ) -> str | None:
-    """Call configured LLM. Returns raw response text, or None on failure."""
+    """Maintenance path: swallow cancel/timeout to None (unchanged contract)."""
     adapter = _get_or_create_adapter(settings)
     if adapter is None:
         return None
     try:
-        return adapter.generate(
-            prompt,
-            json_mode=json_mode,
-            response_format=response_format,
-            temperature=temperature,
-            max_tokens=max_tokens,
+        return _guarded_generate(
+            adapter, prompt, json_mode=json_mode, response_format=response_format,
+            temperature=temperature, max_tokens=max_tokens,
             timeout_hint_seconds=timeout_hint_seconds,
         )
     except (LlmCancelledError, LlmTimeoutError):
         return None
 
 
-def cancel_active_llm_calls() -> int:
-    """Best-effort cancellation of in-flight LLM calls at shutdown.
+def cancel_active_llm_calls(*, final: bool = True) -> int:
+    """Cancel every in-flight LLM call. Returns how many calls the cancel invalidated.
 
-    Adapters opt in by defining cancel_active(); adapters without it (upstream, non-claude_cli
-    providers) are skipped so the drain there stays bounded only by their own HTTP timeouts.
+    ADR-0004 slice 2 redesign: this is now a single epoch bump — no adapter-cache sweep, no
+    lock held across process I/O. An adapter built after this returns still reads the
+    cancelled epoch at generate() entry, so there is no cache-boundary window (R6) and no
+    two-phase transition to interleave (R7).
 
-    ITEM 2 (council-pr R4, Codex): each adapter is isolated. A raising maintenance adapter used
-    to kill this whole function, so the INGEST adapter was never cancelled — and because the R3
-    HIGH-3 fix suppresses this exception in _stop_and_drain, every turn of the join fence
-    restarted on the same raising adapter and the fence spun without ever cancelling what
-    mattered, waiting out the provider timeout.
-
-    R6 (Codex): the gate goes up and the cache is snapshotted in ONE critical section, closing the
-    cache-boundary window where a factory held ``_adapter_lock`` across ``get_adapter`` and the
-    global was still None. The ``cancel_active()`` calls themselves run OUTSIDE the lock on
-    purpose — they run the kill fence (``p.wait(timeout=5)`` per child), and holding
-    ``_adapter_lock`` through that would stall every thread that merely wants an adapter."""
-    global _shutdown_started
-    with _adapter_lock:
-        _shutdown_started = True
-        adapters = _snapshot_adapters()  # the ingest cache exists only on the Beta
-    total = 0
-    for name, adapter in adapters:
-        cancel = getattr(adapter, "cancel_active", None)
-        if callable(cancel):
-            try:
-                total += cancel()
-            except Exception as e:
-                logger.warning("Cancelling in-flight LLM calls on %s failed: %s", name, e)
-    return total
+    ``final=True`` (the default) is a shutdown cancel that resume() must not undo. The
+    watcher's startup rollback passes ``final=False``, because that process keeps serving.
+    """
+    return llm_cancel.begin_cancel(final=final)
 
 
 def resume_llm_adapters() -> None:
-    """Re-arm cancelled adapters. Called at lifespan startup and after a recoverable startup
-    rollback — the module-level caches outlive a single lifespan (council R7).
+    """Re-admit new LLM calls after a RECOVERABLE cancel (the watcher's startup rollback).
 
-    ITEM 2: same per-adapter isolation as ``cancel_active_llm_calls`` — if the first resume()
-    raised, the second never ran and that adapter stayed permanently cancelled (ingest OR
-    maintenance dead until restart).
+    A no-op after a final cancel. Calls already in flight are NOT un-cancelled — the epoch
+    bump keeps them aborting (R4).
+    """
+    llm_cancel.resume()
 
-    R6: this also LOWERS the shutdown gate. Without that, every adapter built after a recoverable
-    rollback would be born cancelled and ingest + maintenance would stay dead until restart —
-    exactly the failure mode HIGH-A (council R1) exists to prevent."""
-    global _shutdown_started
-    with _adapter_lock:
-        _shutdown_started = False
-        adapters = _snapshot_adapters()
-    for name, adapter in adapters:
-        resume = getattr(adapter, "resume", None)
-        if callable(resume):
-            try:
-                resume()
-            except Exception as e:
-                logger.warning("Re-arming LLM adapter %s failed: %s", name, e)
+
+def begin_llm_lifespan() -> None:
+    """Start a clean cancellation era. Called once per lifespan startup.
+
+    The adapter caches here are module-level and outlive a lifespan, so a final cancel from
+    the previous one must be cleared or every call in this process stays dead until restart.
+    """
+    llm_cancel.begin_lifespan()

@@ -26,9 +26,14 @@ from ormah.background.session_watcher import (
     start_session_watcher,
     stop_session_watcher,
 )
+from ormah.background import llm_cancel
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.models.node import CreateNodeRequest
 from ormah.transcript.parser import parse_transcript
+
+# NOTE: the module-level llm_cancel epoch is reset around every test by the autouse
+# `_clean_llm_cancel_epoch` fixture in tests/conftest.py (this file exercises the REAL
+# start_session_watcher/stop_session_watcher, which calls the REAL cancel_active_llm_calls()).
 
 _LLM_PATCH = "ormah.background.llm_client.ingest_llm_generate"
 # A slice-specific extraction failure: the LLM responds but the content is unparseable, so
@@ -2985,7 +2990,7 @@ def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
         def join_drain(self, timeout=None):
             time.sleep(min(timeout or 0, 0.05))
 
-    def _fake_cancel_active_llm_calls():
+    def _fake_cancel_active_llm_calls(*, final=True):
         calls["cancel"] += 1
         if calls["cancel"] >= 3:
             alive["value"] = False  # the late-built adapter is now cancelled -> drain exits
@@ -3147,32 +3152,22 @@ def test_startup_rollback_drains_failing_roots_own_inflight_extraction(engine, t
 def test_startup_rollback_rearms_adapters_and_serves(engine, tmp_path, monkeypatch):
     """HIGH-A (council R1, Cursor): the transactional startup rollback must
     resume_llm_adapters() -- the process keeps serving after a rollback (main.lifespan catches
-    the failure), so leaving an adapter cancelled would poison every later maintenance/ingest
-    LLM call until restart. A normal shutdown must NEVER do this (rearm=False by default)."""
+    the failure), so leaving the world cancelled would poison every later maintenance/ingest LLM
+    call until restart. A normal shutdown must NEVER do this (rearm=False by default).
+
+    ADR-0004 slice 2: cancellation is the module-level llm_cancel epoch now, not a per-adapter
+    flag the facade toggles — the fake adapter below is deliberately dumb (it always succeeds);
+    the FACADE's _guarded_generate is what rejects a call made while the epoch is cancelled."""
     from ormah.background import llm_client
-    from ormah.background.llm_errors import LlmCancelledError
 
     class _FakeAdapter:
-        def __init__(self):
-            self._cancelled = False
-
-        def cancel_active(self):
-            self._cancelled = True
-            return 1
-
-        def resume(self):
-            self._cancelled = False
-
         def generate(self, *a, **k):
-            if self._cancelled:
-                raise LlmCancelledError("still cancelled")
             return "ok"
 
-    fake = _FakeAdapter()
-    fake.cancel_active()  # seed: a call already cancelled this adapter before the rollback runs
-    assert fake._cancelled is True
-    monkeypatch.setattr(llm_client, "_cached_adapter", fake)
+    monkeypatch.setattr(llm_client, "_cached_adapter", _FakeAdapter())
     monkeypatch.setattr(llm_client, "_adapter_initialised", True)
+    llm_cancel.begin_cancel(final=False)  # seed: a call already cancelled before the rollback runs
+    assert llm_cancel.snapshot()[1] is True
 
     root1 = tmp_path / "root1"
     root2 = tmp_path / "root2"
@@ -3203,12 +3198,16 @@ def test_startup_rollback_rearms_adapters_and_serves(engine, tmp_path, monkeypat
         def join(self, timeout=None):
             pass
 
-    with patch("ormah.background.session_watcher.Observer", _FailingObserver):
-        with pytest.raises(RuntimeError):
-            start_session_watcher(engine)
+    try:
+        with patch("ormah.background.session_watcher.Observer", _FailingObserver):
+            with pytest.raises(RuntimeError):
+                start_session_watcher(engine)
 
-    assert fake._cancelled is False, "the adapter must be RE-ARMED after a rollback (HIGH-A)"
-    assert llm_client.llm_generate(engine.settings, "prompt") == "ok"
+        assert llm_cancel.snapshot()[1] is False, \
+            "the world must be RE-ARMED after a rollback (HIGH-A)"
+        assert llm_client.llm_generate(engine.settings, "prompt") == "ok"
+    finally:
+        llm_cancel.begin_lifespan()
 
 
 def test_startup_rollback_rearms_even_when_observer_join_raises(engine, tmp_path, monkeypatch):
@@ -3216,32 +3215,21 @@ def test_startup_rollback_rearms_even_when_observer_join_raises(engine, tmp_path
     so a provisional Observer whose start() raised is a NEVER-STARTED thread; its join() raises
     RuntimeError('cannot join thread before it is started'). That exception must NOT escape
     _stop_and_drain and skip resume_llm_adapters() on the rollback path — otherwise main.lifespan
-    keeps serving with adapters permanently cancelled (ingest AND maintenance dead until restart).
-    """
+    keeps serving with the world permanently cancelled (ingest AND maintenance dead until restart).
+
+    ADR-0004 slice 2: cancellation is the module-level llm_cancel epoch now, not a per-adapter
+    flag the facade toggles — the fake adapter below is deliberately dumb (it always succeeds);
+    the FACADE's _guarded_generate is what rejects a call made while the epoch is cancelled."""
     from ormah.background import llm_client
-    from ormah.background.llm_errors import LlmCancelledError
 
     class _FakeAdapter:
-        def __init__(self):
-            self._cancelled = False
-
-        def cancel_active(self):
-            self._cancelled = True
-            return 1
-
-        def resume(self):
-            self._cancelled = False
-
         def generate(self, *a, **k):
-            if self._cancelled:
-                raise LlmCancelledError("still cancelled")
             return "ok"
 
-    fake = _FakeAdapter()
-    fake.cancel_active()  # seed: cancelled before the rollback runs
-    assert fake._cancelled is True
-    monkeypatch.setattr(llm_client, "_cached_adapter", fake)
+    monkeypatch.setattr(llm_client, "_cached_adapter", _FakeAdapter())
     monkeypatch.setattr(llm_client, "_adapter_initialised", True)
+    llm_cancel.begin_cancel(final=False)  # seed: cancelled before the rollback runs
+    assert llm_cancel.snapshot()[1] is True
 
     root1 = tmp_path / "root1"
     root2 = tmp_path / "root2"
@@ -3278,13 +3266,16 @@ def test_startup_rollback_rearms_even_when_observer_join_raises(engine, tmp_path
             if not self._started:
                 raise RuntimeError("cannot join thread before it is started")
 
-    with patch("ormah.background.session_watcher.Observer", _JoinRaisingObserver):
-        with pytest.raises(RuntimeError):
-            start_session_watcher(engine)
+    try:
+        with patch("ormah.background.session_watcher.Observer", _JoinRaisingObserver):
+            with pytest.raises(RuntimeError):
+                start_session_watcher(engine)
 
-    assert fake._cancelled is False, \
-        "adapters must be RE-ARMED after a rollback even when observer.join() raised (HIGH-3)"
-    assert llm_client.llm_generate(engine.settings, "prompt") == "ok"
+        assert llm_cancel.snapshot()[1] is False, \
+            "the world must be RE-ARMED after a rollback even when observer.join() raised (HIGH-3)"
+        assert llm_client.llm_generate(engine.settings, "prompt") == "ok"
+    finally:
+        llm_cancel.begin_lifespan()
 
 
 def test_stop_and_drain_rearms_even_when_cancel_raises(monkeypatch):
@@ -3298,7 +3289,7 @@ def test_stop_and_drain_rearms_even_when_cancel_raises(monkeypatch):
     import ormah.background.session_watcher as sw
     from ormah.background.session_watcher import SessionWatch
 
-    def _raising_cancel():
+    def _raising_cancel(*, final=True):
         raise RuntimeError("cancel_active blew up after setting the cancel flag")
 
     monkeypatch.setattr(sw, "cancel_active_llm_calls", _raising_cancel)
@@ -3402,7 +3393,7 @@ def test_stop_and_drain_join_fence_survives_a_raising_cancel(monkeypatch):
     watch = SessionWatch(watch_dir=Path("/tmp/high3"), handler=handler, observer=observer,
                          spool=None, discover=False)
 
-    def _raising_cancel():
+    def _raising_cancel(*, final=True):
         raise RuntimeError("cancel_active blew up after setting the cancel flag")
 
     monkeypatch.setattr(sw, "cancel_active_llm_calls", _raising_cancel)
