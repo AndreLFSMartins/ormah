@@ -1,5 +1,8 @@
+import contextlib
 import json
+import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -559,6 +562,80 @@ def test_llm_generate_swallows_cancel_and_timeout(monkeypatch):
                 raise exc
         monkeypatch.setattr(llm_client, "_get_or_create_adapter", lambda s: _Raising())
         assert llm_client.llm_generate(object(), "prompt") is None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@pytest.mark.integration
+def test_cancel_kills_whole_process_group_not_just_parent(tmp_path, monkeypatch):
+    """HIGH-2 (council-pr, Codex): `claude -p` forks grandchildren (user-scoped MCP servers, no
+    --strict-mcp-config) that inherit the child's stdout/stderr. A per-PID kill leaves such a
+    grandchild holding the pipe open, so communicate() never sees EOF and the shutdown drain
+    waits the full provider timeout. start_new_session=True + killpg must reach the WHOLE group.
+
+    REAL subprocess (integration-marked). RED against the pre-fix per-PID kill: generate() does
+    NOT return within 15s and the lingering grandchild survives the cancel."""
+    marker = tmp_path / "marker"
+    marker.mkdir()
+    script = tmp_path / "fake_claude.sh"
+    # A parent shell that forks a background `sleep` (the grandchild) which inherits stdout, then
+    # waits — mirroring a claude -p that spawns an MCP grandchild holding our stdout pipe open.
+    script.write_text(
+        "#!/bin/sh\n"
+        "sleep 60 &\n"
+        'echo "$!" > "$MARKER_DIR/grandchild.pid"\n'
+        ': > "$MARKER_DIR/started"\n'
+        "wait\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("MARKER_DIR", str(marker))
+
+    adapter = ClaudeCliAdapter(model="haiku", bin_path=str(script), timeout=120)
+    outcome = {}
+
+    def _run():
+        try:
+            adapter.generate("hi")
+        except LlmCancelledError as e:
+            outcome["exc"] = e
+        except Exception as e:  # noqa: BLE001
+            outcome["other"] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    assert _wait_until(lambda: (marker / "started").exists(), timeout=10), \
+        "the fake child never started"
+    grandchild_pid = int((marker / "grandchild.pid").read_text().strip())
+    assert _pid_alive(grandchild_pid), "grandchild must be live before the cancel"
+    assert _wait_until(lambda: len(adapter._active_procs) == 1, timeout=5), \
+        "the child must be registered before cancel_active() can see it"
+
+    start = time.monotonic()
+    cancelled = adapter.cancel_active()
+    t.join(timeout=15)
+    elapsed = time.monotonic() - start
+
+    try:
+        assert not t.is_alive(), \
+            "generate() did not return within 15s — a per-PID kill hangs on the grandchild"
+        assert elapsed < 15.0
+        assert cancelled == 1
+        assert isinstance(outcome.get("exc"), LlmCancelledError), \
+            f"cancel must raise LlmCancelledError, got {outcome}"
+        assert _wait_until(lambda: not _pid_alive(grandchild_pid), timeout=5), \
+            "the grandchild survived — the whole process group was not killed"
+    finally:
+        # Never leak the 60s sleeper if an assertion above failed (the RED path).
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(grandchild_pid, signal.SIGKILL)
 
 
 @pytest.mark.integration

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 
 from ormah.background.llm import LLMAdapter, get_adapter
 from ormah.background.llm_errors import LlmCancelledError, LlmTimeoutError
@@ -61,22 +62,33 @@ _adapter_initialised: bool = False
 _cached_ingest_adapter: LLMAdapter | None = None
 _ingest_adapter_initialised: bool = False
 
+# HIGH-1 (council-pr, Codex): serialise lazy init + cache access. Without this, two drain
+# threads on distinct acceptance roots (the Beta has ~/.claude/projects + ~/.codex/sessions)
+# can both enter a factory on first use, both call get_adapter(...), and the second assignment
+# overwrites the cache. The first thread keeps running generate() on its now-uncached adapter,
+# which cancel_active_llm_calls() (it only visits the cached globals) can never reach — so that
+# displaced in-flight call is never cancelled and shutdown waits its full provider timeout.
+# Holding the lock across check+construct+assign guarantees at most one adapter per cache.
+_adapter_lock = threading.Lock()
+
 
 def reset_adapter() -> None:
     """Clear the cached adapters (useful for test isolation)."""
     global _cached_adapter, _adapter_initialised, _cached_ingest_adapter, _ingest_adapter_initialised
-    _cached_adapter = None
-    _adapter_initialised = False
-    _cached_ingest_adapter = None
-    _ingest_adapter_initialised = False
+    with _adapter_lock:
+        _cached_adapter = None
+        _adapter_initialised = False
+        _cached_ingest_adapter = None
+        _ingest_adapter_initialised = False
 
 
 def _get_or_create_adapter(settings) -> LLMAdapter | None:
     global _cached_adapter, _adapter_initialised
-    if not _adapter_initialised:
-        _cached_adapter = get_adapter(settings)
-        _adapter_initialised = True
-    return _cached_adapter
+    with _adapter_lock:
+        if not _adapter_initialised:
+            _cached_adapter = get_adapter(settings)
+            _adapter_initialised = True
+        return _cached_adapter
 
 
 def _resolve_ingest_provider(settings) -> str | None:
@@ -89,14 +101,15 @@ def _resolve_ingest_model(settings) -> str | None:
 
 def _get_or_create_ingest_adapter(settings) -> LLMAdapter | None:
     global _cached_ingest_adapter, _ingest_adapter_initialised
-    if not _ingest_adapter_initialised:
-        _cached_ingest_adapter = get_adapter(
-            settings,
-            provider=_resolve_ingest_provider(settings),
-            model=_resolve_ingest_model(settings),
-        )
-        _ingest_adapter_initialised = True
-    return _cached_ingest_adapter
+    with _adapter_lock:
+        if not _ingest_adapter_initialised:
+            _cached_ingest_adapter = get_adapter(
+                settings,
+                provider=_resolve_ingest_provider(settings),
+                model=_resolve_ingest_model(settings),
+            )
+            _ingest_adapter_initialised = True
+        return _cached_ingest_adapter
 
 
 def ingest_llm_generate(settings, prompt: str, json_mode: bool = True, **kwargs) -> str | None:

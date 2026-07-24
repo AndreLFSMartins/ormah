@@ -1553,7 +1553,12 @@ def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None
         w.handler._stop_event.set()  # no NEW job starts (_run_job's stop-check refuses)
     for w in watches:
         if w.observer is not None:
-            w.observer.stop()
+            # HIGH-3 (council-pr, Codex): individually exception-safe. A provisional Observer
+            # whose start() raised (HIGH-B assigns watch.observer BEFORE start()) is a
+            # never-started thread; its stop()/join() can raise RuntimeError. One bad observer
+            # must not abort the sequence before the rearm below.
+            with contextlib.suppress(Exception):
+                w.observer.stop()
         w.handler.cancel_pending_timers()
         w.handler.wake()  # unblock the drain's idle wait so it exits promptly
     cancelled = cancel_active_llm_calls()
@@ -1564,11 +1569,22 @@ def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None
         for w in watches:          # late-built adapter's fresh Popen on the NEXT iteration
             w.handler.join_drain(timeout=0.2)
     _drain_handlers([w.handler for w in watches])  # in_flight_count()==0 by now -> returns at once
-    for w in watches:
-        if w.observer is not None:
-            w.observer.join(timeout=5)
-    if rearm:
-        resume_llm_adapters()
+    try:
+        for w in watches:
+            if w.observer is not None:
+                # HIGH-3: a never-started Observer thread (its start() raised during a startup
+                # rollback) raises RuntimeError("cannot join thread before it is started"). Per
+                # observer suppress/log so it can't escape and skip the rearm below.
+                try:
+                    w.observer.join(timeout=5)
+                except Exception as e:
+                    logger.debug("Observer join during shutdown failed: %s", e)
+    finally:
+        # HIGH-3: rearm must ALWAYS run on the rollback path (rearm=True), even if an observer
+        # cleanup above raised — otherwise main.lifespan keeps serving with adapters permanently
+        # cancelled (ingest AND maintenance dead until restart). A normal shutdown never rearms.
+        if rearm:
+            resume_llm_adapters()
 
 
 def stop_session_watcher(watches: list[SessionWatch]) -> None:

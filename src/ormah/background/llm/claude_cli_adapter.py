@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -82,6 +83,49 @@ def _cleanup_persisted_stub(session_id: str) -> None:
         pass
 
 
+def _signal_group(proc, sig: int) -> bool:
+    """HIGH-2 (council-pr, Codex): signal the child's WHOLE process group.
+
+    ``claude -p`` forks grandchildren (this machine's ``~/.claude.json`` has user-scoped MCP
+    servers and we pass no ``--strict-mcp-config``); those inherit the child's stdout/stderr.
+    Killing only the tracked direct PID leaves a grandchild holding the pipe open, so
+    ``communicate()`` never sees EOF and the shutdown drain waits the full provider timeout. The
+    child is launched with ``start_new_session=True`` (own session/process group), so signalling
+    the group reaches every descendant.
+
+    Returns True when the group signal was delivered; False when the group is unavailable — a
+    fake without a real ``pid`` (unit tests), or a group that is already gone — so callers fall
+    back to the per-PID ``terminate()``/``kill()`` shape. Both ``os.getpgid`` and ``os.killpg``
+    are suppressed on ``ProcessLookupError``/``PermissionError`` (the group may already be dead).
+    """
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int):
+        return False
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _terminate_proc(proc) -> None:
+    """SIGTERM the child's process group; fall back to the per-PID terminate() shape."""
+    if not _signal_group(proc, signal.SIGTERM):
+        with contextlib.suppress(Exception):
+            proc.terminate()
+
+
+def _kill_proc(proc) -> None:
+    """SIGKILL the child's process group; fall back to the per-PID kill() shape."""
+    if not _signal_group(proc, signal.SIGKILL):
+        with contextlib.suppress(Exception):
+            proc.kill()
+
+
 def _semaphore(max_concurrency: int) -> threading.Semaphore:
     with _SEM_LOCK:
         sem = _SEMAPHORES.get(max_concurrency)
@@ -127,16 +171,14 @@ class ClaudeCliAdapter(LLMAdapter):
         with self._active_lock:
             procs = list(self._active_procs)
         for p in procs:
-            with contextlib.suppress(Exception):
-                p.terminate()
+            _terminate_proc(p)  # SIGTERM the whole group so no grandchild holds the pipe open
         deadline = time.monotonic() + 5.0
         for p in procs:
             with contextlib.suppress(Exception):
                 p.wait(timeout=max(0.1, deadline - time.monotonic()))
         for p in procs:
             if p.poll() is None:
-                with contextlib.suppress(Exception):
-                    p.kill()
+                _kill_proc(p)  # group SIGKILL for anything that ignored SIGTERM
         return len(procs)
 
     def generate(
@@ -179,6 +221,11 @@ class ClaudeCliAdapter(LLMAdapter):
                 proc = subprocess.Popen(
                     argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, text=True, cwd=tempfile.gettempdir(), env=env,
+                    # HIGH-2: own session/process group so a cancel/timeout can SIGTERM the whole
+                    # group (parent + any forked grandchild that inherited our stdout/stderr),
+                    # not just the tracked direct PID — otherwise a grandchild keeps the pipe
+                    # open, communicate() never EOFs, and the drain waits the full timeout.
+                    start_new_session=True,
                 )
             except Exception as e:  # binary missing, OSError, etc. -> FAST failure -> None,
                 logger.warning("claude -p failed to start: %s", e)  # never slice-specific
@@ -194,8 +241,7 @@ class ClaudeCliAdapter(LLMAdapter):
                 # means a raising kill() (already-dead race) skips the reap entirely, leaking
                 # the pipe fds on that path. wait() (not communicate()) matches base's
                 # subprocess.run reap-only semantics: no pipe-EOF wait, just a status collect.
-                with contextlib.suppress(Exception):
-                    proc.kill()
+                _kill_proc(proc)  # group SIGKILL — reach any grandchild too (HIGH-2)
                 with contextlib.suppress(Exception):
                     proc.wait()
                 with self._active_lock:
@@ -217,7 +263,7 @@ class ClaudeCliAdapter(LLMAdapter):
                     # stdout/stderr, that can never arrive and the drain thread hangs forever —
                     # exactly the unbounded wait this slice exists to remove. wait() only waits
                     # for the process itself to exit, which kill() already guarantees promptly.
-                    proc.kill()
+                    _kill_proc(proc)  # group SIGKILL, then reap the direct child (HIGH-2)
                     proc.wait()
                     if self._cancel_event.is_set():
                         # A shutdown kill can surface as TimeoutExpired. It must NOT be reported
@@ -228,10 +274,9 @@ class ClaudeCliAdapter(LLMAdapter):
                     return None  # unchanged for now; slice 3 turns this into LlmTimeoutError
                 except Exception as e:  # I/O failure mid-flight — fast failure
                     # B-2: base's subprocess.run does `except: process.kill(); raise` here —
-                    # kill before the child is orphaned. Suppressed: an already-dead process
-                    # (the failure that got us here) can make kill() itself raise.
-                    with contextlib.suppress(Exception):
-                        proc.kill()
+                    # kill before the child is orphaned. HIGH-2: group SIGKILL (an already-dead
+                    # process is tolerated inside _kill_proc / _signal_group).
+                    _kill_proc(proc)
                     logger.warning("claude -p failed to run: %s", e)
                     return None
                 finally:

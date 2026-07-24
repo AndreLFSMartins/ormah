@@ -3211,6 +3211,82 @@ def test_startup_rollback_rearms_adapters_and_serves(engine, tmp_path, monkeypat
     assert llm_client.llm_generate(engine.settings, "prompt") == "ok"
 
 
+def test_startup_rollback_rearms_even_when_observer_join_raises(engine, tmp_path, monkeypatch):
+    """HIGH-3 (council-pr, Codex): the HIGH-B fix assigns watch.observer BEFORE observer.start(),
+    so a provisional Observer whose start() raised is a NEVER-STARTED thread; its join() raises
+    RuntimeError('cannot join thread before it is started'). That exception must NOT escape
+    _stop_and_drain and skip resume_llm_adapters() on the rollback path — otherwise main.lifespan
+    keeps serving with adapters permanently cancelled (ingest AND maintenance dead until restart).
+    """
+    from ormah.background import llm_client
+    from ormah.background.llm_errors import LlmCancelledError
+
+    class _FakeAdapter:
+        def __init__(self):
+            self._cancelled = False
+
+        def cancel_active(self):
+            self._cancelled = True
+            return 1
+
+        def resume(self):
+            self._cancelled = False
+
+        def generate(self, *a, **k):
+            if self._cancelled:
+                raise LlmCancelledError("still cancelled")
+            return "ok"
+
+    fake = _FakeAdapter()
+    fake.cancel_active()  # seed: cancelled before the rollback runs
+    assert fake._cancelled is True
+    monkeypatch.setattr(llm_client, "_cached_adapter", fake)
+    monkeypatch.setattr(llm_client, "_adapter_initialised", True)
+
+    root1 = tmp_path / "root1"
+    root2 = tmp_path / "root2"
+    root1.mkdir()
+    root2.mkdir()
+    monkeypatch.setattr(
+        "ormah.background.session_watcher._resolve_acceptance_roots",
+        lambda settings: [(root1, True), (root2, True)],
+    )
+
+    class _JoinRaisingObserver:
+        """Second observer's start() raises (never-started thread); its join() then raises the
+        real RuntimeError a threading.Thread raises when joined before it is started."""
+
+        _n = 0
+
+        def __init__(self):
+            type(self)._n += 1
+            self._started = False
+            self._fail = type(self)._n == 2
+
+        def schedule(self, *a, **k):
+            pass
+
+        def start(self):
+            if self._fail:
+                raise RuntimeError("observer boom")
+            self._started = True
+
+        def stop(self):
+            pass  # watchdog's stop() on a never-started observer is a no-op; join() is the trap
+
+        def join(self, timeout=None):
+            if not self._started:
+                raise RuntimeError("cannot join thread before it is started")
+
+    with patch("ormah.background.session_watcher.Observer", _JoinRaisingObserver):
+        with pytest.raises(RuntimeError):
+            start_session_watcher(engine)
+
+    assert fake._cancelled is False, \
+        "adapters must be RE-ARMED after a rollback even when observer.join() raised (HIGH-3)"
+    assert llm_client.llm_generate(engine.settings, "prompt") == "ok"
+
+
 def test_start_session_watcher_recovers_backlog_off_bind(engine, tmp_path):
     """start_session_watcher makes the Observer live immediately (no synchronous scan blocks the
     bind) and the pre-existing backlog is recovered off-bind via the startup discovery sweep +
