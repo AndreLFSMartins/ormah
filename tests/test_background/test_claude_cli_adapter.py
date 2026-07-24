@@ -977,6 +977,87 @@ def test_cancel_is_bounded_even_with_a_detached_setsid_grandchild(tmp_path, monk
 
 
 @pytest.mark.integration
+def test_multi_poll_success_loses_no_output(tmp_path, monkeypatch):
+    """ITEM 3 (council-pr R4, Cursor gap): the poll loop's SUCCESS path across MULTIPLE rounds.
+
+    The cancel and timeout paths are covered; a SUCCESSFUL child whose output spans several
+    expired polls rested only on CPython's contract ("retrying communication will not lose any
+    output"). This locks it against a future refactor.
+
+    REAL subprocess on purpose: a fake that hands back accumulated output would be testing the
+    fake, not CPython's contract nor our loop. The child emits ONE JSON envelope in six pieces,
+    so the document only parses if every piece survived every poll round."""
+
+    class _CountingProc:
+        """Wraps a REAL Popen to count poll rounds. Nothing is faked — the subprocess, its pipes
+        and CPython's own retry bookkeeping all stay real."""
+
+        def __init__(self, real):
+            self._real = real
+            self.communicate_calls = 0
+            self.expired_polls = 0
+            self.final = None
+
+        def communicate(self, input=None, timeout=None):
+            self.communicate_calls += 1
+            try:
+                out, err = self._real.communicate(input=input, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self.expired_polls += 1
+                raise
+            self.final = (out, err)
+            return out, err
+
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+
+        def __exit__(self, *a):
+            return self._real.__exit__(*a)
+
+        def __getattr__(self, item):        # pid / wait / poll / kill / returncode -> real proc
+            return getattr(self._real, item)
+
+    child = tmp_path / "chunked_child.py"
+    # 6 pieces x 0.3s => ~1.8s of runtime against a 0.5s poll slice => several expired polls.
+    child.write_text(
+        f"#!{sys.executable}\n"
+        "import sys, time\n"
+        "pieces = ['{\"result\": \"P0', 'P1', 'P2', 'P3', 'P4', 'P5\"}']\n"
+        "for i, piece in enumerate(pieces):\n"
+        "    sys.stdout.write(piece); sys.stdout.flush()\n"
+        "    sys.stderr.write('E%d' % i); sys.stderr.flush()\n"
+        "    time.sleep(0.3)\n"
+    )
+    child.chmod(0o755)
+
+    real_popen = subprocess.Popen
+    holder = {}
+
+    def popen(argv, **kwargs):
+        proxy = _CountingProc(real_popen(argv, **kwargs))
+        holder["proc"] = proxy
+        return proxy
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    adapter = ClaudeCliAdapter(model="haiku", bin_path=str(child), timeout=60)
+    result = adapter.generate("hi")
+    proxy = holder["proc"]
+
+    # End-to-end: the envelope reassembled across poll rounds parsed into the full result.
+    assert result == "P0P1P2P3P4P5", f"output lost across poll rounds: {result!r}"
+    out, err = proxy.final
+    assert out == '{"result": "P0P1P2P3P4P5"}', f"stdout incomplete or reordered: {out!r}"
+    assert err == "E0E1E2E3E4E5", f"stderr incomplete or reordered: {err!r}"
+    assert proxy.returncode == 0
+    # Non-vacuity: without expired polls this would pass without ever exercising the retry.
+    assert proxy.expired_polls >= 2, (
+        f"only {proxy.expired_polls} poll(s) expired — the multi-poll retry was never exercised"
+    )
+
+
+@pytest.mark.integration
 def test_real_claude_disables_inherited_hooks(tmp_path, monkeypatch):
     """Belt-and-suspenders against the real binary: an operator SessionStart hook must NOT fire
     in the extractor child, proving disableAllHooks overrides the inherited (merged) hooks.
