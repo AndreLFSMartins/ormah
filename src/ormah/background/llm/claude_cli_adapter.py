@@ -309,8 +309,14 @@ class ClaudeCliAdapter(LLMAdapter):
                 finally:
                     with self._active_lock:
                         self._active_procs.pop(proc, None)
-        if (proc.returncode or 0) < 0 or (self._cancel_event.is_set() and proc.returncode != 0):
-            # killed by cancel_active (negative = signal): cancelled, NOT slice evidence.
+        if (proc.returncode or 0) < 0 or self._cancel_event.is_set():
+            # Killed by cancel_active (negative = signal): cancelled, NOT slice evidence.
+            # HIGH-1 (council-pr R3, Codex) DATA INTEGRITY: the cancel event ALONE is decisive —
+            # never `and returncode != 0`. A child that HANDLES SIGTERM and exits 0 inside the 5s
+            # kill fence emits partial/buffered JSON; accepting it as success made the engine
+            # ADVANCE THE CURSOR on a cancelled extraction, violating this slice's invariant that
+            # a cancel never advances the cursor. _cancel_event is instance-scoped and only set on
+            # shutdown/rollback, so the happy path is unaffected.
             # F-4: `or 0` guards a (currently unreachable with a real Popen) None returncode —
             # a bare TypeError here would escape as a generic string and burn the per-slice cap.
             raise LlmCancelledError(f"claude -p cancelled (rc={proc.returncode})")

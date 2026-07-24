@@ -440,6 +440,52 @@ def test_cancel_active_terminates_running_generate(monkeypatch):
     assert not isinstance(outcome.get("exc"), LlmTimeoutError)
 
 
+def test_cancel_set_raises_even_when_child_exits_cleanly(monkeypatch):
+    """HIGH-1 (council-pr R3, Codex) DATA INTEGRITY: a child that HANDLES SIGTERM and exits 0
+    inside the 5s kill fence returns partial/buffered JSON. The old guard only raised when
+    `returncode != 0`, so that envelope was treated as SUCCESS and the engine ADVANCED THE
+    CURSOR — violating this slice's central invariant ("a cancel never advances the cursor").
+    Whenever the cancel event is set, generate() must raise LlmCancelledError regardless of
+    returncode. Safe: _cancel_event is instance-scoped and only set on shutdown/rollback."""
+
+    adapter = ClaudeCliAdapter(model="haiku")
+
+    class _CleanExitOnCancelProc:
+        """The shutdown cancel lands WHILE communicate() runs (as cancel_active() would); the
+        child then exits 0 with partial buffered output instead of dying by signal."""
+
+        def __init__(self):
+            self.returncode = 0
+            self.killed = False
+
+        def communicate(self, input=None, timeout=None):
+            adapter._cancel_event.set()   # the cancel lands mid-call
+            return json.dumps({"result": "partial buffered output"}), ""
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.wait()
+            return False
+
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: _CleanExitOnCancelProc())
+    with pytest.raises(LlmCancelledError):
+        adapter.generate("hi")
+
+
 def test_cancel_active_noop_when_idle():
     adapter = ClaudeCliAdapter(model="haiku")
     assert adapter.cancel_active() == 0
