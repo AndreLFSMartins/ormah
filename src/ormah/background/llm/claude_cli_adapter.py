@@ -179,6 +179,14 @@ class ClaudeCliAdapter(LLMAdapter):
         # failure and keeps serving; nothing calls reset_adapter() on startup), poisoning every
         # later ingest/maintenance call for the life of the process.
         self._cancel_event = threading.Event()
+        # ITEM 1 (council-pr R4, Codex): a MONOTONIC cancel generation. The event answers "are we
+        # in shutdown RIGHT NOW?" (it is cleared by resume()); the generation answers "was THIS
+        # in-flight call cancelled?" and is never rolled back, so a resume() on another thread
+        # cannot erase the history of a call already in flight. Reading the live event at the
+        # final gate let a rollback's finally-resume clear the cancel out from under an in-flight
+        # maintenance call, which then accepted a cancelled child's partial JSON as success.
+        self._cancel_generation = 0
+        self._cancel_lock = threading.Lock()
         # HIGH-1 refine: map each in-flight proc to its pgid CAPTURED AT SPAWN, so the escalation
         # SIGKILL can target the group even after the leader dies (a re-derived pgid would be gone).
         self._active_procs: dict = {}
@@ -188,13 +196,27 @@ class ClaudeCliAdapter(LLMAdapter):
         """Terminate this adapter's in-flight children; new calls abort until resume().
 
         Returns the number of processes terminated (0 when idle)."""
-        self._cancel_event.set()
+        with self._cancel_lock:
+            # Bump the generation BEFORE setting the event, both under the lock: any reader that
+            # observes the event set is then guaranteed to observe the new generation too, so the
+            # two can never be seen in disagreement.
+            self._cancel_generation += 1
+            self._cancel_event.set()
         return self._cancel_tracked_procs()
 
     def resume(self) -> None:
         """Re-arm after a RECOVERABLE cancellation (startup rollback keeps serving) or at the
-        next lifespan startup (the adapter cache is module-level and outlives a reload)."""
+        next lifespan startup (the adapter cache is module-level and outlives a reload).
+
+        Clears the event ONLY — the generation is never rolled back. That asymmetry is the whole
+        point: NEW calls are allowed again, while calls already in flight keep observing the
+        cancel that hit them (ITEM 1)."""
         self._cancel_event.clear()
+
+    def _cancelled_since(self, gen: int) -> bool:
+        """True when a cancel landed after a call captured ``gen`` — i.e. THIS call was
+        cancelled. Immune to a later resume(), unlike reading the live event."""
+        return self._cancel_generation != gen
 
     def _cancel_tracked_procs(self) -> int:
         with self._active_lock:
@@ -246,9 +268,14 @@ class ClaudeCliAdapter(LLMAdapter):
             argv += ["--json-schema", json.dumps(schema)]
         sem = _semaphore(self.max_concurrency)
         with sem:
+            # ITEM 1: capture the cancel generation ONCE, at the start of this call. Every later
+            # "was THIS call cancelled?" question compares against it, so a resume() racing us
+            # cannot erase a cancel that already hit this call.
+            gen = self._cancel_generation
             if self._cancel_event.is_set():
-                # A waiter that acquired the semaphore AFTER the kill pass must not spawn a
-                # replacement child mid-shutdown.
+                # (a) "is the world in shutdown NOW?" — a waiter that acquired the semaphore
+                # AFTER the kill pass must not spawn a replacement child mid-shutdown. This one
+                # stays event-based on purpose: a resume() SHOULD let new calls through again.
                 raise LlmCancelledError("llm call aborted: shutdown in progress")
             try:
                 proc = subprocess.Popen(
@@ -319,7 +346,7 @@ class ClaudeCliAdapter(LLMAdapter):
                             # Any unwritten remainder keeps draining from the interpreter's own
                             # saved offset on the next call.
                             pending_input = None
-                            if self._cancel_event.is_set():
+                            if self._cancelled_since(gen):  # (b) was THIS call cancelled?
                                 # Abandon the read: a setsid grandchild never yields EOF. We kill
                                 # the group and reap the LEADER only — the detached grandchild is
                                 # NOT reaped (only cgroups/job objects could), it just survives as
@@ -354,14 +381,17 @@ class ClaudeCliAdapter(LLMAdapter):
                 finally:
                     with self._active_lock:
                         self._active_procs.pop(proc, None)
-        if (proc.returncode or 0) < 0 or self._cancel_event.is_set():
+        if (proc.returncode or 0) < 0 or self._cancelled_since(gen):
             # Killed by cancel_active (negative = signal): cancelled, NOT slice evidence.
-            # HIGH-1 (council-pr R3, Codex) DATA INTEGRITY: the cancel event ALONE is decisive —
-            # never `and returncode != 0`. A child that HANDLES SIGTERM and exits 0 inside the 5s
-            # kill fence emits partial/buffered JSON; accepting it as success made the engine
-            # ADVANCE THE CURSOR on a cancelled extraction, violating this slice's invariant that
-            # a cancel never advances the cursor. _cancel_event is instance-scoped and only set on
-            # shutdown/rollback, so the happy path is unaffected.
+            # HIGH-1 (council-pr R3, Codex) DATA INTEGRITY: the cancel ALONE is decisive — never
+            # `and returncode != 0`. A child that HANDLES SIGTERM and exits 0 inside the 5s kill
+            # fence emits partial/buffered JSON; accepting it as success made the engine ADVANCE
+            # THE CURSOR on a cancelled extraction, violating this slice's invariant that a
+            # cancel never advances the cursor.
+            # ITEM 1 (council-pr R4, Codex): (b) ask whether THIS call was cancelled, via the
+            # monotonic generation captured at its start — NOT the live event. Reading the event
+            # here let a rollback's finally-resume clear the cancel out from under an in-flight
+            # maintenance call, which then accepted the partial JSON as success anyway.
             # F-4: `or 0` guards a (currently unreachable with a real Popen) None returncode —
             # a bare TypeError here would escape as a generic string and burn the per-slice cap.
             raise LlmCancelledError(f"claude -p cancelled (rc={proc.returncode})")

@@ -510,7 +510,9 @@ def test_cancel_set_raises_even_when_child_exits_cleanly(monkeypatch):
             self.killed = False
 
         def communicate(self, input=None, timeout=None):
-            adapter._cancel_event.set()   # the cancel lands mid-call
+            # The cancel lands mid-call, via the real public API — in production _cancel_event is
+            # only ever set inside cancel_active(), which also bumps the cancel generation.
+            adapter.cancel_active()
             return json.dumps({"result": "partial buffered output"}), ""
 
         def terminate(self):
@@ -575,6 +577,63 @@ def test_cancel_during_poll_loop_raises_within_a_poll_interval(monkeypatch):
     assert elapsed < 5.0, f"the cancel must land within ~a poll interval, took {elapsed:.2f}s"
     assert proc.inputs[0] == "hi" and all(i is None for i in proc.inputs[1:]), \
         "the prompt is handed over exactly once — CPython rejects re-sending it on a retry"
+
+
+def test_cancel_history_survives_a_resume_racing_the_final_gate(monkeypatch):
+    """ITEM 1 (council-pr R4, Codex) DATA INTEGRITY: the final gate read the LIVE _cancel_event —
+    the state AT READ TIME — while resume() clears that same mutable object from another thread.
+
+    Reachable chain: the scheduler starts BEFORE start_session_watcher, so a maintenance call can
+    be in flight when a watcher rollback runs _stop_and_drain(rearm=True). That cancels BOTH
+    cached adapters (the maintenance one isn't the watcher's), the join fence only joins the
+    watcher's drains, and the finally's resume_llm_adapters() CLEARS the event. The in-flight
+    maintenance call then reached the gate with a clean event and accepted a cancelled child's
+    partial JSON as SUCCESS — feeding graph mutations (dedup/merge/conflict). Same failure as
+    R3's HIGH-1 by another route: we traded "the returncode masks the cancel" for "another
+    thread can erase the cancel".
+
+    A monotonic cancel generation captured per call fixes it: resume() re-opens the adapter for
+    NEW calls without erasing the history of calls already in flight."""
+    adapter = ClaudeCliAdapter(model="haiku")
+
+    class _CancelThenResumeProc:
+        """The rollback's cancel AND its finally-resume both land while this call is in flight;
+        the child then exits 0 with partial buffered output."""
+
+        def __init__(self):
+            self.returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            adapter.cancel_active()   # the rollback cancels every cached adapter...
+            adapter.resume()          # ...and its finally re-arms them, clearing the event
+            return json.dumps({"result": "partial buffered output"}), ""
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.wait()
+            return False
+
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: _CancelThenResumeProc())
+    with pytest.raises(LlmCancelledError):
+        adapter.generate("hi")
+
+    # ...and the resume genuinely re-opened the adapter: a NEW call must succeed.
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout=json.dumps({"result": "ok"})))
+    assert adapter.generate("hi") == "ok"
 
 
 def test_cancel_active_noop_when_idle():
