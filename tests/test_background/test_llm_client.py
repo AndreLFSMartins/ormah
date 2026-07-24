@@ -174,6 +174,25 @@ def test_adapter_built_during_shutdown_is_born_cancelled(monkeypatch):
     reset_adapter()
 
 
+def test_gate_is_lowered_by_resume_so_later_adapters_are_not_born_cancelled(monkeypatch):
+    """council-pr R6, the rollback half: resume_llm_adapters() must LOWER the shutdown gate.
+    Otherwise every adapter built after a recoverable rollback would be born cancelled and ingest
+    + maintenance would stay dead until restart — the exact failure mode HIGH-A (council R1)
+    exists to prevent. Locks this against a future refactor."""
+    reset_adapter()   # clean cache, gate down
+    monkeypatch.setattr(llm_client, "get_adapter", lambda *a, **k: _GateFakeAdapter())
+
+    # The cache is EMPTY here, so the gate is the only thing the cancel can leave behind — no
+    # reset_adapter() afterwards, which would clear the gate and make this pass vacuously.
+    llm_client.cancel_active_llm_calls()   # gate UP
+    llm_client.resume_llm_adapters()       # the rollback's finally must lower it again
+
+    # The first adapter is built only now, AFTER the resume: it must not be born cancelled.
+    assert llm_client.llm_generate(_GateSettings(), "hi") == "UNCANCELLED_SUCCESS", \
+        "an adapter built after resume() was born cancelled — the gate was never lowered"
+    reset_adapter()
+
+
 def _concurrent_first_use(factory, cache_name, monkeypatch):
     """Drive two threads into ``factory`` on FIRST use simultaneously and return
     (call_count, result_a, result_b, cached). A Barrier holds both inside the patched
