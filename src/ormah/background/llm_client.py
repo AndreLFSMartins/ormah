@@ -71,15 +71,55 @@ _ingest_adapter_initialised: bool = False
 # Holding the lock across check+construct+assign guarantees at most one adapter per cache.
 _adapter_lock = threading.Lock()
 
+# HIGH (council-pr R6, Codex): shutdown gate for the CACHE BOUNDARY. The sweep used to read the
+# cache globals without ``_adapter_lock``, but a factory HOLDS that lock across
+# ``get_adapter(settings)`` — and during that window the global is still None. A shutdown landing
+# there saw "no adapters", returned 0, the watcher's fence concluded there was nothing to cancel,
+# and the factory then published an UNCANCELLED adapter that went on to spawn `claude -p`.
+#
+# Taking the lock in the sweep + this gate partition every adapter into exactly two cases:
+#   * published BEFORE the sweep wins the lock -> it is in the snapshot -> the sweep cancels it;
+#   * built AFTER the gate went up             -> the factory sees the gate and cancels it at birth.
+# Nothing can be published "during" the sweep: both require ``_adapter_lock``. The sweep therefore
+# waits for an in-progress factory, which is bounded — ``get_adapter`` is pure object construction
+# (at worst a ``shutil.which``), never I/O.
+_shutdown_started: bool = False
+
+
+def _cancel_newborn_if_shutting_down(adapter) -> None:
+    """Cancel a freshly built adapter when shutdown already started. Call with the lock HELD.
+
+    Bounded: ``get_adapter`` returns a BRAND NEW instance whose tracked-process map is empty, so
+    ``cancel_active()`` here only flips the adapter's cancel flag and iterates nothing — it never
+    reaches the ``p.wait(timeout=5)`` kill fence. That is what makes it safe to run while holding
+    ``_adapter_lock``. Lock order is ``_adapter_lock -> _cancel_lock -> _active_lock``; the adapter
+    never calls back into this module from inside its own locks, so the order is strictly one-way.
+    """
+    cancel = getattr(adapter, "cancel_active", None)
+    if not _shutdown_started or not callable(cancel):
+        return
+    try:
+        cancel()
+    except Exception as e:
+        logger.warning("Cancelling a newly built adapter during shutdown failed: %s", e)
+
+
+def _snapshot_adapters() -> list[tuple[str, object]]:
+    """Names + instances of the cached adapters. Call with ``_adapter_lock`` HELD (R6)."""
+    return [(name, globals().get(name)) for name in ("_cached_adapter", "_cached_ingest_adapter")]
+
 
 def reset_adapter() -> None:
     """Clear the cached adapters (useful for test isolation)."""
     global _cached_adapter, _adapter_initialised, _cached_ingest_adapter, _ingest_adapter_initialised
+    global _shutdown_started
     with _adapter_lock:
         _cached_adapter = None
         _adapter_initialised = False
         _cached_ingest_adapter = None
         _ingest_adapter_initialised = False
+        # Also lower the gate: a leaked one would make every later adapter be born cancelled.
+        _shutdown_started = False
 
 
 def _get_or_create_adapter(settings) -> LLMAdapter | None:
@@ -88,6 +128,8 @@ def _get_or_create_adapter(settings) -> LLMAdapter | None:
         if not _adapter_initialised:
             _cached_adapter = get_adapter(settings)
             _adapter_initialised = True
+            # R6: born cancelled if shutdown started while we were building it.
+            _cancel_newborn_if_shutting_down(_cached_adapter)
         return _cached_adapter
 
 
@@ -109,6 +151,8 @@ def _get_or_create_ingest_adapter(settings) -> LLMAdapter | None:
                 model=_resolve_ingest_model(settings),
             )
             _ingest_adapter_initialised = True
+            # R6: born cancelled if shutdown started while we were building it.
+            _cancel_newborn_if_shutting_down(_cached_ingest_adapter)
         return _cached_ingest_adapter
 
 
@@ -167,10 +211,19 @@ def cancel_active_llm_calls() -> int:
     to kill this whole function, so the INGEST adapter was never cancelled — and because the R3
     HIGH-3 fix suppresses this exception in _stop_and_drain, every turn of the join fence
     restarted on the same raising adapter and the fence spun without ever cancelling what
-    mattered, waiting out the provider timeout."""
+    mattered, waiting out the provider timeout.
+
+    R6 (Codex): the gate goes up and the cache is snapshotted in ONE critical section, closing the
+    cache-boundary window where a factory held ``_adapter_lock`` across ``get_adapter`` and the
+    global was still None. The ``cancel_active()`` calls themselves run OUTSIDE the lock on
+    purpose — they run the kill fence (``p.wait(timeout=5)`` per child), and holding
+    ``_adapter_lock`` through that would stall every thread that merely wants an adapter."""
+    global _shutdown_started
+    with _adapter_lock:
+        _shutdown_started = True
+        adapters = _snapshot_adapters()  # the ingest cache exists only on the Beta
     total = 0
-    for name in ("_cached_adapter", "_cached_ingest_adapter"):
-        adapter = globals().get(name)  # the ingest cache exists only on the Beta
+    for name, adapter in adapters:
         cancel = getattr(adapter, "cancel_active", None)
         if callable(cancel):
             try:
@@ -186,9 +239,17 @@ def resume_llm_adapters() -> None:
 
     ITEM 2: same per-adapter isolation as ``cancel_active_llm_calls`` — if the first resume()
     raised, the second never ran and that adapter stayed permanently cancelled (ingest OR
-    maintenance dead until restart)."""
-    for name in ("_cached_adapter", "_cached_ingest_adapter"):
-        resume = getattr(globals().get(name), "resume", None)
+    maintenance dead until restart).
+
+    R6: this also LOWERS the shutdown gate. Without that, every adapter built after a recoverable
+    rollback would be born cancelled and ingest + maintenance would stay dead until restart —
+    exactly the failure mode HIGH-A (council R1) exists to prevent."""
+    global _shutdown_started
+    with _adapter_lock:
+        _shutdown_started = False
+        adapters = _snapshot_adapters()
+    for name, adapter in adapters:
+        resume = getattr(adapter, "resume", None)
         if callable(resume):
             try:
                 resume()
