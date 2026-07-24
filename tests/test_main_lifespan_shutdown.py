@@ -461,8 +461,12 @@ async def test_shutdown_cancels_llm_calls_even_when_the_watcher_failed_to_start(
 @pytest.mark.asyncio
 async def test_a_second_lifespan_can_still_run_llm_calls(tmp_path, monkeypatch):
     """The adapter caches and the cancellation epoch are module-level and outlive a
-    lifespan. A final cancel from the first shutdown must not poison the second."""
-    from ormah.background import llm_cancel
+    lifespan. A final cancel from the first shutdown must not poison the second -- proven
+    here by actually driving an admitted LLM call through the facade in the second lifespan,
+    not just reading the epoch snapshot (the old version of this test only asserted
+    `snapshot()[1] is False`, so it would still pass even if admission itself stayed broken;
+    this must fail if `begin_llm_lifespan()` is removed from lifespan startup)."""
+    from ormah.background import llm_cancel, llm_client
 
     with _fake_lifespan_deps(tmp_path, monkeypatch):
         app = FastAPI(lifespan=main.lifespan)
@@ -476,6 +480,27 @@ async def test_a_second_lifespan_can_still_run_llm_calls(tmp_path, monkeypatch):
             _, cancelled_in_second = llm_cancel.snapshot()
             assert cancelled_in_second is False, (
                 "the second lifespan started with a poisoned cancellation epoch"
+            )
+
+            # Restore the admission assertion the old test had (`llm_generate(...) == "ok"`):
+            # a trivial fake adapter, driven through the real facade seam, proves calls are
+            # actually ADMITTED in the second lifespan -- not merely that the epoch reads clean.
+            llm_client.reset_adapter()
+
+            class _FakeAdapter:
+                def generate(self, *a, **kw):
+                    return "ok"
+
+            monkeypatch.setattr(llm_client, "get_adapter", lambda *a, **kw: _FakeAdapter())
+
+            class _S:
+                llm_provider = "claude_cli"
+                llm_model = "haiku"
+                ingest_llm_provider = None
+                ingest_llm_model = None
+
+            assert llm_client.llm_generate(_S(), "prompt") == "ok", (
+                "the second lifespan must be able to run an LLM call to completion"
             )
 
 

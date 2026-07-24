@@ -316,7 +316,11 @@ async def lifespan(app: FastAPI):
     if stop_ev is not None:
         stop_ev.set()
 
-    # Shutdown — stop session watcher first
+    # Shutdown — stop session watcher first. The shutdown `finally` above has ALREADY issued the
+    # final `llm_cancel` epoch bump (cancel_active_llm_calls(final=True)) before this runs, so
+    # stop_session_watcher's join fence only needs to WAIT for in-flight calls to observe the
+    # already-cancelled epoch — it does not cancel again itself on this path. Moving the cancel
+    # to run AFTER this call would make the fence spin until the provider timeout instead.
     if hasattr(app.state, "session_watches"):
         stop_session_watcher(app.state.session_watches)
 

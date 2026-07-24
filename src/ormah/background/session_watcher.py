@@ -1530,25 +1530,36 @@ def _drain_handlers(handlers: list["SessionHandler"]) -> None:
 
 
 def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None:
-    """Shared shutdown/rollback sequence (ADR-0004 slice 2): stop, cancel, drain, rearm.
+    """Shared shutdown/rollback sequence (ADR-0004 slice 2): stop, cancel (rollback-only), drain,
+    rearm.
 
-    Cancelling in-flight LLM calls after ``wake()`` and before the join is what turns the
-    previously-uncapped ``join_drain()`` wait (up to the provider timeout, ~40min at the Beta's
-    sizing) into a bounded wait: a killed extraction raises ``LlmCancelledError``, which the
-    engine maps to a provider-wide transient (never the per-slice failure cap — see
+    On the NORMAL shutdown path (``rearm=False``, the default) this function does NOT cancel
+    in-flight LLM calls itself — ownership of the final cancel now sits entirely with the
+    lifespan's shutdown ``finally`` (``main.lifespan``), which issues the ONE final
+    ``cancel_active_llm_calls`` call before ``stop_session_watcher`` -> ``_stop_and_drain`` is
+    even entered (see the ordering note on ``stop_session_watcher``'s docstring). What bounds the
+    join wait below on that path is the globally-read ``llm_cancel`` epoch bumped by that earlier
+    call: a killed extraction raises ``LlmCancelledError``, which the engine maps to a
+    provider-wide transient (never the per-slice failure cap — see
     ``memory_engine._extract_memories_llm``), so the slice is durably re-ingested on next boot.
 
-    HIGH-C (council R2, Codex) is now resolved by the epoch itself rather than by re-cancelling
-    every drain iteration: a single cancel bumps the ONE global ``llm_cancel`` epoch, and a late-
-    built adapter reads that cancelled epoch at ``generate()`` entry (ADR-0004 slice 2) — so one
-    cancel reaches every call, past and future, and the join below only needs to wait for exit.
+    On the ROLLBACK path (``rearm=True``, only from ``start_session_watcher``'s except-block)
+    this function DOES call ``cancel_active_llm_calls`` itself — startup failed before the
+    lifespan's shutdown finally could ever run, so nothing else has cancelled yet, and this is
+    the only place that can bound the drain for that path.
 
-    HIGH-3 (council-pr R3, Codex): ``cancel_active_llm_calls()`` is BEST-EFFORT and suppressed —
-    the join fence after it is LOAD-BEARING and must never be skipped by a cancel failure (an
-    un-joined orphan drain thread can touch the DB after ``engine.shutdown()``, #52). Accepted
-    consequence: if cancellation fails systematically the drain stops being bounded by the cancel
-    and is bounded only by the provider timeout again — strictly no worse than the pre-slice
-    baseline, and the fence still runs.
+    HIGH-C (council R2, Codex) is now resolved by the epoch itself rather than by re-cancelling
+    every drain iteration: a single cancel (wherever it comes from) bumps the ONE global
+    ``llm_cancel`` epoch, and a late-built adapter reads that cancelled epoch at ``generate()``
+    entry (ADR-0004 slice 2) — so one cancel reaches every call, past and future, and the join
+    below only needs to wait for exit.
+
+    HIGH-3 (council-pr R3, Codex): on the rollback path, ``cancel_active_llm_calls()`` is
+    BEST-EFFORT and suppressed — the join fence after it is LOAD-BEARING and must never be
+    skipped by a cancel failure (an un-joined orphan drain thread can touch the DB after
+    ``engine.shutdown()``, #52). Accepted consequence: if cancellation fails systematically the
+    drain stops being bounded by the cancel and is bounded only by the provider timeout again —
+    strictly no worse than the pre-slice baseline, and the fence still runs.
 
     HIGH-A (council R1, Cursor): only the ROLLBACK caller passes ``rearm=True`` — the process
     keeps serving after a caught startup failure (``main.lifespan``), so leaving the adapters
@@ -1621,6 +1632,13 @@ def stop_session_watcher(watches: list[SessionWatch]) -> None:
     deadline cap would re-open the use-after-close window by abandoning a running ingest (#52).
     ``rearm`` stays False here (the default): the process is going away and the DB is about to
     close, so adapters must never be resumed on this path.
+
+    Ordering precondition: by the time this is called from ``main.lifespan``'s shutdown, the
+    lifespan's ``finally`` has ALREADY issued the ONE final ``llm_cancel`` epoch cancel
+    (``cancel_active_llm_calls(final=True)``). This function (via ``_stop_and_drain``) does not
+    cancel again on this path — the join fence below only needs to WAIT for in-flight calls to
+    observe that already-cancelled epoch. Moving the cancel to run AFTER this call instead would
+    make the fence spin until the provider timeout, undoing the whole point of ADR-0004 slice 2.
     """
     _stop_and_drain(watches)
     if watches:

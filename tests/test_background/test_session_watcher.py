@@ -2960,22 +2960,34 @@ def test_stop_session_watcher_drains_inflight_ingest(engine, tmp_path):
 
 # --- ADR-0004 slice 2: bounded shutdown (cancel in-flight LLM extractions) -------------
 
-def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
-    """ADR-0004 slice 2 redesign: HIGH-C (council R2, Codex) used to be solved by a re-cancel
-    loop inside `_stop_and_drain` (cancel; join; cancel; join; ... until drain_alive() reports
-    dead). That loop is now REMOVED — cancellation is a single globally-read epoch
-    (`llm_cancel`), and a late-built adapter's `generate()` reads the CURRENT epoch at call
-    time, not a snapshot captured when the adapter was built. So a "late" adapter -- one whose
-    call is already in flight, polling the epoch, when the ONE upstream cancel lands -- is
-    still cancelled without `_stop_and_drain` ever calling `cancel_active_llm_calls` itself.
+def test_normal_shutdown_drain_does_not_cancel_llm_calls_itself(monkeypatch):
+    """Locks the ordering contract: on the normal-shutdown path (`rearm=False`, the default),
+    `_stop_and_drain` must NOT call `cancel_active_llm_calls` itself -- the lifespan's shutdown
+    `finally` already issued the ONE final cancel before `stop_session_watcher` ->
+    `_stop_and_drain` is even entered (see the ordering note in `_stop_and_drain`'s docstring).
+    ADR-0004 slice 2 redesign: HIGH-C (council R2, Codex) used to be solved by a re-cancel loop
+    inside `_stop_and_drain` (cancel; join; cancel; join; ... until drain_alive() reports dead);
+    that loop is now REMOVED in favour of a single globally-read epoch (`llm_cancel`), so this
+    test's only mutation-sensitive assertion is `cancel_calls["n"] == 0`.
 
-    On the normal-shutdown path (`rearm=False`, the default), `_stop_and_drain` must not call
-    `cancel_active_llm_calls` at all: the lifespan's shutdown `finally` already issued the ONE
-    final cancel before `stop_session_watcher` -> `_stop_and_drain` is even entered (see the
-    ordering note in `_stop_and_drain`'s docstring). This test reproduces that ordering directly
-    against the real `llm_cancel` module (reset by the autouse `_clean_llm_cancel_epoch`
-    fixture) and proves the bound holds via a `Barrier`, never `sleep`, to synchronise the "late"
-    thread's start with the join fence."""
+    The companion property -- that a "late" adapter (one whose call is already in flight,
+    polling the epoch, when the ONE upstream cancel lands) still reads the cancelled epoch at
+    `generate()` entry and is cancelled without anyone re-cancelling -- is NOT this test's job;
+    it is owned and locked by
+    `tests/test_background/test_llm_client.py::test_an_adapter_built_during_a_shutdown_is_born_cancelled`.
+    This test still drives a fake "late" thread through the same epoch-read shape purely so the
+    join fence has something real to wait on and so the bound (`elapsed < 5.0`) is exercised, but
+    that thread's own correctness is a secondary, deadlined check here -- not the property under
+    test.
+
+    This test reproduces the ordering directly against the real `llm_cancel` module (reset by
+    the autouse `_clean_llm_cancel_epoch` fixture) and proves the bound holds via a `Barrier`,
+    never `sleep`, to synchronise the "late" thread's start with the join fence. The thread's
+    internal poll loop is DEADLINED (not `while True: sleep`) and records its own failure via a
+    `finally`, so a mutation that breaks the epoch-cancel wiring (e.g. deleting the
+    `begin_cancel(final=True)` call below) makes this test FAIL FAST with a readable message
+    instead of hanging forever -- `dead` must always be set so the production
+    `while any(drain_alive())` loop in `_stop_and_drain` always has an exit."""
     from ormah.background.session_watcher import SessionWatch, _stop_and_drain
 
     cancel_calls = {"n": 0}
@@ -2993,6 +3005,10 @@ def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
     gen, _ = llm_cancel.snapshot()
     building = threading.Barrier(2)
     dead = threading.Event()
+    # Bounded poll deadline for the "late" thread below -- NOT the production bound under test
+    # (that's `elapsed < 5.0`), just a ceiling so a broken epoch never hangs this test.
+    poll_deadline_seconds = 2.0
+    thread_failure: dict[str, BaseException] = {}
 
     class _FakeHandler:
         def __init__(self):
@@ -3013,10 +3029,22 @@ def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
     def _late_built_adapter():
         # Mirrors the facade's real generate()-entry check (llm_client._guarded_generate):
         # reads the CURRENT global epoch, not one captured when the adapter/thread was built.
-        building.wait(timeout=5)
-        while not llm_cancel.epoch_changed(gen):
-            time.sleep(0.005)
-        dead.set()
+        try:
+            building.wait(timeout=5)
+            deadline = time.monotonic() + poll_deadline_seconds
+            while not llm_cancel.epoch_changed(gen):
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        "the late-built adapter never observed the cancelled epoch within "
+                        f"{poll_deadline_seconds}s -- the epoch-cancel wiring is broken"
+                    )
+                time.sleep(0.005)
+        except BaseException as e:  # noqa: BLE001 -- includes BrokenBarrierError
+            thread_failure["error"] = e
+        finally:
+            # ALWAYS set, success or failure, so the production `while any(drain_alive())`
+            # loop in `_stop_and_drain` can never spin forever on this fake.
+            dead.set()
 
     handler = _FakeHandler()
     watch = SessionWatch(watch_dir=Path("/tmp/late-adapter"), handler=handler, observer=None,
@@ -3034,6 +3062,12 @@ def test_late_built_adapter_is_still_cancelled_bounded(monkeypatch):
     _stop_and_drain([watch])
     elapsed = time.monotonic() - start
     t.join(5)
+
+    if "error" in thread_failure:
+        raise AssertionError(
+            "the late-built adapter thread failed: "
+            f"{thread_failure['error']!r}"
+        ) from thread_failure["error"]
 
     assert elapsed < 5.0, "the join fence must be bounded by the epoch read, not by re-cancelling"
     assert not handler.drain_alive(), "the late-built adapter must have observed the cancel"
