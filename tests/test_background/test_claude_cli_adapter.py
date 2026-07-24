@@ -636,6 +636,104 @@ def test_cancel_history_survives_a_resume_racing_the_final_gate(monkeypatch):
     assert adapter.generate("hi") == "ok"
 
 
+def test_torn_cancel_state_cannot_let_a_cancelled_call_report_success(monkeypatch):
+    """council-pr R5 HIGH (Codex 0.99): cancel_active() bumps the generation and THEN sets the
+    event; generate() read both WITHOUT the lock. Reproduced interleaving:
+      1. cancel enters the lock and increments the generation (0->1) — event NOT set yet;
+      2. generate reads gen=1 (the NEW era!) and sees a CLEAR event -> proceeds;
+      3. generate spawns and REGISTERS the child;
+      4. cancel sets the event and SIGTERMs the (already registered) child;
+      5. the child handles SIGTERM and exits 0 with partial buffered JSON;
+      6. final gate: returncode == 0 AND generation (1) == gen (1) -> no raise -> the PARTIAL
+         output is accepted as SUCCESS.
+
+    Third round of the same data-integrity defect through a new door (R3: the returncode masked
+    the cancel; R4: a resume() erased the flag; R5: the torn read). The fix is that EVERY read of
+    the cancel state happens atomically under _cancel_lock, so "new generation + clear event" is
+    never observable. Synchronised entirely with Events — no sleeps — so it cannot go flaky."""
+    adapter = ClaudeCliAdapter(model="haiku", timeout=30)
+
+    entered_set = threading.Event()    # cancel is INSIDE _cancel_lock, generation already bumped
+    release_set = threading.Event()    # let cancel finish (Event.set + the kill pass)
+    child_running = threading.Event()  # the child got spawned+registered (only on the buggy path)
+    may_return = threading.Event()     # let the child hand back its partial JSON
+
+    real_set = adapter._cancel_event.set
+
+    def paused_set():
+        # We are inside _cancel_lock, right after `generation += 1`: hold here to open the window.
+        entered_set.set()
+        release_set.wait(timeout=10)
+        real_set()
+
+    adapter._cancel_event.set = paused_set   # adapter is test-local; no global state touched
+
+    class _SigtermHandlingProc:
+        """A child that HANDLES SIGTERM and exits 0 with partial buffered JSON."""
+
+        def __init__(self):
+            self.returncode = 0
+            self.pid = None       # _capture_pgid returns None -> per-PID fallback, no real signal
+
+        def communicate(self, input=None, timeout=None):
+            child_running.set()
+            may_return.wait(timeout=10)
+            return json.dumps({"result": "PARTIAL buffered output"}), ""
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass                  # handled the signal: returncode stays 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _SigtermHandlingProc())
+
+    outcome = {}
+
+    def _run_generate():
+        try:
+            outcome["result"] = adapter.generate("hi")
+        except LlmCancelledError as e:
+            outcome["raised"] = e
+        except Exception as e:  # noqa: BLE001
+            outcome["other"] = e
+
+    tc = threading.Thread(target=adapter.cancel_active, daemon=True)
+    tc.start()
+    assert entered_set.wait(timeout=5), "cancel never entered its critical section"
+    # The generation is bumped but the event is NOT set yet — the exact torn window.
+
+    tg = threading.Thread(target=_run_generate, daemon=True)
+    tg.start()
+    # On the BUGGY path generate sails through and registers a child; on the FIXED path it parks
+    # on _cancel_lock. Bounded either way — the assertions are on the OUTCOME, not on which ran.
+    child_spawned = child_running.wait(timeout=1.5)
+
+    release_set.set()   # cancel now sets the event and runs its kill pass
+    may_return.set()    # the child hands back its partial JSON with returncode 0
+    tc.join(timeout=10)
+    tg.join(timeout=10)
+
+    assert outcome.get("result") is None, (
+        f"a CANCELLED call reported SUCCESS with partial output: {outcome.get('result')!r} "
+        f"(child_spawned={child_spawned})"
+    )
+    assert isinstance(outcome.get("raised"), LlmCancelledError), \
+        f"a cancelled call must raise LlmCancelledError, got {outcome}"
+
+
 def test_cancel_active_noop_when_idle():
     adapter = ClaudeCliAdapter(model="haiku")
     assert adapter.cancel_active() == 0
