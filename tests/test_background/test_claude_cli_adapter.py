@@ -734,6 +734,93 @@ def test_torn_cancel_state_cannot_let_a_cancelled_call_report_success(monkeypatc
         f"a cancelled call must raise LlmCancelledError, got {outcome}"
 
 
+def test_previous_era_semaphore_waiter_never_spawns_after_cancel_resume(monkeypatch):
+    """council-pr R5 MEDIUM (Cursor 0.85) — same root cause via the semaphore. `gen` was captured
+    INSIDE `with sem:`, i.e. only after the waiter unblocked. A call already queued on the
+    semaphore BEFORE the cancel — a previous-era call the cancel SHOULD have reached — woke up,
+    captured the POST-cancel generation with the event already cleared by a rollback's resume(),
+    and spawned a brand new child mid-shutdown.
+
+    Fixed by capturing the era at ENTRY (before the semaphore) plus an (a)+(b) admission check.
+    Affects the maintenance path, which has semaphore waiters; ingest has a single drain thread."""
+    adapter = ClaudeCliAdapter(model="haiku", max_concurrency=1, timeout=30)
+
+    popen_calls = []
+    a_running = threading.Event()
+    a_may_return = threading.Event()
+
+    class _HolderProc:
+        """Call A: occupies the single semaphore slot until released."""
+
+        def __init__(self):
+            self.returncode = 0
+            self.pid = None
+
+        def communicate(self, input=None, timeout=None):
+            a_running.set()
+            a_may_return.wait(timeout=10)
+            return json.dumps({"result": "A"}), ""
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def popen(*a, **kw):
+        popen_calls.append(1)
+        return _HolderProc()
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    outcome = {}
+
+    def _call(key):
+        try:
+            outcome[key] = adapter.generate("hi")
+        except LlmCancelledError as e:
+            outcome[key] = e
+
+    ta = threading.Thread(target=_call, args=("a",), daemon=True)
+    ta.start()
+    assert a_running.wait(timeout=5), "call A never took the semaphore"
+
+    tb = threading.Thread(target=_call, args=("b",), daemon=True)
+    tb.start()
+    # B must be parked on the semaphore with its (previous) era already captured. Self-validating:
+    # if the settle were too short B would not have entered generate() yet and we would say so
+    # instead of testing nothing.
+    time.sleep(0.2)
+    assert "b" not in outcome, "call B should still be waiting on the semaphore (settle too short)"
+
+    adapter.cancel_active()   # ends B's era (and kills A's child)
+    adapter.resume()          # a rollback's finally re-arms, clearing the event
+
+    a_may_return.set()        # A finishes, handing the semaphore to B
+    ta.join(timeout=10)
+    tb.join(timeout=10)
+
+    assert len(popen_calls) == 1, \
+        f"the previous-era waiter spawned a replacement child: {len(popen_calls)} Popen call(s)"
+    assert isinstance(outcome.get("b"), LlmCancelledError), \
+        f"the previous-era waiter must be treated as cancelled, got {outcome.get('b')!r}"
+    # A was cancelled too (rc=0 but its era ended) — the R3/R4 invariant still holds.
+    assert isinstance(outcome.get("a"), LlmCancelledError), \
+        f"the cancelled in-flight call must also raise, got {outcome.get('a')!r}"
+
+
 def test_cancel_active_noop_when_idle():
     adapter = ClaudeCliAdapter(model="haiku")
     assert adapter.cancel_active() == 0
