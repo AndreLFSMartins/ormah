@@ -6,6 +6,7 @@ import threading
 
 from ormah.background import llm_client
 from ormah.background.llm_client import reset_adapter
+from ormah.background.llm_errors import LlmCancelledError
 
 
 def test_ingest_provider_configured_reflects_adapter(monkeypatch):
@@ -72,6 +73,105 @@ def test_cancel_and_resume_isolate_a_raising_adapter(monkeypatch):
     llm_client.resume_llm_adapters()
     assert ingest.resumed == 1, \
         "a raising maintenance resume must not leave the INGEST adapter permanently cancelled"
+
+
+class _GateFakeAdapter:
+    """Adapter whose generate() refuses once cancelled — so a test can tell an adapter that was
+    born/left cancelled from one that would happily fire `claude -p` during shutdown."""
+
+    def __init__(self, hold: threading.Event | None = None):
+        self.cancelled = 0
+        self._cancel_event = threading.Event()
+        self._hold = hold
+
+    def cancel_active(self):
+        self.cancelled += 1
+        self._cancel_event.set()
+        return 1
+
+    def resume(self):
+        self._cancel_event.clear()
+
+    def generate(self, *a, **kw):
+        if self._hold is not None:
+            # Models a long-running `claude -p` that the shutdown sweep interrupts mid-flight.
+            self._hold.wait(timeout=10)
+        if self._cancel_event.is_set():
+            raise LlmCancelledError("cancelled")
+        return "UNCANCELLED_SUCCESS"
+
+
+class _GateSettings:
+    llm_provider = "claude_cli"
+    llm_model = "haiku"
+    ingest_llm_provider = None
+    ingest_llm_model = None
+
+
+def test_adapter_built_during_shutdown_is_born_cancelled(monkeypatch):
+    """council-pr R6 HIGH (Codex 0.99): the CACHE BOUNDARY window. cancel_active_llm_calls() read
+    the cache globals WITHOUT _adapter_lock, but a factory HOLDS that lock across
+    get_adapter(settings) — and during that window the global is still None. A shutdown landing
+    exactly there saw "no adapters" and returned 0; the watcher's fence concluded there was
+    nothing to cancel and returned; the factory then published an UNCANCELLED adapter that went
+    on to spawn `claude -p`, so the scheduler shutdown could hit its 30s bound and skip
+    engine.shutdown().
+
+    Fixed by raising a shutdown gate and snapshotting the cache in ONE critical section: an
+    adapter is either in the snapshot (cancelled by the sweep) or created afterwards and cancelled
+    at birth by the factory. Synchronised with Events — never sleeps — so it cannot go flaky."""
+    reset_adapter()
+    in_factory = threading.Event()           # the factory is inside, holding _adapter_lock
+    may_finish = threading.Event()           # release the factory so it can publish
+    generate_may_finish = threading.Event()  # release the in-flight call, AFTER the sweep ran
+
+    built = {}
+
+    def slow_get_adapter(settings, provider=None, model=None):
+        in_factory.set()
+        may_finish.wait(timeout=10)   # stall INSIDE _adapter_lock
+        adapter = _GateFakeAdapter(hold=generate_may_finish)
+        built["adapter"] = adapter
+        return adapter
+
+    monkeypatch.setattr(llm_client, "get_adapter", slow_get_adapter)
+
+    result = {}
+
+    def _first_call():
+        result["out"] = llm_client.llm_generate(_GateSettings(), "hi")
+
+    t = threading.Thread(target=_first_call, daemon=True)
+    t.start()
+    assert in_factory.wait(timeout=5), "the factory never entered"
+
+    # SHUTDOWN lands exactly in the cache-boundary window. It runs on its OWN thread because the
+    # fixed sweep takes _adapter_lock and therefore waits for the in-progress factory — running it
+    # on this thread would deadlock against the may_finish we still have to set.
+    sweep = {}
+
+    def _sweep():
+        sweep["ret"] = llm_client.cancel_active_llm_calls()
+
+    ts = threading.Thread(target=_sweep, daemon=True)
+    ts.start()
+
+    may_finish.set()             # the factory publishes and releases the lock
+    ts.join(timeout=10)          # the sweep completes (buggy: at once; fixed: after the factory)
+    assert "ret" in sweep, "the shutdown sweep never completed"
+    cancel_return = sweep["ret"]
+    generate_may_finish.set()    # only now may the in-flight call finish
+    t.join(timeout=10)
+    adapter = built.get("adapter")
+
+    assert adapter is not None, "the factory never published an adapter"
+    assert adapter.cancelled >= 1, (
+        "the adapter published during shutdown was NOT cancelled "
+        f"(sweep returned {cancel_return}) — it would have fired `claude -p` mid-shutdown"
+    )
+    assert result.get("out") != "UNCANCELLED_SUCCESS", \
+        "the in-flight call completed as an UNCANCELLED success during shutdown"
+    reset_adapter()
 
 
 def _concurrent_first_use(factory, cache_name, monkeypatch):
