@@ -56,6 +56,13 @@ _HARDENED_SETTINGS = json.dumps({
 _SEMAPHORES: dict[int, threading.Semaphore] = {}
 _SEM_LOCK = threading.Lock()
 
+# HIGH-2 (council-pr R3, Codex): how often a running generate() re-checks its own cancel event
+# while draining the child's pipes. It bounds shutdown when EOF can never arrive (a setsid
+# grandchild holding our inherited stdout — see `_signal_group`'s residual note), at the cost of
+# ~2 poll cycles per second of a normal call. 0.5s keeps the shutdown snappy while the overhead
+# stays negligible (a 30s call does ~60 selector waits, no extra syscall pressure worth measuring).
+_CANCEL_POLL_INTERVAL = 0.5
+
 
 # session_id comes from the CLI envelope (untrusted). Only ever treat it as an exact,
 # well-formed id — never as a glob pattern (a "*"/"?"/"[" could expand and delete unrelated
@@ -282,23 +289,61 @@ class ClaudeCliAdapter(LLMAdapter):
             # killed (timeout/generic-exception) or fully drained (success) the child.
             with proc:
                 try:
-                    stdout, stderr = proc.communicate(input=prompt, timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    # B-1: base's subprocess.run does process.kill(); process.wait() on a
-                    # timeout — it REAPS, it never waits for pipe EOF. communicate() here (no
-                    # timeout arg) blocks until EOF on both pipes; if a grandchild inherited our
-                    # stdout/stderr, that can never arrive and the drain thread hangs forever —
-                    # exactly the unbounded wait this slice exists to remove. wait() only waits
-                    # for the process itself to exit, which kill() already guarantees promptly.
-                    _kill_group_or_proc(proc, pgid)  # group SIGKILL, then reap the direct child
-                    proc.wait()
-                    if self._cancel_event.is_set():
-                        # A shutdown kill can surface as TimeoutExpired. It must NOT be reported
-                        # as a provider timeout — slice 3 gives timeouts a failure-budget
-                        # meaning, and a restart must never spend it on a cancellation.
-                        raise LlmCancelledError("claude -p cancelled during shutdown") from None
-                    logger.warning("claude -p timed out after %ss", timeout)
-                    return None  # unchanged for now; slice 3 turns this into LlmTimeoutError
+                    # HIGH-2 (council-pr R3, Codex): drain the pipes in BOUNDED slices instead of
+                    # one communicate() that blocks until EOF. A grandchild that calls setsid()
+                    # lands in its OWN session, so it survives our group kill AND keeps the write
+                    # end of our inherited stdout open — EOF depends on ALL write ends closing,
+                    # not on the leader dying, so a single communicate() would block until the
+                    # provider timeout (default 120s) and _stop_and_drain joins on this thread,
+                    # damming the whole shutdown. Polling lets THIS thread observe its own cancel
+                    # event and abandon the read. The bound is observed in-thread ON PURPOSE:
+                    # closing proc.stdout/stderr from the cancelling thread while communicate()'s
+                    # selector is blocked on those fds is undefined at the OS level (the select
+                    # may not wake, may raise EBADF, or may wait on a recycled fd number) — that
+                    # would trade a bounded hang for a corruption race.
+                    deadline = time.monotonic() + timeout
+                    pending_input = prompt
+                    while True:
+                        try:
+                            remaining = max(0.0, deadline - time.monotonic())
+                            stdout, stderr = proc.communicate(
+                                input=pending_input,
+                                timeout=min(_CANCEL_POLL_INTERVAL, remaining),
+                            )
+                            break  # EOF on both pipes: stdout/stderr hold the FULL accumulated
+                        except subprocess.TimeoutExpired:      # output across every poll round
+                            # CPython supports retrying communicate() after a TimeoutExpired
+                            # ("retrying communication will not lose any output"), but the input
+                            # may only be handed over ONCE — a retry that still passes input
+                            # raises ValueError("Cannot send input after starting communication").
+                            # Any unwritten remainder keeps draining from the interpreter's own
+                            # saved offset on the next call.
+                            pending_input = None
+                            if self._cancel_event.is_set():
+                                # Abandon the read: a setsid grandchild never yields EOF. We kill
+                                # the group and reap the LEADER only — the detached grandchild is
+                                # NOT reaped (only cgroups/job objects could), it just survives as
+                                # an orphan whose writes now take EPIPE. It no longer dams us.
+                                _kill_group_or_proc(proc, pgid)
+                                proc.wait()
+                                # A shutdown kill must NOT be reported as a provider timeout —
+                                # slice 3 gives timeouts a failure-budget meaning, and a restart
+                                # must never spend it on a cancellation.
+                                raise LlmCancelledError(
+                                    "claude -p cancelled during shutdown") from None
+                            if time.monotonic() >= deadline:
+                                # REAL provider timeout — semantics identical to before the poll
+                                # loop. B-1: reap via kill()+wait(), NEVER a second unbounded
+                                # communicate() (that blocks on pipe EOF a grandchild can withhold
+                                # forever). wait() only waits for the process itself to exit,
+                                # which the kill already guarantees promptly.
+                                _kill_group_or_proc(proc, pgid)
+                                proc.wait()
+                                logger.warning("claude -p timed out after %ss", timeout)
+                                return None  # slice 3 turns this into LlmTimeoutError
+                except LlmCancelledError:
+                    # Never let the generic handler below downgrade a cancel into a fast failure.
+                    raise
                 except Exception as e:  # I/O failure mid-flight — fast failure
                     # B-2: base's subprocess.run does `except: process.kill(); raise` here —
                     # kill before the child is orphaned. HIGH-2: group SIGKILL (an already-dead

@@ -1,9 +1,11 @@
 import contextlib
 import json
+import logging
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -11,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ormah.background.llm.claude_cli_adapter import ClaudeCliAdapter
+from ormah.background.llm.claude_cli_adapter import _CANCEL_POLL_INTERVAL, ClaudeCliAdapter
 from ormah.background.llm_errors import LlmCancelledError, LlmTimeoutError
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "claude_cli_envelope.json"
@@ -94,6 +96,57 @@ def _fake_popen(stdout="", returncode=0, communicate_raises=None, construct_rais
 
     popen.proc = None
     return popen
+
+
+class _NeverEofProc:
+    """A child whose pipes NEVER reach EOF — models the setsid grandchild that survives our group
+    kill and keeps the write end of our inherited stdout open. communicate() honours its timeout
+    slice (sleeps it) and then raises TimeoutExpired, exactly like the real one.
+
+    Fails loudly on an UNBOUNDED communicate() (timeout=None): that is the B-1 regression, where
+    the call blocks until an EOF a grandchild can withhold forever."""
+
+    def __init__(self):
+        self.returncode = None
+        self.communicate_calls = 0
+        self.wait_calls = 0
+        self.killed = False
+        self.terminated = False
+        self.timeouts = []
+        self.inputs = []
+
+    def communicate(self, input=None, timeout=None):
+        self.communicate_calls += 1
+        self.timeouts.append(timeout)
+        self.inputs.append(input)
+        if timeout is None:
+            raise AssertionError("communicate() must never be called unbounded (B-1)")
+        time.sleep(timeout)
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+        if self.returncode is None:
+            self.returncode = -9
+
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        if self.returncode is None:
+            self.returncode = -9
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.wait()
+        return False
 
 
 class _BlockingFakeProc:
@@ -205,81 +258,79 @@ def test_returns_none_on_nonzero_exit(monkeypatch):
     assert ClaudeCliAdapter(model="haiku").generate("hi") is None
 
 
-def test_generate_returns_none_on_timeout(monkeypatch):
+def test_generate_returns_none_on_timeout(monkeypatch, caplog):
     """MEDIUM-E (council, Codex): a provider timeout still returns None in this slice — never
-    LlmTimeoutError (that's slice 3's job) and never LlmCancelledError (no shutdown involved)."""
-    monkeypatch.setattr(
-        subprocess, "Popen",
-        _fake_popen(communicate_raises=subprocess.TimeoutExpired(cmd="claude", timeout=1)),
-    )
-    assert ClaudeCliAdapter(model="haiku").generate("hi") is None
+    LlmTimeoutError (that's slice 3's job) and never LlmCancelledError (no shutdown involved).
+
+    HIGH-2 (council-pr R3): with the poll loop in place, the REAL deadline path must preserve
+    exactly today's semantics — group kill + wait() reap, the "timed out after" warning, None."""
+    proc = _NeverEofProc()
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: proc)
+    with caplog.at_level(logging.WARNING):
+        result = ClaudeCliAdapter(model="haiku", timeout=1).generate("hi")
+    assert result is None                      # returned, never raised
+    assert proc.killed, "the deadline path must kill the child"
+    assert proc.wait_calls >= 1, "the deadline path must reap via wait()"
+    assert any("timed out after" in r.getMessage() for r in caplog.records)
+    # The input is handed over exactly once — CPython rejects re-sending it on a retry.
+    assert proc.inputs[0] == "hi" and all(i is None for i in proc.inputs[1:])
 
 
-def test_timeout_reaps_via_wait_not_a_second_communicate(monkeypatch):
+def test_timeout_reaps_via_wait_and_never_an_unbounded_communicate(monkeypatch):
     """B-1: base subprocess.run's timeout path does process.kill(); process.wait() -- it REAPS
-    the child, it never waits for pipe EOF. communicate() (no timeout arg) blocks until EOF on
-    BOTH pipes; if a grandchild inherited our stdout/stderr, that can never arrive and the ingest
-    drain thread would hang forever on the live single-process Beta. The fake's second
-    communicate() call raises loudly instead of actually hanging the test suite, proving the
-    adapter reaps via wait() -- not a second communicate() -- on this path."""
+    the child, it never waits for pipe EOF. An UNBOUNDED communicate() (timeout=None) blocks
+    until EOF on BOTH pipes; if a grandchild inherited our stdout/stderr, that can never arrive
+    and the ingest drain thread would hang forever on the live single-process Beta.
 
-    class _FailsOnSecondCommunicate:
-        def __init__(self):
-            self.returncode = None
-            self.communicate_calls = 0
-            self.wait_calls = 0
-            self.killed = False
-
-        def communicate(self, input=None, timeout=None):
-            self.communicate_calls += 1
-            if self.communicate_calls == 1:
-                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
-            # A second call would block indefinitely on pipe EOF in the real world (B-1) --
-            # fail loudly here instead of actually hanging the test suite.
-            raise AssertionError("communicate() must not be called a second time on the timeout path")
-
-        def kill(self):
-            self.killed = True
-
-        def wait(self, timeout=None):
-            self.wait_calls += 1
-            self.returncode = -9
-            return self.returncode
-
-        def poll(self):
-            return self.returncode
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            self.wait()
-            return False
-
-    proc = _FailsOnSecondCommunicate()
+    HIGH-2 (council-pr R3) replaced the single communicate() with a bounded POLL LOOP, so a
+    SECOND communicate() is now expected and correct -- what must never happen is an unbounded
+    one. _NeverEofProc raises loudly on any communicate(timeout=None) instead of hanging the
+    suite, and this proves the deadline path still reaps via kill()+wait()."""
+    proc = _NeverEofProc()
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: proc)
 
     start = time.monotonic()
-    result = ClaudeCliAdapter(model="haiku").generate("hi")
+    result = ClaudeCliAdapter(model="haiku", timeout=1).generate("hi")
     elapsed = time.monotonic() - start
 
     assert result is None
-    assert elapsed < 2.0, "the timeout path must reap via wait(), not block on a second communicate()"
+    assert elapsed < 3.0, "the deadline path must reap via wait(), never block on pipe EOF"
     assert proc.killed
     assert proc.wait_calls >= 1, "the timeout path must call wait() to reap the killed child"
-    assert proc.communicate_calls == 1, "communicate() must be called exactly once on the timeout path"
+    assert proc.communicate_calls >= 2, "the poll loop must re-poll within the budget"
+    assert all(t is not None and t <= _CANCEL_POLL_INTERVAL for t in proc.timeouts), \
+        "every communicate() must be bounded by at most one poll interval (B-1)"
 
 
 def test_generate_respects_timeout_hint(monkeypatch):
-    """timeout_hint_seconds overrides the constructor timeout for a single call; a call
-    without the hint falls back to the constructor default."""
-    popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
+    """timeout_hint_seconds overrides the constructor timeout for a single call; a call without
+    the hint falls back to the constructor default.
+
+    HIGH-2 (council-pr R3): under the poll loop the hint sets the overall DEADLINE while each
+    communicate() is capped at one poll interval, so the budget is asserted by how long a
+    never-EOF child is polled for — not by a single communicate() timeout argument."""
+    procs = []
+
+    def popen(argv, **kwargs):
+        p = _NeverEofProc()
+        procs.append(p)
+        return p
+
     monkeypatch.setattr(subprocess, "Popen", popen)
-    adapter = ClaudeCliAdapter(model="haiku", timeout=120)
-    adapter.generate("hi", timeout_hint_seconds=180)
-    assert popen.proc.timeout == 180
-    adapter.generate("hi")
-    assert popen.proc.timeout == 120
+    adapter = ClaudeCliAdapter(model="haiku", timeout=3)
+
+    start = time.monotonic()
+    assert adapter.generate("hi", timeout_hint_seconds=1) is None
+    hinted = time.monotonic() - start
+    assert 0.9 <= hinted < 2.5, f"the hint must bound this call, took {hinted:.2f}s"
+
+    start = time.monotonic()
+    assert adapter.generate("hi") is None
+    default = time.monotonic() - start
+    assert default >= 2.8, f"without a hint the constructor budget applies, took {default:.2f}s"
+
+    assert all(t <= _CANCEL_POLL_INTERVAL for p in procs for t in p.timeouts), \
+        "every communicate() is capped at one poll interval regardless of the budget"
 
 
 def test_returns_none_on_bad_json(monkeypatch):
@@ -484,6 +535,46 @@ def test_cancel_set_raises_even_when_child_exits_cleanly(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: _CleanExitOnCancelProc())
     with pytest.raises(LlmCancelledError):
         adapter.generate("hi")
+
+
+def test_cancel_during_poll_loop_raises_within_a_poll_interval(monkeypatch):
+    """HIGH-2 (council-pr R3, Codex): a setsid grandchild escapes the group kill AND keeps our
+    inherited stdout open, so communicate() can never reach EOF. Before the poll loop the whole
+    generate() thread sat there until the provider timeout (60s here) and _stop_and_drain joined
+    on it, damming the entire shutdown. The cancel must now land within ~one poll interval.
+
+    The bound is observed IN-THREAD: no fd is closed from the cancelling thread (that would be
+    undefined behaviour while communicate()'s selector is blocked on it)."""
+    adapter = ClaudeCliAdapter(model="haiku", timeout=60)  # a deliberately long provider budget
+    proc = _NeverEofProc()
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: proc)
+
+    outcome = {}
+
+    def _run():
+        try:
+            adapter.generate("hi")
+        except LlmCancelledError as e:
+            outcome["exc"] = e
+        except Exception as e:  # noqa: BLE001
+            outcome["other"] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    assert _wait_until(lambda: proc.communicate_calls >= 1, timeout=5), \
+        "generate() must reach the poll loop"
+
+    start = time.monotonic()
+    adapter.cancel_active()
+    t.join(timeout=10)
+    elapsed = time.monotonic() - start
+
+    assert not t.is_alive(), "generate() must not wait out the 60s provider budget"
+    assert isinstance(outcome.get("exc"), LlmCancelledError), \
+        f"a cancel must raise LlmCancelledError, never a provider timeout: {outcome}"
+    assert elapsed < 5.0, f"the cancel must land within ~a poll interval, took {elapsed:.2f}s"
+    assert proc.inputs[0] == "hi" and all(i is None for i in proc.inputs[1:]), \
+        "the prompt is handed over exactly once — CPython rejects re-sending it on a retry"
 
 
 def test_cancel_active_noop_when_idle():
@@ -745,6 +836,83 @@ def test_group_sigkill_escalation_reaps_sigterm_ignoring_grandchild(tmp_path, mo
         assert _wait_until(lambda: not _pid_alive(grandchild_pid), timeout=6), \
             "the SIGTERM-ignoring grandchild survived — the group SIGKILL escalation was skipped"
     finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(grandchild_pid, signal.SIGKILL)
+
+
+@pytest.mark.integration
+def test_cancel_is_bounded_even_with_a_detached_setsid_grandchild(tmp_path, monkeypatch):
+    """HIGH-2 (council-pr R3, Codex): the DETACHED-grandchild bound. The grandchild calls
+    setsid(), so it lands in its OWN session/process group and survives our group kill — and it
+    still holds the write end of our inherited stdout, so communicate() can NEVER reach EOF (EOF
+    needs ALL write ends closed, not the leader's death).
+
+    REAL subprocess. RED (single unbounded-until-EOF communicate): the cancel returns but
+    generate() sits until the provider timeout (20s here), and _stop_and_drain joins on it.
+    GREEN (poll loop): generate() abandons the read within ~one poll interval.
+
+    The detached grandchild is NOT reaped (only cgroups/job objects could) — it survives as an
+    orphan whose writes now take EPIPE. That residual is accepted; what matters is that it no
+    longer dams our shutdown."""
+    marker = tmp_path / "marker"
+    marker.mkdir()
+    script = tmp_path / "fake_claude_setsid.sh"
+    # The grandchild detaches with setsid() and holds the inherited stdout for 120s.
+    script.write_text(
+        "#!/bin/sh\n"
+        f"'{sys.executable}' -c "
+        "'import os,time; os.setsid(); time.sleep(120)' &\n"
+        'echo "$!" > "$MARKER_DIR/grandchild.pid"\n'
+        ': > "$MARKER_DIR/started"\n'
+        "wait\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("MARKER_DIR", str(marker))
+
+    adapter = ClaudeCliAdapter(model="haiku", bin_path=str(script), timeout=20)
+    outcome = {}
+
+    def _run():
+        try:
+            adapter.generate("hi")
+        except LlmCancelledError as e:
+            outcome["exc"] = e
+        except Exception as e:  # noqa: BLE001
+            outcome["other"] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    assert _wait_until(lambda: (marker / "started").exists(), timeout=15), \
+        "the fake child never started"
+    grandchild_pid = int((marker / "grandchild.pid").read_text().strip())
+    assert _wait_until(lambda: len(adapter._active_procs) == 1, timeout=5)
+    # Scenario integrity: the detached grandchild must really be alive and holding our stdout,
+    # otherwise this test would pass vacuously on a child that simply exited.
+    assert _pid_alive(grandchild_pid), "the setsid grandchild must be live before the cancel"
+    # Settle so generate() is genuinely INSIDE the communicate() poll loop. Without this the
+    # cancel can land on the earlier post-registration re-check — a correct cancel, but it would
+    # not measure the poll-loop bound this test exists to prove.
+    time.sleep(0.3)
+
+    start = time.monotonic()
+    adapter.cancel_active()
+    t.join(timeout=30)          # generous: in RED we want to MEASURE the provider-timeout wait
+    elapsed = time.monotonic() - start
+
+    try:
+        assert not t.is_alive(), "generate() never returned even after the provider timeout"
+        # The residual, asserted explicitly: the detached grandchild SURVIVES the group kill
+        # (only cgroups/job objects could reap it) — the point is that it no longer dams us.
+        assert _pid_alive(grandchild_pid), \
+            "the setsid grandchild should have escaped the group kill (documented residual)"
+        assert isinstance(outcome.get("exc"), LlmCancelledError), \
+            f"a cancel must raise LlmCancelledError, never a provider timeout: {outcome}"
+        assert elapsed < 5.0, (
+            f"cancel took {elapsed:.2f}s — a detached setsid grandchild must not hold the "
+            f"shutdown until the 20s provider timeout"
+        )
+    finally:
+        # The detached grandchild is an accepted orphan — never leak it out of the test run.
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(grandchild_pid, signal.SIGKILL)
 
