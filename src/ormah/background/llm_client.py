@@ -161,20 +161,36 @@ def cancel_active_llm_calls() -> int:
     """Best-effort cancellation of in-flight LLM calls at shutdown.
 
     Adapters opt in by defining cancel_active(); adapters without it (upstream, non-claude_cli
-    providers) are skipped so the drain there stays bounded only by their own HTTP timeouts."""
+    providers) are skipped so the drain there stays bounded only by their own HTTP timeouts.
+
+    ITEM 2 (council-pr R4, Codex): each adapter is isolated. A raising maintenance adapter used
+    to kill this whole function, so the INGEST adapter was never cancelled — and because the R3
+    HIGH-3 fix suppresses this exception in _stop_and_drain, every turn of the join fence
+    restarted on the same raising adapter and the fence spun without ever cancelling what
+    mattered, waiting out the provider timeout."""
     total = 0
     for name in ("_cached_adapter", "_cached_ingest_adapter"):
         adapter = globals().get(name)  # the ingest cache exists only on the Beta
         cancel = getattr(adapter, "cancel_active", None)
         if callable(cancel):
-            total += cancel()
+            try:
+                total += cancel()
+            except Exception as e:
+                logger.warning("Cancelling in-flight LLM calls on %s failed: %s", name, e)
     return total
 
 
 def resume_llm_adapters() -> None:
     """Re-arm cancelled adapters. Called at lifespan startup and after a recoverable startup
-    rollback — the module-level caches outlive a single lifespan (council R7)."""
+    rollback — the module-level caches outlive a single lifespan (council R7).
+
+    ITEM 2: same per-adapter isolation as ``cancel_active_llm_calls`` — if the first resume()
+    raised, the second never ran and that adapter stayed permanently cancelled (ingest OR
+    maintenance dead until restart)."""
     for name in ("_cached_adapter", "_cached_ingest_adapter"):
         resume = getattr(globals().get(name), "resume", None)
         if callable(resume):
-            resume()
+            try:
+                resume()
+            except Exception as e:
+                logger.warning("Re-arming LLM adapter %s failed: %s", name, e)

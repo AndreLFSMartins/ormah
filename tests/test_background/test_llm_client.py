@@ -27,6 +27,53 @@ def test_ingest_provider_configured_reflects_adapter(monkeypatch):
     reset_adapter()
 
 
+def test_cancel_and_resume_isolate_a_raising_adapter(monkeypatch):
+    """ITEM 2 (council-pr R4, Codex): the loop visits _cached_adapter (maintenance) BEFORE
+    _cached_ingest_adapter with no try per adapter. A consistently raising maintenance adapter
+    killed the function there, so the INGEST adapter was never cancelled. Combined with the R3
+    HIGH-3 fix — which now SUPPRESSES that exception in _stop_and_drain — every turn of the join
+    fence restarted on the same raising adapter, so the fence spun without ever cancelling what
+    mattered and waited out the provider timeout. The suppression we added to keep the fence
+    running had made the fence useless on exactly the degraded path it was meant to tolerate.
+
+    resume_llm_adapters() has the same defect in the twin function: if the first resume() raises,
+    the second never runs and that adapter stays permanently cancelled."""
+
+    class _RaisingAdapter:
+        def cancel_active(self):
+            raise RuntimeError("maintenance adapter blew up on cancel")
+
+        def resume(self):
+            raise RuntimeError("maintenance adapter blew up on resume")
+
+    class _RecordingAdapter:
+        def __init__(self):
+            self.cancelled = 0
+            self.resumed = 0
+
+        def cancel_active(self):
+            self.cancelled += 1
+            return 1
+
+        def resume(self):
+            self.resumed += 1
+
+    ingest = _RecordingAdapter()
+    monkeypatch.setattr(llm_client, "_cached_adapter", _RaisingAdapter())
+    monkeypatch.setattr(llm_client, "_adapter_initialised", True)
+    monkeypatch.setattr(llm_client, "_cached_ingest_adapter", ingest)
+    monkeypatch.setattr(llm_client, "_ingest_adapter_initialised", True)
+
+    total = llm_client.cancel_active_llm_calls()
+    assert ingest.cancelled == 1, \
+        "a raising maintenance adapter must not stop the INGEST adapter from being cancelled"
+    assert total == 1, "the surviving adapter's count is still reported"
+
+    llm_client.resume_llm_adapters()
+    assert ingest.resumed == 1, \
+        "a raising maintenance resume must not leave the INGEST adapter permanently cancelled"
+
+
 def _concurrent_first_use(factory, cache_name, monkeypatch):
     """Drive two threads into ``factory`` on FIRST use simultaneously and return
     (call_count, result_a, result_b, cached). A Barrier holds both inside the patched
