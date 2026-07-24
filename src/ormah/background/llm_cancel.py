@@ -66,12 +66,16 @@ def begin_lifespan() -> int:
     exercises consecutive lifespans in-process), so a final cancel that only ``resume()``
     could clear would leave the SECOND lifespan raising LlmCancelledError on every call for
     the life of the process.
+
+    Also resets ``_in_flight`` to 0 — a full reset, not just the cancel/final fields, so the
+    autouse test fixture that calls this leaves no in-flight count leaked across tests.
     """
-    global _epoch, _cancelled, _final
+    global _epoch, _cancelled, _final, _in_flight
     with _lock:
         _epoch += 1
         _cancelled = False
         _final = False
+        _in_flight = 0
         return _epoch
 
 

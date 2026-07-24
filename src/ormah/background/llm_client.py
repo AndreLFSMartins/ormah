@@ -66,10 +66,13 @@ _ingest_adapter_initialised: bool = False
 # HIGH-1 (council-pr, Codex): serialise lazy init + cache access. Without this, two drain
 # threads on distinct acceptance roots (the Beta has ~/.claude/projects + ~/.codex/sessions)
 # can both enter a factory on first use, both call get_adapter(...), and the second assignment
-# overwrites the cache. The first thread keeps running generate() on its now-uncached adapter,
-# which cancel_active_llm_calls() (it only visits the cached globals) can never reach — so that
-# displaced in-flight call is never cancelled and shutdown waits its full provider timeout.
-# Holding the lock across check+construct+assign guarantees at most one adapter per cache.
+# overwrites the cache — the first thread's now-uncached adapter is simply leaked (never
+# reused, GC'd once its call returns). ADR-0004 slice 2 made cancellation a global epoch
+# (see llm_cancel.py) that every adapter's generate() reads at call time, cached or not, so a
+# displaced adapter's in-flight call IS still reached by a shutdown cancel — that is no longer
+# what this lock buys. What it still buys: holding the lock across check+construct+assign
+# guarantees at most one adapter is ever constructed per cache, so a duplicate is never built
+# (and its process/connection never spun up) just to be thrown away.
 _adapter_lock = threading.Lock()
 
 

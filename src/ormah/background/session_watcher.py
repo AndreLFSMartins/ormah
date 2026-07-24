@@ -1567,10 +1567,11 @@ def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None
     shutdown must NEVER rearm — the DB is about to close.
     """
     # HIGH-2 refine (council-pr R2, Codex): the ENTIRE drain body runs inside the try, so a raise
-    # ANYWHERE in it (most directly an adapter's cancel_active() raising AFTER it set its cancel
-    # flag) still rearms on the rollback path instead of leaving adapters permanently cancelled
-    # while main.lifespan keeps serving. The raise is NOT swallowed — it propagates after the
-    # finally runs (the rollback re-raises by design); we only guarantee rearm happened first.
+    # ANYWHERE in it (most directly an adapter's own poll loop raising LlmCancelledError after
+    # noticing the global llm_cancel epoch changed) still rearms on the rollback path instead of
+    # leaving adapters permanently cancelled while main.lifespan keeps serving. The raise is NOT
+    # swallowed — it propagates after the finally runs (the rollback re-raises by design); we
+    # only guarantee rearm happened first.
     try:
         for w in watches:
             w.handler._stop_event.set()  # no NEW job starts (_run_job's stop-check refuses)

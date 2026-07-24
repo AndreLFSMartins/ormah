@@ -316,7 +316,9 @@ class ClaudeCliAdapter(LLMAdapter):
                     logger.warning("claude -p failed to run: %s", e)
                     return None
         if (proc.returncode or 0) < 0 or llm_cancel.epoch_changed(gen):
-            # Killed by cancel_active (negative = signal): cancelled, NOT slice evidence.
+            # Killed by this call's own poll loop noticing the cancellation epoch changed
+            # (negative returncode = signal) OR that same epoch check firing directly below:
+            # cancelled, NOT slice evidence.
             # HIGH-1 (council-pr R3, Codex) DATA INTEGRITY: the cancel ALONE is decisive — never
             # `and returncode != 0`. A child that HANDLES SIGTERM and exits 0 inside the 5s kill
             # fence emits partial/buffered JSON; accepting it as success made the engine ADVANCE

@@ -499,9 +499,13 @@ async def test_a_second_lifespan_can_still_run_llm_calls(tmp_path, monkeypatch):
                 ingest_llm_provider = None
                 ingest_llm_model = None
 
-            assert llm_client.llm_generate(_S(), "prompt") == "ok", (
-                "the second lifespan must be able to run an LLM call to completion"
-            )
+            try:
+                assert llm_client.llm_generate(_S(), "prompt") == "ok", (
+                    "the second lifespan must be able to run an LLM call to completion"
+                )
+            finally:
+                # Do not leak the fake adapter into the module-global cache for later tests.
+                llm_client.reset_adapter()
 
 
 @pytest.mark.asyncio
