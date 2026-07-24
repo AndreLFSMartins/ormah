@@ -3288,33 +3288,136 @@ def test_startup_rollback_rearms_even_when_observer_join_raises(engine, tmp_path
 
 
 def test_stop_and_drain_rearms_even_when_cancel_raises(monkeypatch):
-    """HIGH-2 refine (council-pr R2, Codex): the ENTIRE drain body — not just observer cleanup —
-    must sit inside the try/finally. If cancel_active_llm_calls() raises (most directly an
-    adapter's cancel_active() blowing up AFTER it set its cancel flag), the rollback path
-    (rearm=True) must STILL run resume_llm_adapters() before the exception propagates — otherwise
-    main.lifespan keeps serving with adapters permanently cancelled (ingest AND maintenance dead
-    until restart). A normal shutdown (rearm=False) must NEVER rearm, even on the same raise."""
+    """HIGH-2 refine (council-pr R2) + HIGH-3 (R3): the ENTIRE drain body — not just observer
+    cleanup — sits inside the try/finally, so ANY raise in it still rearms on the rollback path.
+
+    R3 narrowed this further: a raising ``cancel_active_llm_calls()`` is now SUPPRESSED (it is
+    best-effort; the join fence after it is load-bearing), so it no longer propagates at all.
+    The rearm-in-finally guarantee is therefore proven here with a raise from a LOAD-BEARING
+    step (``handler.wake()``), which must still propagate — after the rearm has run."""
     import ormah.background.session_watcher as sw
+    from ormah.background.session_watcher import SessionWatch
 
     def _raising_cancel():
         raise RuntimeError("cancel_active blew up after setting the cancel flag")
 
     monkeypatch.setattr(sw, "cancel_active_llm_calls", _raising_cancel)
 
-    # Rollback path: the raise must not skip the rearm.
+    # R3: a best-effort cancel failure is suppressed — it must NOT propagate, and the rollback
+    # path still rearms.
     resumed_rollback = []
     monkeypatch.setattr(sw, "resume_llm_adapters", lambda: resumed_rollback.append(True))
-    with pytest.raises(RuntimeError):
-        sw._stop_and_drain([], rearm=True)  # empty watches -> reaches the first cancel call
+    sw._stop_and_drain([], rearm=True)  # empty watches -> reaches the first cancel call
     assert resumed_rollback == [True], \
         "rearm must run in finally even when cancel_active_llm_calls raised (HIGH-2)"
 
-    # Normal shutdown: same raise, but rearm=False must NEVER resume.
+    # A LOAD-BEARING step raising still propagates — but only AFTER the finally rearmed.
+    class _WakeRaisingHandler:
+        def __init__(self):
+            self._stop_event = threading.Event()
+
+        def cancel_pending_timers(self):
+            pass
+
+        def wake(self):
+            raise RuntimeError("wake blew up")
+
+        def drain_alive(self):
+            return False
+
+        def join_drain(self, timeout=None):
+            pass
+
+        def in_flight_count(self):
+            return 0
+
+    watch = SessionWatch(watch_dir=Path("/tmp/high2"), handler=_WakeRaisingHandler(),
+                         observer=None, spool=None, discover=False)
+    resumed_loadbearing = []
+    monkeypatch.setattr(sw, "resume_llm_adapters", lambda: resumed_loadbearing.append(True))
+    with pytest.raises(RuntimeError):
+        sw._stop_and_drain([watch], rearm=True)
+    assert resumed_loadbearing == [True], \
+        "rearm must run in finally even when a load-bearing step raised (HIGH-2)"
+
+    # Normal shutdown: same load-bearing raise, but rearm=False must NEVER resume.
+    watch_normal = SessionWatch(watch_dir=Path("/tmp/high2b"), handler=_WakeRaisingHandler(),
+                                observer=None, spool=None, discover=False)
     resumed_normal = []
     monkeypatch.setattr(sw, "resume_llm_adapters", lambda: resumed_normal.append(True))
     with pytest.raises(RuntimeError):
-        sw._stop_and_drain([], rearm=False)
-    assert resumed_normal == [], "a normal shutdown must never rearm, even if cancel raised"
+        sw._stop_and_drain([watch_normal], rearm=False)
+    assert resumed_normal == [], "a normal shutdown must never rearm, even if a step raised"
+
+
+def test_stop_and_drain_join_fence_survives_a_raising_cancel(monkeypatch):
+    """HIGH-3 (council-pr R3, Codex) USE-AFTER-CLOSE. The R2 test used an EMPTY watch list, so
+    the `while any(drain_alive())` fence was trivially skipped and this bug hid behind it.
+
+    cancel_active_llm_calls() sits in the try body; if it raises, control jumps to the finally —
+    the rearm runs, but the ENTIRE join fence (join_drain, _drain_handlers, observer.join) is
+    SKIPPED. An un-joined orphan drain thread then outlives the rollback and can touch the DB
+    after engine.shutdown() closes it (#52) — exactly what the fence exists to prevent.
+
+    The cancel calls are BEST-EFFORT; the join fence is LOAD-BEARING and must always run."""
+    import ormah.background.session_watcher as sw
+    from ormah.background.session_watcher import SessionWatch
+
+    class _FakeHandler:
+        def __init__(self):
+            self._stop_event = threading.Event()
+            self.join_drain_calls = 0
+            self.wake_calls = 0
+            self._alive = True
+
+        def cancel_pending_timers(self):
+            pass
+
+        def wake(self):
+            self.wake_calls += 1
+
+        def drain_alive(self):
+            return self._alive
+
+        def join_drain(self, timeout=None):
+            self.join_drain_calls += 1
+            self._alive = False  # the drain thread exits once actually joined
+
+        def in_flight_count(self):
+            return 0
+
+    class _RecordingObserver:
+        def __init__(self):
+            self.stopped = False
+            self.joined = False
+
+        def stop(self):
+            self.stopped = True
+
+        def join(self, timeout=None):
+            self.joined = True
+
+    handler = _FakeHandler()
+    observer = _RecordingObserver()
+    watch = SessionWatch(watch_dir=Path("/tmp/high3"), handler=handler, observer=observer,
+                         spool=None, discover=False)
+
+    def _raising_cancel():
+        raise RuntimeError("cancel_active blew up after setting the cancel flag")
+
+    monkeypatch.setattr(sw, "cancel_active_llm_calls", _raising_cancel)
+    resumed = []
+    monkeypatch.setattr(sw, "resume_llm_adapters", lambda: resumed.append(True))
+
+    # (c) a best-effort cancel failing must NOT escape over the fence
+    sw._stop_and_drain([watch], rearm=True)
+
+    # (a) the LOAD-BEARING join fence really ran despite the raising cancel
+    assert handler.join_drain_calls >= 1, \
+        "join_drain never ran — a raising cancel skipped the load-bearing join fence (#52)"
+    assert observer.joined, "observer.join never ran — the join fence was skipped"
+    # (b) the rollback path still re-armed the adapters
+    assert resumed == [True], "the rollback path must still rearm"
 
 
 def test_start_session_watcher_recovers_backlog_off_bind(engine, tmp_path):

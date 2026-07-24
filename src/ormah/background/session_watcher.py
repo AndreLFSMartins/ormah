@@ -1544,6 +1544,13 @@ def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None
     in time for the NEXT iteration's cancel, so shutdown is bounded by construction, not by a
     fixed number of passes.
 
+    HIGH-3 (council-pr R3, Codex): ``cancel_active_llm_calls()`` is BEST-EFFORT and suppressed —
+    the join fence after it is LOAD-BEARING and must never be skipped by a cancel failure (an
+    un-joined orphan drain thread can touch the DB after ``engine.shutdown()``, #52). Accepted
+    consequence: if cancellation fails systematically the drain stops being bounded by the cancel
+    and is bounded only by the provider timeout again — strictly no worse than the pre-slice
+    baseline, and the fence still runs.
+
     HIGH-A (council R1, Cursor): only the ROLLBACK caller passes ``rearm=True`` — the process
     keeps serving after a caught startup failure (``main.lifespan``), so leaving the adapters
     cancelled would poison every later maintenance/ingest LLM call until restart. A normal
@@ -1567,12 +1574,22 @@ def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None
                     w.observer.stop()
             w.handler.cancel_pending_timers()
             w.handler.wake()  # unblock the drain's idle wait so it exits promptly
-        cancelled = cancel_active_llm_calls()
-        if cancelled:
-            logger.info("Cancelled %d in-flight LLM call(s) for shutdown", cancelled)
+        # HIGH-3 (council-pr R3, Codex): the cancel calls are BEST-EFFORT; the join fence below
+        # is LOAD-BEARING. A raising cancel used to jump straight to the finally, skipping the
+        # whole fence (join_drain / _drain_handlers / observer.join) and leaving an un-joined
+        # orphan drain thread that can touch the DB after engine.shutdown() closes it (#52).
+        try:
+            cancelled = cancel_active_llm_calls()
+            if cancelled:
+                logger.info("Cancelled %d in-flight LLM call(s) for shutdown", cancelled)
+        except Exception as e:
+            logger.debug("Cancelling in-flight LLM calls for shutdown failed: %s", e)
         while any(w.handler.drain_alive() for w in watches):
-            cancel_active_llm_calls()  # global (module-level adapter caches) -> also kills a
-            for w in watches:          # late-built adapter's fresh Popen on the NEXT iteration
+            try:
+                cancel_active_llm_calls()  # global (module-level adapter caches) -> also kills a
+            except Exception as e:         # late-built adapter's fresh Popen on the NEXT iteration
+                logger.debug("Cancelling in-flight LLM calls for shutdown failed: %s", e)
+            for w in watches:
                 w.handler.join_drain(timeout=0.2)
         _drain_handlers([w.handler for w in watches])  # in_flight_count()==0 -> returns at once
         for w in watches:
