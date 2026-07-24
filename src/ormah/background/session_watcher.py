@@ -1549,40 +1549,44 @@ def _stop_and_drain(watches: list[SessionWatch], *, rearm: bool = False) -> None
     cancelled would poison every later maintenance/ingest LLM call until restart. A normal
     shutdown must NEVER rearm — the DB is about to close.
     """
-    for w in watches:
-        w.handler._stop_event.set()  # no NEW job starts (_run_job's stop-check refuses)
-    for w in watches:
-        if w.observer is not None:
-            # HIGH-3 (council-pr, Codex): individually exception-safe. A provisional Observer
-            # whose start() raised (HIGH-B assigns watch.observer BEFORE start()) is a
-            # never-started thread; its stop()/join() can raise RuntimeError. One bad observer
-            # must not abort the sequence before the rearm below.
-            with contextlib.suppress(Exception):
-                w.observer.stop()
-        w.handler.cancel_pending_timers()
-        w.handler.wake()  # unblock the drain's idle wait so it exits promptly
-    cancelled = cancel_active_llm_calls()
-    if cancelled:
-        logger.info("Cancelled %d in-flight LLM call(s) for shutdown", cancelled)
-    while any(w.handler.drain_alive() for w in watches):
-        cancel_active_llm_calls()  # global (module-level adapter caches) -> also kills a
-        for w in watches:          # late-built adapter's fresh Popen on the NEXT iteration
-            w.handler.join_drain(timeout=0.2)
-    _drain_handlers([w.handler for w in watches])  # in_flight_count()==0 by now -> returns at once
+    # HIGH-2 refine (council-pr R2, Codex): the ENTIRE drain body runs inside the try, so a raise
+    # ANYWHERE in it (most directly an adapter's cancel_active() raising AFTER it set its cancel
+    # flag) still rearms on the rollback path instead of leaving adapters permanently cancelled
+    # while main.lifespan keeps serving. The raise is NOT swallowed — it propagates after the
+    # finally runs (the rollback re-raises by design); we only guarantee rearm happened first.
     try:
         for w in watches:
+            w.handler._stop_event.set()  # no NEW job starts (_run_job's stop-check refuses)
+        for w in watches:
             if w.observer is not None:
-                # HIGH-3: a never-started Observer thread (its start() raised during a startup
-                # rollback) raises RuntimeError("cannot join thread before it is started"). Per
-                # observer suppress/log so it can't escape and skip the rearm below.
+                # HIGH-3: individually exception-safe. A provisional Observer whose start()
+                # raised (HIGH-B assigns watch.observer BEFORE start()) is a never-started
+                # thread; its stop()/join() can raise RuntimeError. One bad observer must not
+                # abort the sequence before the rearm below.
+                with contextlib.suppress(Exception):
+                    w.observer.stop()
+            w.handler.cancel_pending_timers()
+            w.handler.wake()  # unblock the drain's idle wait so it exits promptly
+        cancelled = cancel_active_llm_calls()
+        if cancelled:
+            logger.info("Cancelled %d in-flight LLM call(s) for shutdown", cancelled)
+        while any(w.handler.drain_alive() for w in watches):
+            cancel_active_llm_calls()  # global (module-level adapter caches) -> also kills a
+            for w in watches:          # late-built adapter's fresh Popen on the NEXT iteration
+                w.handler.join_drain(timeout=0.2)
+        _drain_handlers([w.handler for w in watches])  # in_flight_count()==0 -> returns at once
+        for w in watches:
+            if w.observer is not None:
+                # HIGH-3: a never-started Observer thread raises RuntimeError("cannot join
+                # thread before it is started"). Per-observer suppress/log so it can't escape.
                 try:
                     w.observer.join(timeout=5)
                 except Exception as e:
                     logger.debug("Observer join during shutdown failed: %s", e)
     finally:
-        # HIGH-3: rearm must ALWAYS run on the rollback path (rearm=True), even if an observer
-        # cleanup above raised — otherwise main.lifespan keeps serving with adapters permanently
-        # cancelled (ingest AND maintenance dead until restart). A normal shutdown never rearms.
+        # HIGH-3/HIGH-2: rearm must ALWAYS run on the rollback path (rearm=True), whatever raised
+        # above — otherwise main.lifespan keeps serving with adapters permanently cancelled
+        # (ingest AND maintenance dead until restart). A normal shutdown NEVER rearms.
         if rearm:
             resume_llm_adapters()
 

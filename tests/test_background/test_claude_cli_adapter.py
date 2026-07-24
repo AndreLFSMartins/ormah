@@ -540,7 +540,7 @@ def test_cancel_between_creation_and_registration(monkeypatch):
     t.start()
 
     entered.wait(timeout=5)                    # Popen() has been entered
-    assert adapter._active_procs == set(), "must not be registered before Popen() returns"
+    assert not adapter._active_procs, "must not be registered before Popen() returns"
     cancelled = adapter.cancel_active()          # sees an EMPTY set -> returns 0
     assert cancelled == 0
     release.set()                                # let Popen() return; generate() re-checks
@@ -634,6 +634,71 @@ def test_cancel_kills_whole_process_group_not_just_parent(tmp_path, monkeypatch)
             "the grandchild survived — the whole process group was not killed"
     finally:
         # Never leak the 60s sleeper if an assertion above failed (the RED path).
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(grandchild_pid, signal.SIGKILL)
+
+
+@pytest.mark.integration
+def test_group_sigkill_escalation_reaps_sigterm_ignoring_grandchild(tmp_path, monkeypatch):
+    """HIGH-1 refine (council-pr R2, Codex): the exact edge the poll()-gated per-PID escalation
+    missed. The DIRECT child (group leader) exits on SIGTERM, but an in-group grandchild TRAPS
+    and IGNORES SIGTERM while holding our stdout open. The SIGKILL escalation must (a) target the
+    GROUP via the pgid CAPTURED AT SPAWN (a pgid re-derived from the now-dead leader raises
+    ProcessLookupError), and (b) fire UNCONDITIONALLY, not gated on the dead leader's poll().
+    Otherwise the grandchild leaks and communicate()/the drain hang to the full timeout.
+
+    REAL subprocess. RED against the pre-refine code (poll-gated + lazily-derived pgid):
+    generate() does NOT return within 15s and the grandchild survives the cancel."""
+    marker = tmp_path / "marker"
+    marker.mkdir()
+    script = tmp_path / "fake_claude_trap.sh"
+    # Grandchild: a shell that ignores SIGTERM (trap "" TERM) and holds stdout open via a busy
+    # loop. Parent: no trap -> dies on the group SIGTERM (the "leader exits first" case).
+    script.write_text(
+        "#!/bin/sh\n"
+        "sh -c 'trap \"\" TERM; while :; do sleep 1; done' &\n"
+        'echo "$!" > "$MARKER_DIR/grandchild.pid"\n'
+        ': > "$MARKER_DIR/started"\n'
+        "wait\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("MARKER_DIR", str(marker))
+
+    adapter = ClaudeCliAdapter(model="haiku", bin_path=str(script), timeout=120)
+    outcome = {}
+
+    def _run():
+        try:
+            adapter.generate("hi")
+        except LlmCancelledError as e:
+            outcome["exc"] = e
+        except Exception as e:  # noqa: BLE001
+            outcome["other"] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    assert _wait_until(lambda: (marker / "started").exists(), timeout=10), \
+        "the fake child never started"
+    grandchild_pid = int((marker / "grandchild.pid").read_text().strip())
+    assert _pid_alive(grandchild_pid), "grandchild must be live before the cancel"
+    assert _wait_until(lambda: len(adapter._active_procs) == 1, timeout=5), \
+        "the child must be registered before cancel_active() can see it"
+
+    start = time.monotonic()
+    cancelled = adapter.cancel_active()
+    t.join(timeout=15)
+    elapsed = time.monotonic() - start
+
+    try:
+        assert not t.is_alive(), \
+            "generate() did not return within 15s — the SIGTERM-ignoring grandchild was not reaped"
+        assert elapsed < 15.0
+        assert cancelled == 1
+        assert isinstance(outcome.get("exc"), LlmCancelledError), \
+            f"cancel must raise LlmCancelledError, got {outcome}"
+        assert _wait_until(lambda: not _pid_alive(grandchild_pid), timeout=6), \
+            "the SIGTERM-ignoring grandchild survived — the group SIGKILL escalation was skipped"
+    finally:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(grandchild_pid, signal.SIGKILL)
 

@@ -3287,6 +3287,36 @@ def test_startup_rollback_rearms_even_when_observer_join_raises(engine, tmp_path
     assert llm_client.llm_generate(engine.settings, "prompt") == "ok"
 
 
+def test_stop_and_drain_rearms_even_when_cancel_raises(monkeypatch):
+    """HIGH-2 refine (council-pr R2, Codex): the ENTIRE drain body — not just observer cleanup —
+    must sit inside the try/finally. If cancel_active_llm_calls() raises (most directly an
+    adapter's cancel_active() blowing up AFTER it set its cancel flag), the rollback path
+    (rearm=True) must STILL run resume_llm_adapters() before the exception propagates — otherwise
+    main.lifespan keeps serving with adapters permanently cancelled (ingest AND maintenance dead
+    until restart). A normal shutdown (rearm=False) must NEVER rearm, even on the same raise."""
+    import ormah.background.session_watcher as sw
+
+    def _raising_cancel():
+        raise RuntimeError("cancel_active blew up after setting the cancel flag")
+
+    monkeypatch.setattr(sw, "cancel_active_llm_calls", _raising_cancel)
+
+    # Rollback path: the raise must not skip the rearm.
+    resumed_rollback = []
+    monkeypatch.setattr(sw, "resume_llm_adapters", lambda: resumed_rollback.append(True))
+    with pytest.raises(RuntimeError):
+        sw._stop_and_drain([], rearm=True)  # empty watches -> reaches the first cancel call
+    assert resumed_rollback == [True], \
+        "rearm must run in finally even when cancel_active_llm_calls raised (HIGH-2)"
+
+    # Normal shutdown: same raise, but rearm=False must NEVER resume.
+    resumed_normal = []
+    monkeypatch.setattr(sw, "resume_llm_adapters", lambda: resumed_normal.append(True))
+    with pytest.raises(RuntimeError):
+        sw._stop_and_drain([], rearm=False)
+    assert resumed_normal == [], "a normal shutdown must never rearm, even if cancel raised"
+
+
 def test_start_session_watcher_recovers_backlog_off_bind(engine, tmp_path):
     """start_session_watcher makes the Observer live immediately (no synchronous scan blocks the
     bind) and the pre-existing backlog is recovered off-bind via the startup discovery sweep +

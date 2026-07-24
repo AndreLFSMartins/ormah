@@ -83,27 +83,47 @@ def _cleanup_persisted_stub(session_id: str) -> None:
         pass
 
 
-def _signal_group(proc, sig: int) -> bool:
-    """HIGH-2 (council-pr, Codex): signal the child's WHOLE process group.
+def _capture_pgid(proc):
+    """Snapshot the child's process-group id AT SPAWN, while the leader is guaranteed alive.
+
+    HIGH-1 refine (council-pr R2, Codex): the pgid MUST be captured once, up front, and stored —
+    never re-derived from the pid on a later kill pass. ``claude -p`` is launched with
+    ``start_new_session=True`` so the child is its own session/group leader (``pgid == pid``);
+    once it exits, ``os.getpgid(pid)`` raises ProcessLookupError, so a lazily-derived pgid would
+    vanish exactly when a surviving in-group grandchild still needs the escalation SIGKILL.
+
+    Returns an ``int`` pgid for a real child, or ``None`` for a fake without a real ``pid`` (unit
+    tests) so callers fall back to the per-PID ``terminate()``/``kill()`` shape.
+    """
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int):
+        return None
+    try:
+        return os.getpgid(pid)  # leader alive here -> == pid; robust if it ever differs
+    except OSError:
+        return pid
+
+
+def _signal_group(pgid, sig: int) -> bool:
+    """HIGH-2/HIGH-1 (council-pr, Codex): signal a child's WHOLE process group by its STORED pgid.
 
     ``claude -p`` forks grandchildren (this machine's ``~/.claude.json`` has user-scoped MCP
     servers and we pass no ``--strict-mcp-config``); those inherit the child's stdout/stderr.
     Killing only the tracked direct PID leaves a grandchild holding the pipe open, so
-    ``communicate()`` never sees EOF and the shutdown drain waits the full provider timeout. The
-    child is launched with ``start_new_session=True`` (own session/process group), so signalling
-    the group reaches every descendant.
+    ``communicate()`` never sees EOF and the shutdown drain waits the full provider timeout.
+    The pgid is captured at spawn (see ``_capture_pgid``) so it survives the leader's death and
+    still reaches a grandchild that ignored SIGTERM after the leader exited.
 
     Returns True when the group signal was delivered; False when the group is unavailable — a
-    fake without a real ``pid`` (unit tests), or a group that is already gone — so callers fall
-    back to the per-PID ``terminate()``/``kill()`` shape. Both ``os.getpgid`` and ``os.killpg``
-    are suppressed on ``ProcessLookupError``/``PermissionError`` (the group may already be dead).
+    ``None`` pgid (a fake without a real pid, unit tests), or a group already fully gone — so
+    callers fall back to the per-PID ``terminate()``/``kill()`` shape. ``os.killpg`` is
+    suppressed on ``ProcessLookupError``/``PermissionError`` (the group may already be dead).
+
+    RESIDUAL (accepted, tracked in the ADR): a grandchild that calls ``setsid()`` and daemonizes
+    into its OWN session/process group escapes the group signal entirely — no signal-based
+    approach can reap it (that needs cgroups on Linux / job objects on Windows). Out of scope.
     """
-    pid = getattr(proc, "pid", None)
-    if not isinstance(pid, int):
-        return False
-    try:
-        pgid = os.getpgid(pid)
-    except (ProcessLookupError, PermissionError, OSError):
+    if not isinstance(pgid, int):
         return False
     try:
         os.killpg(pgid, sig)
@@ -112,16 +132,16 @@ def _signal_group(proc, sig: int) -> bool:
         return False
 
 
-def _terminate_proc(proc) -> None:
-    """SIGTERM the child's process group; fall back to the per-PID terminate() shape."""
-    if not _signal_group(proc, signal.SIGTERM):
+def _terminate_group_or_proc(proc, pgid) -> None:
+    """SIGTERM the child's process group (stored pgid); fall back to per-PID terminate()."""
+    if not _signal_group(pgid, signal.SIGTERM):
         with contextlib.suppress(Exception):
             proc.terminate()
 
 
-def _kill_proc(proc) -> None:
-    """SIGKILL the child's process group; fall back to the per-PID kill() shape."""
-    if not _signal_group(proc, signal.SIGKILL):
+def _kill_group_or_proc(proc, pgid) -> None:
+    """SIGKILL the child's process group (stored pgid); fall back to per-PID kill()."""
+    if not _signal_group(pgid, signal.SIGKILL):
         with contextlib.suppress(Exception):
             proc.kill()
 
@@ -152,7 +172,9 @@ class ClaudeCliAdapter(LLMAdapter):
         # failure and keeps serving; nothing calls reset_adapter() on startup), poisoning every
         # later ingest/maintenance call for the life of the process.
         self._cancel_event = threading.Event()
-        self._active_procs: set = set()
+        # HIGH-1 refine: map each in-flight proc to its pgid CAPTURED AT SPAWN, so the escalation
+        # SIGKILL can target the group even after the leader dies (a re-derived pgid would be gone).
+        self._active_procs: dict = {}
         self._active_lock = threading.Lock()
 
     def cancel_active(self) -> int:
@@ -169,17 +191,21 @@ class ClaudeCliAdapter(LLMAdapter):
 
     def _cancel_tracked_procs(self) -> int:
         with self._active_lock:
-            procs = list(self._active_procs)
-        for p in procs:
-            _terminate_proc(p)  # SIGTERM the whole group so no grandchild holds the pipe open
+            items = list(self._active_procs.items())  # (proc, pgid) snapshot
+        for p, pgid in items:
+            _terminate_group_or_proc(p, pgid)  # SIGTERM the whole group (no grandchild holds stdout)
         deadline = time.monotonic() + 5.0
-        for p in procs:
+        for p, _pgid in items:
             with contextlib.suppress(Exception):
                 p.wait(timeout=max(0.1, deadline - time.monotonic()))
-        for p in procs:
-            if p.poll() is None:
-                _kill_proc(p)  # group SIGKILL for anything that ignored SIGTERM
-        return len(procs)
+        # HIGH-1 refine (council-pr R2): escalate the group SIGKILL using the STORED pgid,
+        # UNCONDITIONALLY — never gated on the direct child's poll(). If the leader already
+        # exited on SIGTERM but an in-group grandchild ignored it (or still holds our stdout),
+        # the group SIGKILL must still reap it; re-deriving the pgid from the dead leader would
+        # raise ProcessLookupError and skip the kill, leaking the descendant and hanging the drain.
+        for p, pgid in items:
+            _kill_group_or_proc(p, pgid)
+        return len(items)
 
     def generate(
         self,
@@ -230,8 +256,9 @@ class ClaudeCliAdapter(LLMAdapter):
             except Exception as e:  # binary missing, OSError, etc. -> FAST failure -> None,
                 logger.warning("claude -p failed to start: %s", e)  # never slice-specific
                 return None
+            pgid = _capture_pgid(proc)  # snapshot NOW, while the group leader is alive (HIGH-1)
             with self._active_lock:
-                self._active_procs.add(proc)
+                self._active_procs[proc] = pgid
             if self._cancel_event.is_set():
                 # Closes the creation/registration race: if cancel_active() snapshotted the
                 # process set between our event check and the add() above, its kill pass never
@@ -241,11 +268,11 @@ class ClaudeCliAdapter(LLMAdapter):
                 # means a raising kill() (already-dead race) skips the reap entirely, leaking
                 # the pipe fds on that path. wait() (not communicate()) matches base's
                 # subprocess.run reap-only semantics: no pipe-EOF wait, just a status collect.
-                _kill_proc(proc)  # group SIGKILL — reach any grandchild too (HIGH-2)
+                _kill_group_or_proc(proc, pgid)  # group SIGKILL — reach any grandchild too (HIGH-2)
                 with contextlib.suppress(Exception):
                     proc.wait()
                 with self._active_lock:
-                    self._active_procs.discard(proc)
+                    self._active_procs.pop(proc, None)
                 raise LlmCancelledError("llm call aborted: shutdown in progress")
             # B-2: `with proc:` restores the base `subprocess.run` contract (it runs inside
             # `with Popen(...) as process:`) — __exit__ closes stdin/stdout/stderr and reaps via
@@ -263,7 +290,7 @@ class ClaudeCliAdapter(LLMAdapter):
                     # stdout/stderr, that can never arrive and the drain thread hangs forever —
                     # exactly the unbounded wait this slice exists to remove. wait() only waits
                     # for the process itself to exit, which kill() already guarantees promptly.
-                    _kill_proc(proc)  # group SIGKILL, then reap the direct child (HIGH-2)
+                    _kill_group_or_proc(proc, pgid)  # group SIGKILL, then reap the direct child
                     proc.wait()
                     if self._cancel_event.is_set():
                         # A shutdown kill can surface as TimeoutExpired. It must NOT be reported
@@ -275,13 +302,13 @@ class ClaudeCliAdapter(LLMAdapter):
                 except Exception as e:  # I/O failure mid-flight — fast failure
                     # B-2: base's subprocess.run does `except: process.kill(); raise` here —
                     # kill before the child is orphaned. HIGH-2: group SIGKILL (an already-dead
-                    # process is tolerated inside _kill_proc / _signal_group).
-                    _kill_proc(proc)
+                    # process is tolerated inside _kill_group_or_proc / _signal_group).
+                    _kill_group_or_proc(proc, pgid)
                     logger.warning("claude -p failed to run: %s", e)
                     return None
                 finally:
                     with self._active_lock:
-                        self._active_procs.discard(proc)
+                        self._active_procs.pop(proc, None)
         if (proc.returncode or 0) < 0 or (self._cancel_event.is_set() and proc.returncode != 0):
             # killed by cancel_active (negative = signal): cancelled, NOT slice evidence.
             # F-4: `or 0` guards a (currently unreachable with a real Popen) None returncode —
