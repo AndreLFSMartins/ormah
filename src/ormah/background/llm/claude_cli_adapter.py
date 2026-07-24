@@ -210,13 +210,47 @@ class ClaudeCliAdapter(LLMAdapter):
 
         Clears the event ONLY — the generation is never rolled back. That asymmetry is the whole
         point: NEW calls are allowed again, while calls already in flight keep observing the
-        cancel that hit them (ITEM 1)."""
-        self._cancel_event.clear()
+        cancel that hit them (ITEM 1). Serialised on ``_cancel_lock`` (R5) so the pair
+        (generation, event) is only ever mutated inside a critical section.
+        """
+        with self._cancel_lock:
+            self._cancel_event.clear()
+
+    # --- cancel-state reads: ALL of them locked (council-pr R5) ---------------------------------
+    # R5 root cause: the cancel state was WRITTEN atomically but READ non-atomically. Three rounds
+    # of the same data-integrity bug came through that gap (R3: returncode masked the cancel; R4: a
+    # resume() erased the flag; R5: the window between `generation += 1` and `Event.set()` let a
+    # call capture the NEW generation while still seeing a CLEAR event, so the final gate compared
+    # equal and accepted a cancelled child's partial JSON). Every read below therefore takes
+    # ``_cancel_lock``, so no intermediate state is ever observable. These helpers never nest
+    # ``_active_lock`` (and ``cancel_active`` releases ``_cancel_lock`` before touching it), so
+    # there is no lock-ordering hazard.
+
+    def _capture_era(self) -> tuple[int, bool]:
+        """ATOMICALLY capture this call's cancel generation AND whether we are shutting down NOW.
+
+        Both values come from ONE critical section: read separately, a call could observe the torn
+        intermediate "new generation + clear event" and then both adopt the post-cancel era AND
+        conclude it was not being cancelled — escaping the cancel entirely."""
+        with self._cancel_lock:
+            return self._cancel_generation, self._cancel_event.is_set()
 
     def _cancelled_since(self, gen: int) -> bool:
-        """True when a cancel landed after a call captured ``gen`` — i.e. THIS call was
-        cancelled. Immune to a later resume(), unlike reading the live event."""
-        return self._cancel_generation != gen
+        """(b) Was THIS call cancelled? True when a cancel landed after the call captured ``gen``.
+        Immune to a later resume(), unlike reading the live event."""
+        with self._cancel_lock:
+            return self._cancel_generation != gen
+
+    def _aborted(self, gen: int) -> bool:
+        """(a)+(b) in one atomic read: is the world shutting down NOW, or did a cancel land since
+        this call captured ``gen``?
+
+        Used where BOTH questions matter: admission after the semaphore (a waiter from a previous
+        era must never spawn a replacement child, even if a resume() has since cleared the event —
+        the MEDIUM) and the post-registration re-check (a cancel pass may have snapshotted the
+        process set before our registration, so it never saw this child)."""
+        with self._cancel_lock:
+            return self._cancel_generation != gen or self._cancel_event.is_set()
 
     def _cancel_tracked_procs(self) -> int:
         with self._active_lock:
@@ -246,6 +280,14 @@ class ClaudeCliAdapter(LLMAdapter):
         max_tokens: int | None = None,
         timeout_hint_seconds: float | None = None,
     ) -> str | None:
+        # R5: capture the cancel era HERE — at entry, BEFORE the semaphore. A call belongs to the
+        # era it ENTERED, not the era in which it happened to win the semaphore. Capturing it after
+        # the semaphore let a waiter that was already queued BEFORE a cancel (so a call the cancel
+        # should have reached) adopt the post-cancel generation and spawn a fresh child. Atomic, so
+        # "new generation + clear event" is never observable.
+        gen, shutting_down = self._capture_era()
+        if shutting_down:
+            raise LlmCancelledError("llm call aborted: shutdown in progress")
         # A batching caller can hint a longer budget for a fatter combined prompt; a plain
         # call keeps the constructor default.
         timeout = timeout_hint_seconds or self.timeout
@@ -268,14 +310,11 @@ class ClaudeCliAdapter(LLMAdapter):
             argv += ["--json-schema", json.dumps(schema)]
         sem = _semaphore(self.max_concurrency)
         with sem:
-            # ITEM 1: capture the cancel generation ONCE, at the start of this call. Every later
-            # "was THIS call cancelled?" question compares against it, so a resume() racing us
-            # cannot erase a cancel that already hit this call.
-            gen = self._cancel_generation
-            if self._cancel_event.is_set():
-                # (a) "is the world in shutdown NOW?" — a waiter that acquired the semaphore
-                # AFTER the kill pass must not spawn a replacement child mid-shutdown. This one
-                # stays event-based on purpose: a resume() SHOULD let new calls through again.
+            if self._aborted(gen):
+                # (a) is the world in shutdown NOW? — a waiter that acquired the semaphore after
+                # the kill pass must not spawn a replacement child mid-shutdown. PLUS (b) did a
+                # cancel land while we sat on the semaphore? A waiter from the previous era must
+                # abort even if a resume() has since cleared the event (R5 MEDIUM).
                 raise LlmCancelledError("llm call aborted: shutdown in progress")
             try:
                 proc = subprocess.Popen(
@@ -293,11 +332,15 @@ class ClaudeCliAdapter(LLMAdapter):
             pgid = _capture_pgid(proc)  # snapshot NOW, while the group leader is alive (HIGH-1)
             with self._active_lock:
                 self._active_procs[proc] = pgid
-            if self._cancel_event.is_set():
+            if self._aborted(gen):
                 # Closes the creation/registration race: if cancel_active() snapshotted the
-                # process set between our event check and the add() above, its kill pass never
-                # saw this child. Re-checking AFTER registration guarantees either the kill pass
-                # sees the proc, or we see the event.
+                # process set between our check and the add() above, its kill pass never saw this
+                # child. Re-checking AFTER registration guarantees either the kill pass sees the
+                # proc, or we see the cancel.
+                # R5: this now also compares the GENERATION (the (b) reading), not just the event.
+                # Event-only, a cancel that landed during our spawn and was then cleared by a
+                # rollback's finally-resume was invisible here, so a child the kill pass had
+                # missed sailed on as a normal run.
                 # B-3: kill() and wait() get their OWN suppress blocks — a single shared one
                 # means a raising kill() (already-dead race) skips the reap entirely, leaking
                 # the pipe fds on that path. wait() (not communicate()) matches base's
