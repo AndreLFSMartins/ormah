@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from ormah.background import llm_cancel
 from ormah.config import Settings
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.index.db import Database
@@ -84,6 +85,20 @@ def _isolate_settings_from_global_env(monkeypatch, tmp_path):
     for key in list(os.environ):
         if key.startswith("ORMAH_"):
             monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _clean_llm_cancel_epoch():
+    """ADR-0004 slice 2: llm_cancel is process-global state (a single epoch shared by every
+    adapter/caller in the process), unlike the per-adapter cancel flag it replaced. Any test that
+    exercises a REAL shutdown path — the FastAPI app lifespan, start/stop_session_watcher — calls
+    the REAL cancel_active_llm_calls(), which defaults to a FINAL cancel. A normal shutdown never
+    resumes by design (HIGH-A), so without a reset here that FINAL cancel leaks into every later
+    test in the process: an unrelated adapter test would see llm_cancel.snapshot() report
+    cancelled and raise LlmCancelledError before ever touching its own fake subprocess."""
+    llm_cancel.begin_lifespan()
+    yield
+    llm_cancel.begin_lifespan()
 
 
 @pytest.fixture(scope="session", autouse=True)

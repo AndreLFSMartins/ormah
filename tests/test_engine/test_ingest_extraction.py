@@ -31,6 +31,21 @@ def test_extraction_call_failure_is_distinct_from_no_provider(engine):
     assert result == EXTRACT_ERR_NO_PROVIDER
 
 
+def test_cancelled_extraction_maps_to_call_failed_not_slice_failure(engine):
+    """A LlmCancelledError from the adapter (shutdown/stop mid-extraction, ADR-0004 slice 2)
+    must surface as EXTRACT_ERR_CALL_FAILED (provider-wide transient), NOT as a slice-specific
+    failure that _ingest_session would count toward MAX_EXTRACT_FAILURES and eventually skip
+    (data loss). Must be caught BEFORE the generic `except Exception` handler."""
+    from ormah.background.llm_errors import LlmCancelledError
+
+    def _raise(*a, **k):
+        raise LlmCancelledError("shutdown")
+
+    with patch("ormah.background.llm_client.ingest_llm_generate", side_effect=_raise):
+        result = engine._extract_memories_llm(_CONTENT)
+    assert result == EXTRACT_ERR_CALL_FAILED
+
+
 def test_oversized_payload_is_chunked_not_truncated(engine):
     """Content larger than ingest_chunk_chars is split at line boundaries and every chunk is
     extracted — the tail is never dropped."""

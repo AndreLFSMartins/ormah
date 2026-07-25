@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ormah.background.llm_client import ingest_provider_configured
+from ormah.background.llm_errors import LlmCancelledError
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
@@ -2900,6 +2901,11 @@ class MemoryEngine:
                     all_memories.extend(memories)
 
             return all_memories
+        except LlmCancelledError:
+            # A host cancellation (shutdown/stop) says NOTHING about this slice. Route it to
+            # the provider-wide transient sentinel so _ingest_session requeues it (never counts
+            # it toward the per-slice cap). ADR-0004 H1: a cancel must never burn a slice.
+            return EXTRACT_ERR_CALL_FAILED
         except Exception as e:
             logger.warning("LLM extraction failed: %s", e)
             return (

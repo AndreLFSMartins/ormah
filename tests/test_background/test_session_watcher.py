@@ -26,9 +26,14 @@ from ormah.background.session_watcher import (
     start_session_watcher,
     stop_session_watcher,
 )
+from ormah.background import llm_cancel
 from ormah.engine.memory_engine import MemoryEngine
 from ormah.models.node import CreateNodeRequest
 from ormah.transcript.parser import parse_transcript
+
+# NOTE: the module-level llm_cancel epoch is reset around every test by the autouse
+# `_clean_llm_cancel_epoch` fixture in tests/conftest.py (this file exercises the REAL
+# start_session_watcher/stop_session_watcher, which calls the REAL cancel_active_llm_calls()).
 
 _LLM_PATCH = "ormah.background.llm_client.ingest_llm_generate"
 # A slice-specific extraction failure: the LLM responds but the content is unparseable, so
@@ -485,6 +490,36 @@ def test_provider_wide_call_failure_never_skips_slice(engine, tmp_path):
     entry = state.get(rel, {})
     assert entry.get("end_offset", 0) == 0    # cursor never advanced during the outage
     assert "extract_fail_count" not in entry  # provider-wide failure never counts toward the cap
+    assert "skipped_slices" not in entry       # nothing skipped -> no data loss
+
+
+def test_repeated_cancellations_never_skip_a_slice(engine, tmp_path):
+    """ADR-0004 slice 2, Step 3b: a shutdown-cancelled extraction (LlmCancelledError) must map
+    to EXTRACT_ERR_CALL_FAILED -> TRANSIENT and NEVER count toward the per-slice cap, even
+    across many restarts hitting the same offset -- otherwise repeated restarts during the same
+    slice's extraction would eventually SKIP a healthy slice (data loss)."""
+    from ormah.background.llm_errors import LlmCancelledError
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    state = {}
+
+    def _raise(*a, **k):
+        raise LlmCancelledError("shutdown")
+
+    with patch(_LLM_PATCH, side_effect=_raise), \
+         patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
+        for _ in range(MAX_EXTRACT_FAILURES + 3):
+            assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.TRANSIENT
+
+    entry = state.get(rel, {})
+    assert entry.get("end_offset", 0) == 0    # cursor never advanced across restarts
+    assert "extract_fail_count" not in entry  # a cancel never counts toward the cap
     assert "skipped_slices" not in entry       # nothing skipped -> no data loss
 
 
@@ -2921,6 +2956,519 @@ def test_stop_session_watcher_drains_inflight_ingest(engine, tmp_path):
         assert stop_returned.wait(5)               # now the drain completes and stop returns
         s.join(5)
     assert handler.in_flight_count() == 0
+
+
+# --- ADR-0004 slice 2: bounded shutdown (cancel in-flight LLM extractions) -------------
+
+def test_normal_shutdown_drain_does_not_cancel_llm_calls_itself(monkeypatch):
+    """Locks the ordering contract: on the normal-shutdown path (`rearm=False`, the default),
+    `_stop_and_drain` must NOT call `cancel_active_llm_calls` itself -- the lifespan's shutdown
+    `finally` already issued the ONE final cancel before `stop_session_watcher` ->
+    `_stop_and_drain` is even entered (see the ordering note in `_stop_and_drain`'s docstring).
+    ADR-0004 slice 2 redesign: HIGH-C (council R2, Codex) used to be solved by a re-cancel loop
+    inside `_stop_and_drain` (cancel; join; cancel; join; ... until drain_alive() reports dead);
+    that loop is now REMOVED in favour of a single globally-read epoch (`llm_cancel`), so this
+    test's only mutation-sensitive assertion is `cancel_calls["n"] == 0`.
+
+    The companion property -- that a "late" adapter (one whose call is already in flight,
+    polling the epoch, when the ONE upstream cancel lands) still reads the cancelled epoch at
+    `generate()` entry and is cancelled without anyone re-cancelling -- is NOT this test's job;
+    it is owned and locked by
+    `tests/test_background/test_llm_client.py::test_an_adapter_built_during_a_shutdown_is_born_cancelled`.
+    This test still drives a fake "late" thread through the same epoch-read shape purely so the
+    join fence has something real to wait on and so the bound (`elapsed < 5.0`) is exercised, but
+    that thread's own correctness is a secondary, deadlined check here -- not the property under
+    test.
+
+    This test reproduces the ordering directly against the real `llm_cancel` module (reset by
+    the autouse `_clean_llm_cancel_epoch` fixture) and proves the bound holds via a `Barrier`,
+    never `sleep`, to synchronise the "late" thread's start with the join fence. The thread's
+    internal poll loop is DEADLINED (not `while True: sleep`) and records its own failure via a
+    `finally`, so a mutation that breaks the epoch-cancel wiring (e.g. deleting the
+    `begin_cancel(final=True)` call below) makes this test FAIL FAST with a readable message
+    instead of hanging forever -- `dead` must always be set so the production
+    `while any(drain_alive())` loop in `_stop_and_drain` always has an exit."""
+    from ormah.background.session_watcher import SessionWatch, _stop_and_drain
+
+    cancel_calls = {"n": 0}
+
+    def _counting_cancel(*, final=True):
+        cancel_calls["n"] += 1
+        return 0
+
+    monkeypatch.setattr(
+        "ormah.background.session_watcher.cancel_active_llm_calls", _counting_cancel
+    )
+    monkeypatch.setattr("ormah.background.session_watcher.resume_llm_adapters", lambda: None)
+    monkeypatch.setattr("ormah.background.session_watcher._drain_handlers", lambda handlers: None)
+
+    gen, _ = llm_cancel.snapshot()
+    building = threading.Barrier(2)
+    dead = threading.Event()
+    # Bounded poll deadline for the "late" thread below -- NOT the production bound under test
+    # (that's `elapsed < 5.0`), just a ceiling so a broken epoch never hangs this test.
+    poll_deadline_seconds = 2.0
+    thread_failure: dict[str, BaseException] = {}
+
+    class _FakeHandler:
+        def __init__(self):
+            self._stop_event = threading.Event()
+
+        def cancel_pending_timers(self):
+            pass
+
+        def wake(self):
+            pass
+
+        def drain_alive(self):
+            return not dead.is_set()
+
+        def join_drain(self, timeout=None):
+            time.sleep(min(timeout or 0, 0.05))
+
+    def _late_built_adapter():
+        # Mirrors the facade's real generate()-entry check (llm_client._guarded_generate):
+        # reads the CURRENT global epoch, not one captured when the adapter/thread was built.
+        try:
+            building.wait(timeout=5)
+            deadline = time.monotonic() + poll_deadline_seconds
+            while not llm_cancel.epoch_changed(gen):
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        "the late-built adapter never observed the cancelled epoch within "
+                        f"{poll_deadline_seconds}s -- the epoch-cancel wiring is broken"
+                    )
+                time.sleep(0.005)
+        except BaseException as e:  # noqa: BLE001 -- includes BrokenBarrierError
+            thread_failure["error"] = e
+        finally:
+            # ALWAYS set, success or failure, so the production `while any(drain_alive())`
+            # loop in `_stop_and_drain` can never spin forever on this fake.
+            dead.set()
+
+    handler = _FakeHandler()
+    watch = SessionWatch(watch_dir=Path("/tmp/late-adapter"), handler=handler, observer=None,
+                          spool=None, discover=False)
+
+    t = threading.Thread(target=_late_built_adapter)
+    t.start()
+    building.wait(timeout=5)  # the "late" adapter is alive and polling the epoch now
+
+    # The lifespan-style cancel: ONE call, made BEFORE _stop_and_drain is entered -- exactly the
+    # ordering main.lifespan's shutdown finally guarantees ahead of stop_session_watcher().
+    llm_cancel.begin_cancel(final=True)
+
+    start = time.monotonic()
+    _stop_and_drain([watch])
+    elapsed = time.monotonic() - start
+    t.join(5)
+
+    if "error" in thread_failure:
+        raise AssertionError(
+            "the late-built adapter thread failed: "
+            f"{thread_failure['error']!r}"
+        ) from thread_failure["error"]
+
+    assert elapsed < 5.0, "the join fence must be bounded by the epoch read, not by re-cancelling"
+    assert not handler.drain_alive(), "the late-built adapter must have observed the cancel"
+    assert cancel_calls["n"] == 0, (
+        "the normal-shutdown path (rearm=False) must not call cancel_active_llm_calls itself -- "
+        "the lifespan's finally already did, and re-cancelling here would just be the removed "
+        "HIGH-C loop in disguise"
+    )
+
+
+def test_startup_rollback_drains_failing_roots_own_inflight_extraction(engine, tmp_path, monkeypatch):
+    """HIGH-B (council R1, Codex): start_session_watcher registers a PROVISIONAL SessionWatch
+    for each root BEFORE observer.start() -- so when a later root's Observer.start() raises,
+    the FAILING root's own already-draining handler (genuinely mid-extraction, not just
+    registered) is still inside `watches`: the rollback CANCELS it, JOINS its drain thread, and
+    nothing touches the engine again afterward (#52 use-after-close). A pre-seeded, blocked
+    extraction on root2 -- root2 is the root whose OWN Observer.start() raises -- proves the
+    rollback actually drains, not merely registers: a no-op `_stop_and_drain` would leave
+    drain_alive()/in_flight_count() nonzero and would not need to wait for `release`."""
+    import ormah.background.session_watcher as sw_mod
+    from ormah.background.ingest_spool import IngestSpool, root_key, spool_root
+
+    root1 = tmp_path / "root1"
+    root2 = tmp_path / "root2"
+    root1.mkdir()
+    root2.mkdir()
+    monkeypatch.setattr(
+        "ormah.background.session_watcher._resolve_acceptance_roots",
+        lambda settings: [(root1, True), (root2, True)],
+    )
+
+    # Pre-seed root2's spool with a job BEFORE start_session_watcher runs, so root2's drain
+    # thread claims and starts extracting it the instant handler.start_drain() fires -- racing
+    # root2's own (later, in the same loop iteration) Observer.start() failure.
+    proj = root2 / "-Users-alice-Code-proj"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc.jsonl"
+    _make_jsonl(jsonl)
+    _mark_idle(jsonl)
+    seed_spool = IngestSpool(spool_root(engine.settings) / root_key(root2))
+    seed_spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge", force_flush=True)
+
+    entered = threading.Event()   # the pre-seeded job is now genuinely mid-extraction on root2
+    release = threading.Event()   # let the blocked extraction return
+
+    ingest_calls = []
+
+    def _blocking_ingest(*a, **k):
+        ingest_calls.append(1)
+        entered.set()
+        release.wait(5)
+        return IngestResult.OK
+
+    captured = {}
+    real_stop_and_drain = sw_mod._stop_and_drain
+
+    def _spy(watches, **kw):
+        captured["watches"] = list(watches)
+        captured["kwargs"] = kw
+        return real_stop_and_drain(watches, **kw)
+
+    monkeypatch.setattr("ormah.background.session_watcher._stop_and_drain", _spy)
+
+    class _FailingObserver:
+        _n = 0
+
+        def __init__(self):
+            type(self)._n += 1
+            self._fail = type(self)._n == 2  # the SECOND root's (root2's own) Observer fails
+
+        def schedule(self, *a, **k):
+            pass
+
+        def start(self):
+            if self._fail:
+                # root2's own extraction must be genuinely in-flight before its Observer fails
+                # -- otherwise this would not exercise a real drain/join race at all.
+                assert entered.wait(5), "root2's in-flight extraction never started"
+                raise RuntimeError("observer boom")
+
+        def stop(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+    outcome = {}
+
+    def _run():
+        try:
+            with patch(
+                "ormah.background.session_watcher._ingest_session", side_effect=_blocking_ingest
+            ), patch("ormah.background.session_watcher.Observer", _FailingObserver):
+                start_session_watcher(engine)
+        except RuntimeError as e:
+            outcome["exc"] = e
+
+    t = threading.Thread(target=_run)
+    t.start()
+
+    assert entered.wait(5), "root2's pre-seeded job never reached the blocking ingest"
+    # The rollback has now been entered (Observer.start() raised right after seeing `entered`)
+    # and _stop_and_drain is inside its fence loop, waiting on this exact drain thread.
+    assert _wait_until(lambda: "watches" in captured, timeout=5)
+    by_dir = {w.watch_dir: w for w in captured["watches"]}
+    root2_handler = by_dir[root2].handler
+    # The extraction is STILL genuinely in-flight while the rollback is (supposedly) draining
+    # it -- proves the rollback is actually waiting on it, not a no-op that already returned.
+    assert root2_handler.in_flight_count() == 1
+    assert root2_handler.drain_alive() is True
+    # The sharpest discriminator: start_session_watcher (running on `t`) must still be BLOCKED
+    # inside the rollback at this point -- a no-join `_stop_and_drain` would already have
+    # returned and raised, and `t` would already be dead, well before we ever release the
+    # extraction below.
+    assert t.is_alive(), (
+        "the rollback must still be draining root2's in-flight extraction -- it must not have "
+        "already returned/raised before the extraction was even released"
+    )
+
+    release.set()  # let the blocked extraction finish
+    t.join(timeout=10)
+
+    assert not t.is_alive(), "start_session_watcher must return once the drain is fully joined"
+    assert isinstance(outcome.get("exc"), RuntimeError)
+    assert len(captured["watches"]) == 2, (
+        "both root1 (fully started) and root2 (whose Observer.start() failed) must be in "
+        "`watches` -- a provisional registration must own the root it is constructing"
+    )
+    assert by_dir[root1].observer is not None   # root1's own observer started fine
+    # M-3: the observer is assigned onto the watch BEFORE start() is called, so even though
+    # root2's own start() raised, `watch.observer` is still populated -- the rollback's
+    # _stop_and_drain can stop()/join() it instead of leaking a half-started Observer.
+    assert by_dir[root2].observer is not None
+    assert captured["kwargs"].get("rearm") is True
+
+    # The rollback actually DRAINED root2's in-flight extraction, not just registered it:
+    assert root2_handler.drain_alive() is False, "root2's drain thread must be joined by rollback"
+    assert root2_handler.in_flight_count() == 0, "no in-flight ingest may survive the rollback"
+    assert len(ingest_calls) == 1, "no extraction may run again after the stop event is set (#52)"
+
+
+def test_startup_rollback_rearms_adapters_and_serves(engine, tmp_path, monkeypatch):
+    """HIGH-A (council R1, Cursor): the transactional startup rollback must
+    resume_llm_adapters() -- the process keeps serving after a rollback (main.lifespan catches
+    the failure), so leaving the world cancelled would poison every later maintenance/ingest LLM
+    call until restart. A normal shutdown must NEVER do this (rearm=False by default).
+
+    ADR-0004 slice 2: cancellation is the module-level llm_cancel epoch now, not a per-adapter
+    flag the facade toggles — the fake adapter below is deliberately dumb (it always succeeds);
+    the FACADE's _guarded_generate is what rejects a call made while the epoch is cancelled."""
+    from ormah.background import llm_client
+
+    class _FakeAdapter:
+        def generate(self, *a, **k):
+            return "ok"
+
+    monkeypatch.setattr(llm_client, "_cached_adapter", _FakeAdapter())
+    monkeypatch.setattr(llm_client, "_adapter_initialised", True)
+    llm_cancel.begin_cancel(final=False)  # seed: a call already cancelled before the rollback runs
+    assert llm_cancel.snapshot()[1] is True
+
+    root1 = tmp_path / "root1"
+    root2 = tmp_path / "root2"
+    root1.mkdir()
+    root2.mkdir()
+    monkeypatch.setattr(
+        "ormah.background.session_watcher._resolve_acceptance_roots",
+        lambda settings: [(root1, True), (root2, True)],
+    )
+
+    class _FailingObserver:
+        _n = 0
+
+        def __init__(self):
+            type(self)._n += 1
+            self._fail = type(self)._n == 2
+
+        def schedule(self, *a, **k):
+            pass
+
+        def start(self):
+            if self._fail:
+                raise RuntimeError("observer boom")
+
+        def stop(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+    try:
+        with patch("ormah.background.session_watcher.Observer", _FailingObserver):
+            with pytest.raises(RuntimeError):
+                start_session_watcher(engine)
+
+        assert llm_cancel.snapshot()[1] is False, \
+            "the world must be RE-ARMED after a rollback (HIGH-A)"
+        assert llm_client.llm_generate(engine.settings, "prompt") == "ok"
+    finally:
+        llm_cancel.begin_lifespan()
+
+
+def test_startup_rollback_rearms_even_when_observer_join_raises(engine, tmp_path, monkeypatch):
+    """HIGH-3 (council-pr, Codex): the HIGH-B fix assigns watch.observer BEFORE observer.start(),
+    so a provisional Observer whose start() raised is a NEVER-STARTED thread; its join() raises
+    RuntimeError('cannot join thread before it is started'). That exception must NOT escape
+    _stop_and_drain and skip resume_llm_adapters() on the rollback path — otherwise main.lifespan
+    keeps serving with the world permanently cancelled (ingest AND maintenance dead until restart).
+
+    ADR-0004 slice 2: cancellation is the module-level llm_cancel epoch now, not a per-adapter
+    flag the facade toggles — the fake adapter below is deliberately dumb (it always succeeds);
+    the FACADE's _guarded_generate is what rejects a call made while the epoch is cancelled."""
+    from ormah.background import llm_client
+
+    class _FakeAdapter:
+        def generate(self, *a, **k):
+            return "ok"
+
+    monkeypatch.setattr(llm_client, "_cached_adapter", _FakeAdapter())
+    monkeypatch.setattr(llm_client, "_adapter_initialised", True)
+    llm_cancel.begin_cancel(final=False)  # seed: cancelled before the rollback runs
+    assert llm_cancel.snapshot()[1] is True
+
+    root1 = tmp_path / "root1"
+    root2 = tmp_path / "root2"
+    root1.mkdir()
+    root2.mkdir()
+    monkeypatch.setattr(
+        "ormah.background.session_watcher._resolve_acceptance_roots",
+        lambda settings: [(root1, True), (root2, True)],
+    )
+
+    class _JoinRaisingObserver:
+        """Second observer's start() raises (never-started thread); its join() then raises the
+        real RuntimeError a threading.Thread raises when joined before it is started."""
+
+        _n = 0
+
+        def __init__(self):
+            type(self)._n += 1
+            self._started = False
+            self._fail = type(self)._n == 2
+
+        def schedule(self, *a, **k):
+            pass
+
+        def start(self):
+            if self._fail:
+                raise RuntimeError("observer boom")
+            self._started = True
+
+        def stop(self):
+            pass  # watchdog's stop() on a never-started observer is a no-op; join() is the trap
+
+        def join(self, timeout=None):
+            if not self._started:
+                raise RuntimeError("cannot join thread before it is started")
+
+    try:
+        with patch("ormah.background.session_watcher.Observer", _JoinRaisingObserver):
+            with pytest.raises(RuntimeError):
+                start_session_watcher(engine)
+
+        assert llm_cancel.snapshot()[1] is False, \
+            "the world must be RE-ARMED after a rollback even when observer.join() raised (HIGH-3)"
+        assert llm_client.llm_generate(engine.settings, "prompt") == "ok"
+    finally:
+        llm_cancel.begin_lifespan()
+
+
+def test_stop_and_drain_rearms_even_when_cancel_raises(monkeypatch):
+    """HIGH-2 refine (council-pr R2) + HIGH-3 (R3): the ENTIRE drain body — not just observer
+    cleanup — sits inside the try/finally, so ANY raise in it still rearms on the rollback path.
+
+    R3 narrowed this further: a raising ``cancel_active_llm_calls()`` is now SUPPRESSED (it is
+    best-effort; the join fence after it is load-bearing), so it no longer propagates at all.
+    The rearm-in-finally guarantee is therefore proven here with a raise from a LOAD-BEARING
+    step (``handler.wake()``), which must still propagate — after the rearm has run."""
+    import ormah.background.session_watcher as sw
+    from ormah.background.session_watcher import SessionWatch
+
+    def _raising_cancel(*, final=True):
+        raise RuntimeError("cancel_active blew up after setting the cancel flag")
+
+    monkeypatch.setattr(sw, "cancel_active_llm_calls", _raising_cancel)
+
+    # R3: a best-effort cancel failure is suppressed — it must NOT propagate, and the rollback
+    # path still rearms.
+    resumed_rollback = []
+    monkeypatch.setattr(sw, "resume_llm_adapters", lambda: resumed_rollback.append(True))
+    sw._stop_and_drain([], rearm=True)  # empty watches -> reaches the first cancel call
+    assert resumed_rollback == [True], \
+        "rearm must run in finally even when cancel_active_llm_calls raised (HIGH-2)"
+
+    # A LOAD-BEARING step raising still propagates — but only AFTER the finally rearmed.
+    class _WakeRaisingHandler:
+        def __init__(self):
+            self._stop_event = threading.Event()
+
+        def cancel_pending_timers(self):
+            pass
+
+        def wake(self):
+            raise RuntimeError("wake blew up")
+
+        def drain_alive(self):
+            return False
+
+        def join_drain(self, timeout=None):
+            pass
+
+        def in_flight_count(self):
+            return 0
+
+    watch = SessionWatch(watch_dir=Path("/tmp/high2"), handler=_WakeRaisingHandler(),
+                         observer=None, spool=None, discover=False)
+    resumed_loadbearing = []
+    monkeypatch.setattr(sw, "resume_llm_adapters", lambda: resumed_loadbearing.append(True))
+    with pytest.raises(RuntimeError):
+        sw._stop_and_drain([watch], rearm=True)
+    assert resumed_loadbearing == [True], \
+        "rearm must run in finally even when a load-bearing step raised (HIGH-2)"
+
+    # Normal shutdown: same load-bearing raise, but rearm=False must NEVER resume.
+    watch_normal = SessionWatch(watch_dir=Path("/tmp/high2b"), handler=_WakeRaisingHandler(),
+                                observer=None, spool=None, discover=False)
+    resumed_normal = []
+    monkeypatch.setattr(sw, "resume_llm_adapters", lambda: resumed_normal.append(True))
+    with pytest.raises(RuntimeError):
+        sw._stop_and_drain([watch_normal], rearm=False)
+    assert resumed_normal == [], "a normal shutdown must never rearm, even if a step raised"
+
+
+def test_stop_and_drain_join_fence_survives_a_raising_cancel(monkeypatch):
+    """HIGH-3 (council-pr R3, Codex) USE-AFTER-CLOSE. The R2 test used an EMPTY watch list, so
+    the `while any(drain_alive())` fence was trivially skipped and this bug hid behind it.
+
+    cancel_active_llm_calls() sits in the try body; if it raises, control jumps to the finally —
+    the rearm runs, but the ENTIRE join fence (join_drain, _drain_handlers, observer.join) is
+    SKIPPED. An un-joined orphan drain thread then outlives the rollback and can touch the DB
+    after engine.shutdown() closes it (#52) — exactly what the fence exists to prevent.
+
+    The cancel calls are BEST-EFFORT; the join fence is LOAD-BEARING and must always run."""
+    import ormah.background.session_watcher as sw
+    from ormah.background.session_watcher import SessionWatch
+
+    class _FakeHandler:
+        def __init__(self):
+            self._stop_event = threading.Event()
+            self.join_drain_calls = 0
+            self.wake_calls = 0
+            self._alive = True
+
+        def cancel_pending_timers(self):
+            pass
+
+        def wake(self):
+            self.wake_calls += 1
+
+        def drain_alive(self):
+            return self._alive
+
+        def join_drain(self, timeout=None):
+            self.join_drain_calls += 1
+            self._alive = False  # the drain thread exits once actually joined
+
+        def in_flight_count(self):
+            return 0
+
+    class _RecordingObserver:
+        def __init__(self):
+            self.stopped = False
+            self.joined = False
+
+        def stop(self):
+            self.stopped = True
+
+        def join(self, timeout=None):
+            self.joined = True
+
+    handler = _FakeHandler()
+    observer = _RecordingObserver()
+    watch = SessionWatch(watch_dir=Path("/tmp/high3"), handler=handler, observer=observer,
+                         spool=None, discover=False)
+
+    def _raising_cancel(*, final=True):
+        raise RuntimeError("cancel_active blew up after setting the cancel flag")
+
+    monkeypatch.setattr(sw, "cancel_active_llm_calls", _raising_cancel)
+    resumed = []
+    monkeypatch.setattr(sw, "resume_llm_adapters", lambda: resumed.append(True))
+
+    # (c) a best-effort cancel failing must NOT escape over the fence
+    sw._stop_and_drain([watch], rearm=True)
+
+    # (a) the LOAD-BEARING join fence really ran despite the raising cancel
+    assert handler.join_drain_calls >= 1, \
+        "join_drain never ran — a raising cancel skipped the load-bearing join fence (#52)"
+    assert observer.joined, "observer.join never ran — the join fence was skipped"
+    # (b) the rollback path still re-armed the adapters
+    assert resumed == [True], "the rollback path must still rearm"
 
 
 def test_start_session_watcher_recovers_backlog_off_bind(engine, tmp_path):

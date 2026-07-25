@@ -1,17 +1,22 @@
 """Claude CLI LLM adapter — headless `claude -p` via subscription auth (no paid API)."""
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
+from ormah.background import llm_cancel
 from ormah.background.llm.base import LLMAdapter
+from ormah.background.llm_errors import LlmCancelledError
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,13 @@ _HARDENED_SETTINGS = json.dumps({
 _SEMAPHORES: dict[int, threading.Semaphore] = {}
 _SEM_LOCK = threading.Lock()
 
+# HIGH-2 (council-pr R3, Codex): how often a running generate() re-checks its own cancel event
+# while draining the child's pipes. It bounds shutdown when EOF can never arrive (a setsid
+# grandchild holding our inherited stdout — see `_signal_group`'s residual note), at the cost of
+# ~2 poll cycles per second of a normal call. 0.5s keeps the shutdown snappy while the overhead
+# stays negligible (a 30s call does ~60 selector waits, no extra syscall pressure worth measuring).
+_CANCEL_POLL_INTERVAL = 0.5
+
 
 # session_id comes from the CLI envelope (untrusted). Only ever treat it as an exact,
 # well-formed id — never as a glob pattern (a "*"/"?"/"[" could expand and delete unrelated
@@ -77,6 +89,69 @@ def _cleanup_persisted_stub(session_id: str) -> None:
                 return
     except OSError:
         pass
+
+
+def _capture_pgid(proc):
+    """Snapshot the child's process-group id AT SPAWN, while the leader is guaranteed alive.
+
+    HIGH-1 refine (council-pr R2, Codex): the pgid MUST be captured once, up front, and stored —
+    never re-derived from the pid on a later kill pass. ``claude -p`` is launched with
+    ``start_new_session=True`` so the child is its own session/group leader (``pgid == pid``);
+    once it exits, ``os.getpgid(pid)`` raises ProcessLookupError, so a lazily-derived pgid would
+    vanish exactly when a surviving in-group grandchild still needs the escalation SIGKILL.
+
+    Returns an ``int`` pgid for a real child, or ``None`` for a fake without a real ``pid`` (unit
+    tests) so callers fall back to the per-PID ``terminate()``/``kill()`` shape.
+    """
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int):
+        return None
+    try:
+        return os.getpgid(pid)  # leader alive here -> == pid; robust if it ever differs
+    except OSError:
+        return pid
+
+
+def _signal_group(pgid, sig: int) -> bool:
+    """HIGH-2/HIGH-1 (council-pr, Codex): signal a child's WHOLE process group by its STORED pgid.
+
+    ``claude -p`` forks grandchildren (this machine's ``~/.claude.json`` has user-scoped MCP
+    servers and we pass no ``--strict-mcp-config``); those inherit the child's stdout/stderr.
+    Killing only the tracked direct PID leaves a grandchild holding the pipe open, so
+    ``communicate()`` never sees EOF and the shutdown drain waits the full provider timeout.
+    The pgid is captured at spawn (see ``_capture_pgid``) so it survives the leader's death and
+    still reaches a grandchild that ignored SIGTERM after the leader exited.
+
+    Returns True when the group signal was delivered; False when the group is unavailable — a
+    ``None`` pgid (a fake without a real pid, unit tests), or a group already fully gone — so
+    callers fall back to the per-PID ``terminate()``/``kill()`` shape. ``os.killpg`` is
+    suppressed on ``ProcessLookupError``/``PermissionError`` (the group may already be dead).
+
+    RESIDUAL (accepted, tracked in the ADR): a grandchild that calls ``setsid()`` and daemonizes
+    into its OWN session/process group escapes the group signal entirely — no signal-based
+    approach can reap it (that needs cgroups on Linux / job objects on Windows). Out of scope.
+    """
+    if not isinstance(pgid, int):
+        return False
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _terminate_group_or_proc(proc, pgid) -> None:
+    """SIGTERM the child's process group (stored pgid); fall back to per-PID terminate()."""
+    if not _signal_group(pgid, signal.SIGTERM):
+        with contextlib.suppress(Exception):
+            proc.terminate()
+
+
+def _kill_group_or_proc(proc, pgid) -> None:
+    """SIGKILL the child's process group (stored pgid); fall back to per-PID kill()."""
+    if not _signal_group(pgid, signal.SIGKILL):
+        with contextlib.suppress(Exception):
+            proc.kill()
 
 
 def _semaphore(max_concurrency: int) -> threading.Semaphore:
@@ -111,6 +186,14 @@ class ClaudeCliAdapter(LLMAdapter):
         max_tokens: int | None = None,
         timeout_hint_seconds: float | None = None,
     ) -> str | None:
+        # R5: capture the cancel era HERE — at entry, BEFORE the semaphore. A call belongs to the
+        # era it ENTERED, not the era in which it happened to win the semaphore. Capturing it after
+        # the semaphore let a waiter that was already queued BEFORE a cancel (so a call the cancel
+        # should have reached) adopt the post-cancel generation and spawn a fresh child. Atomic, so
+        # "new generation + clear event" is never observable.
+        gen, shutting_down = llm_cancel.snapshot()
+        if shutting_down:
+            raise LlmCancelledError("llm call aborted: shutdown in progress")
         # A batching caller can hint a longer budget for a fatter combined prompt; a plain
         # call keeps the constructor default.
         timeout = timeout_hint_seconds or self.timeout
@@ -133,22 +216,126 @@ class ClaudeCliAdapter(LLMAdapter):
             argv += ["--json-schema", json.dumps(schema)]
         sem = _semaphore(self.max_concurrency)
         with sem:
+            if llm_cancel.aborted(gen):
+                # (a) is the world cancelled NOW — a waiter that acquired the semaphore after
+                # the cancel must not spawn a replacement child. PLUS (b) did a cancel land while
+                # we sat on the semaphore? A waiter from the previous era aborts even if a
+                # resume() has since re-admitted new calls.
+                raise LlmCancelledError("llm call aborted: shutdown in progress")
             try:
-                proc = subprocess.run(
-                    argv, input=prompt, capture_output=True, text=True,
-                    timeout=timeout, cwd=tempfile.gettempdir(), env=env,
+                proc = subprocess.Popen(
+                    argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, cwd=tempfile.gettempdir(), env=env,
+                    # HIGH-2: own session/process group so a cancel/timeout can SIGTERM the whole
+                    # group (parent + any forked grandchild that inherited our stdout/stderr),
+                    # not just the tracked direct PID — otherwise a grandchild keeps the pipe
+                    # open, communicate() never EOFs, and the drain waits the full timeout.
+                    start_new_session=True,
                 )
-            except subprocess.TimeoutExpired:
-                logger.warning("claude -p timed out after %ss", timeout)
+            except Exception as e:  # binary missing, OSError, etc. -> FAST failure -> None,
+                logger.warning("claude -p failed to start: %s", e)  # never slice-specific
                 return None
-            except Exception as e:  # binary missing, OSError, etc.
-                logger.warning("claude -p failed to run: %s", e)
-                return None
+            pgid = _capture_pgid(proc)  # snapshot NOW, while the group leader is alive
+            if llm_cancel.aborted(gen):
+                # A cancel that landed during Popen() construction: kill the newborn child
+                # immediately rather than let the poll loop notice it a tick later. There is
+                # no creation/registration race left to close — nothing kills our child from
+                # another thread, so there is no cross-thread process set to miss it.
+                _kill_group_or_proc(proc, pgid)
+                with contextlib.suppress(Exception):
+                    proc.wait()
+                raise LlmCancelledError("llm call aborted: shutdown in progress")
+            # B-2: `with proc:` restores the base `subprocess.run` contract (it runs inside
+            # `with Popen(...) as process:`) — __exit__ closes stdin/stdout/stderr and reaps via
+            # wait() on EVERY exit path (return or exception), so a mid-flight OSError/ValueError
+            # from communicate() can no longer orphan the child and retain the pipe fds. wait()
+            # inside __exit__ never blocks here because every path that reaches it has already
+            # killed (timeout/generic-exception) or fully drained (success) the child.
+            with proc:
+                try:
+                    # HIGH-2 (council-pr R3, Codex): drain the pipes in BOUNDED slices instead of
+                    # one communicate() that blocks until EOF. A grandchild that calls setsid()
+                    # lands in its OWN session, so it survives our group kill AND keeps the write
+                    # end of our inherited stdout open — EOF depends on ALL write ends closing,
+                    # not on the leader dying, so a single communicate() would block until the
+                    # provider timeout (default 120s) and _stop_and_drain joins on this thread,
+                    # damming the whole shutdown. Polling lets THIS thread observe its own cancel
+                    # event and abandon the read. The bound is observed in-thread ON PURPOSE:
+                    # closing proc.stdout/stderr from the cancelling thread while communicate()'s
+                    # selector is blocked on those fds is undefined at the OS level (the select
+                    # may not wake, may raise EBADF, or may wait on a recycled fd number) — that
+                    # would trade a bounded hang for a corruption race.
+                    deadline = time.monotonic() + timeout
+                    pending_input = prompt
+                    while True:
+                        try:
+                            remaining = max(0.0, deadline - time.monotonic())
+                            stdout, stderr = proc.communicate(
+                                input=pending_input,
+                                timeout=min(_CANCEL_POLL_INTERVAL, remaining),
+                            )
+                            break  # EOF on both pipes: stdout/stderr hold the FULL accumulated
+                        except subprocess.TimeoutExpired:      # output across every poll round
+                            # CPython supports retrying communicate() after a TimeoutExpired
+                            # ("retrying communication will not lose any output"), but the input
+                            # may only be handed over ONCE — a retry that still passes input
+                            # raises ValueError("Cannot send input after starting communication").
+                            # Any unwritten remainder keeps draining from the interpreter's own
+                            # saved offset on the next call.
+                            pending_input = None
+                            if llm_cancel.epoch_changed(gen):  # (b) was THIS call cancelled?
+                                # Abandon the read: a setsid grandchild never yields EOF. We kill
+                                # the group and reap the LEADER only — the detached grandchild is
+                                # NOT reaped (only cgroups/job objects could), it just survives as
+                                # an orphan whose writes now take EPIPE. It no longer dams us.
+                                _kill_group_or_proc(proc, pgid)
+                                proc.wait()
+                                # A shutdown kill must NOT be reported as a provider timeout —
+                                # slice 3 gives timeouts a failure-budget meaning, and a restart
+                                # must never spend it on a cancellation.
+                                raise LlmCancelledError(
+                                    "claude -p cancelled during shutdown") from None
+                            if time.monotonic() >= deadline:
+                                # REAL provider timeout — semantics identical to before the poll
+                                # loop. B-1: reap via kill()+wait(), NEVER a second unbounded
+                                # communicate() (that blocks on pipe EOF a grandchild can withhold
+                                # forever). wait() only waits for the process itself to exit,
+                                # which the kill already guarantees promptly.
+                                _kill_group_or_proc(proc, pgid)
+                                proc.wait()
+                                logger.warning("claude -p timed out after %ss", timeout)
+                                return None  # slice 3 turns this into LlmTimeoutError
+                except LlmCancelledError:
+                    # Never let the generic handler below downgrade a cancel into a fast failure.
+                    raise
+                except Exception as e:  # I/O failure mid-flight — fast failure
+                    # B-2: base's subprocess.run does `except: process.kill(); raise` here —
+                    # kill before the child is orphaned. HIGH-2: group SIGKILL (an already-dead
+                    # process is tolerated inside _kill_group_or_proc / _signal_group).
+                    _kill_group_or_proc(proc, pgid)
+                    logger.warning("claude -p failed to run: %s", e)
+                    return None
+        if (proc.returncode or 0) < 0 or llm_cancel.epoch_changed(gen):
+            # Killed by this call's own poll loop noticing the cancellation epoch changed
+            # (negative returncode = signal) OR that same epoch check firing directly below:
+            # cancelled, NOT slice evidence.
+            # HIGH-1 (council-pr R3, Codex) DATA INTEGRITY: the cancel ALONE is decisive — never
+            # `and returncode != 0`. A child that HANDLES SIGTERM and exits 0 inside the 5s kill
+            # fence emits partial/buffered JSON; accepting it as success made the engine ADVANCE
+            # THE CURSOR on a cancelled extraction, violating this slice's invariant that a
+            # cancel never advances the cursor.
+            # ITEM 1 (council-pr R4, Codex): (b) ask whether THIS call was cancelled, via the
+            # monotonic generation captured at its start — NOT the live event. Reading the event
+            # here let a rollback's finally-resume clear the cancel out from under an in-flight
+            # maintenance call, which then accepted the partial JSON as success anyway.
+            # F-4: `or 0` guards a (currently unreachable with a real Popen) None returncode —
+            # a bare TypeError here would escape as a generic string and burn the per-slice cap.
+            raise LlmCancelledError(f"claude -p cancelled (rc={proc.returncode})")
         if proc.returncode != 0:
-            logger.warning("claude -p exited %s: %s", proc.returncode, proc.stderr[:300])
+            logger.warning("claude -p exited %s: %s", proc.returncode, stderr[:300])
             return None
         try:
-            envelope = json.loads(proc.stdout)
+            envelope = json.loads(stdout)
         except json.JSONDecodeError:
             logger.warning("claude -p returned a non-JSON envelope")
             return None

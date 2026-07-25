@@ -192,6 +192,17 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     logger.info("Memory engine ready.")
 
+    # ADR-0004 slice 2: start a clean cancellation era. The llm_cancel epoch is module-level and
+    # outlives an in-process reload (the repo already exercises consecutive lifespans), so this
+    # must run before anything below can call llm_generate/ingest_llm_generate — otherwise a
+    # FINAL cancel left by a prior lifespan's real shutdown would raise LlmCancelledError on
+    # every later call for the life of this process. resume_llm_adapters() alone is not enough
+    # here — it is a no-op against a final cancel by design (R4); only begin_llm_lifespan()
+    # clears `final`, which is exactly what a fresh lifespan needs.
+    from ormah.background.llm_client import begin_llm_lifespan
+
+    begin_llm_lifespan()
+
     # Per-lifespan stop event (R1): a fresh Event per lifespan so that a prior
     # lifespan's orphan worker (if shutdown timed out) can never be rearmed by
     # a new startup — there is nothing to clear(), each lifespan owns its own.
@@ -265,7 +276,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Session watcher not started: %s", e)
 
-    yield
+    try:
+        yield
+    finally:
+        # ADR-0004 slice 2 (council R7 HIGH-2 + council R1 HIGH-1): cancel in-flight LLM calls
+        # FIRST and UNCONDITIONALLY — even if the lifespan body raised or was cancelled. This is
+        # the ONE piece of teardown that must survive an abnormal shutdown, and only a finally
+        # guarantees it. It used to live inside stop_session_watcher(), which the `hasattr` guard
+        # below skips when start_session_watcher() raised; the scheduler is an independent LLM
+        # consumer and must not depend on the watcher's lifecycle.
+        from ormah.background.llm_client import cancel_active_llm_calls
+
+        try:
+            invalidated = cancel_active_llm_calls(final=True)
+            if invalidated:
+                logger.info("Cancelled %d in-flight LLM call(s) for shutdown", invalidated)
+        except Exception as e:
+            logger.warning("Cancelling in-flight LLM calls for shutdown failed: %s", e)
 
     # Unschedule the reconcile job before stopping the watchers, to shrink the window where
     # a tick recreates an Observer that nothing then stops. remove_job() only cancels future
@@ -289,7 +316,11 @@ async def lifespan(app: FastAPI):
     if stop_ev is not None:
         stop_ev.set()
 
-    # Shutdown — stop session watcher first
+    # Shutdown — stop session watcher first. The shutdown `finally` above has ALREADY issued the
+    # final `llm_cancel` epoch bump (cancel_active_llm_calls(final=True)) before this runs, so
+    # stop_session_watcher's join fence only needs to WAIT for in-flight calls to observe the
+    # already-cancelled epoch — it does not cancel again itself on this path. Moving the cancel
+    # to run AFTER this call would make the fence spin until the provider timeout instead.
     if hasattr(app.state, "session_watches"):
         stop_session_watcher(app.state.session_watches)
 

@@ -75,12 +75,22 @@ def test_ingest_path_generate_carries_no_session_persistence(monkeypatch):
 
     captured = {}
 
-    def fake_run(argv, **kwargs):
-        captured["argv"] = argv
-        return subprocess.CompletedProcess(
-            argv, 0, stdout=json.dumps({"is_error": False, "result": "{}"}), stderr="",
-        )
+    class _FakeProc:
+        returncode = 0
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+        def communicate(self, input=None, timeout=None):
+            return json.dumps({"is_error": False, "result": "{}"}), ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     llm_client.ingest_llm_generate(s, "prompt")
     assert "--no-session-persistence" in captured["argv"]
