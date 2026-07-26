@@ -861,7 +861,7 @@ def _ingest_session(
     # force_flush from the job's reason; boundary keeps pinning the ceiling for all jobs.
     try:
         result = parse_transcript(
-            path, start_offset=prev_offset, max_bytes=flush_bytes, stop_offset=boundary
+            path, start_offset=prev_offset, max_conversation_chars=flush_bytes, stop_offset=boundary
         )
         if should_rewind(result, prev_offset):
             # Orphan with NO forward progress: a genuine cursor left mid-response by an
@@ -886,7 +886,7 @@ def _ingest_session(
             # There is something to recover: drain capped as usual so the ingest slice
             # honours flush_bytes; later ticks continue incrementally from the new cursor.
             result = parse_transcript(
-                path, start_offset=0, max_bytes=flush_bytes, stop_offset=boundary
+                path, start_offset=0, max_conversation_chars=flush_bytes, stop_offset=boundary
             )
     except Exception as e:
         logger.warning("Session transcript parse error for %s: %s", path, e)

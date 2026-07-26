@@ -43,9 +43,9 @@ class TranscriptResult:
     leading_orphan: bool = False
     turns: list[TranscriptTurn] = field(default_factory=list)
     source: str = "agent_jsonl"
-    # True when max_bytes stopped the parse before a turn that would have overshot the
-    # byte budget — more closed content remains past safe_end_offset for the caller to
-    # drain in a follow-up parse_transcript(start_offset=safe_end_offset, ...) call.
+    # True when a budget stopped the parse before a turn that would have overshot it —
+    # more closed content remains past safe_end_offset for the caller to drain in a
+    # follow-up parse_transcript(start_offset=safe_end_offset, ...) call.
     capped: bool = False
 
 
@@ -196,17 +196,27 @@ def extract_user_prompts(path: Path, start_offset: int = 0) -> list[str]:
     return prompts
 
 
+_TURN_SEPARATOR = "\n\n"
+
+
+def _format_turn(turn: TranscriptTurn) -> str:
+    """The exact rendering a turn gets in the Extractor's payload.
+
+    ``_conversation_from_turns`` and the parser's running length counter MUST both go through
+    this function. The budget is only correct while the length it accumulates is the length
+    the Extractor receives — that identity is the whole point of ADR-0001 Amendment 3.
+    """
+    return f"{turn.role.title()}: {turn.text}"
+
+
 def _conversation_from_turns(turns: list[TranscriptTurn]) -> str:
-    return "\n\n".join(
-        f"{turn.role.title()}: {turn.text}"
-        for turn in turns
-    )
+    return _TURN_SEPARATOR.join(_format_turn(turn) for turn in turns)
 
 
 def parse_transcript(
     path: Path,
     start_offset: int = 0,
-    max_bytes: int | None = None,
+    max_conversation_chars: int | None = None,
     stop_offset: int | None = None,
 ) -> TranscriptResult:
     """Parse a supported JSONL transcript into cleaned conversation text.
@@ -219,19 +229,25 @@ def parse_transcript(
     The caller must ensure the offset falls on a line boundary (e.g. from
     a previous call's ``end_offset``).
 
-    When *max_bytes* is set, parsing stops BEFORE committing a turn that would push the
-    closed slice (``safe_end_offset - start_offset``) past that budget — so a multi-turn
-    slice never exceeds max_bytes. The caller re-parses from the new ``safe_end_offset``
-    to drain the rest. A single turn larger than max_bytes is committed anyway (there is
-    no smaller slice to make progress with).
+    When *max_conversation_chars* is set, parsing stops BEFORE committing a turn that would
+    push the CLEANED conversation of the closed slice past that budget — so a multi-turn slice
+    never exceeds it. The caller re-parses from the new ``safe_end_offset`` to drain the rest.
+    A single turn larger than the budget is committed anyway (there is no smaller slice to make
+    progress with); that progress guard is what keeps ``capped`` implying an advanced safe
+    boundary, which is what keeps ``should_rewind`` (ADR-0003) unreachable from a capped parse.
+
+    The budget is measured on conversation the Extractor receives, NOT on transcript bytes
+    (ADR-0001 Amendment 3): the raw→clean ratio ranges from ~3x to ~93x, so a byte budget bounds
+    a quantity uncorrelated with recall.
 
     When *stop_offset* is set it is an ABSOLUTE hard ceiling, not a budget: no turn is
     committed whose end exceeds it, and ``safe_end_offset`` is never returned beyond it.
-    ``max_bytes`` alone commits an oversized single turn anyway (see above); ``stop_offset``
-    refuses it. This is the consent boundary a nudge measured (ADR-0004): a PreCompact nudge
-    fires on a live, still-growing session, so bytes appended after acceptance must never be
-    ingested. It only bounds the output — it does not change how the safe boundary is
-    computed. Leave it ``None`` (the non-nudge lane) for the parser's prior behaviour exactly.
+    ``max_conversation_chars`` alone commits an oversized single turn anyway (see above);
+    ``stop_offset`` refuses it. This is the consent boundary a nudge measured (ADR-0004): a
+    PreCompact nudge fires on a live, still-growing session, so bytes appended after
+    acceptance must never be ingested. It only bounds the output — it does not change how
+    the safe boundary is computed. Leave it ``None`` (the non-nudge lane) for the parser's
+    prior behaviour exactly.
     """
     path = Path(path)
     total_chars = path.stat().st_size
@@ -250,19 +266,36 @@ def parse_transcript(
     _seen_assistant_text = False  # a text-bearing assistant appeared in the current block
     _leading_orphan = False  # dropped assistant content before any user record (bad cursor)
     _saw_user_record = False  # any user-role record seen (incl. a text-less tool_result)
-    _capped = False  # max_bytes stopped the parse before an overshooting turn
+    _capped = False  # a budget stopped the parse before an overshooting turn
+    # _len_after[k] == len(_conversation_from_turns(turns[:k])) — maintained incrementally so a
+    # candidate boundary costs O(1) instead of re-joining the whole slice at every commit site.
+    _len_after: list[int] = [0]
 
-    def _would_overshoot(new_safe_end: int) -> bool:
-        # Only refuse a candidate boundary once something is already committed — a first
-        # turn alone can't be shrunk further, so it's always allowed through.
+    def _projected_len(pending: TranscriptTurn | None) -> int:
+        """Conversation length once *pending* (if any) joins the turns already accumulated."""
+        base = _len_after[-1]
+        if pending is None:
+            return base
+        separator = len(_TURN_SEPARATOR) if turns else 0
+        return base + separator + len(_format_turn(pending))
+
+    def _commit_turn(turn: TranscriptTurn) -> None:
+        new_len = _projected_len(turn)  # BEFORE the append — the separator depends on `turns`
+        turns.append(turn)
+        _len_after.append(new_len)
+
+    def _would_overshoot(pending: TranscriptTurn | None = None) -> bool:
+        # Only refuse a candidate boundary once something is already committed — a first turn
+        # alone can't be shrunk further, so it is always allowed through. Do NOT remove this
+        # progress guard: it is what makes `capped` imply `safe_end_offset > start_offset`.
         return (
-            max_bytes is not None
+            max_conversation_chars is not None
             and _safe_len > 0
-            and (new_safe_end - start_offset) > max_bytes
+            and _projected_len(pending) > max_conversation_chars
         )
 
     def _exceeds_ceiling(new_safe_end: int) -> bool:
-        # ABSOLUTE limit, unlike max_bytes: it refuses even the first turn of a slice, so a
+        # ABSOLUTE limit, unlike max_conversation_chars: it refuses even the first turn of a slice, so a
         # single oversized turn that grew past the accepted boundary is never committed.
         return stop_offset is not None and new_safe_end > stop_offset
 
@@ -298,7 +331,7 @@ def parse_transcript(
                 if _seen_assistant_text:
                     if _exceeds_ceiling(f.tell()):
                         break  # ceiling: absolute, never advance the boundary past it
-                    if _would_overshoot(f.tell()):
+                    if _would_overshoot():
                         _capped = True
                         break
                     _safe_end = f.tell()
@@ -329,14 +362,14 @@ def parse_transcript(
                     if _seen_assistant_text:
                         if _exceeds_ceiling(pos_before):
                             break  # ceiling: absolute, never advance past it
-                        if _would_overshoot(pos_before):
+                        if _would_overshoot():
                             _capped = True
                             break
                         _safe_end = pos_before  # boundary = start of this user line
                         _safe_len = len(turns)
                         _safe_users = user_turn_count
                         _seen_assistant_text = False
-                    turns.append(TranscriptTurn(role="user", text=text))
+                    _commit_turn(TranscriptTurn(role="user", text=text))
                     user_turn_count += 1
 
             elif entry_type == "assistant":
@@ -351,12 +384,13 @@ def parse_transcript(
                 if text and not _saw_user_record and start_offset > 0:
                     _leading_orphan = True
                 if text and user_turn_count > 0:
+                    pending = TranscriptTurn(role="assistant", text=text)
                     if _assistant_is_terminal(entry) and _exceeds_ceiling(f.tell()):
                         break  # ceiling: refuse an oversized/grew-after turn entirely
-                    if _assistant_is_terminal(entry) and _would_overshoot(f.tell()):
+                    if _assistant_is_terminal(entry) and _would_overshoot(pending):
                         _capped = True
                         break
-                    turns.append(TranscriptTurn(role="assistant", text=text))
+                    _commit_turn(pending)
                     if _assistant_is_terminal(entry):
                         # Reliable completion signal (Claude Code): the response is done,
                         # so the safe boundary may advance past it even with no following

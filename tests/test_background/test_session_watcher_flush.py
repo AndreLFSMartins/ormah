@@ -55,7 +55,7 @@ def test_parse_transcript_max_bytes_breaks_before_overshoot(tmp_path):
     _write_turns(p, turns=4, pad=20000)
 
     full = parse_transcript(p)
-    capped = parse_transcript(p, max_bytes=60000)
+    capped = parse_transcript(p, max_conversation_chars=60000)
 
     assert 0 < capped.safe_end_offset < full.safe_end_offset
     assert capped.safe_end_offset <= 60000        # start_offset == 0 here
@@ -64,7 +64,7 @@ def test_parse_transcript_max_bytes_breaks_before_overshoot(tmp_path):
 
     # Draining the remainder from the new cursor must make more progress and
     # eventually reach EOF (proves the left-behind turn isn't lost).
-    next_slice = parse_transcript(p, start_offset=capped.safe_end_offset, max_bytes=60000)
+    next_slice = parse_transcript(p, start_offset=capped.safe_end_offset, max_conversation_chars=60000)
     assert next_slice.safe_end_offset - capped.safe_end_offset <= 60000
     assert next_slice.safe_user_turn_count > 0
 
@@ -76,7 +76,7 @@ def test_parse_transcript_max_bytes_none_preserves_behavior(tmp_path):
     _write_turns(p, turns=2, pad=100)
 
     default = parse_transcript(p)
-    explicit_none = parse_transcript(p, max_bytes=None)
+    explicit_none = parse_transcript(p, max_conversation_chars=None)
 
     assert default.safe_end_offset == explicit_none.safe_end_offset
     assert default.capped is False
@@ -91,7 +91,7 @@ def test_parse_transcript_single_oversized_turn_commits_anyway(tmp_path):
     p = tmp_path / "oneturn.jsonl"
     _write_turns(p, turns=1, pad=20000)
 
-    result = parse_transcript(p, max_bytes=5000)
+    result = parse_transcript(p, max_conversation_chars=5000)
     assert result.safe_user_turn_count == 1
     assert result.safe_end_offset > 5000  # unavoidable overshoot for a lone oversized turn
 

@@ -747,9 +747,10 @@ class TestStopOffsetCeiling:
         return sum(len((json.dumps(line) + "\n").encode()) for line in lines[:upto])
 
     def test_stop_offset_rejects_an_oversized_turn_past_the_ceiling(self, tmp_path):
-        """The flagged leak: ``max_bytes`` commits an oversized FIRST turn anyway (its own
-        docstring), so a single turn that grew past the accepted boundary would ship to a
-        remote extractor. The ceiling refuses it even when ``max_bytes`` would allow it."""
+        """The flagged leak: ``max_conversation_chars`` commits an oversized FIRST turn anyway
+        (its own docstring), so a single turn that grew past the accepted boundary would ship
+        to a remote extractor. The ceiling refuses it even when ``max_conversation_chars``
+        would allow it."""
         lines = [
             {"type": "user", "message": {"content": "prompt"}},
             {"type": "assistant", "message": {"stop_reason": "end_turn",
@@ -761,7 +762,7 @@ class TestStopOffsetCeiling:
         assert len(full.safe_turns) == 2
 
         ceiling = full.safe_end_offset - 1                    # the oversized turn ends past it
-        bounded = parse_transcript(path, max_bytes=10, stop_offset=ceiling)
+        bounded = parse_transcript(path, max_conversation_chars=10, stop_offset=ceiling)
         assert bounded.safe_end_offset <= ceiling
         assert not any(t.text.startswith("X") for t in bounded.safe_turns)
 
@@ -816,3 +817,130 @@ class TestStopOffsetCeiling:
         ceiling = self._byte_len(lines, 3) - 1                   # just before task_complete ends
         bounded = parse_transcript(path, stop_offset=ceiling)
         assert bounded.safe_end_offset <= ceiling
+
+
+def _tool_heavy_jsonl(path, turns: int, text_chars: int = 500, noise_chars: int = 40000) -> None:
+    """A transcript whose RAW bytes dwarf its CLEANED conversation.
+
+    Each turn carries a little real conversation and a large tool_use/tool_result payload the
+    Extractor never sees. This is the fixture that DISCRIMINATES the two budget axes: under a
+    byte budget one turn exhausts the batch; under a content budget many turns fit. A fixture
+    padded with plain user text passes identically under both units and proves nothing.
+    """
+    import json
+    lines = []
+    for i in range(turns):
+        lines.append({"type": "user", "message": {"role": "user",
+                      "content": f"u{i} " + "q" * text_chars}})
+        lines.append({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Read", "input": {"blob": "N" * noise_chars}}]}})
+        lines.append({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "content": "M" * noise_chars}]}})
+        lines.append({"type": "assistant", "message": {"role": "assistant",
+                      "content": [{"type": "text", "text": f"a{i} " + "r" * text_chars}],
+                      "stop_reason": "end_turn"}})
+    path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+
+
+def test_projected_length_matches_rendered_conversation():
+    """The running counter and the rendered payload must not be able to drift.
+
+    Both go through _format_turn and _TURN_SEPARATOR; this pins the arithmetic the parser
+    uses to decide a boundary against the string the Extractor actually receives.
+    """
+    from ormah.transcript.parser import (
+        _TURN_SEPARATOR, TranscriptTurn, _conversation_from_turns, _format_turn,
+    )
+    turns = [
+        TranscriptTurn(role="user", text="hello"),
+        TranscriptTurn(role="assistant", text="world"),
+        TranscriptTurn(role="user", text="again"),
+    ]
+    for k in range(len(turns) + 1):
+        incremental = (
+            sum(len(_format_turn(t)) for t in turns[:k])
+            + len(_TURN_SEPARATOR) * max(0, k - 1)
+        )
+        assert incremental == len(_conversation_from_turns(turns[:k])), f"drift at k={k}"
+
+
+def test_content_budget_batches_many_turns_a_byte_budget_could_not(tmp_path):
+    """The regression Amendment 3 exists to kill: tool-heavy turns must BATCH.
+
+    Each turn here spends ~80KB of raw transcript on tool payloads and ~1KB on conversation.
+    A byte budget of 60000 is exhausted by the first turn alone, so it committed exactly one
+    user turn. A 60000-CHAR content budget must fit dozens.
+    """
+    from ormah.transcript.parser import parse_transcript
+
+    path = tmp_path / "toolheavy.jsonl"
+    _tool_heavy_jsonl(path, turns=30)
+
+    result = parse_transcript(path, max_conversation_chars=60000)
+
+    assert result.safe_user_turn_count >= 5, (
+        f"only {result.safe_user_turn_count} user turn(s) batched — the budget is still "
+        "bounded by a quantity the Extractor never sees"
+    )
+    assert len(result.safe_conversation) <= 60000
+
+
+def test_content_budget_never_commits_past_the_budget(tmp_path):
+    """A multi-turn slice's committed conversation stays within the budget — break BEFORE
+    the turn that would overshoot, not after."""
+    from ormah.transcript.parser import parse_transcript
+
+    path = tmp_path / "toolheavy.jsonl"
+    _tool_heavy_jsonl(path, turns=30, text_chars=2000)
+
+    result = parse_transcript(path, max_conversation_chars=20000)
+
+    assert result.capped is True
+    assert len(result.safe_conversation) <= 20000
+    assert result.safe_user_turn_count > 1
+
+
+def test_terminal_assistant_turn_counts_toward_the_budget(tmp_path):
+    """The commit-site asymmetry: at the terminal-assistant site the budget check runs
+    BEFORE the append, but the commit INCLUDES that turn. Forgetting it under-counts by a
+    whole turn and lets the slice exceed the budget."""
+    from ormah.transcript.parser import parse_transcript
+
+    import json
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": "u0"}},
+        {"type": "assistant", "message": {"role": "assistant", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "a0"}]}},
+        {"type": "user", "message": {"role": "user", "content": "u1"}},
+        {"type": "assistant", "message": {"role": "assistant", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Z" * 900}]}},
+    ]
+    path = tmp_path / "asym.jsonl"
+    path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+
+    # Budget large enough for turns 1-3 but NOT for the 900-char assistant turn.
+    result = parse_transcript(path, max_conversation_chars=200)
+
+    assert result.capped is True
+    assert len(result.safe_conversation) <= 200
+    assert not any(t.text.startswith("Z") for t in result.safe_turns)
+
+
+def test_single_oversized_turn_is_still_committed(tmp_path):
+    """The progress guard: a lone turn bigger than the budget can't be shrunk, so it is
+    committed as its own slice. This guard is load-bearing for Task 2's rewind invariant."""
+    from ormah.transcript.parser import parse_transcript
+
+    import json
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": "u0"}},
+        {"type": "assistant", "message": {"role": "assistant", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "X" * 50000}]}},
+    ]
+    path = tmp_path / "oversized.jsonl"
+    path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+
+    result = parse_transcript(path, max_conversation_chars=1000)
+
+    assert result.safe_user_turn_count == 1
+    assert len(result.safe_conversation) > 1000  # unavoidable for a lone oversized turn
