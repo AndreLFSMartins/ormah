@@ -222,7 +222,7 @@ def test_ingest_session_basic(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "abc123.jsonl"
     _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
+    _mark_idle(jsonl)  # finished session, below flush_chars → idle flush
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
@@ -304,7 +304,7 @@ def test_capped_skip_schedules_drain_continuation(engine, tmp_path):
     project_dir = watch_dir / "-Users-alice-Code-myproject"
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "abc123.jsonl"
-    _make_jsonl(jsonl, user_turns=12)  # large enough that a small flush_bytes caps the first batch
+    _make_jsonl(jsonl, user_turns=12)  # large enough that a small flush_chars caps the first batch
     _mark_idle(jsonl)
     state = {}
     defer_calls: list[int] = []
@@ -315,7 +315,7 @@ def test_capped_skip_schedules_drain_continuation(engine, tmp_path):
         for _ in range(MAX_EXTRACT_FAILURES):
             result = _ingest_session(
                 engine, jsonl, state, watch_dir, min_turns=1,
-                flush_bytes=300,  # small -> the first closed batch is capped (content past it)
+                flush_chars=300,  # small -> the first closed batch is capped (content past it)
                 on_defer_active=lambda: defer_calls.append(1),
             )
 
@@ -394,7 +394,7 @@ def test_success_after_cap_preserves_skipped_slices(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_UNPARSEABLE), \
          patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
         for _ in range(MAX_EXTRACT_FAILURES):
-            _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_bytes=300)
+            _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_chars=300)
     assert state[rel]["skipped_slices"], "precondition: first slice quarantined"
     quarantined = list(state[rel]["skipped_slices"])
 
@@ -403,7 +403,7 @@ def test_success_after_cap_preserves_skipped_slices(engine, tmp_path):
                                    "title": "t"}]})
     with patch(_LLM_PATCH, return_value=ok), \
          patch("ormah.background.session_watcher.ingest_provider_configured", return_value=True):
-        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_bytes=300)
+        result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_chars=300)
 
     assert result == IngestResult.OK
     # The durable quarantine trail must survive the successful write.
@@ -1051,7 +1051,7 @@ def test_min_turns_filter(engine, tmp_path):
         result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
 
     # A short ACTIVE window below min_turns defers (noise cut) rather than extracting —
-    # retry until it crosses min_turns, crosses flush_bytes, or the session idles.
+    # retry until it crosses min_turns, crosses flush_chars, or the session idles.
     assert result == IngestResult.TRANSIENT
     assert str(jsonl.relative_to(watch_dir)) not in state
 
@@ -1096,7 +1096,7 @@ def test_unchanged_session_skipped(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "session.jsonl"
     _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
+    _mark_idle(jsonl)  # finished session, below flush_chars → idle flush
 
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
@@ -1193,7 +1193,7 @@ def test_incremental_only_new_turns(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
+    _mark_idle(jsonl)  # finished session, below flush_chars → idle flush
 
     captured: list[str] = []
     real_ingest = engine.ingest_conversation
@@ -1210,7 +1210,7 @@ def test_incremental_only_new_turns(engine, tmp_path):
         assert first_offset > 0
 
         _make_jsonl(jsonl, user_turns=12)  # identical first 6 turns + 6 appended
-        _mark_idle(jsonl)  # appended session, below flush_bytes → idle flush
+        _mark_idle(jsonl)  # appended session, below flush_chars → idle flush
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " not in captured[1]
@@ -1227,7 +1227,7 @@ def test_incremental_defers_small_append(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
+    _mark_idle(jsonl)  # finished session, below flush_chars → idle flush
 
     calls = 0
     real_ingest = engine.ingest_conversation
@@ -1259,7 +1259,7 @@ def test_shrink_resets_cursor(engine, tmp_path):
     project_dir.mkdir(parents=True)
     jsonl = project_dir / "active.jsonl"
     _make_jsonl(jsonl, user_turns=10)
-    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
+    _mark_idle(jsonl)  # finished session, below flush_chars → idle flush
 
     captured: list[str] = []
     real_ingest = engine.ingest_conversation
@@ -1274,7 +1274,7 @@ def test_shrink_resets_cursor(engine, tmp_path):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
         _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset
-        _mark_idle(jsonl)  # shrunk session, below flush_bytes → idle flush
+        _mark_idle(jsonl)  # shrunk session, below flush_chars → idle flush
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " in captured[1]
@@ -1344,7 +1344,7 @@ def test_inflight_multirecord_response_not_split(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
 
     _make_jsonl(jsonl, user_turns=6)  # 6 complete (end_turn) pairs
-    _mark_idle(jsonl)  # finished-so-far session, below flush_bytes → idle flush
+    _mark_idle(jsonl)  # finished-so-far session, below flush_chars → idle flush
     state = {}
     captured: list[str] = []
     real_ingest = engine.ingest_conversation
@@ -1393,7 +1393,7 @@ def test_codex_multirecord_turn_committed_whole_via_task_complete(engine, tmp_pa
     _append_codex_turn(jsonl, 1, records=2, complete=True)
     # In-flight final turn: two assistant records, no task_complete yet.
     _append_codex_turn(jsonl, 2, records=2, complete=False)
-    _mark_idle(jsonl)  # below flush_bytes → idle flush for the closed turns
+    _mark_idle(jsonl)  # below flush_chars → idle flush for the closed turns
 
     state = {}
     captured: list[str] = []
@@ -1432,7 +1432,7 @@ def test_legacy_mid_response_cursor_recovered(engine, tmp_path):
             "content": [{"type": "text", "text": "Second part with the actual answer"}]}},
     ]
     jsonl.write_text("\n".join(json.dumps(r) for r in records) + "\n")
-    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
+    _mark_idle(jsonl)  # finished session, below flush_chars → idle flush
 
     # A legacy state cursor saved mid-response (after the first assistant record), with the
     # CORRECT file hash — the file is unchanged. Recovery must still fire because the stored
@@ -1476,7 +1476,7 @@ def test_codex_inflight_turn_not_split_on_idle(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
 
     _append_codex_turn(jsonl, 0, records=2, complete=True)
-    _mark_idle(jsonl)  # finished-so-far turn, below flush_bytes → idle flush
+    _mark_idle(jsonl)  # finished-so-far turn, below flush_chars → idle flush
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=1) == IngestResult.OK
@@ -1797,7 +1797,7 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     rel = str(jsonl.relative_to(watch_dir))
 
     _make_jsonl(jsonl, user_turns=10)
-    _mark_idle(jsonl)  # finished session, below flush_bytes → idle flush
+    _mark_idle(jsonl)  # finished session, below flush_chars → idle flush
     state = {}
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
@@ -1805,7 +1805,7 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     assert first_nodes  # first ingest produced at least one node
 
     _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset → full re-ingest
-    _mark_idle(jsonl)  # shrunk session, below flush_bytes → idle flush
+    _mark_idle(jsonl)  # shrunk session, below flush_chars → idle flush
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
@@ -1827,8 +1827,8 @@ def test_shrink_resets_node_ids(engine, tmp_path):
 # window (issue #52), now expressed on the reconcile API (list[SessionWatch] + _stop_event).
 
 
-def test_large_orphan_beyond_flush_bytes_does_not_rewind(engine, tmp_path, caplog):
-    """Beta byte-cap path (council R2): an orphan larger than flush_bytes must not make
+def test_large_orphan_beyond_flush_chars_does_not_rewind(engine, tmp_path, caplog):
+    """Beta byte-cap path (council R2): an orphan larger than flush_chars must not make
     should_rewind true (the first boundary commit ignores the cap while nothing closed),
     and the post-rewind park probe must not mis-park a recoverable file. Cursor advances
     monotonically across ticks; no recovery rewind ever."""
@@ -1865,7 +1865,7 @@ def test_large_orphan_beyond_flush_bytes_does_not_rewind(engine, tmp_path, caplo
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
          caplog.at_level(logging.INFO, logger="ormah.background.session_watcher"):
         for _ in range(10):  # bounded drain: several capped ticks may be needed
-            r = _ingest_session(engine, jsonl, state, watch_dir, 1, flush_bytes=8000)
+            r = _ingest_session(engine, jsonl, state, watch_dir, 1, flush_chars=8000)
             offsets.append(state[rel]["end_offset"])
             if r == IngestResult.NO_PROGRESS:
                 break
@@ -2041,7 +2041,7 @@ def test_disabled_worker_ignores_growth_after_the_accepted_boundary(engine, tmp_
 
 
 def test_a_capped_batch_re_enqueues_the_remainder(engine, tmp_path):
-    """The drain must finish a boundary larger than flush_bytes on its own, across several
+    """The drain must finish a boundary larger than flush_chars on its own, across several
     capped batches — no sticky flag needed."""
     watch_dir = tmp_path / "projects"
     proj = watch_dir / "-Users-alice-Code-myproject"
@@ -2054,7 +2054,7 @@ def test_a_capped_batch_re_enqueues_the_remainder(engine, tmp_path):
 
     engine.settings.session_watcher_enabled = False
     engine.settings.session_watcher_dir = watch_dir
-    engine.settings.session_watcher_flush_bytes = 400        # force several capped batches
+    engine.settings.session_watcher_flush_chars = 400        # force several capped batches
     watches = start_session_watcher(engine)
     try:
         w = watches[0]
@@ -2306,7 +2306,7 @@ def test_reconcile_skips_subagents_keeps_primary(engine, tmp_path):
     sub_dir.mkdir(parents=True)
     primary = project_dir / "abc123.jsonl"
     _make_jsonl(primary, user_turns=6)
-    _mark_idle(primary)  # finished session, below flush_bytes → idle flush
+    _mark_idle(primary)  # finished session, below flush_chars → idle flush
     _make_jsonl(sub_dir / "agent-deadbeef.jsonl", user_turns=6)
 
     handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
@@ -2332,7 +2332,7 @@ def test_reconcile_respects_lookback_for_never_seen_files(engine, tmp_path):
 
     recent = project_dir / "recent.jsonl"
     _make_jsonl(recent, user_turns=6)
-    _mark_idle(recent)  # finished session, below flush_bytes → idle flush
+    _mark_idle(recent)  # finished session, below flush_chars → idle flush
 
     old = project_dir / "old.jsonl"
     _make_jsonl(old, user_turns=6)
@@ -2759,11 +2759,11 @@ def test_capped_continuation_inherits_the_producer_force_flush(engine, tmp_path)
     proj.mkdir(parents=True)
 
     handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool", min_turns=1)
-    handler.flush_bytes = 300      # small -> the first closed batch caps (content past it)
+    handler.flush_chars = 300      # small -> the first closed batch caps (content past it)
     spool = handler.spool
 
     obs_file = proj / "obs.jsonl"
-    _make_jsonl(obs_file, user_turns=12)       # large -> flush_bytes=300 caps the first batch
+    _make_jsonl(obs_file, user_turns=12)       # large -> flush_chars=300 caps the first batch
     _mark_idle(obs_file)
     spool.enqueue(obs_file, boundary=obs_file.stat().st_size, reason="observer", force_flush=False)
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):

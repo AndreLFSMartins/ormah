@@ -783,12 +783,13 @@ def _commit_state(state: dict, rel: str, entry: dict, state_lock, watch_dir: Pat
 
 
 def _should_flush(is_idle: bool, capped: bool) -> bool:
-    """A Batch closes once idle, or once the parser filled a full flush_bytes batch.
+    """A Batch closes once idle, or once the parser filled a full batch.
 
-    Gating on ``capped`` (not ``pending >= flush_bytes``) matters: break-before capping
-    guarantees a multi-turn slice's pending bytes stay BELOW flush_bytes, so a
-    byte-threshold comparison would never fire for the common multi-turn case. ``capped``
-    is the parser's own "a full batch is ready, more closed content remains" signal.
+    Gating on ``capped`` (not a length comparison) matters: break-before capping guarantees a
+    multi-turn slice's committed conversation stays BELOW the budget, so a threshold comparison
+    would never fire for the common multi-turn case. ``capped`` is the parser's own "a full
+    batch is ready, more closed content remains" signal, and it now covers BOTH budgets
+    (conversation length and raw span) — the gate does not care which one bound.
     """
     return is_idle or capped
 
@@ -800,7 +801,8 @@ def _ingest_session(
     watch_dir: Path,
     min_turns: int,
     idle_threshold: float = 600.0,
-    flush_bytes: int = 60000,
+    flush_chars: int = 60000,
+    max_raw_bytes: int | None = None,
     on_defer_active=None,
     state_lock=None,
     boundary: int | None = None,
@@ -861,7 +863,8 @@ def _ingest_session(
     # force_flush from the job's reason; boundary keeps pinning the ceiling for all jobs.
     try:
         result = parse_transcript(
-            path, start_offset=prev_offset, max_conversation_chars=flush_bytes, stop_offset=boundary
+            path, start_offset=prev_offset, max_conversation_chars=flush_chars,
+            max_raw_bytes=max_raw_bytes, stop_offset=boundary,
         )
         if should_rewind(result, prev_offset):
             # Orphan with NO forward progress: a genuine cursor left mid-response by an
@@ -884,9 +887,10 @@ def _ingest_session(
                 # transcript parks, it does not re-extract the closed prefix every tick.
                 return IngestResult.NO_PROGRESS
             # There is something to recover: drain capped as usual so the ingest slice
-            # honours flush_bytes; later ticks continue incrementally from the new cursor.
+            # honours flush_chars; later ticks continue incrementally from the new cursor.
             result = parse_transcript(
-                path, start_offset=0, max_conversation_chars=flush_bytes, stop_offset=boundary
+                path, start_offset=0, max_conversation_chars=flush_chars,
+                max_raw_bytes=max_raw_bytes, stop_offset=boundary,
             )
     except Exception as e:
         logger.warning("Session transcript parse error for %s: %s", path, e)
@@ -903,7 +907,7 @@ def _ingest_session(
     payload_users = result.safe_user_turn_count
     payload_turns = result.safe_turns
 
-    # When the file looks idle/finished, commit whatever is closed even below flush_bytes,
+    # When the file looks idle/finished, commit whatever is closed even below flush_chars,
     # so a short finished session is not stranded.
     try:
         age = time.time() - path.stat().st_mtime
@@ -929,7 +933,7 @@ def _ingest_session(
             return IngestResult.TRANSIENT  # will grow; retry, never park
         return IngestResult.NO_PROGRESS   # idle/frozen safe boundary -> park-eligible
 
-    # Batch gate: flush once idle, or once the parser filled a full flush_bytes batch
+    # Batch gate: flush once idle, or once the parser filled a full flush_chars batch
     # (result.capped). Below that, defer so a Batch accumulates instead of round-tripping
     # the LLM per turn. A nudge force-flushes past this too: it authorised these exact bytes.
     if not force_flush and not _should_flush(is_idle, result.capped):
@@ -1102,7 +1106,8 @@ class SessionHandler(FileSystemEventHandler):
         idle_threshold: float = 600.0,
         lookback_hours: int = 72,
         retry_seconds: float = 30.0,
-        flush_bytes: int = 60000,
+        flush_chars: int = 60000,
+        max_raw_bytes: int | None = None,
         stop_event: Event | None = None,
         spool: "IngestSpool | None" = None,
     ) -> None:
@@ -1113,7 +1118,8 @@ class SessionHandler(FileSystemEventHandler):
         self.idle_threshold = idle_threshold
         self.lookback_hours = lookback_hours
         self.retry_seconds = retry_seconds
-        self.flush_bytes = flush_bytes
+        self.flush_chars = flush_chars
+        self.max_raw_bytes = max_raw_bytes
         self.spool = spool
         self._state = _load_state(watch_dir)
         self._timers: dict[str, Timer] = {}
@@ -1255,7 +1261,8 @@ class SessionHandler(FileSystemEventHandler):
         with self._ingesting_guard(path):
             result = _ingest_session(
                 self.engine, path, self._state, self.watch_dir, self.min_turns,
-                idle_threshold=self.idle_threshold, flush_bytes=self.flush_bytes,
+                idle_threshold=self.idle_threshold, flush_chars=self.flush_chars,
+                max_raw_bytes=self.max_raw_bytes,
                 boundary=job.boundary, force_flush=force_flush, state_lock=self._state_lock,
             )
         if result is IngestResult.TRANSIENT:
@@ -1472,7 +1479,8 @@ def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
                 engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
                 s.session_watcher_idle_threshold, s.session_watcher_lookback_hours,
                 retry_seconds=s.session_watcher_retry_seconds,
-                flush_bytes=s.session_watcher_flush_bytes,
+                flush_chars=s.session_watcher_flush_chars,
+                max_raw_bytes=s.session_watcher_max_raw_bytes,
                 stop_event=stop_event, spool=spool,
             )
             handler.start_drain()  # the always-on worker

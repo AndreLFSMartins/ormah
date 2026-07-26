@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
+
+_DEPRECATED_FLUSH_BYTES_ENV = "ORMAH_SESSION_WATCHER_FLUSH_BYTES"
+_warned_flush_bytes = False
 
 
 _ENV_FILES = [
@@ -14,6 +21,37 @@ _ENV_FILES = [
 ]
 # pydantic-settings reads later files with higher priority
 _EXISTING_ENV_FILES = [str(p) for p in _ENV_FILES if p.exists()]
+
+
+def _deprecated_key_present(env_files: list[str] | None = None) -> bool:
+    """True when the deprecated key is set in ANY configured settings source.
+
+    pydantic-settings resolves the process environment AND the .env files in _ENV_FILES, so
+    checking os.environ alone would miss the likeliest case: an operator who wrote the old key
+    into ~/.config/ormah/.env. Parsing is deliberately crude -- we only need presence, never the
+    value (the value is in the wrong unit and is discarded either way).
+    """
+    if _DEPRECATED_FLUSH_BYTES_ENV in os.environ:
+        return True
+    # Mirror Settings' own resolution, including the `or ".env"` fallback (config.py:20) -- a
+    # scanner that reads a different list than Settings does would report on files nobody loads
+    # (council R2, Cursor).
+    sources = env_files if env_files is not None else (_EXISTING_ENV_FILES or [".env"])
+    for path in sources:
+        try:
+            for line in Path(path).read_text().splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if stripped.split("=", 1)[0].strip().upper() == _DEPRECATED_FLUSH_BYTES_ENV:
+                    return True
+        except OSError as e:
+            # Council decision (repo owner): swallowing this silently hides a real config-read
+            # failure from the operator -- exactly the class of silent surprise this whole
+            # deprecation path exists to prevent. Warn, then keep scanning the other sources.
+            logger.warning("Could not read %s while scanning for the deprecated flush-bytes key: %s", path, e)
+            continue
+    return False
 
 
 class Settings(BaseSettings):
@@ -96,7 +134,8 @@ class Settings(BaseSettings):
     session_watcher_lookback_hours: int = 72
     session_watcher_idle_threshold: float = 600.0  # was 30.0 — 30s flushed 1-turn batches
     session_watcher_retry_seconds: float = 30.0    # FSEvents-miss retry — decoupled from idle
-    session_watcher_flush_bytes: int = 60000       # pending-delta bytes that close a Batch (~15-20K tok)
+    session_watcher_flush_chars: int = 60000       # CONVERSATION chars that close a Batch (~15K tok)
+    session_watcher_max_raw_bytes: int | None = None  # independent raw-span budget; see ADR-0001 Am.3
     session_watcher_reconcile_interval_minutes: int = 5
     session_watcher_reconcile_max_per_tick: int = 50
     session_watcher_reconcile_max_seconds: float = 30.0
@@ -558,11 +597,18 @@ class Settings(BaseSettings):
             raise ValueError(f"session_watcher_retry_seconds must be >= 1.0, got {v}")
         return v
 
-    @field_validator("session_watcher_flush_bytes")
+    @field_validator("session_watcher_flush_chars")
     @classmethod
-    def _flush_bytes_min(cls, v: int) -> int:
+    def _flush_chars_min(cls, v: int) -> int:
         if v < 1000:
-            raise ValueError(f"session_watcher_flush_bytes must be >= 1000, got {v}")
+            raise ValueError(f"session_watcher_flush_chars must be >= 1000, got {v}")
+        return v
+
+    @field_validator("session_watcher_max_raw_bytes")
+    @classmethod
+    def _max_raw_bytes_min(cls, v: int | None) -> int | None:
+        if v is not None and v < 1000:
+            raise ValueError(f"session_watcher_max_raw_bytes must be >= 1000, got {v}")
         return v
 
     @field_validator("ingest_chunk_chars")
@@ -573,15 +619,56 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
-    def _flush_bytes_within_cap(self) -> "Settings":
-        if self.session_watcher_flush_bytes > self.ingest_max_content_chars:
+    def _flush_chars_within_cap(self) -> "Settings":
+        if self.session_watcher_flush_chars > self.ingest_max_content_chars:
             raise ValueError(
-                "session_watcher_flush_bytes "
-                f"({self.session_watcher_flush_bytes}) must be <= "
+                "session_watcher_flush_chars "
+                f"({self.session_watcher_flush_chars}) must be <= "
                 f"ingest_max_content_chars ({self.ingest_max_content_chars}); "
                 "a larger cap would let a MULTI-turn batch overshoot the extractor's "
                 "truncation limit (a single turn bigger than the cap is still truncated, "
                 "and logged, regardless of this setting)"
+            )
+        # Council R1 (Cursor): a bare `>= flush_chars` floor compares BYTES to CHARS and would
+        # admit a ~200KB ceiling. Measured raw->clean ratios run ~3x to ~93x (p50 ~27x), so such a
+        # ceiling closes tool-heavy slices far below the char sweet spot -- the same axis error
+        # Amendment 3 fixes, one scale up, and silently. Anchor the floor on the observed ratio.
+        _MIN_RAW_RATIO = 25  # p50 of the measured raw:clean ratio (~27x), rounded down
+        if (
+            self.session_watcher_max_raw_bytes is not None
+            and self.session_watcher_max_raw_bytes
+            < self.session_watcher_flush_chars * _MIN_RAW_RATIO
+        ):
+            raise ValueError(
+                f"session_watcher_max_raw_bytes ({self.session_watcher_max_raw_bytes}) must be "
+                f">= {_MIN_RAW_RATIO}x session_watcher_flush_chars "
+                f"({self.session_watcher_flush_chars * _MIN_RAW_RATIO}); the measured raw:clean "
+                f"ratio is ~{_MIN_RAW_RATIO}x at p50, so a tighter raw budget would close batches "
+                "before the recall sweet spot and become the binding limit -- reintroducing the "
+                "axis error ADR-0001 Amendment 3 removes"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_on_deprecated_flush_bytes(self) -> "Settings":
+        # Renamed in ADR-0001 Amendment 3 because the UNIT changed: the old value counted raw
+        # transcript bytes, the new one counts conversation chars, and the raw->clean ratio
+        # ranges from ~3x to ~93x. Translating is not possible, so the old value is ignored --
+        # but silently ignoring it (what `extra: "ignore"` does today) hides a real config
+        # change from the operator. Warn once per process.
+        # Council R1 (Codex): checking os.environ ALONE misses the likely case. Settings also reads
+        # ~/.config/ormah/.env and ./.env (see _ENV_FILES above), and an operator who set the old
+        # key there would get no warning at all -- the exact silent migration this guard exists to
+        # prevent. Scan every configured source.
+        global _warned_flush_bytes
+        if not _warned_flush_bytes and _deprecated_key_present():
+            _warned_flush_bytes = True
+            logger.warning(
+                "%s is set but no longer used: it was renamed to ORMAH_SESSION_WATCHER_FLUSH_CHARS "
+                "and its unit changed from raw transcript bytes to conversation characters "
+                "(ADR-0001 Amendment 3). The old value was IGNORED; the default %d is in effect. "
+                "Remove the old variable, or set the new one deliberately.",
+                _DEPRECATED_FLUSH_BYTES_ENV, self.session_watcher_flush_chars,
             )
         return self
 
