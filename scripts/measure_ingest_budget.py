@@ -46,6 +46,10 @@ def main() -> None:
             offset = r.safe_end_offset
 
     def pct(xs: list[int], q: float) -> int:
+        # Returns a FLOOR, not an exact percentile: int() truncates. That is a no-op for the two
+        # integer series reported below (byte spans and char counts), but it silently floors any
+        # non-integer series -- during Task 6 reusing this on raw:clean RATIOS turned a p50 of
+        # 22.9x into 22.0x. Do not reuse it on float data without removing the cast.
         s = sorted(xs)
         return int(s[min(len(s) - 1, int(q * len(s)))])
 

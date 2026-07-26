@@ -225,11 +225,19 @@ def test_timeout_hint_never_lowers_the_active_provider_baseline(tmp_path):
 def test_extraction_timeout_hint_is_bounded(tmp_path):
     """A hung provider must not be waited on indefinitely just because the payload was big.
 
-    The cap must sit BELOW the derived term or this test stops testing the cap. Task 6 measured
-    ingest_timeout_per_10k_chars down from the provisional 60.0 to 4.9, which drops the derived
-    value for a 60000-char payload from ~457s to ~92s -- so the old cap of 100 no longer bound and
-    the assertion silently became a test of the derived term. The cap is 70 for that reason; it is
-    not an arbitrary constant, and it must be re-checked if the rate is ever re-measured.
+    The cap must sit strictly BETWEEN the provider baseline and the derived term, or this test
+    stops testing the cap: at or below the baseline the hint is the baseline, and at or above the
+    derived term the hint is the derived term. Neither would be the cap.
+
+    ``ingest_timeout_per_10k_chars`` has moved twice during Task 6 (provisional 60.0 -> measured
+    4.9 -> 17.5, raised after an ollama measurement showed 4.9 left only ~5% headroom on the
+    local-inference lane), and each move rescales the derived term for the 60000-char payload
+    below: ~457s -> ~92s -> ~175.7s. The cap of 100 that this fixture originally used stopped
+    binding at 4.9 and the assertion silently became a test of the derived term instead.
+
+    The legal window is therefore ``(60, 175.7)`` today and 70 sits inside it with margin. 70 is
+    not an arbitrary constant: it must be re-checked, and this docstring updated, whenever the
+    rate moves again.
 
     The provider is pinned to ollama on purpose: a cap this low is only a
     LEGAL config under a provider whose own baseline is <= it, since the cross-field validator
@@ -268,7 +276,7 @@ def test_extraction_timeout_hint_is_bounded(tmp_path):
     finally:
         engine.shutdown()
 
-    # == not <=: a 60000-char payload derives ~92s at the measured rate, so the cap is what MUST
+    # == not <=: a 60000-char payload derives ~175.7s at the current rate, so the cap is what MUST
     # produce this number. `<= 70` would also hold if the size term were dropped entirely (that
     # would yield the 60s baseline, not 70).
     assert hints[-1] == 70

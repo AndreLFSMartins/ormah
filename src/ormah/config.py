@@ -405,26 +405,31 @@ class Settings(BaseSettings):
     # bounds under contention, not steady state. claude_cli / claude-haiku-4-5, 5 real
     # _extract_memories_llm calls on live 50K-58K-char slices: 37.2 / 32.3 / 45.0 / 74.6 / 61.6 s
     # (median 45.0s, max 74.6s, 0 failures).
-    #   rate = max(0, 74.6 - 60) / 6.0 * 2.0 = 4.8666... -> 4.9  (rounded UP, the safe direction)
-    # The 6.0 divisor is the NOMINAL flush_chars/10000 and is deliberately not what the code
-    # multiplies by: memory_engine uses len(prompt)/10000 = 6.61 for a full Batch (the rendered
-    # prompt adds ~6117 chars), and the slowest run's payload was 50,037 chars = 5.61 units. Treat
-    # 4.9 as a coarse safety figure, not an exact per-10k coefficient.
+    # ollama / gemma3:12b-it-qat, ONE real call (n=1): 75.2s on a 50,577-char slice, 0 failures,
+    # 6 memories extracted. Cold-vs-warm model load unestablished for that call.
     #
-    # NOT a fitted slope: across that sample latency did not track payload size at all (Pearson
-    # r = -0.27, n=5; the SLOWEST run had the SMALLEST payload). Wall clock is dominated by
-    # generation volume and provider variance. Read 4.9 as "2x the worst observed excess over the
-    # 60s base", not as seconds-per-10k-chars.
+    # NOT a fitted slope. On the claude_cli sample latency did not track payload size at all
+    # (Pearson r = -0.274, n=5; the SLOWEST run had the SMALLEST payload) -- wall clock is
+    # dominated by generation volume and provider variance, so no per-10k coefficient can be
+    # fitted from this data. 17.5 is a chosen safety envelope, not a measurement.
     #
-    # A default, not a claim about every provider -- which is why the hint is a FLOOR over the
-    # adapter baseline (max(baseline, derived)) rather than a replacement for it. On claude_cli
-    # this value therefore changes NOTHING: its baseline (120s) beats the derived term (89.4s at a
-    # full Batch). The lane it actually governs is ollama (baseline = llm_timeout_seconds = 60s),
-    # where a full Batch gets 92.4s instead of the old 457s. One timed real call there
-    # (gemma3:12b-it-qat, 50,577 chars) took 75.2s -- 85.7% of the 87.8s that payload's own hint
-    # allows, and a full Batch size-scales to ~87.7s against a 92.4s hint (~5% headroom). That
-    # margin is thin and is an OPEN question for the repo owner, not a settled default.
-    ingest_timeout_per_10k_chars: float = 4.9
+    # Why 17.5: a full 60000-char Batch renders a ~66,117-char prompt (6.61 units), giving
+    # 60 + 17.5 * 6.61 = 175.7s. The ollama observation size-scales to ~87.7s for a full Batch, so
+    # 175.7s is ~2.0x that -- ~100% headroom. Scope of that envelope, stated precisely: the
+    # claude_cli sample spread 2.31x min->max (32.3->74.6s) and 1.66x median->max. Applied to
+    # 87.7s those need 145.4s and 202.6s respectively, so 175.7s COVERS a median->max excursion
+    # but NOT a full 2.31x min->max one. It is a large improvement on the 92.4s it replaces, not a
+    # guarantee.
+    #
+    # The trade is deliberately asymmetric: overshooting costs latency in the bad case, while
+    # undershooting costs retry churn and eventual quarantine after MAX_EXTRACT_FAILURES. Waiting
+    # is the cheaper mistake.
+    #
+    # ACCEPTED CONSEQUENCE -- unlike the 4.9 this replaces, 17.5 DOES change the live provider:
+    # 175.7s exceeds claude_cli's 120s baseline, so claude_cli now waits up to ~176s before
+    # declaring failure instead of 120s. Deliberate, not an oversight. Still below
+    # ingest_timeout_max_seconds (900), so the cap does not clamp it.
+    ingest_timeout_per_10k_chars: float = 17.5
     ingest_timeout_max_seconds: int = 900        # absolute bound for a hung provider
     ingest_min_confidence: float = 0.0  # drop auto-extracted memories below this confidence (0 = off)
     ingest_relevance_gate: bool = True  # drop memories the Extractor labels provenance=material
