@@ -112,6 +112,30 @@ def test_deprecated_key_scanner_ignores_comments_and_partial_names(tmp_path):
     assert cfg._deprecated_key_present(env_files=[str(env_file)]) is False
 
 
+def test_deprecated_key_scanner_warns_once_on_unreadable_source(tmp_path, caplog):
+    """Review M-9: the repo owner's ordered fix (warn instead of silently `continue` on
+    OSError) needs its own coverage -- an unreadable source must produce exactly one warning
+    naming the path, not be swallowed."""
+    import logging
+
+    import ormah.config as cfg
+
+    # A directory, not a file: Path.read_text() raises IsADirectoryError, a subclass of
+    # OSError, without needing to fiddle with real filesystem permissions.
+    unreadable = tmp_path / "not_a_file"
+    unreadable.mkdir()
+
+    with caplog.at_level(logging.WARNING, logger="ormah.config"):
+        present = cfg._deprecated_key_present(env_files=[str(unreadable)])
+
+    assert present is False  # the read failed; nothing was matched, but it must not raise
+    matching = [r for r in caplog.records if str(unreadable) in r.message]
+    assert len(matching) == 1, (
+        f"expected exactly one warning naming {unreadable}, got {len(matching)}: "
+        f"{[r.message for r in caplog.records]}"
+    )
+
+
 def test_raw_ceiling_far_below_the_measured_ratio_is_rejected():
     """Council R1 (Cursor): a floor of `>= flush_chars` compares bytes to chars and permits a
     ~200KB ceiling, which would close tool-heavy slices long before the char sweet spot --
@@ -155,8 +179,14 @@ def test_parse_transcript_breaks_before_overshooting_the_content_budget(tmp_path
 
     assert 0 < capped.safe_end_offset < full.safe_end_offset
     assert len(capped.safe_conversation) <= 60000
+    # Lower bound, not just an upper one (review I-1): this fixture's raw span passes 60000
+    # bytes after a SINGLE turn (noise_chars=40000 * 2 blocks), so a byte-axis cap would also
+    # satisfy every assertion above with convo_len~4025/turns=1. Only a genuine char-axis cap
+    # commits multiple turns and tens of thousands of cleaned chars -- require that.
+    assert len(capped.safe_conversation) > 50_000
     assert capped.capped is True
     assert capped.safe_user_turn_count < full.user_turn_count
+    assert capped.safe_user_turn_count > 5
 
     # Draining the remainder from the new cursor must make more progress and eventually reach
     # EOF (proves the left-behind turn isn't lost).
@@ -327,6 +357,38 @@ def test_ingest_session_subcap_flush_does_not_retrigger(tmp_path):
     assert result == IngestResult.OK
     assert engine.recorded_lengths
     assert not defer_calls
+
+
+def test_ingest_session_raw_budget_caps_independently_of_flush_chars(tmp_path):
+    """Review I-2: max_raw_bytes has to actually reach parse_transcript through
+    _ingest_session's plumbing, not just Settings' ratio validator or a direct
+    parse_transcript call. A generous flush_chars (60000) alone would let a tool-heavy
+    slice through at convo_len~56384/14 turns (see the content-budget test above); a tight
+    max_raw_bytes=8000 must instead bind first and commit a MUCH smaller slice
+    (convo_len~4025/1 turn) -- proving the kwarg is wired all the way through, not dropped
+    at any of the two _ingest_session call sites or the SessionHandler constructor."""
+    from ormah.background.session_watcher import _ingest_session
+
+    watch_dir = tmp_path
+    path = watch_dir / "raw_capped.jsonl"
+    _tool_heavy_turns(path, turns=30, text_chars=2000)
+    now = time.time()
+    os.utime(path, (now, now - 700))  # idle -> the gate flushes regardless of which cap bound
+
+    engine = _FakeEngine()
+    state: dict = {}
+    _ingest_session(
+        engine, path, state, watch_dir, min_turns=1,
+        flush_chars=60000, max_raw_bytes=8000,
+    )
+
+    assert engine.recorded_lengths, "expected at least one ingest call"
+    # char_only(flush_chars=60000) commits ~56384 chars; if max_raw_bytes never reached the
+    # parser, this test would see that number instead of the raw-bound ~4025.
+    assert engine.recorded_lengths[-1] < 10_000, (
+        "the committed slice looks bounded by flush_chars, not max_raw_bytes -- "
+        "the kwarg likely never reached parse_transcript"
+    )
 
 
 def test_ingest_session_active_session_flushes_when_over_flush_chars(tmp_path):

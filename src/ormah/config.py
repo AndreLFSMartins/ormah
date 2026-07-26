@@ -45,10 +45,13 @@ def _deprecated_key_present(env_files: list[str] | None = None) -> bool:
                     continue
                 if stripped.split("=", 1)[0].strip().upper() == _DEPRECATED_FLUSH_BYTES_ENV:
                     return True
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             # Council decision (repo owner): swallowing this silently hides a real config-read
             # failure from the operator -- exactly the class of silent surprise this whole
             # deprecation path exists to prevent. Warn, then keep scanning the other sources.
+            # UnicodeDecodeError is included: a non-UTF-8 .env would otherwise escape this
+            # helper (called from a model validator) and turn a cosmetic deprecation scan into
+            # a hard config-load failure (review M-11).
             logger.warning("Could not read %s while scanning for the deprecated flush-bytes key: %s", path, e)
             continue
     return False
@@ -643,9 +646,9 @@ class Settings(BaseSettings):
                 f"session_watcher_max_raw_bytes ({self.session_watcher_max_raw_bytes}) must be "
                 f">= {_MIN_RAW_RATIO}x session_watcher_flush_chars "
                 f"({self.session_watcher_flush_chars * _MIN_RAW_RATIO}); the measured raw:clean "
-                f"ratio is ~{_MIN_RAW_RATIO}x at p50, so a tighter raw budget would close batches "
-                "before the recall sweet spot and become the binding limit -- reintroducing the "
-                "axis error ADR-0001 Amendment 3 removes"
+                "ratio is ~27x at p50 (this floor uses 25x, rounded down), so a tighter raw "
+                "budget would close batches before the recall sweet spot and become the binding "
+                "limit -- reintroducing the axis error ADR-0001 Amendment 3 removes"
             )
         return self
 
@@ -666,7 +669,7 @@ class Settings(BaseSettings):
             logger.warning(
                 "%s is set but no longer used: it was renamed to ORMAH_SESSION_WATCHER_FLUSH_CHARS "
                 "and its unit changed from raw transcript bytes to conversation characters "
-                "(ADR-0001 Amendment 3). The old value was IGNORED; the default %d is in effect. "
+                "(ADR-0001 Amendment 3). The old value was IGNORED; the effective value is %d. "
                 "Remove the old variable, or set the new one deliberately.",
                 _DEPRECATED_FLUSH_BYTES_ENV, self.session_watcher_flush_chars,
             )
