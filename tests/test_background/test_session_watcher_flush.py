@@ -259,6 +259,13 @@ class _FakeEngine:
         self.settings = SimpleNamespace(
             feedback_llm_judge_enabled=False,
             llm_enabled=False,
+            # _ingest_session always calls ingest_provider_configured(engine.settings), which
+            # reads settings.llm_provider directly (no getattr default) -- a bare SimpleNamespace
+            # without this attribute raises AttributeError there, but ONLY when this is the
+            # FIRST test in the pytest process to reach that code path (llm_client.py caches the
+            # resolved adapter globally after the first successful call). "none" matches
+            # ingest_conversation being unconditionally called regardless of provider_on below.
+            llm_provider="none",
             session_watcher_flush_chars=flush_chars,
             session_watcher_idle_threshold=idle_threshold,
         )
@@ -365,8 +372,15 @@ def test_ingest_session_raw_budget_caps_independently_of_flush_chars(tmp_path):
     parse_transcript call. A generous flush_chars (60000) alone would let a tool-heavy
     slice through at convo_len~56384/14 turns (see the content-budget test above); a tight
     max_raw_bytes=8000 must instead bind first and commit a MUCH smaller slice
-    (convo_len~4025/1 turn) -- proving the kwarg is wired all the way through, not dropped
-    at any of the two _ingest_session call sites or the SessionHandler constructor."""
+    (convo_len~4025/1 turn) -- proving the kwarg is wired all the way through.
+
+    Review I-2b: this covers exactly ONE leg -- the direct _ingest_session call below
+    reaches parse_transcript at session_watcher.py's happy-path call site. It says nothing
+    about the post-rewind re-parse (this fixture triggers no rewind) or about whether
+    SessionHandler._run_job actually forwards its OWN max_raw_bytes attribute into
+    _ingest_session -- see test_session_handler_run_job_forwards_max_raw_bytes below for
+    that sibling leg. An earlier version of this docstring overclaimed coverage of all three
+    sites; it did not have it."""
     from ormah.background.session_watcher import _ingest_session
 
     watch_dir = tmp_path
@@ -388,6 +402,66 @@ def test_ingest_session_raw_budget_caps_independently_of_flush_chars(tmp_path):
     assert engine.recorded_lengths[-1] < 10_000, (
         "the committed slice looks bounded by flush_chars, not max_raw_bytes -- "
         "the kwarg likely never reached parse_transcript"
+    )
+
+
+def test_session_handler_run_job_forwards_max_raw_bytes(engine, tmp_path):
+    """Review I-2b: the SIBLING production leg -- SessionHandler._run_job ->
+    _ingest_session (session_watcher.py:1265) -- had zero coverage. The direct-call test
+    above only proves _ingest_session itself honours max_raw_bytes; it never constructs a
+    SessionHandler, so it says nothing about whether the handler forwards its own
+    max_raw_bytes attribute into that call. Mirrors test_session_watcher.py's
+    test_a_capped_batch_re_enqueues_the_remainder, which already covers this exact hop for
+    flush_chars -- max_raw_bytes was the one budget whose production leg had no coverage at
+    all, in the exact task that introduces it.
+
+    Uses the real `engine` fixture (tests/conftest.py) rather than _FakeEngine: driving
+    SessionHandler._run_job needs a Settings object with a real llm_provider attribute
+    (ingest_provider_configured reads it), which _FakeEngine's bare SimpleNamespace does
+    not have.
+    """
+    from unittest.mock import patch
+
+    from ormah.background.ingest_spool import IngestSpool
+    from ormah.background.session_watcher import SessionHandler
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(
+        engine, watch_dir, 60.0, 1, 30.0, 9999, spool=spool,
+    )
+    handler.flush_chars = 60000   # generous -- would NOT cap this fixture on its own
+    handler.max_raw_bytes = 8000  # tight -- must be the axis that actually binds
+
+    path = proj / "raw_capped.jsonl"
+    _tool_heavy_turns(path, turns=30, text_chars=2000)
+    now = time.time()
+    os.utime(path, (now, now - 700))  # idle -> flush fires
+
+    captured: list[str] = []
+    real_ingest = engine.ingest_conversation
+
+    def capture(content, **kwargs):
+        captured.append(content)
+        return real_ingest(content=content, **kwargs)
+
+    with patch(
+        "ormah.background.llm_client.ingest_llm_generate", return_value='{"memories": []}',
+    ), patch.object(engine, "ingest_conversation", side_effect=capture):
+        spool.enqueue(path, boundary=path.stat().st_size, reason="observer", force_flush=False)
+        job = spool.claim_next()
+        handler._run_job(job)
+
+    assert captured, "expected at least one ingest call"
+    # char_only(flush_chars=60000) would commit ~56384 chars (see the sibling test above);
+    # if the handler dropped max_raw_bytes before calling _ingest_session, this test would
+    # see that number instead of the raw-bound ~4025.
+    assert len(captured[-1]) < 10_000, (
+        "the committed slice looks bounded by flush_chars, not max_raw_bytes -- "
+        "SessionHandler likely dropped max_raw_bytes before it reached _ingest_session"
     )
 
 
