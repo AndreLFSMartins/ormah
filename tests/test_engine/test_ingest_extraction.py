@@ -225,11 +225,14 @@ def test_timeout_hint_never_lowers_the_active_provider_baseline(tmp_path):
 def test_extraction_timeout_hint_is_bounded(tmp_path):
     """A hung provider must not be waited on indefinitely just because the payload was big.
 
-    The provider is pinned to ollama on purpose. ``ingest_timeout_max_seconds=100`` is only a
-    LEGAL config under a provider whose own baseline is <= 100 (the cross-field validator rejects
-    a cap below the active baseline), and the ambient ~/.config/ormah/.env sets
-    ORMAH_INGEST_LLM_PROVIDER=claude_cli (baseline 120) -- so leaving the provider implicit would
-    make this fixture pass or ValidationError depending on the machine.
+    The provider is pinned to ollama on purpose: ``ingest_timeout_max_seconds=100`` is only a
+    LEGAL config under a provider whose own baseline is <= 100, since the cross-field validator
+    rejects a cap below the active baseline (claude_cli's is 120). Left implicit it would resolve
+    to the DEFAULT provider "none" -> llm_timeout_seconds 60, which happens to be legal -- so the
+    fixture would silently depend both on that default never changing and on the autouse
+    ``_isolate_settings_from_global_env`` fixture (tests/conftest.py:77) continuing to blank the
+    ambient ~/.config/ormah/.env, which really does set ORMAH_INGEST_LLM_PROVIDER=claude_cli.
+    Pinning states the requirement locally instead of inheriting it.
     """
     from unittest.mock import patch
 
@@ -513,6 +516,16 @@ def _run_in_subprocess(code: str):
         "ORMAH_LLM_PROVIDER": "ollama",
         "ORMAH_INGEST_LLM_PROVIDER": "ollama",
         "ORMAH_INGEST_LLM_MODEL": "gemma3:12b-it-qat",
+        # Pinned, not inherited. A window below the capacity floor would fail these tests with a
+        # ValidationError surfaced under a message about the boot validator reaching back into
+        # memory_engine -- a misleading diagnosis of a real failure.
+        # Two routes exist and only one is already covered: the autouse fixture at
+        # tests/conftest.py:77 strips every ORMAH_* var from os.environ, so the OS-var route
+        # cannot reach this `**os.environ`. The DOTENV route is live -- the child is a fresh
+        # interpreter, and monkeypatching Settings.model_config only affected the parent, so the
+        # child does read ~/.config/ormah/.env. An explicit env var outranks dotenv in
+        # pydantic-settings, which is why this pin closes that route.
+        "ORMAH_OLLAMA_NUM_CTX": "65536",
     }
     return subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=180,
@@ -536,6 +549,16 @@ def test_importing_memory_engine_first_under_ollama_does_not_cycle():
         f"reaches back into it:\n{r.stderr[-2500:]}"
     )
     assert "IMPORT OK" in r.stdout
+
+    # The documented entry point itself (`Makefile:11`: make server = python -m ormah.main).
+    # memory_engine-first is the tighter test for THIS cycle; this one closes the entry point
+    # against a cycle introduced later through any other module `main` touches before `config`.
+    r = _run_in_subprocess("import ormah.main; print('MAIN OK')")
+    assert r.returncode == 0, (
+        "`python -m ormah.main` -- the documented `make server` entry point -- cannot import "
+        f"under an ollama config:\n{r.stderr[-2500:]}"
+    )
+    assert "MAIN OK" in r.stdout
 
 
 def test_computing_the_prompt_overhead_never_loads_the_engine_or_config():

@@ -36,8 +36,11 @@ def get_adapter(settings, provider: str | None = None, model: str | None = None,
             base_url=settings.llm_base_url,
             timeout=timeout,
             num_predict=getattr(settings, "llm_num_predict", 4096),
-            # None -> the adapter's modest default. Maintenance judges small pairs and must not
-            # pay for the ingest window.
+            # None -> the adapter OMITS num_ctx entirely, leaving the operator's server/Modelfile
+            # window in charge. There is deliberately no adapter-side default: maintenance judges
+            # small pairs, and a number invented here would silently NARROW every one of those
+            # calls (pair_batch renders K pairs into one prompt, and parse_batch_verdicts accepts
+            # a PARTIAL verdict list, so truncation under-judges without erroring).
             num_ctx=num_ctx,
         )
 
