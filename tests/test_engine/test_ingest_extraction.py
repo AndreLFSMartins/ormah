@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
+
 from ormah.engine.memory_engine import (
     EXTRACT_ERR_CALL_FAILED,
     EXTRACT_ERR_NO_PROVIDER,
@@ -143,3 +145,327 @@ def test_oversized_line_among_normal_turns_loses_nothing():
     chunks = _split_for_extraction(content, chunk_chars=1000, hard_cap=1000)
     assert all(len(c) <= 1000 for c in chunks)
     assert "".join(chunks) == content  # every turn + the oversized tail preserved
+
+
+# --- provider fit: payload-derived timeout + pinned Ollama input window (ADR-0001 Amendment 3) ---
+
+def test_extraction_passes_a_payload_proportional_timeout_hint(tmp_path):
+    """A variable payload against a fixed provider timeout is the bug. The hint must grow with
+    the payload, using the same base+rate idiom as pair_batch."""
+    from unittest.mock import patch
+
+    from ormah.config import Settings
+    from ormah.engine.memory_engine import MemoryEngine
+
+    (tmp_path / "nodes").mkdir()
+    settings = Settings(memory_dir=tmp_path)
+    engine = MemoryEngine(settings)
+    engine.startup()
+    hints = []
+
+    def fake_generate(settings, prompt, **kwargs):
+        hints.append(kwargs.get("timeout_hint_seconds"))
+        return '{"memories": []}'
+
+    try:
+        with patch(
+            "ormah.background.llm_client.ingest_llm_generate", side_effect=fake_generate,
+        ), patch(
+            "ormah.engine.memory_engine.ingest_provider_configured", return_value=True,
+        ):
+            engine._extract_memories_llm("x" * 1000)
+            small = hints[-1]
+            engine._extract_memories_llm("x" * 50000)
+            large = hints[-1]
+    finally:
+        engine.shutdown()
+
+    assert small is not None, "ingest still sends no timeout hint at all"
+    assert large > small, "the hint does not scale with the payload"
+
+
+def test_timeout_hint_never_lowers_the_active_provider_baseline(tmp_path):
+    """Council R1, both peers: adapters treat the hint as a REPLACEMENT
+    (`timeout_hint_seconds or self.timeout`), and claude_cli's own baseline is 120s while
+    llm_timeout_seconds is 60s. A hint derived from the 60s base would hand a short flush 84s --
+    a regression on the most common path. The hint must be a floor-raiser, never a reducer."""
+    from unittest.mock import patch
+
+    from ormah.config import Settings
+    from ormah.engine.memory_engine import MemoryEngine
+
+    (tmp_path / "nodes").mkdir()
+    settings = Settings(
+        memory_dir=tmp_path, ingest_llm_provider="claude_cli", ingest_llm_model="haiku",
+    )
+    engine = MemoryEngine(settings)
+    engine.startup()
+    hints = []
+
+    def fake_generate(settings, prompt, **kwargs):
+        hints.append(kwargs.get("timeout_hint_seconds"))
+        return '{"memories": []}'
+
+    try:
+        with patch(
+            "ormah.background.llm_client.ingest_llm_generate", side_effect=fake_generate,
+        ), patch(
+            "ormah.engine.memory_engine.ingest_provider_configured", return_value=True,
+        ):
+            engine._extract_memories_llm("x" * 1000)   # tiny: the derived term is negligible
+    finally:
+        engine.shutdown()
+
+    assert hints[-1] >= settings.claude_cli_timeout_seconds, (
+        f"hint {hints[-1]}s is BELOW the claude_cli baseline "
+        f"{settings.claude_cli_timeout_seconds}s -- this regresses short flushes"
+    )
+
+
+def test_extraction_timeout_hint_is_bounded(tmp_path):
+    """A hung provider must not be waited on indefinitely just because the payload was big.
+
+    The provider is pinned to ollama on purpose. ``ingest_timeout_max_seconds=100`` is only a
+    LEGAL config under a provider whose own baseline is <= 100 (the cross-field validator rejects
+    a cap below the active baseline), and the ambient ~/.config/ormah/.env sets
+    ORMAH_INGEST_LLM_PROVIDER=claude_cli (baseline 120) -- so leaving the provider implicit would
+    make this fixture pass or ValidationError depending on the machine.
+    """
+    from unittest.mock import patch
+
+    from ormah.config import Settings
+    from ormah.engine.memory_engine import MemoryEngine
+
+    (tmp_path / "nodes").mkdir()
+    settings = Settings(
+        memory_dir=tmp_path, ingest_llm_provider="ollama", ingest_llm_model="gemma3:12b-it-qat",
+        ingest_timeout_max_seconds=100,
+    )
+    engine = MemoryEngine(settings)
+    engine.startup()
+    hints = []
+
+    def fake_generate(settings, prompt, **kwargs):
+        hints.append(kwargs.get("timeout_hint_seconds"))
+        return '{"memories": []}'
+
+    try:
+        with patch(
+            "ormah.background.llm_client.ingest_llm_generate", side_effect=fake_generate,
+        ), patch(
+            "ormah.engine.memory_engine.ingest_provider_configured", return_value=True,
+        ):
+            engine._extract_memories_llm("x" * 60000)
+    finally:
+        engine.shutdown()
+
+    # == not <=: a 60000-char payload derives ~457s, so the cap is what MUST produce this number.
+    # `<= 100` would also hold if the size term were dropped entirely.
+    assert hints[-1] == 100
+
+
+def test_timeout_max_below_the_provider_baseline_is_rejected():
+    """min(max(baseline, derived), max) still returns `max` when max < baseline -- recreating the
+    very short-flush regression the floor exists to remove. Reject that config at boot."""
+    from pydantic import ValidationError
+
+    from ormah.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(ingest_llm_provider="claude_cli", ingest_llm_model="haiku",
+                 ingest_timeout_max_seconds=100)   # claude_cli baseline is 120
+
+
+def test_ollama_adapter_pins_the_input_window():
+    """num_predict bounds OUTPUT; num_ctx bounds INPUT. Leaving num_ctx unset inherits the
+    Ollama server's default, which we neither control nor version -- and a default below the
+    payload truncates the prompt SILENTLY, killing recall with no signal."""
+    from ormah.background.llm.ollama_adapter import OllamaAdapter
+
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"response": "{}"}
+
+    def fake_post(url, json=None, timeout=None):
+        captured.update(json)
+        return _Resp()
+
+    import httpx
+    original = httpx.post
+    httpx.post = fake_post
+    try:
+        OllamaAdapter(model="gemma3:12b-it-qat", num_ctx=70000).generate("hello")
+    finally:
+        httpx.post = original
+
+    assert captured["options"]["num_ctx"] == 70000
+
+
+def test_factory_passes_configured_num_ctx_to_the_request():
+    """The constructor default must never be what ships -- the value an operator sets has to reach
+    the actual HTTP request.
+
+    Driven through ``ingest_llm_generate`` rather than ``get_adapter(settings)``: ``num_ctx`` is a
+    THREADED factory parameter (maintenance must not pay for the ingest window), so only the ingest
+    adapter factory in llm_client.py reads ``settings.ollama_num_ctx``. Calling ``get_adapter``
+    bare would assert the constructor default and prove nothing about the wiring.
+    """
+    import httpx
+
+    from ormah.background.llm_client import ingest_llm_generate, reset_adapter
+    from ormah.config import Settings
+
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"response": "{}"}
+
+    original = httpx.post
+    httpx.post = lambda url, json=None, timeout=None: (captured.update(json), _Resp())[1]
+    reset_adapter()
+    try:
+        # 70000, not 8192: the boot validator rejects a window too small for the worst
+        # payload, so an 8192 fixture would ValidationError before reaching the factory.
+        settings = Settings(
+            llm_provider="ollama", llm_model="gemma3:12b-it-qat",
+            ingest_llm_provider="ollama", ingest_llm_model="gemma3:12b-it-qat",
+            ollama_num_ctx=70000,
+        )
+        ingest_llm_generate(settings, "hello")
+    finally:
+        httpx.post = original
+        reset_adapter()
+
+    assert captured["options"]["num_ctx"] == 70000
+
+
+def test_maintenance_adapter_does_not_inherit_the_ingest_window():
+    """Council R3 (Codex): get_adapter builds BOTH adapters. Wiring ollama_num_ctx unconditionally
+    would hand every maintenance pair-judging call a 65536-token KV cache -- a large memory cost and
+    a plausible OOM on a local machine, for no benefit (maintenance judges small pairs)."""
+    import httpx
+
+    from ormah.background.llm_client import llm_generate, reset_adapter
+    from ormah.config import Settings
+
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"response": "{}"}
+
+    original = httpx.post
+    httpx.post = lambda url, json=None, timeout=None: (captured.update(json), _Resp())[1]
+    reset_adapter()
+    try:
+        settings = Settings(
+            llm_provider="ollama", llm_model="gemma3:12b-it-qat",
+            ingest_llm_provider="ollama", ingest_llm_model="gemma3:12b-it-qat",
+            ollama_num_ctx=70000,
+        )
+        llm_generate(settings, "hello")
+    finally:
+        httpx.post = original
+        reset_adapter()
+
+    assert captured["options"]["num_ctx"] != 70000
+
+
+def test_prompt_overhead_tracks_the_real_template():
+    """If the extraction prompt grows and this drifts, the boot guarantee silently weakens."""
+    from ormah.engine.memory_engine import _INGEST_LLM_PROMPT
+    from ormah.ingest_capacity import prompt_overhead_chars
+
+    assert prompt_overhead_chars() == len(_INGEST_LLM_PROMPT.format(conversation=""))
+    assert prompt_overhead_chars() > 100   # a plausible template, not an empty string
+
+
+def test_capacity_preflight_refuses_an_oversized_prompt():
+    """Unit-test the estimator directly.
+
+    It cannot be driven through Settings any more: the boot validator now rejects any config whose
+    window is too small for the largest emittable payload, which is exactly what makes the runtime
+    refusal unreachable in normal operation. The preflight stays as a guard against paths that
+    bypass validation (mutated engine.settings, a future config route) and against content denser
+    than the estimator's bound.
+    """
+    from types import SimpleNamespace
+
+    from ormah.engine.memory_engine import _prompt_exceeds_provider_capacity
+
+    tight = SimpleNamespace(
+        ingest_llm_provider="ollama", llm_provider="ollama",
+        ollama_num_ctx=8192, llm_num_predict=4096,   # usable 4096 tokens
+    )
+    assert _prompt_exceeds_provider_capacity(tight, "x" * 60000) is not None
+    assert _prompt_exceeds_provider_capacity(tight, "x" * 100) is None
+
+    # Non-ollama providers are not introspectable, so the guard must stay silent rather than
+    # invent a limit and reject valid work.
+    other = SimpleNamespace(ingest_llm_provider="claude_cli", llm_provider="claude_cli")
+    assert _prompt_exceeds_provider_capacity(other, "x" * 10_000_000) is None
+
+
+def test_refusal_returns_the_retryable_sentinel_and_sends_nothing(tmp_path):
+    """When the guard does fire, nothing may reach the provider and the cursor must not advance."""
+    from unittest.mock import patch
+
+    from ormah.config import Settings
+    from ormah.engine.memory_engine import EXTRACT_ERR_CALL_FAILED, MemoryEngine
+
+    (tmp_path / "nodes").mkdir()
+    settings = Settings(memory_dir=tmp_path)   # boot-valid
+    engine = MemoryEngine(settings)
+    engine.startup()
+    calls = []
+
+    try:
+        # Bypass validation deliberately: this is the path the guard exists to cover.
+        engine.settings.ingest_llm_provider = "ollama"
+        engine.settings.ollama_num_ctx = 8192
+        with patch(
+            "ormah.background.llm_client.ingest_llm_generate",
+            side_effect=lambda *a, **k: calls.append(1) or '{"memories": []}',
+        ), patch(
+            "ormah.engine.memory_engine.ingest_provider_configured", return_value=True,
+        ):
+            out = engine._extract_memories_llm("x" * 60000)
+    finally:
+        engine.shutdown()
+
+    assert not calls, "the oversized prompt was SENT — the provider will truncate it silently"
+    assert out == EXTRACT_ERR_CALL_FAILED, "must return the retryable sentinel, not any string"
+
+
+def test_ollama_window_too_small_for_the_worst_payload_fails_at_boot():
+    """Deterministic capacity failure must surface at startup, not as a transcript that retries
+    forever (the refusal is TRANSIENT and never reaches the failure cap)."""
+    from pydantic import ValidationError
+
+    from ormah.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(ingest_llm_provider="ollama", ingest_llm_model="gemma3:12b-it-qat",
+                 ollama_num_ctx=8192)
+
+
+def test_default_ollama_window_admits_the_worst_payload():
+    """The shipped default must not fail its own boot check."""
+    from ormah.config import Settings
+    from ormah.ingest_capacity import estimated_tokens, prompt_overhead_chars, usable_input_tokens
+
+    s = Settings(ingest_llm_provider="ollama", ingest_llm_model="gemma3:12b-it-qat")
+    worst = estimated_tokens(s.ingest_max_content_chars + prompt_overhead_chars())
+    assert worst <= usable_input_tokens(s)

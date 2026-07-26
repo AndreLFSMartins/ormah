@@ -111,6 +111,10 @@ def _get_or_create_ingest_adapter(settings) -> LLMAdapter | None:
                 settings,
                 provider=_resolve_ingest_provider(settings),
                 model=_resolve_ingest_model(settings),
+                # ONLY the ingest adapter gets the large Ollama input window: a full Batch is
+                # ~60000 chars and the server default would truncate it silently. The maintenance
+                # factory above deliberately leaves this None (small pairs, no KV-cache cost).
+                num_ctx=getattr(settings, "ollama_num_ctx", None),
             )
             _ingest_adapter_initialised = True
         return _cached_ingest_adapter

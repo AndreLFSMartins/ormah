@@ -123,6 +123,38 @@ def _split_for_extraction(content: str, chunk_chars: int, hard_cap: int) -> list
     return chunks
 
 
+def _ingest_adapter_baseline_timeout(settings) -> int:
+    """The timeout the ACTIVE ingest adapter would use on its own.
+
+    Adapters treat timeout_hint_seconds as a REPLACEMENT (`timeout_hint_seconds or self.timeout`),
+    so a hint below this baseline silently shortens the provider's own budget. claude_cli is built
+    with claude_cli_timeout_seconds (120) while ollama/litellm get llm_timeout_seconds (60), so the
+    baseline is provider-specific and must be resolved, never assumed (llm/__init__.py:22,47).
+    """
+    provider = settings.ingest_llm_provider or settings.llm_provider
+    if provider == "claude_cli":
+        return settings.claude_cli_timeout_seconds
+    return settings.llm_timeout_seconds
+
+
+def _prompt_exceeds_provider_capacity(settings, prompt: str) -> int | None:
+    """Usable input tokens the prompt would overflow, or None when it fits / is unknown.
+
+    Deliberately conservative and estimate-based: the goal is to convert a SILENT truncation into
+    a LOUD, retryable failure, not to be exact. Only providers whose window we actually control
+    are checked -- for the rest, capacity stays a documented requirement (there is nothing to
+    introspect, and inventing a limit would reject valid work).
+    """
+    from ormah.ingest_capacity import estimated_tokens, usable_input_tokens
+
+    provider = settings.ingest_llm_provider or settings.llm_provider
+    if provider != "ollama":
+        return None
+    usable = usable_input_tokens(settings)
+    estimated = estimated_tokens(len(prompt))
+    return estimated if estimated > usable else None
+
+
 # Edge type factors for spreading activation scoring.
 # Higher factor = tighter structural link = more activation propagated.
 _EDGE_TYPE_FACTORS: dict[str, float] = {
@@ -2859,12 +2891,33 @@ class MemoryEngine:
             all_memories: list[dict] = []
             for i, chunk in enumerate(chunks):
                 prompt = _INGEST_LLM_PROMPT.format(conversation=chunk)
+                overflow = _prompt_exceeds_provider_capacity(self.settings, prompt)
+                if overflow is not None:
+                    logger.error(
+                        "ingest extraction: rendered prompt ~%d tokens exceeds the usable input "
+                        "window (%d); REFUSING to send rather than let the provider truncate "
+                        "silently and advance the cursor over unextracted content. Lower "
+                        "ORMAH_SESSION_WATCHER_FLUSH_CHARS or raise ORMAH_OLLAMA_NUM_CTX.",
+                        overflow, self.settings.ollama_num_ctx - self.settings.llm_num_predict,
+                    )
+                    return EXTRACT_ERR_CALL_FAILED   # retryable; the cursor must NOT advance
+                baseline = _ingest_adapter_baseline_timeout(self.settings)
+                derived = (
+                    self.settings.llm_timeout_seconds
+                    + self.settings.ingest_timeout_per_10k_chars * (len(prompt) / 10000)
+                )
+                # max(): the hint must RAISE the provider's budget, never lower it.
+                hint = min(
+                    max(float(baseline), derived),
+                    float(self.settings.ingest_timeout_max_seconds),
+                )
                 raw = ingest_llm_generate(
                     self.settings, prompt, json_mode=True,
                     response_format={
                         "type": "json_schema",
                         "json_schema": {"schema": _INGEST_RESPONSE_SCHEMA},
                     },
+                    timeout_hint_seconds=hint,
                 )
                 if raw is None:
                     # One failed chunk means this slice was NOT fully extracted. Committing the

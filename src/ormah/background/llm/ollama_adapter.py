@@ -16,11 +16,17 @@ class OllamaAdapter(LLMAdapter):
         base_url: str = "http://localhost:11434",
         timeout: int = 60,
         num_predict: int = 4096,
+        num_ctx: int | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url
         self.timeout = timeout
         self.num_predict = num_predict
+        # INPUT window. num_predict bounds output only; leaving num_ctx unset inherits the
+        # server's default, which is neither controlled nor versioned by us. A default below the
+        # payload truncates the prompt SILENTLY -- recall dies with no error, which is the exact
+        # failure class ADR-0001/0003/0004 exist to eliminate.
+        self.num_ctx = num_ctx or 8192   # ingest overrides via settings.ollama_num_ctx
 
     def generate(
         self,
@@ -34,7 +40,10 @@ class OllamaAdapter(LLMAdapter):
     ) -> str | None:
         import httpx
 
-        options: dict = {"num_predict": max_tokens or self.num_predict}
+        options: dict = {
+            "num_predict": max_tokens or self.num_predict,
+            "num_ctx": self.num_ctx,
+        }
         if temperature is not None:
             options["temperature"] = temperature
 

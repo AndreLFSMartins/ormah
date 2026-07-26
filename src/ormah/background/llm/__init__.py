@@ -13,10 +13,17 @@ __all__ = [
 ]
 
 
-def get_adapter(settings, provider: str | None = None, model: str | None = None) -> LLMAdapter | None:
+def get_adapter(settings, provider: str | None = None, model: str | None = None,
+                num_ctx: int | None = None) -> LLMAdapter | None:
     """Build an adapter from the application settings.
 
     Returns ``None`` when the resolved provider is ``"none"``.
+
+    ``num_ctx`` is threaded rather than read off ``settings`` on purpose (council R3, Codex): this
+    factory builds BOTH the maintenance adapter and the ingest adapter, and wiring the large ingest
+    window unconditionally would give every maintenance pair-judging call a 65536-token KV cache --
+    a real memory cost, and a plausible OOM on a local machine, even for users whose ingest runs on
+    claude_cli. Only the ingest factory in ``llm_client.py`` opts in.
     """
     provider = provider or settings.llm_provider
     timeout = getattr(settings, "llm_timeout_seconds", 60)
@@ -29,6 +36,9 @@ def get_adapter(settings, provider: str | None = None, model: str | None = None)
             base_url=settings.llm_base_url,
             timeout=timeout,
             num_predict=getattr(settings, "llm_num_predict", 4096),
+            # None -> the adapter's modest default. Maintenance judges small pairs and must not
+            # pay for the ingest window.
+            num_ctx=num_ctx,
         )
 
     if provider == "litellm":

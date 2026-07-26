@@ -98,6 +98,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:11434"
     llm_timeout_seconds: int = 60
     llm_num_predict: int = 4096
+    ollama_num_ctx: int = 65536   # INPUT window; never inherit the server default (silent truncation)
     llm_api_key_env_var: str | None = None
     llm_inherit_api_key: bool = False
 
@@ -387,6 +388,11 @@ class Settings(BaseSettings):
     # Ingestion
     ingest_max_content_chars: int = 100000
     ingest_chunk_chars: int = 60000  # >= session_watcher_flush_chars, so a full Batch is ONE call
+    # The ingest payload is variable (a Batch is sized to the recall sweet spot), so the provider
+    # timeout must be DERIVED from it rather than fixed -- otherwise the batch size is silently
+    # capped by whichever provider is configured. Same base+rate idiom as pair_batch.py.
+    ingest_timeout_per_10k_chars: float = 60.0   # provisional; measured in Task 6
+    ingest_timeout_max_seconds: int = 900        # absolute bound for a hung provider
     ingest_min_confidence: float = 0.0  # drop auto-extracted memories below this confidence (0 = off)
     ingest_relevance_gate: bool = True  # drop memories the Extractor labels provenance=material
     ingest_relevance_gate_enforce: bool = False  # False = SHADOW (record would-drops, keep them); True = actually drop
@@ -621,6 +627,24 @@ class Settings(BaseSettings):
             raise ValueError(f"ingest_chunk_chars must be >= 1000, got {v}")
         return v
 
+    @field_validator("ingest_timeout_per_10k_chars")
+    @classmethod
+    def _ingest_timeout_rate_non_negative(cls, v: float) -> float:
+        # >= 0, NOT > 0 (council R2, Cursor): Task 6 legitimately derives a rate of 0.0 when the
+        # provider completes a full batch inside its own baseline. Rejecting 0 would make the
+        # measured default unlandable and push the operator into inventing a positive number.
+        # 0.0 means "no size term" -- max(baseline, ...) from the hint formula then governs.
+        if v < 0:
+            raise ValueError(f"ingest_timeout_per_10k_chars must be >= 0, got {v}")
+        return v
+
+    @field_validator("ingest_timeout_max_seconds")
+    @classmethod
+    def _ingest_timeout_max_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"ingest_timeout_max_seconds must be >= 1, got {v}")
+        return v
+
     @model_validator(mode="after")
     def _flush_chars_within_cap(self) -> "Settings":
         if self.session_watcher_flush_chars > self.ingest_chunk_chars:
@@ -667,6 +691,47 @@ class Settings(BaseSettings):
                 "budget would close batches before the recall sweet spot and become the binding "
                 "limit -- reintroducing the axis error ADR-0001 Amendment 3 removes"
             )
+        # Council R3 (Codex): the derived ingest hint is min(max(baseline, derived), max), and that
+        # min still returns `max` when max < baseline -- e.g. claude_cli (baseline 120) with
+        # ingest_timeout_max_seconds=100 emits a 100s hint. Adapters treat the hint as a REPLACEMENT
+        # (`timeout_hint_seconds or self.timeout`), so that SHORTENS the provider's own budget on
+        # the common short-flush path: the exact regression the floor exists to remove.
+        _baseline = (
+            self.claude_cli_timeout_seconds
+            if (self.ingest_llm_provider or self.llm_provider) == "claude_cli"
+            else self.llm_timeout_seconds
+        )
+        if self.ingest_timeout_max_seconds < _baseline:
+            raise ValueError(
+                f"ingest_timeout_max_seconds ({self.ingest_timeout_max_seconds}) must be >= the "
+                f"active ingest provider's own timeout ({_baseline}); a lower cap makes the hint "
+                "SHORTEN the provider's budget, which is the short-flush regression the derived "
+                "timeout exists to prevent"
+            )
+        if (self.ingest_llm_provider or self.llm_provider) == "ollama":
+            # A capacity refusal at runtime returns EXTRACT_ERR_CALL_FAILED, which session_watcher
+            # maps to TRANSIENT: the cursor is held (correct) but the failure never counts toward
+            # MAX_EXTRACT_FAILURES, so a DETERMINISTIC overflow would requeue that transcript
+            # forever. Rather than invent a terminal failure state (the quarantine design was
+            # descoped 2026-07-25), make the misconfiguration unreachable at boot.
+            # Validated against ingest_max_content_chars, NOT flush_chars: an oversized single turn
+            # bypasses the batch budget via the parser's progress guard, and _split_for_extraction
+            # then emits chunks up to that hard cap.
+            from ormah.ingest_capacity import (
+                estimated_tokens, prompt_overhead_chars, usable_input_tokens,
+            )
+
+            _usable = usable_input_tokens(self)
+            _needed = estimated_tokens(self.ingest_max_content_chars + prompt_overhead_chars())
+            if _needed > _usable:
+                raise ValueError(
+                    f"the largest payload ingest can emit (~{_needed} tokens, from "
+                    f"ingest_max_content_chars={self.ingest_max_content_chars}) exceeds the usable "
+                    f"Ollama input window ({_usable} = ollama_num_ctx {self.ollama_num_ctx} - "
+                    f"llm_num_predict {self.llm_num_predict}). Raise ORMAH_OLLAMA_NUM_CTX or lower "
+                    "ORMAH_INGEST_MAX_CONTENT_CHARS. Starting anyway would let such a payload fail "
+                    "extraction deterministically and retry forever."
+                )
         return self
 
     @model_validator(mode="after")

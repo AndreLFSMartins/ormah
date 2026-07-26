@@ -47,15 +47,18 @@ def test_extraction_uses_ingest_adapter_not_maintenance(monkeypatch):
     s = Settings(llm_provider="ollama", ingest_llm_provider="claude_cli", ingest_llm_model="haiku")
     captured = {}
 
-    def fake_get_adapter(settings, provider=None, model=None):
+    def fake_get_adapter(settings, provider=None, model=None, num_ctx=None):
         captured["provider"] = provider
         captured["model"] = model
+        captured["num_ctx"] = num_ctx
         return None
 
     monkeypatch.setattr(llm_client, "get_adapter", fake_get_adapter)
     llm_client.ingest_llm_generate(s, "prompt")
     assert captured["provider"] == "claude_cli"
     assert captured["model"] == "haiku"
+    # The ingest factory is also where the pinned Ollama input window is threaded in.
+    assert captured["num_ctx"] == s.ollama_num_ctx
 
 
 def test_ingest_path_generate_carries_no_session_persistence(monkeypatch):
