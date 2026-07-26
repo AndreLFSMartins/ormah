@@ -594,9 +594,22 @@ def test_chunk_smaller_than_flush_is_rejected():
         Settings(session_watcher_flush_chars=60000, ingest_chunk_chars=40000)
 
 
+def test_chunk_larger_than_max_content_is_rejected():
+    """Isolates the `ingest_chunk_chars <= ingest_max_content_chars` leg specifically:
+    flush <= chunk and flush <= max both hold here, so only the chunk-vs-max check can
+    raise. Without it a chunk could exceed the extractor's hard cap and this would pass
+    silently."""
+    with pytest.raises(ValidationError):
+        Settings(
+            session_watcher_flush_chars=50000, ingest_chunk_chars=150000,
+            ingest_max_content_chars=100000,
+        )
+
+
 def test_a_full_batch_reaches_the_extractor_as_one_chunk(tmp_path):
-    """The behavioural consequence, not just the validator: a payload the size of a full
-    Batch must produce exactly ONE extraction call."""
+    """The behavioural consequence, not just the validator: a payload approaching the size of
+    a full Batch (built from whole turns, so integer division lands slightly under
+    flush_chars) must produce exactly ONE extraction call."""
     from unittest.mock import patch
 
     from ormah.config import Settings

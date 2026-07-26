@@ -636,6 +636,10 @@ class Settings(BaseSettings):
                 f"ingest_chunk_chars ({self.ingest_chunk_chars}) must be <= "
                 f"ingest_max_content_chars ({self.ingest_max_content_chars})"
             )
+        # Vestigial: now transitively implied by the two checks above (flush <= chunk <=
+        # max), so this branch can no longer actually fire for any input that passes them.
+        # Kept anyway (plan-mandated) for a direct error message if that chain is ever
+        # weakened or reordered.
         if self.session_watcher_flush_chars > self.ingest_max_content_chars:
             raise ValueError(
                 "session_watcher_flush_chars "
