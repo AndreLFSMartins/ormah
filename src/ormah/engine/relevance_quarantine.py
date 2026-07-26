@@ -21,7 +21,7 @@ def quarantine_path(settings) -> Path:
 
 def prompt_version() -> str:
     """First 12 hex chars of sha256 of the ingest LLM rules prompt text."""
-    from ormah.engine.memory_engine import _INGEST_LLM_RULES
+    from ormah.ingest_prompt import _INGEST_LLM_RULES
 
     return hashlib.sha256(_INGEST_LLM_RULES.encode()).hexdigest()[:12]
 

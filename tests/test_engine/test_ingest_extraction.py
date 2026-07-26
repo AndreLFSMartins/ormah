@@ -380,7 +380,12 @@ def test_maintenance_adapter_does_not_inherit_the_ingest_window():
         httpx.post = original
         reset_adapter()
 
-    assert captured["options"]["num_ctx"] != 70000
+    # Pinned, not "!= 70000": the contract is that maintenance sends NO num_ctx key at all, so the
+    # operator's server/Modelfile window stays in charge. A hardcoded adapter-side default would
+    # satisfy "!= 70000" while silently narrowing every pair-judging call -- pair_batch renders K
+    # pairs into one ~40K-char prompt and parse_batch_verdicts accepts a PARTIAL verdict list, so
+    # the truncation would under-judge without erroring.
+    assert "num_ctx" not in captured["options"]
 
 
 def test_prompt_overhead_tracks_the_real_template():
@@ -469,3 +474,89 @@ def test_default_ollama_window_admits_the_worst_payload():
     s = Settings(ingest_llm_provider="ollama", ingest_llm_model="gemma3:12b-it-qat")
     worst = estimated_tokens(s.ingest_max_content_chars + prompt_overhead_chars())
     assert worst <= usable_input_tokens(s)
+
+
+def test_ollama_num_ctx_must_be_positive():
+    """The cross-field capacity check only runs on the ollama branch, so a non-ollama config would
+    otherwise accept a zero/negative window outright."""
+    from pydantic import ValidationError
+
+    from ormah.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(ollama_num_ctx=0)
+    with pytest.raises(ValidationError):
+        Settings(ollama_num_ctx=-1)
+
+
+# --- CRITICAL regression: the boot validator must not drag memory_engine into import time ---
+
+def _run_in_subprocess(code: str):
+    """Run `code` in a fresh interpreter pinned to the SAME source tree as this test.
+
+    A subprocess is not optional here. Inside pytest, `ormah.config` is already in `sys.modules`
+    long before these tests run, and importing it first is exactly what MASKS the cycle -- an
+    in-process assertion could never fail. The PYTHONPATH pin is derived from the live `ormah`
+    package so the child cannot silently resolve an editable install pointing at another clone.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import ormah
+
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path(ormah.__file__).resolve().parents[1]),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "ORMAH_LLM_PROVIDER": "ollama",
+        "ORMAH_INGEST_LLM_PROVIDER": "ollama",
+        "ORMAH_INGEST_LLM_MODEL": "gemma3:12b-it-qat",
+    }
+    return subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=180,
+    )
+
+
+def test_importing_memory_engine_first_under_ollama_does_not_cycle():
+    """config.py builds a module-level `settings = Settings()`, so the ollama capacity validator
+    runs during `import ormah.config`. Reaching the prompt overhead through
+    engine/memory_engine.py -- which itself imports ormah.config -- made that a REAL circular
+    import: `import ormah.engine.memory_engine` crashed, while `import ormah.config` first
+    survived, so whether a process lived depended purely on module load order. `make server` is
+    `python -m ormah.main`.
+
+    The failing configuration is the SHIPPED DEFAULT (ollama_num_ctx=65536), which the capacity
+    arithmetic accepts -- this is a valid config crashing, not an invalid one being rejected.
+    """
+    r = _run_in_subprocess("import ormah.engine.memory_engine; print('IMPORT OK')")
+    assert r.returncode == 0, (
+        "importing memory_engine FIRST under an ollama config crashed -- the boot validator "
+        f"reaches back into it:\n{r.stderr[-2500:]}"
+    )
+    assert "IMPORT OK" in r.stdout
+
+
+def test_computing_the_prompt_overhead_never_loads_the_engine_or_config():
+    """The invariant behind the fix, asserted directly so it cannot silently rot.
+
+    `prompt_overhead_chars()` is CALLED by the boot validator, i.e. during `import ormah.config`.
+    Whatever it touches -- at module level or lazily inside the function, which is how the cycle
+    was introduced -- must not reach `engine.memory_engine` (which imports `ormah.config`) nor
+    `ormah.config` itself. So the check is on the state AFTER the call, not merely after the
+    import: a lazy import is not a fix, it only relocates the cycle to call time.
+    """
+    r = _run_in_subprocess(
+        "import sys; import ormah.ingest_capacity as c; c.prompt_overhead_chars(); "
+        "print('CONFIG_LOADED' if 'ormah.config' in sys.modules else 'CLEAN-config'); "
+        "print('ENGINE_LOADED' if 'ormah.engine.memory_engine' in sys.modules else 'CLEAN-engine')"
+    )
+    assert r.returncode == 0, r.stderr[-2500:]
+    assert "ENGINE_LOADED" not in r.stdout, (
+        "computing the overhead loads engine.memory_engine, which imports ormah.config -- "
+        "that is the cycle, restored"
+    )
+    assert "CONFIG_LOADED" not in r.stdout, (
+        "computing the overhead loads ormah.config -- that is the cycle, restored"
+    )

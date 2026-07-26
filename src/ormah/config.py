@@ -627,6 +627,15 @@ class Settings(BaseSettings):
             raise ValueError(f"ingest_chunk_chars must be >= 1000, got {v}")
         return v
 
+    @field_validator("ollama_num_ctx")
+    @classmethod
+    def _ollama_num_ctx_positive(cls, v: int) -> int:
+        # The cross-field capacity check below only runs when the provider resolves to ollama, so
+        # without this floor a 0 or negative window is accepted outright under any other provider.
+        if v < 1:
+            raise ValueError(f"ollama_num_ctx must be >= 1, got {v}")
+        return v
+
     @field_validator("ingest_timeout_per_10k_chars")
     @classmethod
     def _ingest_timeout_rate_non_negative(cls, v: float) -> float:

@@ -25,8 +25,16 @@ class OllamaAdapter(LLMAdapter):
         # INPUT window. num_predict bounds output only; leaving num_ctx unset inherits the
         # server's default, which is neither controlled nor versioned by us. A default below the
         # payload truncates the prompt SILENTLY -- recall dies with no error, which is the exact
-        # failure class ADR-0001/0003/0004 exist to eliminate.
-        self.num_ctx = num_ctx or 8192   # ingest overrides via settings.ollama_num_ctx
+        # failure class ADR-0001/0003/0004 exist to eliminate. The INGEST factory pins it from
+        # settings.ollama_num_ctx.
+        #
+        # None means OMIT the key, NOT "substitute a default of our own". Every non-ingest caller
+        # (maintenance pair-judging) passes None, and a hardcoded fallback here would silently
+        # NARROW those calls: pair_batch concatenates K rendered pairs into one prompt (~40K chars
+        # at the live maintenance_pairs_per_call=10), and parse_batch_verdicts accepts a PARTIAL
+        # verdict list -- so a truncated batch under-judges without erroring. Omitting the key
+        # leaves the operator's server/Modelfile setting in charge, which is what it was before.
+        self.num_ctx = num_ctx
 
     def generate(
         self,
@@ -40,10 +48,9 @@ class OllamaAdapter(LLMAdapter):
     ) -> str | None:
         import httpx
 
-        options: dict = {
-            "num_predict": max_tokens or self.num_predict,
-            "num_ctx": self.num_ctx,
-        }
+        options: dict = {"num_predict": max_tokens or self.num_predict}
+        if self.num_ctx is not None:
+            options["num_ctx"] = self.num_ctx
         if temperature is not None:
             options["temperature"] = temperature
 
