@@ -217,6 +217,7 @@ def parse_transcript(
     path: Path,
     start_offset: int = 0,
     max_conversation_chars: int | None = None,
+    max_raw_bytes: int | None = None,
     stop_offset: int | None = None,
 ) -> TranscriptResult:
     """Parse a supported JSONL transcript into cleaned conversation text.
@@ -235,6 +236,12 @@ def parse_transcript(
     A single turn larger than the budget is committed anyway (there is no smaller slice to make
     progress with); that progress guard is what keeps ``capped`` implying an advanced safe
     boundary, which is what keeps ``should_rewind`` (ADR-0003) unreachable from a capped parse.
+
+    *max_raw_bytes* is a SECOND, independent budget on the raw span consumed
+    (``safe_end_offset - start_offset``). It exists for resource safety, not recall: a pure
+    content budget leaves the raw span unbounded (measured p99 ~16 MB for a 60000-char slice).
+    Whichever budget binds first closes the Batch. It keeps the same progress guard as the
+    content budget and is therefore NOT a ceiling in the ``stop_offset`` sense — see below.
 
     The budget is measured on conversation the Extractor receives, NOT on transcript bytes
     (ADR-0001 Amendment 3): the raw→clean ratio ranges from ~3x to ~93x, so a byte budget bounds
@@ -294,6 +301,16 @@ def parse_transcript(
             and _projected_len(pending) > max_conversation_chars
         )
 
+    def _would_exceed_raw(new_safe_end: int) -> bool:
+        # Same progress guard as the content budget, deliberately: making this absolute would
+        # let a cap occur with no forward progress, which is exactly the state should_rewind
+        # (ADR-0003) triggers on. `stop_offset` is the only absolute limit in this parser.
+        return (
+            max_raw_bytes is not None
+            and _safe_len > 0
+            and (new_safe_end - start_offset) > max_raw_bytes
+        )
+
     def _exceeds_ceiling(new_safe_end: int) -> bool:
         # ABSOLUTE limit, unlike max_conversation_chars: it refuses even the first turn of a slice, so a
         # single oversized turn that grew past the accepted boundary is never committed.
@@ -331,7 +348,7 @@ def parse_transcript(
                 if _seen_assistant_text:
                     if _exceeds_ceiling(f.tell()):
                         break  # ceiling: absolute, never advance the boundary past it
-                    if _would_overshoot():
+                    if _would_overshoot() or _would_exceed_raw(f.tell()):
                         _capped = True
                         break
                     _safe_end = f.tell()
@@ -362,7 +379,7 @@ def parse_transcript(
                     if _seen_assistant_text:
                         if _exceeds_ceiling(pos_before):
                             break  # ceiling: absolute, never advance past it
-                        if _would_overshoot():
+                        if _would_overshoot() or _would_exceed_raw(pos_before):
                             _capped = True
                             break
                         _safe_end = pos_before  # boundary = start of this user line
@@ -387,7 +404,9 @@ def parse_transcript(
                     pending = TranscriptTurn(role="assistant", text=text)
                     if _assistant_is_terminal(entry) and _exceeds_ceiling(f.tell()):
                         break  # ceiling: refuse an oversized/grew-after turn entirely
-                    if _assistant_is_terminal(entry) and _would_overshoot(pending):
+                    if _assistant_is_terminal(entry) and (
+                        _would_overshoot(pending) or _would_exceed_raw(f.tell())
+                    ):
                         _capped = True
                         break
                     _commit_turn(pending)

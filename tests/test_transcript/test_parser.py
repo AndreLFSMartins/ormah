@@ -944,3 +944,65 @@ def test_single_oversized_turn_is_still_committed(tmp_path):
 
     assert result.safe_user_turn_count == 1
     assert len(result.safe_conversation) > 1000  # unavoidable for a lone oversized turn
+
+
+def test_raw_ceiling_binds_independently_of_the_content_budget(tmp_path):
+    """Tiny conversation, enormous raw span: the content budget is nowhere near full, so
+    only the raw ceiling can close this slice."""
+    from ormah.transcript.parser import parse_transcript
+
+    path = tmp_path / "sparse.jsonl"
+    _tool_heavy_jsonl(path, turns=20, text_chars=50, noise_chars=60000)
+
+    unbounded = parse_transcript(path, max_conversation_chars=60000)
+    bounded = parse_transcript(path, max_conversation_chars=60000, max_raw_bytes=200000)
+
+    assert len(unbounded.safe_conversation) < 60000     # content budget never binds here
+    assert bounded.capped is True
+    assert bounded.safe_end_offset < unbounded.safe_end_offset
+    assert bounded.safe_end_offset <= 200000            # start_offset == 0 here
+
+
+def test_raw_ceiling_keeps_the_progress_guard(tmp_path):
+    """A lone turn whose raw span exceeds the ceiling is committed anyway. Without this the
+    drain would starve, AND `capped` would stop implying forward progress — which is what
+    keeps should_rewind unreachable (see the next test)."""
+    from ormah.transcript.parser import parse_transcript
+
+    path = tmp_path / "one_big.jsonl"
+    _tool_heavy_jsonl(path, turns=1, text_chars=50, noise_chars=100000)
+
+    result = parse_transcript(path, max_conversation_chars=60000, max_raw_bytes=1000)
+
+    assert result.safe_user_turn_count == 1
+    assert result.safe_end_offset > 1000  # unavoidable for a lone oversized turn
+
+
+def test_capped_always_implies_forward_progress(tmp_path):
+    """ADR-0001 Amendment 3's open question, closed as a property.
+
+    should_rewind == leading_orphan AND safe_end_offset <= start_offset. A cap only fires with
+    _safe_len > 0, which implies the boundary already advanced. Therefore NO budget, on either
+    axis, can produce a rewind. Verified on 1400 real slices during design; pinned here.
+    """
+    from ormah.transcript.parser import parse_transcript, should_rewind
+
+    path = tmp_path / "walk.jsonl"
+    _tool_heavy_jsonl(path, turns=25, text_chars=800, noise_chars=30000)
+
+    for budget, ceiling in ((20000, None), (60000, 150000), (None, 100000)):
+        offset = 0
+        for _ in range(200):
+            result = parse_transcript(
+                path, start_offset=offset,
+                max_conversation_chars=budget, max_raw_bytes=ceiling,
+            )
+            if result.capped:
+                assert result.safe_end_offset > offset, (
+                    f"capped without progress at offset={offset} "
+                    f"(budget={budget}, ceiling={ceiling}) — should_rewind becomes reachable"
+                )
+                assert not should_rewind(result, offset)
+            if result.safe_end_offset <= offset:
+                break
+            offset = result.safe_end_offset
