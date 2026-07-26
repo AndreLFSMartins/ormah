@@ -239,13 +239,14 @@ def parse_transcript(
 
     *max_raw_bytes* is a SECOND, independent budget on the raw span consumed
     (``safe_end_offset - start_offset``). It exists for resource safety, not recall: a pure
-    content budget leaves the raw span unbounded (measured p99 ~16 MB for a 60000-char slice).
+    content budget leaves the raw span unbounded (measured p99 9.8 MB for a 60000-char slice --
+    420 slices replayed from the 200 largest live transcripts, 2026-07-26; max observed 40.3 MB).
     Whichever budget binds first closes the Batch. It keeps the same progress guard as the
     content budget and is therefore NOT a ceiling in the ``stop_offset`` sense — see below.
 
     The budget is measured on conversation the Extractor receives, NOT on transcript bytes
-    (ADR-0001 Amendment 3): the raw→clean ratio ranges from ~3x to ~93x, so a byte budget bounds
-    a quantity uncorrelated with recall.
+    (ADR-0001 Amendment 3): the raw→clean ratio spans 1.1x to 2928x (p50 22.9x, p90 56.5x, p99
+    223.3x, over 2562 measured slices), so a byte budget bounds a quantity uncorrelated with recall.
 
     When *stop_offset* is set it is an ABSOLUTE hard ceiling, not a budget: no turn is
     committed whose end exceeds it, and ``safe_end_offset`` is never returned beyond it.

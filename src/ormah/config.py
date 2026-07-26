@@ -142,9 +142,12 @@ class Settings(BaseSettings):
     # Independent raw-span budget (ADR-0001 Am.3). Measured p99 of the realised raw span under the
     # 60000-char content budget: 9,844,378 B over 420 slices from the 200 largest live transcripts
     # (2026-07-26, scripts/measure_ingest_budget.py --budget 60000 --files 200). Rounded up to 10 MB.
-    # p99 deliberately, not the median: this bounds pathological cost. At 10 MB it binds on 4/420
-    # (0.95%) of large-file slices and 4/2562 (0.16%) corpus-wide, so it stays a tail bound rather
-    # than a second budget competing with the content budget.
+    # p99 deliberately, not the median: this bounds pathological cost. At 10 MB it WOULD HAVE BOUND
+    # on 4/420 (0.95%) of large-file slices and 4/2562 (0.16%) corpus-wide. That is the pre-ceiling
+    # distribution -- the replay never passed max_raw_bytes -- so the realised rate once the ceiling
+    # is live is somewhat higher: each oversized span is re-sliced into several ceiling-closed ones
+    # (the 40.3 MB outlier alone becomes >= 4). Still a tail bound, not a second budget competing
+    # with the content budget.
     session_watcher_max_raw_bytes: int | None = 10_000_000
     session_watcher_reconcile_interval_minutes: int = 5
     session_watcher_reconcile_max_per_tick: int = 50
@@ -397,11 +400,30 @@ class Settings(BaseSettings):
     # The ingest payload is variable (a Batch is sized to the recall sweet spot), so the provider
     # timeout must be DERIVED from it rather than fixed -- otherwise the batch size is silently
     # capped by whichever provider is configured. Same base+rate idiom as pair_batch.py.
-    # Measured 2026-07-26 on ONE provider (claude_cli / claude-haiku-4-5) on ONE machine, over 5 real
-    # _extract_memories_llm calls on live 50K-58K-char slices: median 45.0s, max 74.6s, 0 failures.
-    # rate = max(0, (74.6 - llm_timeout_seconds 60) / (60000/10000)) * 2.0 = 4.87, rounded up to 4.9.
+    #
+    # Measured 2026-07-26, ONE machine, WHILE AN INGEST DRAIN WAS IN FLIGHT -- so these are upper
+    # bounds under contention, not steady state. claude_cli / claude-haiku-4-5, 5 real
+    # _extract_memories_llm calls on live 50K-58K-char slices: 37.2 / 32.3 / 45.0 / 74.6 / 61.6 s
+    # (median 45.0s, max 74.6s, 0 failures).
+    #   rate = max(0, 74.6 - 60) / 6.0 * 2.0 = 4.8666... -> 4.9  (rounded UP, the safe direction)
+    # The 6.0 divisor is the NOMINAL flush_chars/10000 and is deliberately not what the code
+    # multiplies by: memory_engine uses len(prompt)/10000 = 6.61 for a full Batch (the rendered
+    # prompt adds ~6117 chars), and the slowest run's payload was 50,037 chars = 5.61 units. Treat
+    # 4.9 as a coarse safety figure, not an exact per-10k coefficient.
+    #
+    # NOT a fitted slope: across that sample latency did not track payload size at all (Pearson
+    # r = -0.27, n=5; the SLOWEST run had the SMALLEST payload). Wall clock is dominated by
+    # generation volume and provider variance. Read 4.9 as "2x the worst observed excess over the
+    # 60s base", not as seconds-per-10k-chars.
+    #
     # A default, not a claim about every provider -- which is why the hint is a FLOOR over the
-    # adapter baseline (max(baseline, derived)) rather than a replacement for it.
+    # adapter baseline (max(baseline, derived)) rather than a replacement for it. On claude_cli
+    # this value therefore changes NOTHING: its baseline (120s) beats the derived term (89.4s at a
+    # full Batch). The lane it actually governs is ollama (baseline = llm_timeout_seconds = 60s),
+    # where a full Batch gets 92.4s instead of the old 457s. One timed real call there
+    # (gemma3:12b-it-qat, 50,577 chars) took 75.2s -- 85.7% of the 87.8s that payload's own hint
+    # allows, and a full Batch size-scales to ~87.7s against a 92.4s hint (~5% headroom). That
+    # margin is thin and is an OPEN question for the repo owner, not a settled default.
     ingest_timeout_per_10k_chars: float = 4.9
     ingest_timeout_max_seconds: int = 900        # absolute bound for a hung provider
     ingest_min_confidence: float = 0.0  # drop auto-extracted memories below this confidence (0 = off)
@@ -694,10 +716,15 @@ class Settings(BaseSettings):
                 "and logged, regardless of this setting)"
             )
         # Council R1 (Cursor): a bare `>= flush_chars` floor compares BYTES to CHARS and would
-        # admit a ~200KB ceiling. Measured raw->clean ratios run ~3x to ~93x (p50 ~27x), so such a
-        # ceiling closes tool-heavy slices far below the char sweet spot -- the same axis error
-        # Amendment 3 fixes, one scale up, and silently. Anchor the floor on the observed ratio.
-        _MIN_RAW_RATIO = 25  # p50 of the measured raw:clean ratio (~27x), rounded down
+        # admit a ~200KB ceiling. Measured raw->clean ratios span 1.1x to 2928x (p50 22.9x, p90
+        # 56.5x, p99 223.3x, over 2562 slices, 2026-07-26), so such a ceiling closes tool-heavy
+        # slices far below the char sweet spot -- the same axis error Amendment 3 fixes, one scale
+        # up, and silently. Anchor the floor on the observed ratio.
+        # 25 is kept deliberately: the earlier ~27x p50 it was rounded down from did not reproduce
+        # (the measured p50 is 22.9x), so the floor now sits ABOVE the p50 rather than below it --
+        # i.e. it is more conservative than its original justification claimed, which is the safe
+        # direction for a floor. The value stands; only the rationale needed correcting.
+        _MIN_RAW_RATIO = 25
         if (
             self.session_watcher_max_raw_bytes is not None
             and self.session_watcher_max_raw_bytes
@@ -707,7 +734,7 @@ class Settings(BaseSettings):
                 f"session_watcher_max_raw_bytes ({self.session_watcher_max_raw_bytes}) must be "
                 f">= {_MIN_RAW_RATIO}x session_watcher_flush_chars "
                 f"({self.session_watcher_flush_chars * _MIN_RAW_RATIO}); the measured raw:clean "
-                "ratio is ~27x at p50 (this floor uses 25x, rounded down), so a tighter raw "
+                "ratio is 22.9x at p50 and 56.5x at p90 (this floor uses 25x), so a tighter raw "
                 "budget would close batches before the recall sweet spot and become the binding "
                 "limit -- reintroducing the axis error ADR-0001 Amendment 3 removes"
             )

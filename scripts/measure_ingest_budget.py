@@ -49,7 +49,16 @@ def main() -> None:
         s = sorted(xs)
         return int(s[min(len(s) - 1, int(q * len(s)))])
 
+    # The p99 below is a percentile over the WHOLE corpus's tail only while the sample still
+    # contains that tail. A slice's raw span cannot exceed its own file's size, so every slice
+    # larger than the smallest sampled file is guaranteed to be inside the sample. Print that
+    # cutoff: it is the evidence for the population choice, and it is what goes stale. Once
+    # enough files grow past it, --files N silently starts censoring the tail instead.
+    cutoff = sample[-1].stat().st_size if sample else 0
+    over = sum(1 for p in files if p.stat().st_size > cutoff)
     print(f"files sampled : {len(sample)} of {len(files)}")
+    print(f"sample cutoff : {cutoff:,} B (smallest sampled file); {over} of {len(files)} files "
+          f"exceed it -- no slice larger than this can exist outside the sample")
     print(f"slices        : {slices}")
     print(f"INVARIANT VIOLATIONS (capped without progress): {violations}")
     print()
