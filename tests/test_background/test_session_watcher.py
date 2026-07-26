@@ -852,6 +852,134 @@ def test_nonexistent_watch_dir(engine, tmp_path):
     assert observers == []
 
 
+def test_start_returns_before_startup_reconcile_finishes(engine, tmp_path):
+    """Startup reconcile runs off the bind path after observers are active."""
+    import threading
+
+    import ormah.background.session_watcher as sw
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = watch_dir
+    engine.settings.session_watcher_debounce_seconds = 10.0
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_reconcile(watches):
+        started.set()
+        release.wait(5)
+        return 0
+
+    with patch.object(sw, "run_session_reconcile", side_effect=blocking_reconcile):
+        t0 = time.monotonic()
+        watches = sw.start_session_watcher(engine)
+        elapsed = time.monotonic() - t0
+        try:
+            assert elapsed < 1.0
+            assert len(watches) == 1
+            assert watches[0].observer.is_alive()
+            assert watches[0].startup_reconcile_thread is not None
+            assert started.wait(2)
+        finally:
+            release.set()
+            sw.stop_session_watcher(watches)
+
+
+def test_startup_reconcile_uses_live_handler_state(engine, tmp_path):
+    """The off-bind startup catch-up reuses SessionHandler.reconcile, not a separate state owner."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = watch_dir
+    engine.settings.session_watcher_debounce_seconds = 10.0
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        watches = start_session_watcher(engine)
+        try:
+            thread = watches[0].startup_reconcile_thread
+            assert thread is not None
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            rel = str(jsonl.relative_to(watch_dir))
+            assert rel in watches[0].handler._state
+        finally:
+            stop_session_watcher(watches)
+
+
+def test_stop_drains_live_inflight_ingest(engine, tmp_path):
+    """stop_session_watcher waits for live ingest work before returning."""
+    import threading
+
+    import ormah.background.session_watcher as sw
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    engine.settings.session_watcher_enabled = True
+    engine.settings.session_watcher_dir = watch_dir
+    engine.settings.session_watcher_debounce_seconds = 10.0
+    engine.settings.session_watcher_lookback_hours = -1
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_ingest(*args, **kwargs):
+        started.set()
+        release.wait(5)
+        return IngestResult.TRANSIENT
+
+    with patch.object(sw, "_ingest_session", side_effect=blocking_ingest):
+        watches = sw.start_session_watcher(engine)
+        live = threading.Thread(target=watches[0].handler._do_ingest, args=(jsonl,))
+        live.start()
+        assert started.wait(2)
+
+        stopped = threading.Event()
+        stopper = threading.Thread(
+            target=lambda: (sw.stop_session_watcher(watches), stopped.set()),
+        )
+        stopper.start()
+        assert not stopped.wait(0.5)
+        release.set()
+        assert stopped.wait(5)
+        live.join(timeout=5)
+        stopper.join(timeout=5)
+
+    assert watches[0].handler.in_flight_count() == 0
+
+
+def test_do_ingest_rejects_work_after_stop(engine, tmp_path):
+    """A timer firing after shutdown begins must not touch ingest/DB work."""
+    import ormah.background.session_watcher as sw
+
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = sw.SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler.request_stop()
+    ingest = MagicMock(return_value=IngestResult.OK)
+
+    with patch.object(sw, "_ingest_session", ingest):
+        assert handler._do_ingest(jsonl) == IngestResult.TRANSIENT
+
+    ingest.assert_not_called()
+
+
 # --- Test 11: Incremental — only appended turns are re-ingested ---
 
 def test_incremental_only_new_turns(engine, tmp_path):
@@ -1283,6 +1411,7 @@ def test_retry_fires_and_ingests_after_idle(engine, tmp_path):
 
 def test_concurrent_ingest_skipped(engine, tmp_path):
     import threading
+
     from ormah.background import session_watcher as sw
 
     watch_dir = tmp_path / "projects"
@@ -1479,9 +1608,9 @@ def test_reconcile_logs_recovery_heartbeat(engine, tmp_path, caplog):
     _mark_idle(jsonl)
 
     handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        with caplog.at_level("INFO", logger="ormah.background.session_watcher"):
-            handler.reconcile()
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+         caplog.at_level("INFO", logger="ormah.background.session_watcher"):
+        handler.reconcile()
     assert any("reconcile recovered" in r.message for r in caplog.records)
 
 
@@ -1609,6 +1738,27 @@ def test_run_session_reconcile_recreates_dead_observer(engine, tmp_path):
     new_obs.start.assert_called_once()
     assert watch.observer is new_obs
     assert total == 0  # empty dir, nothing to recover
+
+
+def test_run_session_reconcile_skips_stopping_handler(engine, tmp_path):
+    """A shutdown-overlapped reconcile tick must not recreate observers or ingest."""
+    from ormah.background.session_watcher import SessionWatch, run_session_reconcile
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler.request_stop()
+
+    dead = MagicMock()
+    dead.is_alive.return_value = False
+    watch = SessionWatch(watch_dir=watch_dir, handler=handler, observer=dead)
+
+    with patch("ormah.background.session_watcher.Observer") as MockObserver:
+        total = run_session_reconcile([watch])
+
+    MockObserver.assert_not_called()
+    dead.stop.assert_not_called()
+    assert total == 0
 
 
 def test_run_session_reconcile_runs_reconcile_even_when_recreate_fails(engine, tmp_path):
