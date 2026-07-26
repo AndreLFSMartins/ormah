@@ -130,6 +130,23 @@ jobs:
           APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: cargo tauri build --target ${{ matrix.target }}
 
+      # tauri-bundler notarizes and staples the .app, then builds the .dmg
+      # around it and code-signs the dmg container — but never submits the
+      # dmg itself for notarization. Without this, Gatekeeper rejects the
+      # downloaded dmg on open (spctl: "Unnotarized Developer ID") even
+      # though the .app inside is validly notarized.
+      - name: Notarize and staple dmg (macOS)
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+        run: |
+          DMG=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -name '*.dmg')
+          xcrun notarytool submit "$DMG" --key-id "$APPLE_API_KEY" --key "$APPLE_API_KEY_PATH" --issuer "$APPLE_API_ISSUER" --wait
+          xcrun stapler staple "$DMG"
+
       - name: Stop DNS resolver keepalive
         if: runner.os == 'macOS' && always()
         run: kill "$DNS_KEEPALIVE_PID" 2>/dev/null || true
