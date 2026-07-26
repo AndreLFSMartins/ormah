@@ -386,7 +386,7 @@ class Settings(BaseSettings):
 
     # Ingestion
     ingest_max_content_chars: int = 100000
-    ingest_chunk_chars: int = 40000  # timeout-safe payload per claude_cli call (~10K tokens)
+    ingest_chunk_chars: int = 60000  # >= session_watcher_flush_chars, so a full Batch is ONE call
     ingest_min_confidence: float = 0.0  # drop auto-extracted memories below this confidence (0 = off)
     ingest_relevance_gate: bool = True  # drop memories the Extractor labels provenance=material
     ingest_relevance_gate_enforce: bool = False  # False = SHADOW (record would-drops, keep them); True = actually drop
@@ -623,6 +623,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _flush_chars_within_cap(self) -> "Settings":
+        if self.session_watcher_flush_chars > self.ingest_chunk_chars:
+            raise ValueError(
+                f"session_watcher_flush_chars ({self.session_watcher_flush_chars}) must be <= "
+                f"ingest_chunk_chars ({self.ingest_chunk_chars}); a chunk smaller than the batch "
+                "chops every full Batch into chunk-blind extraction calls, re-introducing the "
+                "cross-chunk blindness the sweet-spot sizing exists to remove (ADR-0001 "
+                "Amendment 2)"
+            )
+        if self.ingest_chunk_chars > self.ingest_max_content_chars:
+            raise ValueError(
+                f"ingest_chunk_chars ({self.ingest_chunk_chars}) must be <= "
+                f"ingest_max_content_chars ({self.ingest_max_content_chars})"
+            )
         if self.session_watcher_flush_chars > self.ingest_max_content_chars:
             raise ValueError(
                 "session_watcher_flush_chars "

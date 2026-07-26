@@ -554,6 +554,7 @@ def test_oversized_turn_is_split_not_truncated(tmp_path, caplog):
     (tmp_path / "nodes").mkdir()
     settings = Settings(
         memory_dir=tmp_path, ingest_max_content_chars=1000, session_watcher_flush_chars=1000,
+        ingest_chunk_chars=1000,
     )
     engine = MemoryEngine(settings)
     engine.startup()
@@ -575,3 +576,56 @@ def test_oversized_turn_is_split_not_truncated(tmp_path, caplog):
 
     assert len(calls) >= 5  # 5000 chars / 1000 cap -> split into >=5 pieces, none truncated
     assert any("split into" in r.message for r in caplog.records)
+
+
+def test_chunk_chars_defaults_at_or_above_the_flush_budget():
+    """ADR-0001 Amendment 2: a Batch sized to the recall sweet spot must reach the Extractor
+    in ONE reasoning context. A chunk smaller than the batch chops every full batch into
+    chunk-blind calls by design."""
+    s = Settings()
+    assert s.ingest_chunk_chars >= s.session_watcher_flush_chars
+    assert s.ingest_chunk_chars <= s.ingest_max_content_chars
+
+
+def test_chunk_smaller_than_flush_is_rejected():
+    """The validator Amendment 2 prescribed and that was never added. Without it the
+    violation returns silently."""
+    with pytest.raises(ValidationError):
+        Settings(session_watcher_flush_chars=60000, ingest_chunk_chars=40000)
+
+
+def test_a_full_batch_reaches_the_extractor_as_one_chunk(tmp_path):
+    """The behavioural consequence, not just the validator: a payload the size of a full
+    Batch must produce exactly ONE extraction call."""
+    from unittest.mock import patch
+
+    from ormah.config import Settings
+    from ormah.engine.memory_engine import MemoryEngine
+
+    (tmp_path / "nodes").mkdir()
+    settings = Settings(memory_dir=tmp_path)
+    engine = MemoryEngine(settings)
+    engine.startup()
+    calls = []
+
+    def fake_generate(settings, prompt, **kwargs):
+        calls.append(prompt)
+        return '{"memories": []}'
+
+    # Turn-boundary content, not one unbroken line: _split_for_extraction only splits at
+    # line boundaries, so a single newline-free string always yields ONE chunk regardless of
+    # ingest_chunk_chars and would not exercise the invariant this test guards.
+    turn = "x" * 1000 + "\n"
+    content = turn * (settings.session_watcher_flush_chars // len(turn))
+
+    try:
+        with patch(
+            "ormah.background.llm_client.ingest_llm_generate", side_effect=fake_generate,
+        ), patch(
+            "ormah.engine.memory_engine.ingest_provider_configured", return_value=True,
+        ):
+            engine._extract_memories_llm(content)
+    finally:
+        engine.shutdown()
+
+    assert len(calls) == 1, f"a full Batch was split into {len(calls)} chunk-blind calls"
