@@ -139,7 +139,13 @@ class Settings(BaseSettings):
     session_watcher_idle_threshold: float = 600.0  # was 30.0 — 30s flushed 1-turn batches
     session_watcher_retry_seconds: float = 30.0    # FSEvents-miss retry — decoupled from idle
     session_watcher_flush_chars: int = 60000       # CONVERSATION chars that close a Batch (~15K tok)
-    session_watcher_max_raw_bytes: int | None = None  # independent raw-span budget; see ADR-0001 Am.3
+    # Independent raw-span budget (ADR-0001 Am.3). Measured p99 of the realised raw span under the
+    # 60000-char content budget: 9,844,378 B over 420 slices from the 200 largest live transcripts
+    # (2026-07-26, scripts/measure_ingest_budget.py --budget 60000 --files 200). Rounded up to 10 MB.
+    # p99 deliberately, not the median: this bounds pathological cost. At 10 MB it binds on 4/420
+    # (0.95%) of large-file slices and 4/2562 (0.16%) corpus-wide, so it stays a tail bound rather
+    # than a second budget competing with the content budget.
+    session_watcher_max_raw_bytes: int | None = 10_000_000
     session_watcher_reconcile_interval_minutes: int = 5
     session_watcher_reconcile_max_per_tick: int = 50
     session_watcher_reconcile_max_seconds: float = 30.0
@@ -391,7 +397,12 @@ class Settings(BaseSettings):
     # The ingest payload is variable (a Batch is sized to the recall sweet spot), so the provider
     # timeout must be DERIVED from it rather than fixed -- otherwise the batch size is silently
     # capped by whichever provider is configured. Same base+rate idiom as pair_batch.py.
-    ingest_timeout_per_10k_chars: float = 60.0   # provisional; measured in Task 6
+    # Measured 2026-07-26 on ONE provider (claude_cli / claude-haiku-4-5) on ONE machine, over 5 real
+    # _extract_memories_llm calls on live 50K-58K-char slices: median 45.0s, max 74.6s, 0 failures.
+    # rate = max(0, (74.6 - llm_timeout_seconds 60) / (60000/10000)) * 2.0 = 4.87, rounded up to 4.9.
+    # A default, not a claim about every provider -- which is why the hint is a FLOOR over the
+    # adapter baseline (max(baseline, derived)) rather than a replacement for it.
+    ingest_timeout_per_10k_chars: float = 4.9
     ingest_timeout_max_seconds: int = 900        # absolute bound for a hung provider
     ingest_min_confidence: float = 0.0  # drop auto-extracted memories below this confidence (0 = off)
     ingest_relevance_gate: bool = True  # drop memories the Extractor labels provenance=material
