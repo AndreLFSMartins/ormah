@@ -232,7 +232,7 @@ def test_stats(engine):
     assert stats["store"]["total_nodes"] == 2
 
 
-def test_warmup_reranker_marks_unavailable_when_cache_missing(settings):
+def test_warmup_reranker_provisions_model_when_cache_missing(settings):
     with (
         patch("ormah.engine.memory_engine.MemoryEngine._warmup_embedder"),
         patch("ormah.embeddings.reranker.model_is_cached", return_value=False),
@@ -243,8 +243,26 @@ def test_warmup_reranker_marks_unavailable_when_cache_missing(settings):
         engine = MemoryEngine(settings)
         engine.startup()
 
+    assert engine._whisper_reranker_available is True
+    preload_model.assert_called_once_with(settings.whisper_reranker_model)
+    engine.shutdown()
+
+
+def test_warmup_reranker_degrades_when_provisioning_fails(settings):
+    with (
+        patch("ormah.engine.memory_engine.MemoryEngine._warmup_embedder"),
+        patch("ormah.embeddings.reranker.model_is_cached", return_value=False),
+        patch(
+            "ormah.embeddings.reranker.preload_model",
+            side_effect=RuntimeError("network unavailable"),
+        ),
+    ):
+        from ormah.engine.memory_engine import MemoryEngine
+
+        engine = MemoryEngine(settings)
+        engine.startup()
+
     assert engine._whisper_reranker_available is False
-    preload_model.assert_not_called()
     engine.shutdown()
 
 

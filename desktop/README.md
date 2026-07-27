@@ -89,12 +89,16 @@ Also set `plugins.updater.pubkey` in `tauri.conf.json` and
 
 ## Known follow-ups
 
-- **Model downloads on first run** — embedding weights (~100 MB) are downloaded
-  by fastembed at runtime to `~/.cache/fastembed`. The onboarding flow waits for
-  the server, which covers this window.
-- **App updates** — after updating the app, users re-click "Connect" to upgrade
-  ormah via `uv tool install ormah==<new-version>`. Automatic upgrade on launch
-  is a TODO.
+- **Model downloads on first run** — embedding and whisper-reranker weights are
+  downloaded by FastEmbed during server startup into Ormah's shared model cache at
+  `~/.local/share/ormah/models`. Server readiness waits for each download attempt, so
+  provisioning does not depend on whether desktop onboarding runs. If the reranker
+  download fails, Ormah remains available with conservative embedding-only whisper and
+  retries provisioning on the next server start.
+- **Python runtime updates** — each desktop build pins an Ormah package version. On
+  launch the app installs a missing/older version with `uv tool install`, then restarts
+  the daemon so the new Python code and migrations are active. It never downgrades a
+  newer installed runtime.
 - **Updater appcast** — the CI `publish` job attaches artifacts but the
   `latest.json` regeneration/upload is a TODO.
 
