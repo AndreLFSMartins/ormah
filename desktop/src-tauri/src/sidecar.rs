@@ -131,7 +131,23 @@ fn needs_upgrade() -> bool {
     else {
         return false;
     };
-    !String::from_utf8_lossy(&out.stdout).contains(ORMAH_VERSION)
+    if !out.status.success() {
+        return true;
+    }
+    should_upgrade(&out.stdout, ORMAH_VERSION)
+}
+
+fn should_upgrade(output: &[u8], required: &str) -> bool {
+    let Ok(required) = semver::Version::parse(required) else {
+        return true;
+    };
+    let installed = String::from_utf8_lossy(output)
+        .split_whitespace()
+        .find_map(|word| semver::Version::parse(word).ok());
+    match installed {
+        Some(installed) => installed < required,
+        None => true,
+    }
 }
 
 /// Remove Python env vars that AppImage sets and that corrupt child Python runtimes.
@@ -161,5 +177,30 @@ async fn install_via_uv<R: Runtime>(app: &AppHandle<R>) -> bool {
             false
         }
         Err(e) => { eprintln!("uv sidecar error: {e}"); false }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_upgrade;
+
+    #[test]
+    fn upgrades_an_older_cli() {
+        assert!(should_upgrade(b"ormah 0.13.6\n", "0.14.0"));
+    }
+
+    #[test]
+    fn leaves_the_pinned_cli_unchanged() {
+        assert!(!should_upgrade(b"ormah 0.14.0\n", "0.14.0"));
+    }
+
+    #[test]
+    fn never_downgrades_a_newer_cli() {
+        assert!(!should_upgrade(b"ormah 0.15.0\n", "0.14.0"));
+    }
+
+    #[test]
+    fn repairs_unparseable_version_output() {
+        assert!(should_upgrade(b"unknown\n", "0.14.0"));
     }
 }

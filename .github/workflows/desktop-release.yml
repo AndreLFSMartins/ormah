@@ -35,6 +35,17 @@ jobs:
             exit 1
           fi
 
+      - name: Verify bundled Ormah release
+        shell: bash
+        run: |
+          PY_VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)
+          PYPI_VERSION=$(curl -fsSL https://pypi.org/pypi/ormah/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
+          if [ "$PY_VERSION" != "$PYPI_VERSION" ]; then
+            echo "Desktop embeds ormah $PY_VERSION, but PyPI latest is $PYPI_VERSION" >&2
+            echo "Publish the Python release before tagging the desktop app." >&2
+            exit 1
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
