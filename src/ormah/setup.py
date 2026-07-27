@@ -2400,7 +2400,7 @@ def _hooks_manifest_wires_ormah(hooks_json_path: Path) -> bool:
 
 
 def _mcp_manifest_wires_ormah(mcp_json_path: Path) -> bool:
-    """True when a plugin's .mcp.json is a real manifest declaring an ormah server.
+    """True when a plugin's .mcp.json declares the ormah-mcp wrapper command.
 
     An interrupted plugin update can leave .mcp.json present but empty
     (``{"mcpServers": {}}``); that must not count as "the plugin provides
@@ -2413,7 +2413,21 @@ def _mcp_manifest_wires_ormah(mcp_json_path: Path) -> bool:
     if not isinstance(data, dict):
         return False
     servers = data.get("mcpServers")
-    return isinstance(servers, dict) and "ormah" in servers
+    if not isinstance(servers, dict):
+        return False
+
+    server = servers.get("ormah")
+    if not isinstance(server, dict):
+        return False
+
+    command = server.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return False
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(parts) and Path(parts[0]).name == "ormah-mcp"
 
 
 def _claude_code_detected() -> bool:

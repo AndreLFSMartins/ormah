@@ -560,6 +560,23 @@ class TestClaudeCodePluginProvidesHooks:
         with patch("ormah.setup.Path.home", return_value=tmp_path):
             assert _claude_code_plugin_provides_hooks() is False
 
+    def test_false_when_mcp_manifest_has_empty_ormah_entry(self, tmp_path):
+        """An ormah key without a runnable command must not license stripping CLI MCP."""
+        self._enable(tmp_path)
+        self._install(tmp_path, mcp_content={"mcpServers": {"ormah": {}}})
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_mcp_manifest_uses_non_plugin_command(self, tmp_path):
+        """The replacement MCP must be the plugin wrapper command."""
+        self._enable(tmp_path)
+        self._install(
+            tmp_path,
+            mcp_content={"mcpServers": {"ormah": {"command": "/usr/bin/ormah"}}},
+        )
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
     def test_false_when_hooks_manifest_has_only_third_party_hook(self, tmp_path):
         """Proves the check inspects ormah's own hooks, not just any hook."""
         self._enable(tmp_path)
