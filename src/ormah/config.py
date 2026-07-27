@@ -39,12 +39,13 @@ def _deprecated_key_present(env_files: list[str] | None = None) -> bool:
     sources = env_files if env_files is not None else (_EXISTING_ENV_FILES or [".env"])
     for path in sources:
         try:
-            for line in Path(path).read_text().splitlines():
-                stripped = line.strip()
-                if stripped.startswith("#"):
-                    continue
-                if stripped.split("=", 1)[0].strip().upper() == _DEPRECATED_FLUSH_BYTES_ENV:
-                    return True
+            text = Path(path).read_text()
+        except FileNotFoundError:
+            # A fresh install has no ~/.config/ormah/.env and no ./.env: _EXISTING_ENV_FILES is
+            # then empty and the `or [".env"]` fallback names a file nobody created. That is
+            # "nothing to scan", not a config-read failure -- warning here would fire on every
+            # `Settings()` on a clean machine (review F1).
+            continue
         except (OSError, UnicodeDecodeError) as e:
             # Council decision (repo owner): swallowing this silently hides a real config-read
             # failure from the operator -- exactly the class of silent surprise this whole
@@ -54,6 +55,12 @@ def _deprecated_key_present(env_files: list[str] | None = None) -> bool:
             # a hard config-load failure (review M-11).
             logger.warning("Could not read %s while scanning for the deprecated flush-bytes key: %s", path, e)
             continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if stripped.split("=", 1)[0].strip().upper() == _DEPRECATED_FLUSH_BYTES_ENV:
+                return True
     return False
 
 
@@ -417,7 +424,7 @@ class Settings(BaseSettings):
     # 60 + 17.5 * 6.61 = 175.7s. The ollama observation size-scales to ~87.7s for a full Batch, so
     # 175.7s is ~2.0x that -- ~100% headroom. Scope of that envelope, stated precisely: the
     # claude_cli sample spread 2.31x min->max (32.3->74.6s) and 1.66x median->max. Applied to
-    # 87.7s those need 145.4s and 202.6s respectively, so 175.7s COVERS a median->max excursion
+    # 87.7s those need 202.6s and 145.4s respectively, so 175.7s COVERS a median->max excursion
     # but NOT a full 2.31x min->max one. It is a large improvement on the 92.4s it replaces, not a
     # guarantee.
     #
@@ -790,7 +797,9 @@ class Settings(BaseSettings):
     def _warn_on_deprecated_flush_bytes(self) -> "Settings":
         # Renamed in ADR-0001 Amendment 3 because the UNIT changed: the old value counted raw
         # transcript bytes, the new one counts conversation chars, and the raw->clean ratio
-        # ranges from ~3x to ~93x. Translating is not possible, so the old value is ignored --
+        # ranges from 1.1x to 2928x (p50 22.9x, p90 56.5x, p99 223.3x, over 2562 slices,
+        # 2026-07-26 -- see the measured-ratio note above, near session_watcher_flush_chars).
+        # Translating is not possible, so the old value is ignored --
         # but silently ignoring it (what `extra: "ignore"` does today) hides a real config
         # change from the operator. Warn once per process.
         # Council R1 (Codex): checking os.environ ALONE misses the likely case. Settings also reads
@@ -798,15 +807,20 @@ class Settings(BaseSettings):
         # key there would get no warning at all -- the exact silent migration this guard exists to
         # prevent. Scan every configured source.
         global _warned_flush_bytes
-        if not _warned_flush_bytes and _deprecated_key_present():
+        if not _warned_flush_bytes:
+            key_present = _deprecated_key_present()
+            # Latch unconditionally once the scan has run, not only when it found the key:
+            # otherwise a clean install (nothing found) never latches, and every subsequent
+            # `Settings()` in the process re-scans and can re-emit a warning (review F1).
             _warned_flush_bytes = True
-            logger.warning(
-                "%s is set but no longer used: it was renamed to ORMAH_SESSION_WATCHER_FLUSH_CHARS "
-                "and its unit changed from raw transcript bytes to conversation characters "
-                "(ADR-0001 Amendment 3). The old value was IGNORED; the effective value is %d. "
-                "Remove the old variable, or set the new one deliberately.",
-                _DEPRECATED_FLUSH_BYTES_ENV, self.session_watcher_flush_chars,
-            )
+            if key_present:
+                logger.warning(
+                    "%s is set but no longer used: it was renamed to ORMAH_SESSION_WATCHER_FLUSH_CHARS "
+                    "and its unit changed from raw transcript bytes to conversation characters "
+                    "(ADR-0001 Amendment 3). The old value was IGNORED; the effective value is %d. "
+                    "Remove the old variable, or set the new one deliberately.",
+                    _DEPRECATED_FLUSH_BYTES_ENV, self.session_watcher_flush_chars,
+                )
         return self
 
     @field_validator("decay_interval_hours")

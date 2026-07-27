@@ -136,6 +136,53 @@ def test_deprecated_key_scanner_warns_once_on_unreadable_source(tmp_path, caplog
     )
 
 
+def test_fresh_install_settings_emits_no_warning_and_latches(tmp_path, monkeypatch, caplog):
+    """Regression for review F1: with no ~/.config/ormah/.env and no ./.env, `_EXISTING_ENV_FILES`
+    is empty, the `or [".env"]` fallback names a file nobody ever created, and the branch meant to
+    warn about the DEPRECATED KEY instead reported a config-read failure for a file that was never
+    meant to exist -- the first line a fresh `ormah --help` printed. Constructing `Settings()` on
+    a clean machine must emit nothing, and the scan must still latch so a later `Settings()` in
+    the same process does not re-scan and re-warn."""
+    import logging
+
+    import ormah.config as cfg
+
+    monkeypatch.chdir(tmp_path)  # no ./.env here
+    monkeypatch.setattr(cfg, "_EXISTING_ENV_FILES", [])  # no ~/.config/ormah/.env either
+    monkeypatch.delenv("ORMAH_SESSION_WATCHER_FLUSH_BYTES", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="ormah.config"):
+        Settings()
+
+    assert caplog.records == [], (
+        f"a fresh install with nothing to scan must emit no warning, got: "
+        f"{[r.message for r in caplog.records]}"
+    )
+    assert cfg._warned_flush_bytes is True, (
+        "the scan ran but never latched -- it will re-run and can re-warn on every Settings()"
+    )
+
+
+def test_genuinely_unreadable_env_file_still_warns_through_settings(tmp_path, monkeypatch, caplog):
+    """The F1 fix must not over-correct into swallowing a REAL read failure (permissions, a
+    directory where a file was expected, a decode error) -- only a MISSING file is silent."""
+    import logging
+
+    import ormah.config as cfg
+
+    unreadable = tmp_path / "not_a_file"
+    unreadable.mkdir()
+    monkeypatch.setattr(cfg, "_EXISTING_ENV_FILES", [str(unreadable)])
+    monkeypatch.delenv("ORMAH_SESSION_WATCHER_FLUSH_BYTES", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="ormah.config"):
+        Settings()
+
+    assert any(str(unreadable) in r.message for r in caplog.records), (
+        "a genuinely unreadable source must still warn, not be silently treated as absent"
+    )
+
+
 def test_raw_ceiling_far_below_the_measured_ratio_is_rejected():
     """Council R1 (Cursor): a floor of `>= flush_chars` compares bytes to chars and permits a
     ~200KB ceiling, which would close tool-heavy slices long before the char sweet spot --
