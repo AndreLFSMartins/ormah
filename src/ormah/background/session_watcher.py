@@ -11,7 +11,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from threading import Event, Lock, Thread, Timer
@@ -31,7 +31,12 @@ from ormah.engine.memory_engine import (
     MemoryEngine,
 )
 from ormah.text.tokens import distinctive_tokens
-from ormah.transcript.parser import TranscriptResult, TranscriptTurn, parse_transcript, should_rewind
+from ormah.transcript.parser import (
+    TranscriptResult,
+    TranscriptTurn,
+    parse_transcript,
+    should_rewind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -431,7 +436,7 @@ def _record_whisper_usage_signals(
     if not rows:
         return 0
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     recorded = 0
 
     heuristic_records: list[dict] = []
@@ -888,7 +893,7 @@ def _ingest_session(
             result = parse_transcript(
                 path, start_offset=0, max_bytes=flush_bytes, stop_offset=boundary
             )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - transcript parsers can raise provider-specific errors
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return IngestResult.NO_PROGRESS
 
@@ -968,12 +973,12 @@ def _ingest_session(
                 "end": payload_offset,
                 "source_hash": h,
                 "reason": reason,
-                "at": datetime.now(timezone.utc).isoformat(),
+                "at": datetime.now(UTC).isoformat(),
             })
             skip_entry.update({
                 "hash": h,
                 "end_offset": payload_offset,  # advance past the toxic slice
-                "last_ingested": datetime.now(timezone.utc).isoformat(),
+                "last_ingested": datetime.now(UTC).isoformat(),
                 "session_id": result.session_id,
                 "source": result.source,
                 "space": space,
@@ -1024,7 +1029,7 @@ def _ingest_session(
         # Filesystem-level transient failure — same reasoning as the SQLite lock above.
         logger.warning("Session watcher transient I/O error for %s: %s", path, e)
         return IngestResult.TRANSIENT
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - engine providers surface heterogeneous failures
         logger.warning("Session watcher ingestion error for %s: %s", path, e)
         # A DETERMINISTIC exception (e.g. a memory whose content always breaks a write) would pin
         # the cursor forever, re-calling the LLM every tick — count it toward the per-slice cap so
@@ -1066,7 +1071,7 @@ def _ingest_session(
     entry.update({
         "hash": h,
         "end_offset": payload_offset,
-        "last_ingested": datetime.now(timezone.utc).isoformat(),
+        "last_ingested": datetime.now(UTC).isoformat(),
         "session_id": result.session_id,
         "source": result.source,
         "space": space,
@@ -1140,6 +1145,8 @@ class SessionHandler(FileSystemEventHandler):
             return
         key = str(path)
         with self._lock:
+            if self._stop_event.is_set():
+                return
             if key in self._timers:
                 self._timers[key].cancel()
             timer = Timer(self.debounce_seconds, self._enqueue_path, args=(path, "observer"))
@@ -1510,6 +1517,7 @@ def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
         # serving after a caught rollback (main.lifespan), so re-arm any cancelled adapter.
         _stop_and_drain(watches, rearm=True)
         raise
+
     return watches
 
 

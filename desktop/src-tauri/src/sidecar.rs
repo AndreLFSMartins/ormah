@@ -33,23 +33,55 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
 }
 
 async fn ensure_running<R: Runtime>(app: AppHandle<R>) {
-    if find_ormah().is_none() {
-        let _ = app.emit("ormah://status", Phase::Installing { version: ORMAH_VERSION });
-        if !install_via_uv(&app).await {
+    let installed = find_ormah().is_some();
+    let runtime_action = choose_runtime_action(installed, installed && needs_upgrade());
+    let runtime_changed = match runtime_action {
+        RuntimeAction::Install | RuntimeAction::Upgrade => {
             let _ = app.emit(
                 "ormah://status",
-                Phase::Failed {
-                    reason: "Could not install ormah. Check your internet connection.".into(),
+                Phase::Installing {
+                    version: ORMAH_VERSION,
                 },
             );
-            return;
+            if !install_via_uv(&app).await {
+                let _ = app.emit(
+                    "ormah://status",
+                    Phase::Failed {
+                        reason: "Could not install ormah. Check your internet connection.".into(),
+                    },
+                );
+                return;
+            }
+            true
         }
-    } else if needs_upgrade() {
-        let _ = app.emit("ormah://status", Phase::Installing { version: ORMAH_VERSION });
-        let _ = install_via_uv(&app).await;
+        RuntimeAction::Reuse => false,
+    };
+
+    // A uv reinstall replaces files on disk but cannot replace modules in the already-running
+    // daemon. Restart after successful install/upgrade so migrations and model provisioning run
+    // under the newly pinned Python package.
+    if runtime_changed {
+        stop_daemon();
     }
     let _ = app.emit("ormah://status", Phase::Starting);
     start_daemon();
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeAction {
+    Install,
+    Upgrade,
+    Reuse,
+}
+
+fn choose_runtime_action(installed: bool, upgrade_needed: bool) -> RuntimeAction {
+    if !installed {
+        RuntimeAction::Install
+    } else if upgrade_needed {
+        RuntimeAction::Upgrade
+    } else {
+        RuntimeAction::Reuse
+    }
 }
 
 /// Find the ormah binary. Checks uv tool install locations first (GUI apps
@@ -131,7 +163,23 @@ fn needs_upgrade() -> bool {
     else {
         return false;
     };
-    !String::from_utf8_lossy(&out.stdout).contains(ORMAH_VERSION)
+    if !out.status.success() {
+        return true;
+    }
+    should_upgrade(&out.stdout, ORMAH_VERSION)
+}
+
+fn should_upgrade(output: &[u8], required: &str) -> bool {
+    let Ok(required) = semver::Version::parse(required) else {
+        return true;
+    };
+    let installed = String::from_utf8_lossy(output)
+        .split_whitespace()
+        .find_map(|word| semver::Version::parse(word).ok());
+    match installed {
+        Some(installed) => installed < required,
+        None => true,
+    }
 }
 
 /// Remove Python env vars that AppImage sets and that corrupt child Python runtimes.
@@ -161,5 +209,45 @@ async fn install_via_uv<R: Runtime>(app: &AppHandle<R>) -> bool {
             false
         }
         Err(e) => { eprintln!("uv sidecar error: {e}"); false }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{choose_runtime_action, should_upgrade, RuntimeAction};
+
+    #[test]
+    fn installs_when_runtime_is_missing() {
+        assert_eq!(choose_runtime_action(false, false), RuntimeAction::Install);
+    }
+
+    #[test]
+    fn upgrades_when_installed_runtime_is_old() {
+        assert_eq!(choose_runtime_action(true, true), RuntimeAction::Upgrade);
+    }
+
+    #[test]
+    fn reuses_matching_or_newer_runtime() {
+        assert_eq!(choose_runtime_action(true, false), RuntimeAction::Reuse);
+    }
+
+    #[test]
+    fn upgrades_an_older_cli() {
+        assert!(should_upgrade(b"ormah 0.13.6\n", "0.14.0"));
+    }
+
+    #[test]
+    fn leaves_the_pinned_cli_unchanged() {
+        assert!(!should_upgrade(b"ormah 0.14.0\n", "0.14.0"));
+    }
+
+    #[test]
+    fn never_downgrades_a_newer_cli() {
+        assert!(!should_upgrade(b"ormah 0.15.0\n", "0.14.0"));
+    }
+
+    #[test]
+    fn repairs_unparseable_version_output() {
+        assert!(should_upgrade(b"unknown\n", "0.14.0"));
     }
 }

@@ -35,6 +35,17 @@ jobs:
             exit 1
           fi
 
+      - name: Verify bundled Ormah release
+        shell: bash
+        run: |
+          PY_VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)
+          PYPI_VERSION=$(curl -fsSL https://pypi.org/pypi/ormah/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
+          if [ "$PY_VERSION" != "$PYPI_VERSION" ]; then
+            echo "Desktop embeds ormah $PY_VERSION, but PyPI latest is $PYPI_VERSION" >&2
+            echo "Publish the Python release before tagging the desktop app." >&2
+            exit 1
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -129,6 +140,23 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: cargo tauri build --target ${{ matrix.target }}
+
+      # tauri-bundler notarizes and staples the .app, then builds the .dmg
+      # around it and code-signs the dmg container — but never submits the
+      # dmg itself for notarization. Without this, Gatekeeper rejects the
+      # downloaded dmg on open (spctl: "Unnotarized Developer ID") even
+      # though the .app inside is validly notarized.
+      - name: Notarize and staple dmg (macOS)
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+        run: |
+          DMG=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -name '*.dmg')
+          xcrun notarytool submit "$DMG" --key-id "$APPLE_API_KEY" --key "$APPLE_API_KEY_PATH" --issuer "$APPLE_API_ISSUER" --wait
+          xcrun stapler staple "$DMG"
 
       - name: Stop DNS resolver keepalive
         if: runner.os == 'macOS' && always()

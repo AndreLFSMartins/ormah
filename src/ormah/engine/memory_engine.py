@@ -501,7 +501,13 @@ class MemoryEngine:
             logger.warning("Embedding model warmup failed: %s", e)
 
     def _warmup_reranker(self) -> None:
-        """Mark whisper reranker availability up front instead of failing per prompt."""
+        """Download/load the whisper reranker before the server becomes ready.
+
+        Model provisioning must not depend on first-run agent onboarding: desktop upgrades can
+        legitimately reuse an existing onboarding marker on a machine whose model cache is empty.
+        A download failure still degrades to conservative embedding-only whisper so local memory
+        remains usable offline.
+        """
         if not self.settings.whisper_reranker_enabled:
             logger.info("Whisper reranker disabled in settings.")
             self._whisper_reranker_available = False
@@ -519,14 +525,11 @@ class MemoryEngine:
                 cache_dir,
             )
             if not model_is_cached(model_name):
-                logger.warning(
-                    "Whisper reranker is enabled but model %s is not cached in %s. "
-                    "Whisper will run without reranking until the model is preloaded.",
+                logger.info(
+                    "Whisper reranker model %s is not cached in %s; downloading...",
                     model_name,
                     cache_dir,
                 )
-                self._whisper_reranker_available = False
-                return
 
             logger.info("Loading whisper reranker...")
             preload_model(model_name)
