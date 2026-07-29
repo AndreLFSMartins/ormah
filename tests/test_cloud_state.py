@@ -8,7 +8,13 @@ from types import SimpleNamespace
 import uuid
 
 from ormah.cloud.state import (
+    CURRENT_CLOUD_STATE_SCHEMA_VERSION,
     CloudState,
+    ProtectionIntentStatus,
+    ProtectionOperationKind,
+    ProtectionOperationPhase,
+    ProtectionReasonCode,
+    ProtectionState,
     cloud_status_payload,
     load_state,
     save_state,
@@ -28,6 +34,14 @@ def test_state_round_trip_is_atomic_and_owner_only(tmp_path):
         last_verify_ok=False,
         last_verify_snapshot_id="01VERIFY",
         last_verify_error="hash mismatch",
+        protection_enabled_at=now,
+        protection_state=ProtectionState.ATTENTION_REQUIRED,
+        pending_protection_intent_id="intent-1",
+        pending_protection_status=ProtectionIntentStatus.RUNNING,
+        last_operation_id="operation-1",
+        last_operation_kind=ProtectionOperationKind.VERIFY,
+        last_operation_phase=ProtectionOperationPhase.FAILED,
+        last_error_code=ProtectionReasonCode.VERIFICATION_FAILED,
     )
 
     save_state(store_id, state, state_dir=tmp_path)
@@ -70,6 +84,57 @@ def test_update_preserves_future_state_fields(tmp_path):
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["last_synced_snapshot_id"] == "future-e06"
     assert payload["last_upload_error"] == "retrying"
+
+
+def test_legacy_state_migrates_success_fields_and_protection_state(tmp_path):
+    store_id = str(uuid.uuid4())
+    now = "2026-07-13T12:00:00+00:00"
+    path = state_path(store_id, state_dir=tmp_path)
+    path.write_text(
+        json.dumps(
+            {
+                "last_upload_at": now,
+                "last_upload_snapshot_id": "01VERIFIED",
+                "last_verify_at": now,
+                "last_verify_ok": True,
+                "last_verify_snapshot_id": "01VERIFIED",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = load_state(store_id, state_dir=tmp_path)
+
+    assert state.schema_version == CURRENT_CLOUD_STATE_SCHEMA_VERSION
+    assert state.protection_state is ProtectionState.PROTECTED
+    assert state.last_successful_upload_at == state.last_upload_at
+    assert state.last_successful_backup_snapshot_id == "01VERIFIED"
+    assert state.last_successful_verify_at == state.last_verify_at
+    assert state.last_verified_snapshot_id == "01VERIFIED"
+
+
+def test_unknown_future_state_values_survive_an_older_writer(tmp_path):
+    store_id = str(uuid.uuid4())
+    path = state_path(store_id, state_dir=tmp_path)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 99,
+                "protection_state": "future_safe_state",
+                "last_operation_kind": "future_operation",
+                "future_c03_field": {"head": "01HEAD"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    update_state(store_id, state_dir=tmp_path, last_upload_error="offline")
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 99
+    assert payload["protection_state"] == "future_safe_state"
+    assert payload["last_operation_kind"] == "future_operation"
+    assert payload["future_c03_field"] == {"head": "01HEAD"}
 
 
 def test_two_stores_never_share_state(tmp_path):
@@ -144,15 +209,10 @@ def test_cloud_state_json_contains_only_plain_metadata(tmp_path):
     payload = json.loads(state_path(store_id, state_dir=tmp_path).read_text(encoding="utf-8"))
 
     assert payload["last_upload_snapshot_id"] == "01SAFE"
-    assert set(payload) == {
-        "last_upload_at",
-        "last_upload_snapshot_id",
-        "last_upload_error",
-        "last_verify_at",
-        "last_verify_ok",
-        "last_verify_snapshot_id",
-        "last_verify_error",
-    }
+    assert set(payload) == set(CloudState().to_dict())
+    serialized = json.dumps(payload).lower()
+    for forbidden in ("account_token", "presigned", "age-secret-key", "recovery_phrase"):
+        assert forbidden not in serialized
 
 
 def test_admin_cloud_status_is_thin_wrapper(monkeypatch):
