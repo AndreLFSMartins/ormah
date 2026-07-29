@@ -49,18 +49,18 @@ def _existing_store_id(memory_dir: Path) -> str | None:
     return get_or_create_store_id(memory_dir)
 
 
-def _safe_update(store_id: str | None, **changes) -> None:
+def _safe_update(store_id: str | None, *, memory_dir: Path, **changes) -> None:
     if store_id is None:
         return
     try:
-        update_state(store_id, **changes)
+        update_state(store_id, memory_dir=memory_dir, **changes)
     except Exception as exc:
         logger.warning("Could not persist Ormah Cloud state: %s", exc)
 
 
-def _record_upload_error(store_id: str | None, message: str) -> None:
+def _record_upload_error(store_id: str | None, message: str, *, memory_dir: Path) -> None:
     logger.warning("Ormah Cloud backup skipped or failed: %s", message)
-    _safe_update(store_id, last_upload_error=message)
+    _safe_update(store_id, memory_dir=memory_dir, last_upload_error=message)
 
 
 def _snapshot_files(root: Path) -> dict[str, Path]:
@@ -119,12 +119,20 @@ def run_cloud_backup(engine) -> str | None:
 
         if not key_file_exists():
             store_id = _existing_store_id(settings.memory_dir)
-            _record_upload_error(store_id, "Cloud encryption key is missing; run `ormah cloud init`.")
+            _record_upload_error(
+                store_id,
+                "Cloud encryption key is missing; run `ormah cloud init`.",
+                memory_dir=settings.memory_dir,
+            )
             return None
 
         store_id = _existing_store_id(settings.memory_dir)
         if store_id is None:
-            _record_upload_error(None, "Cloud store id is missing; run `ormah cloud init`.")
+            _record_upload_error(
+                None,
+                "Cloud store id is missing; run `ormah cloud init`.",
+                memory_dir=settings.memory_dir,
+            )
             return None
 
         entitlement = check_entitlement(settings)
@@ -132,6 +140,7 @@ def run_cloud_backup(engine) -> str | None:
             _record_upload_error(
                 store_id,
                 f"Cloud backup paused because entitlement is {entitlement.value}.",
+                memory_dir=settings.memory_dir,
             )
             return None
 
@@ -183,16 +192,20 @@ def run_cloud_backup(engine) -> str | None:
             if finalized.get("status") != "committed" or finalized_snapshot != snapshot_id:
                 raise RuntimeError("Cloud upload finalize response was malformed.")
 
+        uploaded_at = _utc_now()
         _safe_update(
             store_id,
-            last_upload_at=_utc_now(),
+            memory_dir=settings.memory_dir,
+            last_upload_at=uploaded_at,
             last_upload_snapshot_id=snapshot_id,
             last_upload_error=None,
+            last_successful_upload_at=uploaded_at,
+            last_successful_backup_snapshot_id=snapshot_id,
         )
         logger.info("Uploaded encrypted Ormah Cloud snapshot %s", snapshot_id)
         return snapshot_id
     except Exception as exc:
-        _record_upload_error(store_id, str(exc))
+        _record_upload_error(store_id, str(exc), memory_dir=settings.memory_dir)
         return None
     finally:
         close = getattr(client, "close", None) if client is not None else None
@@ -293,10 +306,13 @@ def run_restore_verification(engine) -> bool:
         verified_at = _utc_now()
         _safe_update(
             store_id,
+            memory_dir=settings.memory_dir,
             last_verify_at=verified_at,
             last_verify_ok=True,
             last_verify_snapshot_id=snapshot_id,
             last_verify_error=None,
+            last_successful_verify_at=verified_at,
+            last_verified_snapshot_id=snapshot_id,
         )
         logger.info("Verified Ormah Cloud snapshot %s is restorable", snapshot_id)
         return True
@@ -310,6 +326,7 @@ def run_restore_verification(engine) -> bool:
                 store_id = None
         _safe_update(
             store_id,
+            memory_dir=settings.memory_dir,
             last_verify_at=_utc_now(),
             last_verify_ok=False,
             last_verify_snapshot_id=snapshot_id,

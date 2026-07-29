@@ -199,7 +199,11 @@ def test_cloud_backup_fresh_upload_short_circuits_bundle(
     from ormah.cloud import jobs
 
     settings, store_id = _settings(tmp_path)
-    save_state(store_id, CloudState(last_upload_at=NOW - timedelta(hours=23)))
+    save_state(
+        store_id,
+        CloudState(last_upload_at=NOW - timedelta(hours=23)),
+        memory_dir=settings.memory_dir,
+    )
     client = FakeCloudClient()
     _patch_upload_prerequisites(monkeypatch, client)
     monkeypatch.setattr(
