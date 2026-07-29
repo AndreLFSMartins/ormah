@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -16,6 +15,18 @@ import uuid
 CLOUD_STATE_DIR = Path.home() / ".local" / "share" / "ormah" / "cloud"
 CURRENT_CLOUD_STATE_SCHEMA_VERSION = 2
 _STATE_LOCK = threading.RLock()
+
+
+class CloudStateError(RuntimeError):
+    """Base error for durable cloud-state failures."""
+
+
+class CloudStateLoadError(CloudStateError):
+    """Raised when an existing cloud-state file cannot be read or parsed safely."""
+
+
+class CloudStateVersionError(CloudStateError):
+    """Raised when an older client would overwrite state from a newer schema."""
 
 
 class ProtectionState(StrEnum):
@@ -336,20 +347,26 @@ def state_path(store_id: str, *, state_dir: Path | None = None) -> Path:
 
 
 def load_state(store_id: str, *, state_dir: Path | None = None) -> CloudState:
-    """Load one store's state; missing or corrupt files start empty."""
+    """Load one store's state, distinguishing absence from unsafe existing data."""
     path = state_path(store_id, state_dir=state_dir)
     try:
-        return CloudState.from_dict(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return CloudState()
+    except OSError as exc:
+        raise CloudStateLoadError(f"Could not read cloud state {path}: {exc}") from exc
+    try:
+        return CloudState.from_dict(json.loads(raw))
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise CloudStateLoadError(f"Cloud state {path} is invalid: {exc}") from exc
 
 
 def save_state(
     store_id: str,
     state: CloudState,
     *,
+    memory_dir: Path,
     state_dir: Path | None = None,
-    memory_dir: Path | None = None,
     lock_timeout: float = 30.0,
 ) -> CloudState:
     """Atomically persist one store's state with owner-only permissions."""
@@ -357,17 +374,25 @@ def save_state(
 
     from ormah.cloud.store_lock import StoreLock
 
-    lock = (
-        StoreLock(memory_dir, timeout=lock_timeout)
-        if memory_dir is not None
-        else nullcontext()
-    )
-    with lock:
+    with StoreLock(memory_dir, timeout=lock_timeout):
+        if path.exists():
+            existing = load_state(store_id, state_dir=state_dir)
+            _ensure_writable_schema(existing)
         return _write_state(path, state)
+
+
+def _ensure_writable_schema(state: CloudState) -> None:
+    if state.schema_version > CURRENT_CLOUD_STATE_SCHEMA_VERSION:
+        raise CloudStateVersionError(
+            f"Cloud state schema {state.schema_version} is newer than this client's "
+            f"schema {CURRENT_CLOUD_STATE_SCHEMA_VERSION}; update Ormah before writing it."
+        )
 
 
 def _write_state(path: Path, state: CloudState) -> CloudState:
     """Write state after the caller has acquired any required store lock."""
+
+    _ensure_writable_schema(state)
 
     from ormah.setup import _atomic_write
 
@@ -385,8 +410,8 @@ def mutate_state(
     store_id: str,
     transform: Callable[[CloudState], CloudState],
     *,
+    memory_dir: Path,
     state_dir: Path | None = None,
-    memory_dir: Path | None = None,
     lock_timeout: float = 30.0,
 ) -> CloudState:
     """Apply one read-modify-write transformation without losing concurrent updates."""
@@ -394,12 +419,7 @@ def mutate_state(
 
     from ormah.cloud.store_lock import StoreLock
 
-    lock = (
-        StoreLock(memory_dir, timeout=lock_timeout)
-        if memory_dir is not None
-        else nullcontext()
-    )
-    with lock, _STATE_LOCK:
+    with StoreLock(memory_dir, timeout=lock_timeout), _STATE_LOCK:
         current = load_state(store_id, state_dir=state_dir)
         updated = transform(current)
         if not isinstance(updated, CloudState):
@@ -410,8 +430,8 @@ def mutate_state(
 def update_state(
     store_id: str,
     *,
+    memory_dir: Path,
     state_dir: Path | None = None,
-    memory_dir: Path | None = None,
     lock_timeout: float = 30.0,
     **changes: Any,
 ) -> CloudState:
@@ -448,7 +468,12 @@ def cloud_status_payload(
     except Exception as exc:
         store_id = None
         store_error = str(exc)
-    state = load_state(store_id, state_dir=state_dir) if store_id else CloudState()
+    state_error = None
+    try:
+        state = load_state(store_id, state_dir=state_dir) if store_id else CloudState()
+    except CloudStateError as exc:
+        state = CloudState()
+        state_error = str(exc)
 
     if entitlement is None:
         from ormah.cloud.entitlements import check_entitlement
@@ -462,6 +487,11 @@ def cloud_status_payload(
     warnings: list[str] = []
     if store_error is not None:
         warnings.append(f"Cloud store identity is invalid: {store_error}")
+    if state_error is not None:
+        warnings.append(
+            "Cloud protection state could not be read and was not overwritten: "
+            f"{state_error}"
+        )
     if settings.cloud_backup_enabled:
         if store_id is None and store_error is None:
             warnings.append("Cloud backup is enabled but this memory store is not initialized.")
@@ -480,7 +510,7 @@ def cloud_status_payload(
         "schema_version": state.schema_version,
         "enabled": settings.cloud_backup_enabled,
         "store_id": store_id,
-        "protection_state": _serialize_enum(state.protection_state),
+        "state_error": state_error,
         "interval_hours": settings.cloud_backup_interval_hours,
         "entitlement": entitlement,
         "last_upload_at": (
