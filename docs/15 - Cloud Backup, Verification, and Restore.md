@@ -1,6 +1,6 @@
 # Cloud Backup, Verification, and Restore
 
-Verified against the current Ormah client and the hardened C01 cloud protocol on 2026-07-27.
+Verified against the current Ormah client and the hardened C01 cloud protocol on 2026-07-29.
 
 This guide explains what happens when Ormah protects a memory graph in the cloud. It starts with a
 small worked example, then adds the security and failure-handling details one layer at a time.
@@ -73,7 +73,7 @@ blob bytes.
 | Term | Plain meaning |
 | --- | --- |
 | Memory store | One local Ormah graph, identified by a UUIDv4 `store_id` |
-| Local backup | A timestamped copy of `nodes/` and `deleted/` on the same machine |
+| Local backup | A timestamped copy of `nodes/` and `deleted/`, plus the active Self pointer |
 | Bundle | A gzip-compressed tar archive containing the backup and integrity manifest |
 | Ciphertext | The encrypted bytes produced by age; unreadable without an identity |
 | Snapshot | One committed encrypted cloud recovery point, identified by a server ULID |
@@ -140,7 +140,13 @@ Otherwise it creates a new backup such as:
 `-- backup.json
 ```
 
-`backup.json` records when and why the local backup was made. The snapshot deliberately excludes:
+`backup.json` records when and why the local backup was made and the exact `user_node_id` selected as
+the graph's active Self. That small pointer is portable source state even though the rest of SQLite is
+derived. It prevents a fresh installation's temporary Self node from remaining active after a full
+restore. Historical duplicate Self nodes are copied like every other node; backup and restore do not
+merge or repair them.
+
+The snapshot deliberately excludes:
 
 - `index.db`, its WAL, and other derived indexes;
 - account tokens, `.env`, and API keys;
@@ -382,12 +388,13 @@ For the latest committed snapshot, the current verification path:
 7. rejects absolute paths, `..`, backslashes, links, duplicates, Unicode/case collisions, excess
    members, and excess expanded bytes;
 8. recomputes every file size and SHA-256 and compares them with the encrypted manifest;
-9. parses every active and deleted Markdown node;
-10. creates a throwaway SQLite database and rebuilds its index from the extracted active nodes;
-11. requires the rebuilt active-node count to equal `manifest.node_count`;
-12. runs an FTS search and requires it to return a known restored node;
-13. records `last_verify_ok=true` and the exact snapshot ID;
-14. deletes the temporary directory in `finally`, whether verification succeeds or fails.
+9. validates that `backup.json`'s active Self pointer names the exact included `system:self` node;
+10. parses every active and deleted Markdown node;
+11. creates a throwaway SQLite database and rebuilds its index from the extracted active nodes;
+12. requires the rebuilt active-node count to equal `manifest.node_count`;
+13. runs an FTS search and requires it to return a known restored node;
+14. records `last_verify_ok=true` and the exact snapshot ID;
+15. deletes the temporary directory in `finally`, whether verification succeeds or fails.
 
 For our three-file example, the scratch index must rebuild exactly `2` active nodes. The deleted
 node is parsed and integrity-checked but correctly does not become an active search result.
@@ -459,10 +466,20 @@ The restore command:
 7. delegates to the existing `BackupService.restore()` path;
 8. creates a safety backup of any current Mac memory before replacement;
 9. replaces only the source-of-truth `nodes/` and `deleted/` directories;
-10. rebuilds the Mac's SQLite search index from Markdown.
+10. rebuilds the Mac's SQLite search index from Markdown;
+11. replaces the Mac-local active Self pointer with the source graph's recorded `user_node_id`.
 
 For the example, the result is two active nodes, one deleted node retained as a tombstone, and a
-fresh searchable index containing the two active nodes.
+fresh searchable index containing the two active nodes. If installing Ormah on the Mac created a
+temporary isolated Self node before restore, the pre-restore safety backup preserves it and the full
+restore then removes it with the rest of the target graph. The source graph's selected Self becomes
+active exactly as backed up.
+
+This is intentionally replacement, not merge. Restore does not inspect connections to decide which
+Self node looks most important, transfer target-only nodes, or rewrite historical source duplicates.
+Those are sync or explicit repair concerns. A new backup records the choice exactly. An older backup
+without the pointer is accepted only when it contains zero or one `system:self` node; an ambiguous
+legacy backup fails before touching the target and asks for a fresh backup from the source machine.
 
 Cloud restore remains available when subscription entitlement expires, while the service retains
 the snapshot. Cancellation pauses new uploads; it does not turn recovery into a ransom gate.
@@ -479,6 +496,7 @@ the snapshot. Cancellation pauses new uploads; it does not turn recovery into a 
 | Process dies during promotion | Durable lease/state lets janitor reconcile safely rather than guessing |
 | Ciphertext is truncated or altered | Age decryption or archive/manifest verification fails |
 | A Markdown file is malformed | Parse stage fails; snapshot is not marked verified |
+| Active Self pointer is missing, invalid, or ambiguous | Verification/restore fails closed before replacing the live graph |
 | Scratch index/search fails | Snapshot remains committed but is not reported as verified restorable |
 | Verification fails | Live graph bytes and mtimes remain untouched; exact error is recorded locally |
 | Restore starts on a populated machine | A safety backup is created before source directories are replaced |
