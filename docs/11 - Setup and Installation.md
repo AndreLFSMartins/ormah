@@ -123,11 +123,14 @@ Older docs that point to `~/Library/Logs/ormah/` or only to `journalctl` are not
 Supported commands:
 
 ```bash
-ormah server start
-ormah server start -d
+ormah server start       # foreground; stops when this process exits
+ormah server start -d    # supervised background service (recommended)
 ormah server stop
 ormah server status
 ```
+
+`ormah server stop` also removes the supervised service. Ormah remains stopped
+until `ormah setup` or `ormah server start -d` explicitly enables it again.
 
 Health checks:
 
