@@ -96,9 +96,8 @@ def is_server_running() -> bool:
 def is_port_in_use(host: str, port: int) -> bool:
     """Return True if something is already accepting connections on host:port.
 
-    Used as a pre-flight before binding: if another process (typically an
-    already-running ormah server) owns the port, the launcher exits cleanly
-    instead of letting uvicorn crash on bind and KeepAlive respawn it in a loop.
+    Used as a pre-flight before binding so the launcher can distinguish an
+    existing Ormah server from a foreign listener before starting uvicorn.
     """
     try:
         with socket.create_connection((host, port), timeout=0.5):
@@ -376,6 +375,38 @@ def _stop_running_server() -> _StopServerResult:
         print("No running Ormah server found.")
 
     return res
+
+
+def restart_with_autostart(
+    ormah_bin: str,
+    wrapper_path: str | None = None,
+    *,
+    show_progress: bool = False,
+) -> bool:
+    """Replace any running server with one owned by launchd/systemd.
+
+    A reachable port does not prove that the process is supervised. Stop the
+    existing process first and fail closed if ownership cannot be established.
+    """
+    stop_result = _stop_running_server()
+    if stop_result.failed:
+        print("Could not stop the existing Ormah server; auto-start was not installed.")
+        return False
+
+    if is_port_in_use(settings.host, settings.port):
+        print(
+            f"Port {settings.port} is still in use after stopping Ormah; "
+            "auto-start was not installed."
+        )
+        return False
+
+    try:
+        install_autostart(ormah_bin, wrapper_path=wrapper_path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Could not install Ormah auto-start: {exc}")
+        return False
+
+    return wait_for_server(show_progress=show_progress)
 
 
 def stop_running_server() -> bool:

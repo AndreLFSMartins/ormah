@@ -71,14 +71,29 @@ def test_plist_has_throttle_interval():
 
 
 def test_server_start_exits_clean_when_port_in_use():
-    """`ormah server start` must NOT launch uvicorn when the port is already
-    owned by another server — it returns cleanly so KeepAlive does not respawn."""
+    """A healthy Ormah listener makes a duplicate foreground start a no-op."""
     from ormah import cli
 
     args = mock.Mock(daemon=False, reload=False)
     with mock.patch("ormah.server_manager.is_port_in_use", return_value=True), \
+         mock.patch("ormah.server_manager.is_server_running", return_value=True), \
          mock.patch("uvicorn.run") as run:
         cli._cmd_server_start(args)
+    run.assert_not_called()
+
+
+def test_server_start_fails_when_foreign_process_owns_port():
+    """A foreign listener must make the supervisor retry instead of going dormant."""
+    from ormah import cli
+
+    args = mock.Mock(daemon=False, reload=False)
+    with mock.patch("ormah.server_manager.is_port_in_use", return_value=True), \
+         mock.patch("ormah.server_manager.is_server_running", return_value=False), \
+         mock.patch("uvicorn.run") as run, \
+         pytest.raises(SystemExit) as exc_info:
+        cli._cmd_server_start(args)
+
+    assert exc_info.value.code == 1
     run.assert_not_called()
 
 
@@ -91,3 +106,59 @@ def test_server_start_runs_uvicorn_when_port_free():
          mock.patch("uvicorn.run") as run:
         cli._cmd_server_start(args)
     run.assert_called_once()
+
+
+def test_restart_with_autostart_transfers_ownership_and_waits_for_health():
+    stop_result = server_manager._StopServerResult(found=True, stopped=True)
+    with mock.patch("ormah.server_manager._stop_running_server", return_value=stop_result) as stop, \
+         mock.patch("ormah.server_manager.is_port_in_use", return_value=False) as port_in_use, \
+         mock.patch("ormah.server_manager.install_autostart") as install, \
+         mock.patch("ormah.server_manager.wait_for_server", return_value=True) as wait:
+        result = server_manager.restart_with_autostart(
+            "/abs/path/ormah",
+            wrapper_path="/abs/path/ormah-server",
+            show_progress=True,
+        )
+
+    assert result is True
+    stop.assert_called_once()
+    port_in_use.assert_called_once_with(server_manager.settings.host, server_manager.settings.port)
+    install.assert_called_once_with("/abs/path/ormah", wrapper_path="/abs/path/ormah-server")
+    wait.assert_called_once_with(show_progress=True)
+
+
+def test_restart_with_autostart_fails_closed_when_stop_fails():
+    stop_result = server_manager._StopServerResult(found=True, failed=True)
+    with mock.patch("ormah.server_manager._stop_running_server", return_value=stop_result), \
+         mock.patch("ormah.server_manager.install_autostart") as install, \
+         mock.patch("ormah.server_manager.wait_for_server") as wait:
+        result = server_manager.restart_with_autostart("/abs/path/ormah")
+
+    assert result is False
+    install.assert_not_called()
+    wait.assert_not_called()
+
+
+def test_restart_with_autostart_fails_closed_when_port_remains_occupied():
+    stop_result = server_manager._StopServerResult(found=True, stopped=True)
+    with mock.patch("ormah.server_manager._stop_running_server", return_value=stop_result), \
+         mock.patch("ormah.server_manager.is_port_in_use", return_value=True), \
+         mock.patch("ormah.server_manager.install_autostart") as install, \
+         mock.patch("ormah.server_manager.wait_for_server") as wait:
+        result = server_manager.restart_with_autostart("/abs/path/ormah")
+
+    assert result is False
+    install.assert_not_called()
+    wait.assert_not_called()
+
+
+def test_restart_with_autostart_fails_closed_when_install_fails():
+    stop_result = server_manager._StopServerResult()
+    with mock.patch("ormah.server_manager._stop_running_server", return_value=stop_result), \
+         mock.patch("ormah.server_manager.is_port_in_use", return_value=False), \
+         mock.patch("ormah.server_manager.install_autostart", side_effect=OSError("denied")), \
+         mock.patch("ormah.server_manager.wait_for_server") as wait:
+        result = server_manager.restart_with_autostart("/abs/path/ormah")
+
+    assert result is False
+    wait.assert_not_called()

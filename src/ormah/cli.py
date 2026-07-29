@@ -116,33 +116,40 @@ def _cmd_eval_recall_import(args):
 def _cmd_server_start(args):
     if args.daemon:
         from ormah.console import info, warn
-        from ormah.server_manager import get_ormah_bin_path, install_autostart, wait_for_server
+        from ormah.server_manager import get_ormah_bin_path, restart_with_autostart
         from ormah.setup import WRAPPER_PATH, generate_server_wrapper
 
         ormah_bin = get_ormah_bin_path()
         if not WRAPPER_PATH.exists():
             generate_server_wrapper(ormah_bin)
-        install_autostart(ormah_bin, wrapper_path=str(WRAPPER_PATH))
-        if not wait_for_server(show_progress=True):
+        if not restart_with_autostart(
+            ormah_bin,
+            wrapper_path=str(WRAPPER_PATH),
+            show_progress=True,
+        ):
             warn("Server did not start in time")
             info("Check ~/.local/share/ormah/logs/ormah.log")
             sys.exit(1)
     else:
         import uvicorn
         from ormah.config import settings
-        from ormah.console import info
-        from ormah.server_manager import is_port_in_use
+        from ormah.console import info, warn
+        from ormah.server_manager import is_port_in_use, is_server_running
 
-        # Pre-flight: if the port is already taken (typically by an existing
-        # ormah server), exit cleanly instead of letting uvicorn crash on bind.
-        # Under launchd/systemd KeepAlive this prevents a respawn loop that would
-        # re-run expensive startup work on every restart.
+        # A duplicate Ormah start is a clean no-op. A foreign listener must fail
+        # so launchd/systemd keeps retrying instead of treating the job as done.
         if is_port_in_use(settings.host, settings.port):
-            info(
-                f"A process is already listening on {settings.host}:{settings.port}; "
-                "assuming an ormah server is already running. Exiting."
+            if is_server_running():
+                info(
+                    f"Ormah is already running on {settings.host}:{settings.port}. "
+                    "Exiting."
+                )
+                return
+            warn(
+                f"Port {settings.port} is in use by another process; "
+                "Ormah could not start."
             )
-            return
+            sys.exit(1)
 
         uvicorn.run(
             "ormah.main:app",
