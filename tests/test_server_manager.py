@@ -46,6 +46,50 @@ def test_is_port_in_use_true_when_ipv6_socket_listening():
         assert server_manager.is_port_in_use("::1", port) is True
 
 
+def test_terminate_pid_allows_graceful_shutdown_window():
+    pid = 1234
+    with mock.patch("ormah.server_manager.os.kill") as kill, \
+         mock.patch("ormah.server_manager._wait_for_pid_exit", return_value=True) as wait:
+        result = server_manager._terminate_pid(pid)
+
+    assert result is True
+    kill.assert_called_once_with(pid, server_manager.signal.SIGTERM)
+    wait.assert_called_once_with(
+        pid,
+        timeout=server_manager._GRACEFUL_STOP_TIMEOUT_SECONDS,
+    )
+
+
+def test_terminate_pid_escalates_after_graceful_timeout():
+    pid = 1234
+    with mock.patch("ormah.server_manager.os.kill") as kill, \
+         mock.patch(
+             "ormah.server_manager._wait_for_pid_exit",
+             side_effect=[False, True],
+         ) as wait:
+        result = server_manager._terminate_pid(pid)
+
+    assert result is True
+    assert kill.call_args_list == [
+        mock.call(pid, server_manager.signal.SIGTERM),
+        mock.call(pid, server_manager.signal.SIGKILL),
+    ]
+    assert wait.call_args_list == [
+        mock.call(pid, timeout=server_manager._GRACEFUL_STOP_TIMEOUT_SECONDS),
+        mock.call(pid, timeout=server_manager._FORCED_STOP_TIMEOUT_SECONDS),
+    ]
+
+
+def test_terminate_pid_fails_when_process_survives_sigkill():
+    pid = 1234
+    with mock.patch("ormah.server_manager.os.kill") as kill, \
+         mock.patch("ormah.server_manager._wait_for_pid_exit", return_value=False):
+        result = server_manager._terminate_pid(pid)
+
+    assert result is False
+    assert kill.call_args_list[-1] == mock.call(pid, server_manager.signal.SIGKILL)
+
+
 def test_plist_keepalive_only_on_unsuccessful_exit():
     """KeepAlive must not be unconditional: a clean exit (port already taken)
     must not trigger a launchd respawn storm."""

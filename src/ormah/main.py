@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "hippocampus_observers"):
         stop_hippocampus(app.state.hippocampus_observers)
 
-    # Shutdown — wait for running jobs to finish (up to 10s)
+    # Shutdown — wait for running jobs to finish
     if hasattr(app.state, "scheduler"):
         app.state.scheduler.shutdown(wait=True)
     engine.shutdown()

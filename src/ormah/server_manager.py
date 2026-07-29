@@ -26,6 +26,9 @@ PLIST_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_PATH = PLIST_DIR / f"{LAUNCHD_LABEL}.plist"
 LOG_DIR = Path.home() / ".local" / "share" / "ormah" / "logs"
 
+_GRACEFUL_STOP_TIMEOUT_SECONDS = 15.0
+_FORCED_STOP_TIMEOUT_SECONDS = 5.0
+
 SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
 SYSTEMD_UNIT = SYSTEMD_DIR / "ormah.service"
 
@@ -261,6 +264,29 @@ def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> bool:
     return False
 
 
+def _terminate_pid(pid: int) -> bool:
+    """Stop a process, escalating only after its graceful shutdown window."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+    if _wait_for_pid_exit(pid, timeout=_GRACEFUL_STOP_TIMEOUT_SECONDS):
+        return True
+
+    print(f"Warning: process {pid} did not exit after SIGTERM; sending SIGKILL.")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+    return _wait_for_pid_exit(pid, timeout=_FORCED_STOP_TIMEOUT_SECONDS)
+
+
 @dataclass
 class _StopServerResult:
     found: bool = False
@@ -355,15 +381,10 @@ def _stop_running_server() -> _StopServerResult:
     killed = 0
     for pid in _find_manual_server_pids():
         res.found = True
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            res.failed = True
-            continue
-        if _wait_for_pid_exit(pid):
+        if _terminate_pid(pid):
             killed += 1
         else:
-            print(f"Warning: process {pid} did not exit after SIGTERM.")
+            print(f"Failed to stop process {pid}.")
             res.failed = True
 
     if killed:
