@@ -9,7 +9,13 @@ import re
 import shutil
 import tempfile
 
-from ormah.backup import BackupInfo, service_from_settings
+from ormah.backup import (
+    BackupError,
+    BackupInfo,
+    resolve_backup_user_node_id,
+    resolve_current_user_node_id,
+    service_from_settings,
+)
 from ormah.cloud.bundle import open_bundle, build_bundle
 from ormah.cloud.client import CloudError, client_from_settings
 from ormah.cloud.entitlements import EntitlementStatus, check_entitlement
@@ -70,6 +76,12 @@ def _snapshot_files(root: Path) -> dict[str, Path]:
 
 
 def _backup_matches_memory(backup: BackupInfo, memory_dir: Path) -> bool:
+    try:
+        if resolve_backup_user_node_id(backup.path) != resolve_current_user_node_id(memory_dir):
+            return False
+    except BackupError:
+        return False
+
     source_files = _snapshot_files(memory_dir)
     backup_files = _snapshot_files(backup.path)
     if source_files.keys() != backup_files.keys():
@@ -208,6 +220,8 @@ def _verify_extracted_bundle(extracted: Path, expected_store_id: str, info) -> i
         raise RuntimeError(
             f"Bundle store id {info.store_id!r} does not match local store {expected_store_id!r}."
         )
+
+    resolve_backup_user_node_id(extracted)
 
     active_nodes = []
     for dirname in ("nodes", "deleted"):

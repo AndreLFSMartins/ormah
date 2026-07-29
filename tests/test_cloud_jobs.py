@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import shutil
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from ormah.cloud.crypto import generate_identity
 from ormah.cloud.entitlements import EntitlementStatus
 from ormah.cloud.state import load_state, save_state, CloudState
 from ormah.config import Settings
+from ormah.index.db import Database
 from ormah.models.node import MemoryNode, NodeType
 from ormah.store.file_store import FileStore
 
@@ -265,6 +267,44 @@ def test_cloud_backup_never_reuses_newer_safety_backup_with_different_contents(t
     assert len(list((selected.path / "nodes").glob("*.md"))) == 1
 
 
+def test_cloud_backup_does_not_reuse_snapshot_with_different_active_self(tmp_path):
+    from ormah.cloud import jobs
+
+    settings, _ = _settings(tmp_path, with_node=False)
+    first = MemoryNode(type=NodeType.person, source="system:self", title="First Self")
+    second = MemoryNode(type=NodeType.person, source="system:self", title="Second Self")
+    store = FileStore(settings.memory_dir / "nodes")
+    store.save(first)
+    store.save(second)
+    database = Database(settings.memory_dir / "index.db")
+    try:
+        database.init_schema()
+        database.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('user_node_id', ?)",
+            (first.id,),
+        )
+    finally:
+        database.close()
+    service = service_from_settings(settings)
+    first_backup = service.create()
+
+    database = Database(settings.memory_dir / "index.db")
+    try:
+        database.init_schema()
+        database.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('user_node_id', ?)",
+            (second.id,),
+        )
+    finally:
+        database.close()
+
+    selected = jobs._backup_for_upload(service)
+
+    assert selected.name != first_backup.name
+    manifest = json.loads((selected.path / "backup.json").read_text(encoding="utf-8"))
+    assert manifest["user_node_id"] == second.id
+
+
 def test_two_stores_upload_under_their_own_ids(tmp_path, monkeypatch, cloud_state_dir):
     from ormah.cloud import jobs
 
@@ -382,6 +422,34 @@ def test_restore_verification_records_bundle_failures(
     assert state.last_verify_snapshot_id == "01SNAPSHOT"
     expected = "Hash mismatch" if failure == "hash-mismatch" else "decrypt"
     assert expected.lower() in state.last_verify_error.lower()
+
+
+def test_restore_verification_rejects_invalid_active_self_pointer(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    from ormah.cloud import jobs
+
+    settings, store_id = _settings(tmp_path)
+    service = service_from_settings(settings)
+    backup = service.create(reason="invalid-identity-fixture")
+    manifest_path = backup.path / "backup.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["user_node_id"] = "missing-self-node"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    identity = generate_identity()
+    bundle = tmp_path / "invalid-identity.age"
+    build_bundle(
+        backup.path,
+        bundle,
+        [identity.to_public()],
+        store_id=store_id,
+        reason="cloud-backup",
+    )
+    client = FakeCloudClient(bundle=bundle)
+    _patch_verification(monkeypatch, client, bundle, identity)
+
+    assert jobs.run_restore_verification(SimpleNamespace(settings=settings)) is False
+    assert "exact system:self node is not present" in load_state(store_id).last_verify_error
 
 
 def test_restore_verification_cleans_temporary_tree_on_failure(

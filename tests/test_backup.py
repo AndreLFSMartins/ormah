@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import sqlite3
 from unittest.mock import patch
 
-from ormah.backup import BackupService, run_auto_backup
+import pytest
+
+from ormah.backup import BackupError, BackupService, resolve_backup_user_node_id, run_auto_backup
 from ormah.config import Settings
+from ormah.engine.memory_engine import MemoryEngine
+from ormah.index.db import Database
 from ormah.models.node import MemoryNode, NodeType, Tier
 from ormah.store.file_store import FileStore
 
@@ -26,6 +31,42 @@ def _save_node(memory_dir: Path, title: str, content: str) -> MemoryNode:
     node = MemoryNode(type=NodeType.fact, title=title, content=content)
     store.save(node)
     return node
+
+
+def _save_self_node(memory_dir: Path, title: str) -> MemoryNode:
+    node = MemoryNode(
+        type=NodeType.person,
+        tier=Tier.core,
+        source="system:self",
+        title=title,
+        content=f"Identity node {title}",
+    )
+    FileStore(memory_dir / "nodes").save(node)
+    return node
+
+
+def _set_active_self(memory_dir: Path, node_id: str) -> None:
+    database = Database(memory_dir / "index.db")
+    try:
+        database.init_schema()
+        with database.transaction() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('user_node_id', ?)",
+                (node_id,),
+            )
+    finally:
+        database.close()
+
+
+def _active_self(memory_dir: Path) -> str | None:
+    connection = sqlite3.connect(memory_dir / "index.db")
+    try:
+        row = connection.execute(
+            "SELECT value FROM meta WHERE key = 'user_node_id'"
+        ).fetchone()
+    finally:
+        connection.close()
+    return row[0] if row else None
 
 
 def test_create_backup_copies_nodes_and_deleted_only(tmp_path):
@@ -50,6 +91,22 @@ def test_create_backup_copies_nodes_and_deleted_only(tmp_path):
     assert list((backup.path / "deleted").glob(f"*_{deleted.short_id}.md"))
     assert not (backup.path / "index.db").exists()
     assert not (backup.path / ".env").exists()
+
+
+def test_create_backup_records_exact_active_self_with_historical_duplicate(tmp_path):
+    memory_dir = tmp_path / "memory"
+    backup_dir = tmp_path / "backups"
+    historical = _save_self_node(memory_dir, "Historical Self")
+    active = _save_self_node(memory_dir, "Active Self")
+    _set_active_self(memory_dir, active.id)
+
+    backup = _service(memory_dir, backup_dir).create()
+
+    manifest = json.loads((backup.path / "backup.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == 2
+    assert manifest["user_node_id"] == active.id
+    assert manifest["user_node_id"] != historical.id
+    assert resolve_backup_user_node_id(backup.path) == active.id
 
 
 def test_retention_keeps_latest_ten_backups(tmp_path):
@@ -116,6 +173,109 @@ def test_restore_replaces_memory_files_and_rebuilds_index(tmp_path):
     finally:
         conn.close()
     assert row == (original.id, "Original")
+
+
+def test_restore_replaces_target_self_pointer_without_reconciling_source_duplicates(tmp_path):
+    memory_dir = tmp_path / "memory"
+    backup_dir = tmp_path / "backups"
+    active = _save_self_node(memory_dir, "Source Active Self")
+    historical = _save_self_node(memory_dir, "Source Historical Self")
+    _save_node(memory_dir, "Source Memory", "Restored content")
+    _set_active_self(memory_dir, active.id)
+    service = _service(memory_dir, backup_dir)
+    backup = service.create()
+
+    store = FileStore(memory_dir / "nodes")
+    for path in store.list_paths():
+        path.unlink()
+    target_self = _save_self_node(memory_dir, "Target Generated Self")
+    _set_active_self(memory_dir, target_self.id)
+
+    result = service.restore(backup.name)
+
+    restored_ids = {node.id for node in FileStore(memory_dir / "nodes").list_all()}
+    assert active.id in restored_ids
+    assert historical.id in restored_ids
+    assert target_self.id not in restored_ids
+    assert _active_self(memory_dir) == active.id
+    assert result.safety_backup is not None
+    assert resolve_backup_user_node_id(result.safety_backup.path) == target_self.id
+
+    database = Database(memory_dir / "index.db")
+    try:
+        restarted = SimpleNamespace(
+            db=database,
+            file_store=FileStore(memory_dir / "nodes"),
+            user_node_id=None,
+        )
+        node_count = len(restarted.file_store.list_paths())
+        MemoryEngine._ensure_self_node(restarted)
+        assert restarted.user_node_id == active.id
+        assert len(restarted.file_store.list_paths()) == node_count
+    finally:
+        database.close()
+
+
+def test_restore_rejects_invalid_manifest_pointer_before_touching_target(tmp_path):
+    memory_dir = tmp_path / "memory"
+    backup_dir = tmp_path / "backups"
+    target = _save_node(memory_dir, "Target", "Must remain")
+    service = _service(memory_dir, backup_dir)
+    backup = service.create()
+    manifest_path = backup.path / "backup.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["user_node_id"] = "missing-self-node"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(BackupError, match="exact system:self node is not present"):
+        service.restore(backup.name)
+
+    assert FileStore(memory_dir / "nodes").load(target.id) is not None
+    assert len(service.list()) == 1
+
+
+def test_restore_adopts_unique_self_from_legacy_backup(tmp_path):
+    memory_dir = tmp_path / "memory"
+    backup_dir = tmp_path / "backups"
+    source_self = _save_self_node(memory_dir, "Legacy Source Self")
+    service = _service(memory_dir, backup_dir)
+    backup = service.create()
+    manifest_path = backup.path / "backup.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["version"] = 1
+    manifest.pop("user_node_id")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    for path in (memory_dir / "nodes").glob("*.md"):
+        path.unlink()
+    target_self = _save_self_node(memory_dir, "Target Self")
+    _set_active_self(memory_dir, target_self.id)
+
+    service.restore(backup.name)
+
+    assert _active_self(memory_dir) == source_self.id
+    assert FileStore(memory_dir / "nodes").load(target_self.id) is None
+
+
+def test_restore_rejects_ambiguous_legacy_self_before_touching_target(tmp_path):
+    memory_dir = tmp_path / "memory"
+    backup_dir = tmp_path / "backups"
+    first = _save_self_node(memory_dir, "First Self")
+    _save_self_node(memory_dir, "Second Self")
+    _set_active_self(memory_dir, first.id)
+    service = _service(memory_dir, backup_dir)
+    backup = service.create()
+    manifest_path = backup.path / "backup.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["version"] = 1
+    manifest.pop("user_node_id")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(BackupError, match="no portable active pointer"):
+        service.restore(backup.name)
+
+    assert _active_self(memory_dir) == first.id
+    assert len(service.list()) == 1
 
 
 def test_auto_backup_creates_only_when_due(tmp_path):
