@@ -908,20 +908,37 @@ def _ingest_session(
         # reconcile interval of minutes, which cannot fit inside that window) before it is
         # trusted durably.
         marker = (existing or {}).get("shrink_pending")
-        if marker is None:
-            # Tick 1: persist the marker WITHOUT touching hash or end_offset. If this tick
-            # stored the NEW (shrunk-file) hash instead, tick 2 -- where the file is STILL
-            # shrunk, so prev_offset >= size still holds -- would see that hash match too and
-            # hit the early-return guard above before ever reaching this branch, deadlocking
-            # the marker permanently. Leaving hash at its old value keeps the two hashes
-            # distinct until the confirmed reset below actually commits the new one.
+        # `not marker` (never `marker is None`): a falsy-but-present marker must also take
+        # the re-arm branch below, not the confirmed-reset one -- the reconcile predicate
+        # and the clearing branch already key off truthiness, and drifting from that here
+        # would let an edge-case falsy marker confirm on its very first observation.
+        if not marker or marker.get("size") != size:
+            # Tick 1 (no marker yet), OR a marker IS present but recorded a DIFFERENT size
+            # than this observation: two independent transient truncations of different
+            # sizes must not confirm each other (review follow-up, Change 3) -- that would
+            # durably reset on a coincidence of "shrunk twice", not "shrunk the same way
+            # twice". Re-arm with THIS observation's size/timestamp and wait for it, in
+            # turn, to be confirmed. This does not catch two same-size independent
+            # truncations (a stricter identity check would need file content, not just
+            # size) -- accepted, since the primary defense is the multi-order-of-magnitude
+            # gap between a millisecond truncate-then-rewrite window and the multi-second
+            # spool backoff (or reconcile interval) separating any two observations.
+            #
+            # Persist WITHOUT touching hash or end_offset. If this tick stored the NEW
+            # (shrunk-file) hash instead, a later confirming tick -- where the file is
+            # STILL shrunk, so prev_offset >= size still holds -- would see that hash match
+            # too and hit the early-return guard above before ever reaching this branch,
+            # deadlocking the marker permanently. Leaving hash at its old value keeps the
+            # two hashes distinct until the confirmed reset below actually commits the new
+            # one.
             pending_entry = dict(existing or {})
             pending_entry["shrink_pending"] = {
                 "size": size, "at": datetime.now(UTC).isoformat(),
             }
             _commit_state(state, rel, pending_entry, state_lock, watch_dir)
             return IngestResult.NO_PROGRESS
-        # Tick 2: shrink confirmed on a second, independent observation -> durable reset.
+        # Tick 2: the SAME shrink confirmed on a second, independent observation (marker
+        # present AND its recorded size matches this tick's) -> durable reset.
         # The ONLY legitimate cursor retreat: the old offset no longer exists in the file.
         # Without this opt-in the monotonic clamp would freeze the cursor above EOF and
         # reconcile would drop the file from the sweep forever. Persist the reset NOW
@@ -1457,6 +1474,20 @@ class SessionHandler(FileSystemEventHandler):
             # never a silent complete.
             self._mark_frozen_prefix_consumed(path, rel, job.boundary)
             self.spool.requeue(job, failure_class="no_safe_boundary")
+            return
+        if self._state.get(rel, {}).get("shrink_pending"):
+            # Task 4 review follow-up: tick 1 of the shrink gate returns NO_PROGRESS with
+            # no guaranteed second observation -- an acceptance-only root (`discover=False`
+            # on SessionWatch; run_session_reconcile only sweeps `if w.discover`) is NEVER
+            # reconciled, so `complete`-ing this job would strand the marker (and the
+            # cursor above EOF) forever if no further nudge ever arrives for this path.
+            # requeue(..., failure_class="external") gives it the spool's own persisted
+            # exponential backoff instead (starts at 2s), so tick 2 is reachable through
+            # the spool alone. This narrows the two-observation separation from a
+            # reconcile interval (minutes) to a spool backoff (seconds) -- still orders of
+            # magnitude past the millisecond truncate-then-rewrite window the gate exists
+            # to defend against, so the guarantee is worth more than the shorter gap.
+            self.spool.requeue(job, failure_class="external")
             return
         self.spool.complete(job)
 

@@ -2493,6 +2493,40 @@ def test_reconcile_selects_marked_file_whose_cursor_is_above_eof(engine, tmp_pat
     assert handler.reconcile() == 1
 
 
+def test_shrink_tick_one_requeues_without_reconcile(engine, tmp_path):
+    """Task 4 review follow-up (Change 1): an acceptance-only root has discover=False and
+    is NEVER swept by reconcile (session_watcher.py: discover on SessionWatch, and
+    run_session_reconcile's `if w.discover`). If tick 1 `complete`d its job, a transcript
+    whose last-ever nudge happened to land on the shrink would strand its marker (and its
+    cursor above EOF) forever. Tick 1 must instead requeue via the spool's own backoff, so
+    a second observation is reachable through the spool ALONE -- no reconcile call
+    anywhere in this test."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-test-space"
+    proj.mkdir(parents=True)
+    jsonl = proj / "shrunk.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+    assert handler._state[rel]["end_offset"] == jsonl.stat().st_size
+
+    _make_jsonl(jsonl, user_turns=2)   # shrink below the stored cursor
+    _mark_idle(jsonl)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)  # tick 1 only: a backed-off job is left pending, not reclaimed
+    assert handler._state[rel]["shrink_pending"]
+    # The job must be requeued (pending, backed off) -- NOT completed, NOT dead-lettered.
+    assert handler.spool.pending_count() == 1
+    failed_dir = handler.spool.root / "failed"
+    assert not any(p.name.endswith(".json") for p in failed_dir.iterdir())
+
+
 def test_reconcile_while_live_ingesting_does_not_double_enqueue(engine, tmp_path):
     """reconcile no longer touches _ingesting; a path already queued at its current boundary
     is not double-enqueued (enqueue is idempotent per (path, boundary))."""
@@ -4062,6 +4096,49 @@ class TestAboveCapOrphanRecovery:
             _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
         assert "shrink_pending" not in state[rel]            # marker cleared
         assert state[rel]["end_offset"] == cursor             # no whole-file re-ingest
+
+    def test_shrink_marker_size_mismatch_does_not_confirm(self, engine, tmp_path):
+        """Review follow-up (Change 3): the marker records the observed size so two
+        INDEPENDENT transient truncations of different sizes cannot confirm each other.
+        A different-size second observation re-arms the marker instead of confirming."""
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "shrunk.jsonl"
+        _make_jsonl(jsonl, user_turns=10)
+        _mark_idle(jsonl)
+        rel = str(jsonl.relative_to(watch_dir))
+        state: dict = {}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.OK
+        cursor = state[rel]["end_offset"]
+
+        _make_jsonl(jsonl, user_turns=4)   # first transient truncation
+        _mark_idle(jsonl)
+        size_a = jsonl.stat().st_size
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.NO_PROGRESS
+        assert state[rel]["shrink_pending"]["size"] == size_a
+        assert state[rel]["end_offset"] == cursor
+
+        _make_jsonl(jsonl, user_turns=2)   # a DIFFERENT, unrelated truncation size
+        _mark_idle(jsonl)
+        size_b = jsonl.stat().st_size
+        assert size_b != size_a
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            # Size mismatch: re-armed, NOT confirmed.
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.NO_PROGRESS
+        assert state[rel]["shrink_pending"]["size"] == size_b   # re-armed with the NEW size
+        assert state[rel]["end_offset"] == cursor                # still not reset
+
+        # NOW confirm: same size as the re-armed marker, observed again.
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=1) == IngestResult.OK
+        assert "shrink_pending" not in state[rel]
 
 
 class TestCommitStateMonotonic:
