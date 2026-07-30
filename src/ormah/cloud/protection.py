@@ -11,6 +11,8 @@ import tempfile
 from typing import Any
 import uuid
 
+import httpx
+
 from ormah.backup import (
     BackupError,
     BackupInfo,
@@ -54,6 +56,11 @@ logger = logging.getLogger(__name__)
 _URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 _BEARER_RE = re.compile(r"\bBearer\s+[^\s]+", re.IGNORECASE)
 _AGE_SECRET_RE = re.compile(r"AGE-SECRET-KEY-[A-Z0-9]+", re.IGNORECASE)
+_QUERY_SECRET_RE = re.compile(
+    r"(?i)((?:^|[?&\s])(?:x-amz-signature|x-amz-credential|x-amz-security-token|"
+    r"access_token|token|signature)=)[^&\s]+"
+)
+_SNAPSHOT_ID_RE = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
 
 
 def _utc_now() -> datetime:
@@ -65,6 +72,7 @@ def safe_error_message(value: object, *sensitive_values: str | None) -> str:
 
     message = str(value)
     message = _URL_RE.sub("<redacted-url>", message)
+    message = _QUERY_SECRET_RE.sub(r"\1<redacted>", message)
     message = _BEARER_RE.sub("Bearer <redacted>", message)
     message = _AGE_SECRET_RE.sub("<redacted-age-key>", message)
     for sensitive in sensitive_values:
@@ -140,8 +148,10 @@ def _known_state(state: CloudState) -> ProtectionState:
 
 def _state_after_backup(state: CloudState) -> ProtectionState:
     current = _known_state(state)
-    if current in {ProtectionState.LOCAL_ONLY, ProtectionState.STOPPED}:
-        return current
+    if current is ProtectionState.LOCAL_ONLY:
+        return ProtectionState.VERIFYING_FIRST_BACKUP
+    if current is ProtectionState.STOPPED:
+        return ProtectionState.STOPPED
     if current is ProtectionState.UPLOADING_FIRST_BACKUP:
         return ProtectionState.VERIFYING_FIRST_BACKUP
     return ProtectionState.CHANGES_PENDING
@@ -167,9 +177,21 @@ def _state_after_failure(
     requested: ProtectionState,
 ) -> ProtectionState:
     current = _known_state(state)
-    if current in {ProtectionState.LOCAL_ONLY, ProtectionState.STOPPED}:
-        return current
+    if current is ProtectionState.STOPPED:
+        return ProtectionState.STOPPED
     return requested
+
+
+def _is_offline_error(error: object) -> bool:
+    return isinstance(error, httpx.RequestError) or (
+        isinstance(error, CloudError) and error.status_code is None
+    )
+
+
+def _validated_snapshot_id(value: object) -> str:
+    if not isinstance(value, str) or _SNAPSHOT_ID_RE.fullmatch(value) is None:
+        raise RuntimeError("Cloud response contained an invalid snapshot id.")
+    return value
 
 
 def _probe_search(database: Database, nodes: list[Any]) -> None:
@@ -261,19 +283,31 @@ class CloudProtectionService:
         store_id: str | None = None
         client = None
         try:
+            store_id = _existing_store_id(settings.memory_dir)
+            try:
+                state = _load_writable_state(store_id) if store_id is not None else None
+            except CloudStateVersionError:
+                return self._client_update_required_operation(
+                    operation_id,
+                    ProtectionOperationKind.BACKUP,
+                )
+            if state is not None and not isinstance(state.protection_state, ProtectionState):
+                return self._client_update_required_operation(
+                    operation_id,
+                    ProtectionOperationKind.BACKUP,
+                )
+
             if not settings.cloud_backup_enabled:
                 logger.debug("Ormah Cloud backup is disabled")
                 return ProtectionOperation(
                     operation_id,
                     ProtectionOperationKind.BACKUP,
                     ProtectionOperationPhase.CANCELED,
-                    ProtectionState.LOCAL_ONLY,
+                    state.protection_state if state is not None else ProtectionState.LOCAL_ONLY,
                     ProtectionReasonCode.NOT_ENABLED,
                     "Cloud backup is disabled.",
                 )
 
-            store_id = _existing_store_id(settings.memory_dir)
-            state = _load_writable_state(store_id) if store_id is not None else None
             if state is not None and state.protection_state is ProtectionState.STOPPED:
                 return ProtectionOperation(
                     operation_id,
@@ -321,6 +355,7 @@ class CloudProtectionService:
                     state.protection_state
                     if isinstance(state.protection_state, ProtectionState)
                     else ProtectionState.ATTENTION_REQUIRED,
+                    ProtectionReasonCode.NO_BACKUPABLE_MEMORY,
                     message="No memory nodes are available to back up.",
                 )
 
@@ -334,6 +369,7 @@ class CloudProtectionService:
                     state.protection_state
                     if isinstance(state.protection_state, ProtectionState)
                     else ProtectionState.ATTENTION_REQUIRED,
+                    ProtectionReasonCode.NOT_DUE,
                     message="The latest cloud backup is still fresh.",
                     snapshot_id=state.last_upload_snapshot_id,
                 )
@@ -353,12 +389,12 @@ class CloudProtectionService:
                 client = client_from_settings(settings)
                 upload = client.create_upload(store_id, size, digest)
                 upload_id = upload.get("upload_id")
-                snapshot_id = upload.get("snapshot_id")
+                snapshot_id = _validated_snapshot_id(upload.get("snapshot_id"))
                 put_url = upload.get("put_url")
                 expires_at = upload.get("expires_at")
                 required_headers = upload.get("required_headers", {})
                 if not all(
-                    isinstance(value, str) and value for value in (upload_id, snapshot_id, put_url)
+                    isinstance(value, str) and value for value in (upload_id, put_url)
                 ):
                     raise RuntimeError("Cloud upload reservation response was malformed.")
                 if not isinstance(expires_at, str):
@@ -374,7 +410,7 @@ class CloudProtectionService:
 
                 put_file(put_url, bundle, required_headers)
                 finalized = client.finalize_upload(store_id, upload_id)
-                finalized_snapshot = finalized.get("snapshot_id")
+                finalized_snapshot = _validated_snapshot_id(finalized.get("snapshot_id"))
                 if finalized.get("status") != "committed" or finalized_snapshot != snapshot_id:
                     raise RuntimeError("Cloud upload finalize response was malformed.")
 
@@ -405,6 +441,14 @@ class CloudProtectionService:
                 snapshot_id=snapshot_id,
             )
         except Exception as exc:
+            if _is_offline_error(exc):
+                return self._backup_failure(
+                    operation_id,
+                    exc,
+                    store_id=store_id,
+                    reason_code=ProtectionReasonCode.OFFLINE,
+                    protection_state=ProtectionState.OFFLINE,
+                )
             return self._backup_failure(operation_id, exc, store_id=store_id)
         finally:
             self._close_client(client)
@@ -424,6 +468,11 @@ class CloudProtectionService:
         if store_id is not None:
             try:
                 current = _load_writable_state(store_id)
+                if not isinstance(current.protection_state, ProtectionState):
+                    return self._client_update_required_operation(
+                        operation_id,
+                        ProtectionOperationKind.BACKUP,
+                    )
                 persisted_state = _state_after_failure(current, protection_state)
                 update_state(
                     store_id,
@@ -438,6 +487,11 @@ class CloudProtectionService:
                     last_error_at=_utc_now(),
                 )
                 protection_state = persisted_state
+            except CloudStateVersionError:
+                return self._client_update_required_operation(
+                    operation_id,
+                    ProtectionOperationKind.BACKUP,
+                )
             except Exception as exc:
                 logger.warning("Could not persist Ormah Cloud state: %s", self._message(exc))
         return ProtectionOperation(
@@ -475,16 +529,30 @@ class CloudProtectionService:
         client = None
         tmp_root: Path | None = None
         try:
-            if not key_file_exists():
-                raise _VerificationPrerequisiteError(
-                    "Cloud encryption key is missing; cannot verify restore.",
-                    ProtectionReasonCode.KEY_MISSING,
-                )
             store_id = _existing_store_id(settings.memory_dir)
             if store_id is None:
                 raise _VerificationPrerequisiteError(
                     "Cloud store id is missing; cannot verify restore.",
                     ProtectionReasonCode.NOT_ENABLED,
+                )
+            try:
+                state = _load_writable_state(store_id)
+            except CloudStateVersionError:
+                return self._client_update_required_operation(
+                    operation_id,
+                    ProtectionOperationKind.VERIFY,
+                    snapshot_id=requested_snapshot_id,
+                )
+            if not isinstance(state.protection_state, ProtectionState):
+                return self._client_update_required_operation(
+                    operation_id,
+                    ProtectionOperationKind.VERIFY,
+                    snapshot_id=requested_snapshot_id,
+                )
+            if not key_file_exists():
+                raise _VerificationPrerequisiteError(
+                    "Cloud encryption key is missing; cannot verify restore.",
+                    ProtectionReasonCode.KEY_MISSING,
                 )
             if not settings.account_token:
                 raise _VerificationPrerequisiteError(
@@ -492,17 +560,14 @@ class CloudProtectionService:
                     ProtectionReasonCode.SIGN_IN_REQUIRED,
                 )
 
-            state = _load_writable_state(store_id)
             client = client_from_settings(settings)
             listing = client.list_blobs(store_id)
             blobs = listing.get("blobs")
             if not isinstance(blobs, list) or not blobs:
                 raise RuntimeError("No committed cloud snapshot is available to verify.")
-            latest_snapshot_id = (
+            latest_snapshot_id = _validated_snapshot_id(
                 blobs[0].get("snapshot_id") if isinstance(blobs[0], dict) else None
             )
-            if not isinstance(latest_snapshot_id, str) or not latest_snapshot_id:
-                raise RuntimeError("Cloud snapshot listing was malformed.")
             selected = (
                 blobs[0]
                 if requested_snapshot_id is None
@@ -518,9 +583,7 @@ class CloudProtectionService:
             )
             if not isinstance(selected, dict):
                 raise RuntimeError("The requested cloud snapshot is not available to verify.")
-            snapshot_id = selected.get("snapshot_id")
-            if not isinstance(snapshot_id, str) or not snapshot_id:
-                raise RuntimeError("Cloud snapshot listing was malformed.")
+            snapshot_id = _validated_snapshot_id(selected.get("snapshot_id"))
             expected_latest_snapshot_id = (
                 state.last_successful_backup_snapshot_id or latest_snapshot_id
             )
@@ -577,9 +640,12 @@ class CloudProtectionService:
                 snapshot_id=snapshot_id,
             )
         except Exception as exc:
+            offline = _is_offline_error(exc)
             reason_code = (
                 exc.reason_code
                 if isinstance(exc, _VerificationPrerequisiteError)
+                else ProtectionReasonCode.OFFLINE
+                if offline
                 else ProtectionReasonCode.BUNDLE_CORRUPT
                 if isinstance(exc, BundleError)
                 else ProtectionReasonCode.VERIFICATION_FAILED
@@ -590,7 +656,14 @@ class CloudProtectionService:
                 store_id=store_id,
                 snapshot_id=snapshot_id,
                 reason_code=reason_code,
-                record_health=tracks_latest_snapshot,
+                record_health=tracks_latest_snapshot and not offline,
+                protection_state=(
+                    ProtectionState.OFFLINE
+                    if offline
+                    else ProtectionState.ATTENTION_REQUIRED
+                    if tracks_latest_snapshot
+                    else None
+                ),
             )
         finally:
             self._close_client(client)
@@ -606,6 +679,7 @@ class CloudProtectionService:
         snapshot_id: str | None = None,
         reason_code: ProtectionReasonCode = ProtectionReasonCode.VERIFICATION_FAILED,
         record_health: bool = True,
+        protection_state: ProtectionState | None = ProtectionState.ATTENTION_REQUIRED,
     ) -> ProtectionOperation:
         message = self._message(error)
         logger.warning("Ormah Cloud restore verification failed: %s", message)
@@ -617,9 +691,15 @@ class CloudProtectionService:
         if store_id is not None:
             try:
                 current = _load_writable_state(store_id)
+                if not isinstance(current.protection_state, ProtectionState):
+                    return self._client_update_required_operation(
+                        operation_id,
+                        ProtectionOperationKind.VERIFY,
+                        snapshot_id=snapshot_id,
+                    )
                 persisted_state = (
-                    _state_after_failure(current, ProtectionState.ATTENTION_REQUIRED)
-                    if record_health
+                    _state_after_failure(current, protection_state)
+                    if protection_state is not None
                     else _known_state(current)
                 )
                 failed_at = _utc_now()
@@ -637,10 +717,17 @@ class CloudProtectionService:
                         last_verify_ok=False,
                         last_verify_snapshot_id=snapshot_id,
                         last_verify_error=message,
-                        protection_state=persisted_state,
                     )
+                if protection_state is not None:
+                    changes["protection_state"] = persisted_state
                 update_state(store_id, memory_dir=self.settings.memory_dir, **changes)
                 failure_state = persisted_state
+            except CloudStateVersionError:
+                return self._client_update_required_operation(
+                    operation_id,
+                    ProtectionOperationKind.VERIFY,
+                    snapshot_id=snapshot_id,
+                )
             except Exception as exc:
                 logger.warning("Could not persist Ormah Cloud state: %s", self._message(exc))
                 failure_state = ProtectionState.ATTENTION_REQUIRED
@@ -653,6 +740,25 @@ class CloudProtectionService:
             failure_state,
             reason_code,
             message,
+            snapshot_id,
+        )
+
+    def _client_update_required_operation(
+        self,
+        operation_id: str,
+        kind: ProtectionOperationKind,
+        *,
+        snapshot_id: str | None = None,
+    ) -> ProtectionOperation:
+        """Fail closed when durable state belongs to a newer client."""
+
+        return ProtectionOperation(
+            operation_id,
+            kind,
+            ProtectionOperationPhase.CANCELED,
+            ProtectionState.ATTENTION_REQUIRED,
+            ProtectionReasonCode.CLIENT_UPDATE_REQUIRED,
+            "This cloud state requires a newer Ormah version.",
             snapshot_id,
         )
 

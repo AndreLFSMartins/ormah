@@ -97,6 +97,9 @@ class ProtectionReasonCode(StrEnum):
     OPERATION_INTERRUPTED = "operation_interrupted"
     STORE_BUSY = "store_busy"
     PROTECTION_STOPPED = "protection_stopped"
+    CLIENT_UPDATE_REQUIRED = "client_update_required"
+    NO_BACKUPABLE_MEMORY = "no_backupable_memory"
+    NOT_DUE = "not_due"
 
 
 @dataclass(frozen=True)

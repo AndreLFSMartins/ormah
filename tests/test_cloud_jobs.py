@@ -22,6 +22,7 @@ from ormah.store.file_store import FileStore
 
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+SNAPSHOT_ID = "01J00000000000000000000000"
 
 
 class FakeCloudClient:
@@ -35,7 +36,7 @@ class FakeCloudClient:
         self.created.append((store_id, size, sha256))
         return {
             "upload_id": "upload-1",
-            "snapshot_id": "01SNAPSHOT",
+            "snapshot_id": SNAPSHOT_ID,
             "put_url": "https://objects.example/put",
             "expires_at": (NOW + timedelta(minutes=15)).isoformat(),
             "required_headers": {"x-amz-checksum-sha256": "signed-checksum"},
@@ -43,11 +44,11 @@ class FakeCloudClient:
 
     def finalize_upload(self, *args):
         self.finalized.append(args)
-        return {"snapshot_id": "01SNAPSHOT", "status": "committed", "head": {"seq": 0}}
+        return {"snapshot_id": SNAPSHOT_ID, "status": "committed", "head": {"seq": 0}}
 
     def list_blobs(self, store_id):
         return {
-            "blobs": [{"snapshot_id": "01SNAPSHOT", "created_at": NOW.isoformat(), "size_bytes": 1}]
+            "blobs": [{"snapshot_id": SNAPSHOT_ID, "created_at": NOW.isoformat(), "size_bytes": 1}]
         }
 
     def presign_download(self, store_id, snapshot_id):
@@ -238,11 +239,11 @@ def test_successful_upload_finalizes_without_advancing_sync_head(
 
     result = jobs.run_cloud_backup(SimpleNamespace(settings=settings))
 
-    assert result == "01SNAPSHOT"
+    assert result == SNAPSHOT_ID
     assert client.finalized == [(store_id, "upload-1")]
     state = load_state(store_id)
     assert state.last_upload_at == NOW
-    assert state.last_upload_snapshot_id == "01SNAPSHOT"
+    assert state.last_upload_snapshot_id == SNAPSHOT_ID
     assert state.last_upload_error is None
 
 
@@ -308,8 +309,8 @@ def test_two_stores_upload_under_their_own_ids(tmp_path, monkeypatch, cloud_stat
     jobs.run_cloud_backup(SimpleNamespace(settings=second_settings))
 
     assert [call[0] for call in client.created] == [first_id, second_id]
-    assert load_state(first_id).last_upload_snapshot_id == "01SNAPSHOT"
-    assert load_state(second_id).last_upload_snapshot_id == "01SNAPSHOT"
+    assert load_state(first_id).last_upload_snapshot_id == SNAPSHOT_ID
+    assert load_state(second_id).last_upload_snapshot_id == SNAPSHOT_ID
 
 
 def _verification_bundle(tmp_path: Path, settings: Settings, store_id: str):
@@ -356,7 +357,7 @@ def test_restore_verification_rebuilds_search_and_leaves_live_store_untouched(
 
     state = load_state(store_id)
     assert state.last_verify_ok is True
-    assert state.last_verify_snapshot_id == "01SNAPSHOT"
+    assert state.last_verify_snapshot_id == SNAPSHOT_ID
     assert state.last_verify_error is None
     assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in live_files} == live_files
 
@@ -408,7 +409,7 @@ def test_restore_verification_records_bundle_failures(
 
     state = load_state(store_id)
     assert state.last_verify_ok is False
-    assert state.last_verify_snapshot_id == "01SNAPSHOT"
+    assert state.last_verify_snapshot_id == SNAPSHOT_ID
     expected = "Hash mismatch" if failure == "hash-mismatch" else "decrypt"
     assert expected.lower() in state.last_verify_error.lower()
 

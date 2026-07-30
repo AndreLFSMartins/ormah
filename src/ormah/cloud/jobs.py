@@ -16,7 +16,7 @@ def run_cloud_backup(engine) -> str | None:
 
     try:
         result = CloudProtectionService.from_engine(engine).backup_now(
-            reason="cloud", only_if_due=True
+            reason="scheduled", only_if_due=True
         )
         if result.phase is ProtectionOperationPhase.COMPLETED:
             return result.snapshot_id
