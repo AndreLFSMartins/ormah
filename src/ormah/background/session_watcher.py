@@ -776,15 +776,50 @@ def _save_state(watch_dir: Path, state: dict) -> None:
             os.close(dir_fd)
 
 
-def _commit_state(state: dict, rel: str, entry: dict, state_lock, watch_dir: Path) -> None:
-    """Write one state entry and persist, honoring the optional cross-thread lock."""
+def _commit_state(
+    state: dict, rel: str, entry: dict, state_lock, watch_dir: Path,
+    *, allow_rewind: bool = False,
+) -> None:
+    """Write one state entry and persist, honoring the optional cross-thread lock.
+
+    Monotonic invariant (#154): ``end_offset`` never moves backward. The read-clamp-
+    write sequence is ONE critical section — a stale read outside the lock would let
+    two writers interleave a higher then a lower offset and persist the retreat anyway
+    (council R1). Only the offset field is clamped — the rest of the entry
+    (extract_fail_count, skipped_slices…) always persists, so a refused retreat can
+    never lose the failure/quarantine trail (council-pr I1). Callers with a LEGITIMATE
+    retreat (file shrank; deliberate backfill) opt in with ``allow_rewind=True``.
+    Threat model: same-path concurrent writers do not exist in-process — _run_job
+    serializes per path via _ingesting_guard — so the clamp is a backstop against
+    LOGIC bugs (a code path that computes a lower offset), not a substitute for that
+    ownership. Cross-PROCESS writers are NOT covered (threading.Lock is per-process)
+    — the pre-existing #150-class spool limitation, unchanged here.
+    """
+    def _clamp_and_save() -> None:
+        committed = entry
+        if not allow_rewind:
+            current = (state.get(rel) or {}).get("end_offset")
+            new = entry.get("end_offset")
+            if current is not None and new is not None and new < current:
+                logger.warning(
+                    "Session watcher refusing cursor retreat for %s: %d -> %d (clamped)",
+                    rel, current, new,
+                )
+                committed = {**entry, "end_offset": current}
+        # Persist FIRST, publish SECOND (council R2, codex): if _save_state raises, the
+        # shared in-memory dict must not already claim the new cursor — a requeued job
+        # would look consumed while disk kept the old offset, and a restart would undo
+        # a supposedly durable commit.
+        snapshot = dict(state)
+        snapshot[rel] = committed
+        _save_state(watch_dir, snapshot)
+        state[rel] = committed
+
     if state_lock is not None:
         with state_lock:
-            state[rel] = entry
-            _save_state(watch_dir, state)
+            _clamp_and_save()
     else:
-        state[rel] = entry
-        _save_state(watch_dir, state)
+        _clamp_and_save()
 
 
 def _should_flush(is_idle: bool, capped: bool) -> bool:
@@ -855,8 +890,22 @@ def _ingest_session(
     # which must be re-parsed (so recovery can run) even when the hash is unchanged.
     if existing and existing.get("hash") == h and prev_offset >= size:
         return IngestResult.NO_PROGRESS
+    allow_rewind = False
     if prev_offset > size:
         prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
+        # The ONLY legitimate cursor retreat: the old offset no longer exists in the
+        # file. Without this opt-in the monotonic clamp would freeze the cursor above
+        # EOF and reconcile (:1390) would drop the file from the sweep forever.
+        allow_rewind = True
+        # Persist the reset NOW (council C2): if this very tick finds no safe boundary
+        # (malformed/unclosed rewrite), _ingest_session returns NO_PROGRESS without any
+        # commit, the durable cursor stays above EOF, _idle_with_unsafe_tail sees
+        # size <= cursor, and reconcile skips the file FOREVER. With the reset
+        # persisted, a later grow/reconcile re-selects it normally.
+        reset_entry = dict(existing or {})
+        reset_entry.update({"hash": h, "end_offset": 0})
+        _commit_state(state, rel, reset_entry, state_lock, watch_dir, allow_rewind=True)
+        existing = state.get(rel)
 
     # Two INDEPENDENT effects of a nudge, decoupled (council-pr F3): the `boundary`
     # stop_offset ceiling applies to EVERY producer's job (never read past accepted bytes),
@@ -865,6 +914,11 @@ def _ingest_session(
     # jobs (which also carry a boundary), fragmenting active sessions. The caller now passes
     # force_flush from the job's reason; boundary keeps pinning the ceiling for all jobs.
     abandon_range: tuple[int, int] | None = None
+    # Durable pre-rewind cursor for the failure-counter key (council R1, Cursor). Re-pointed
+    # to the true pre-rewind offset inside the orphan-recovery branch below, before that
+    # branch zeroes prev_offset — so a clamped fail-path entry stays consistent with the
+    # cursor the invariant refuses to retreat.
+    fail_key_offset = prev_offset
     try:
         result = parse_transcript(
             path, start_offset=prev_offset, max_bytes=flush_bytes, stop_offset=boundary
@@ -876,6 +930,7 @@ def _ingest_session(
             # #149): the fragment is dropped and the cursor advances — rewinding there
             # would re-ingest the whole file on every tick forever.
             original_offset = prev_offset
+            fail_key_offset = original_offset
             logger.info("Session watcher recovering legacy mid-response cursor for %s", rel)
             prev_offset = 0
             # Uncapped probe: decide progress on the true whole-file boundary. A capped
@@ -1008,14 +1063,17 @@ def _ingest_session(
         failure cannot pin the cursor either (council-pr I1)."""
         fail_count = (
             existing.get("extract_fail_count", 0) + 1
-            if existing and existing.get("extract_fail_offset") == prev_offset
+            if existing and existing.get("extract_fail_offset") == fail_key_offset
             else 1
         )
         if fail_count >= MAX_EXTRACT_FAILURES:
             skip_entry = dict(existing or {})
             skipped_slices = list(skip_entry.get("skipped_slices", []))
             skipped_slices.append({
-                "start": prev_offset,
+                # council C2: the durable pre-rewind cursor, not the transient zeroed
+                # prev_offset — otherwise a rewind quarantine records [0, payload_offset)
+                # and the deferred backfill would replay already-ingested history.
+                "start": fail_key_offset,
                 "end": payload_offset,
                 "source_hash": h,
                 "reason": reason,
@@ -1032,11 +1090,12 @@ def _ingest_session(
             })
             skip_entry.pop("extract_fail_offset", None)
             skip_entry.pop("extract_fail_count", None)
-            _commit_state(state, rel, skip_entry, state_lock, watch_dir)
+            _commit_state(state, rel, skip_entry, state_lock, watch_dir, allow_rewind=allow_rewind)
             logger.error(
                 "Session watcher SKIPPING un-processable slice for %s after %d failures (%s): "
                 "cursor %d->%d, %d chars dropped (observable data loss)",
-                rel, fail_count, reason, prev_offset, payload_offset, payload_offset - prev_offset,
+                rel, fail_count, reason, fail_key_offset, payload_offset,
+                payload_offset - fail_key_offset,
             )
             # The cursor advanced -> progress, like a successful empty extraction. If more
             # closed content remains past this slice, drain it now instead of waiting for the
@@ -1048,11 +1107,12 @@ def _ingest_session(
         fail_entry = dict(existing or {})
         fail_entry.update({
             "hash": h,
-            "end_offset": prev_offset,  # cursor unchanged; slice will be retried
-            "extract_fail_offset": prev_offset,
+            "end_offset": prev_offset,  # clamped by _commit_state inside a rewind
+            "extract_fail_offset": fail_key_offset,
             "extract_fail_count": fail_count,
         })
-        _commit_state(state, rel, fail_entry, state_lock, watch_dir)
+        _commit_state(state, rel, fail_entry, state_lock, watch_dir,
+                      allow_rewind=allow_rewind)
         return IngestResult.TRANSIENT
 
     try:
@@ -1127,7 +1187,7 @@ def _ingest_session(
     })
     entry.pop("extract_fail_offset", None)  # a success at this offset clears the retry counter
     entry.pop("extract_fail_count", None)
-    _commit_state(state, rel, entry, state_lock, watch_dir)
+    _commit_state(state, rel, entry, state_lock, watch_dir, allow_rewind=allow_rewind)
 
     logger.info(
         "Session watcher ingested %s (%d new turns, %d memories extracted, %d signals recorded)",

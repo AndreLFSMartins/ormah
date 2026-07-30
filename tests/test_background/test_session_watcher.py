@@ -16,6 +16,7 @@ from ormah.background.session_watcher import (
     MAX_EXTRACT_FAILURES,
     IngestResult,
     SessionHandler,
+    _commit_state,
     _ingest_session,
     _load_state,
     _record_whisper_usage_signals,
@@ -3872,4 +3873,134 @@ class TestAboveCapOrphanRecovery:
             _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_bytes=2000)
         assert calls, "abandonment commit was never reached"
         assert calls[-1]["skipped_slices"][-1]["reason"] == "orphan_above_cap"
+
+    def test_extract_failure_during_rewind_keeps_cursor(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "failrewind.jsonl"
+        _write_orphan_tail_jsonl(jsonl, pairs=1, pad=10)   # small file: rewind proceeds
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        last_line_bytes = len((jsonl.read_text().splitlines()[-1] + "\n").encode())
+        orphan_start = size - last_line_bytes
+        rel = str(jsonl.relative_to(watch_dir))
+        state = {rel: {"hash": "stale", "end_offset": orphan_start}}
+        # Slice-specific failure: the LLM answers, but with unparseable content — the
+        # deterministic class that goes through _record_extract_failure (not TRANSIENT-early).
+        with patch(_LLM_PATCH, return_value="not-json"):
+            result = _ingest_session(engine, jsonl, state, watch_dir,
+                                     min_turns=1, flush_bytes=60000)
+        assert result == IngestResult.TRANSIENT
+        # Pre-fix this is 0: the rewind zeroed prev_offset and the fail path committed it.
+        assert state[rel]["end_offset"] == orphan_start
+        # Council R1 (Cursor): the counter is keyed on the durable pre-rewind cursor, so
+        # the persisted pair is consistent — not extract_fail_offset=0 with a real cursor.
+        assert state[rel]["extract_fail_offset"] == orphan_start
+        assert state[rel]["extract_fail_count"] == 1
+        # Council R3 (Codex): one failure cannot distinguish correct keying from a
+        # counter that resets to 1 forever. A SECOND failed rewind must accumulate...
+        with patch(_LLM_PATCH, return_value="not-json"):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=1, flush_bytes=60000) == IngestResult.TRANSIENT
+        assert state[rel]["extract_fail_count"] == 2
+        # ...and the THIRD reaches MAX_EXTRACT_FAILURES: the toxic slice is quarantined
+        # (skipped_slices) and the cursor finally advances — the counter converges
+        # instead of pinning the cursor forever.
+        with patch(_LLM_PATCH, return_value="not-json"):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=1, flush_bytes=60000) == IngestResult.OK
+        assert state[rel]["end_offset"] > orphan_start
+        # council C2: the quarantine's loss record starts at the durable pre-rewind
+        # cursor — NOT at 0, which would make the backfill replay ingested history.
+        assert state[rel]["skipped_slices"][0]["start"] == orphan_start
+        assert "extract_fail_count" not in state[rel]
+
+    def test_file_shrink_still_rewinds_cursor(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "shrunk.jsonl"
+        _make_jsonl(jsonl, user_turns=6)
+        _mark_idle(jsonl)
+        rel = str(jsonl.relative_to(watch_dir))
+        state: dict = {}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.OK
+        assert state[rel]["end_offset"] == jsonl.stat().st_size
+        # The transcript is rewritten smaller (compaction/rewrite) — a legitimate retreat.
+        _make_jsonl(jsonl, user_turns=2)
+        _mark_idle(jsonl)
+        new_size = jsonl.stat().st_size
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=1) == IngestResult.OK
+        # A naive monotonic clamp would freeze the cursor above EOF and reconcile
+        # (session_watcher.py:1390) would skip this file forever.
+        assert state[rel]["end_offset"] == new_size
+
+    def test_shrunk_file_with_no_safe_boundary_is_not_stranded(self, engine, tmp_path):
+        # council C2 (codex): a shrunk rewrite with NO closed boundary used to return
+        # NO_PROGRESS without any commit, leaving the durable cursor above EOF —
+        # _idle_with_unsafe_tail sees size <= cursor and reconcile skips the file
+        # forever. The shrink reset must persist even on a no-progress tick.
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "shrunkbad.jsonl"
+        _make_jsonl(jsonl, user_turns=6)
+        _mark_idle(jsonl)
+        rel = str(jsonl.relative_to(watch_dir))
+        state: dict = {}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.OK
+        # Rewritten smaller with NO closed boundary: a single open user turn.
+        jsonl.write_text(json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": "only an open turn"},
+        }) + "\n")
+        _mark_idle(jsonl)
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+        assert state[rel]["end_offset"] <= jsonl.stat().st_size
+
+
+class TestCommitStateMonotonic:
+    def test_stale_lower_commit_is_clamped(self, tmp_path):
+        state: dict = {}
+        lock = threading.Lock()
+        _commit_state(state, "a.jsonl", {"end_offset": 200}, lock, tmp_path)
+        # A writer that decided on stale data commits a LOWER offset afterwards —
+        # the ordering Codex flagged. The clamp re-reads under the lock, so the
+        # retreat is refused no matter when the stale decision was made.
+        _commit_state(state, "a.jsonl", {"end_offset": 150, "extra": "kept"}, lock, tmp_path)
+        assert state["a.jsonl"]["end_offset"] == 200
+        assert state["a.jsonl"]["extra"] == "kept"      # only the offset is clamped
+        assert _load_state(tmp_path)["a.jsonl"]["end_offset"] == 200
+
+    def test_allow_rewind_accepts_lower_commit(self, tmp_path):
+        state: dict = {}
+        _commit_state(state, "a.jsonl", {"end_offset": 200}, None, tmp_path)
+        _commit_state(state, "a.jsonl", {"end_offset": 50}, None, tmp_path,
+                      allow_rewind=True)
+        assert state["a.jsonl"]["end_offset"] == 50
+
+    def test_save_failure_does_not_publish_in_memory(self, tmp_path, monkeypatch):
+        # council R2 (codex): a failed persist must not leave the shared in-memory dict
+        # claiming the new cursor — the retry would look already-consumed while disk
+        # kept the old offset.
+        state: dict = {}
+        _commit_state(state, "a.jsonl", {"end_offset": 100}, None, tmp_path)
+
+        def _boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("ormah.background.session_watcher._save_state", _boom)
+        with pytest.raises(OSError):
+            _commit_state(state, "a.jsonl", {"end_offset": 200}, None, tmp_path)
+        assert state["a.jsonl"]["end_offset"] == 100   # not published on failed persist
+        monkeypatch.undo()
+        assert _load_state(tmp_path)["a.jsonl"]["end_offset"] == 100
 
