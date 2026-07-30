@@ -887,22 +887,65 @@ def _ingest_session(
     prev_offset = existing.get("end_offset", 0) if existing else 0
     # Skip an unchanged file only if the previous ingest already consumed it whole. A stored
     # offset behind EOF means a pending tail or a legacy mid-response cursor still to process,
-    # which must be re-parsed (so recovery can run) even when the hash is unchanged.
-    if existing and existing.get("hash") == h and prev_offset >= size:
+    # which must be re-parsed (so recovery can run) even when the hash is unchanged. The
+    # shrink_pending exemption (task 4) matters for the marker-CLEARING tick below: once a
+    # truncated file is restored, hash and offset can both coincide with this pre-shrink
+    # observation again, which would otherwise return here before the marker is ever
+    # cleared -- stranding the reconcile predicate's shrink_pending bypass open forever.
+    if (
+        existing
+        and existing.get("hash") == h
+        and prev_offset >= size
+        and not existing.get("shrink_pending")
+    ):
         return IngestResult.NO_PROGRESS
     if prev_offset > size:
-        prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
-        # The ONLY legitimate cursor retreat: the old offset no longer exists in the
-        # file. Without this opt-in the monotonic clamp would freeze the cursor above
-        # EOF and reconcile (:1390) would drop the file from the sweep forever.
-        # Persist the reset NOW (council C2): if this very tick finds no safe boundary
-        # (malformed/unclosed rewrite), _ingest_session returns NO_PROGRESS without any
-        # commit, the durable cursor stays above EOF, _idle_with_unsafe_tail sees
-        # size <= cursor, and reconcile skips the file FOREVER. With the reset
-        # persisted, a later grow/reconcile re-selects it normally.
+        # File shrank (compaction/rewrite). A single stat() cannot tell a real shrink from
+        # an in-place editor's truncate-then-rewrite window (milliseconds) -- task 4, council-
+        # pr M: durably publishing end_offset=0 from ONE observation let a transient
+        # truncation re-ingest the whole file the moment the writer finished restoring it.
+        # Require the shrink to be observed on a SECOND, independent tick (separated by a
+        # reconcile interval of minutes, which cannot fit inside that window) before it is
+        # trusted durably.
+        marker = (existing or {}).get("shrink_pending")
+        if marker is None:
+            # Tick 1: persist the marker WITHOUT touching hash or end_offset. If this tick
+            # stored the NEW (shrunk-file) hash instead, tick 2 -- where the file is STILL
+            # shrunk, so prev_offset >= size still holds -- would see that hash match too and
+            # hit the early-return guard above before ever reaching this branch, deadlocking
+            # the marker permanently. Leaving hash at its old value keeps the two hashes
+            # distinct until the confirmed reset below actually commits the new one.
+            pending_entry = dict(existing or {})
+            pending_entry["shrink_pending"] = {
+                "size": size, "at": datetime.now(UTC).isoformat(),
+            }
+            _commit_state(state, rel, pending_entry, state_lock, watch_dir)
+            return IngestResult.NO_PROGRESS
+        # Tick 2: shrink confirmed on a second, independent observation -> durable reset.
+        # The ONLY legitimate cursor retreat: the old offset no longer exists in the file.
+        # Without this opt-in the monotonic clamp would freeze the cursor above EOF and
+        # reconcile would drop the file from the sweep forever. Persist the reset NOW
+        # (council C2): if this very tick finds no safe boundary (malformed/unclosed
+        # rewrite), _ingest_session returns NO_PROGRESS without any further commit, the
+        # durable cursor stays at 0 (not above EOF), and reconcile re-selects it normally on
+        # the next sweep. This reset commit runs BEFORE any quarantine/fail/happy-path commit
+        # later in THIS SAME tick (trap 2): once 0 is published, none of those later commits
+        # can be a retreat, so none of them needs (or may re-acquire) allow_rewind.
+        prev_offset = 0
         reset_entry = dict(existing or {})
         reset_entry.update({"hash": h, "end_offset": 0})
+        reset_entry.pop("shrink_pending", None)
         _commit_state(state, rel, reset_entry, state_lock, watch_dir, allow_rewind=True)
+        existing = state.get(rel)
+    elif existing and existing.get("shrink_pending"):
+        # File is no longer shrunk relative to the stored cursor, but a marker survives:
+        # the transient-truncation case this two-tick gate exists to catch. The old cursor
+        # was valid all along -- clear the marker (persisted, so it does not strand the
+        # reconcile predicate's bypass open forever) and continue normally; end_offset is
+        # untouched (no retreat here, so no allow_rewind is needed for this commit).
+        cleared_entry = dict(existing)
+        cleared_entry.pop("shrink_pending", None)
+        _commit_state(state, rel, cleared_entry, state_lock, watch_dir)
         existing = state.get(rel)
 
     # Two INDEPENDENT effects of a nudge, decoupled (council-pr F3): the `boundary`
@@ -1510,8 +1553,14 @@ class SessionHandler(FileSystemEventHandler):
                     continue  # catch-up disabled -> skip never-seen files
                 if cutoff > 0 and st.st_mtime < cutoff:
                     continue
-            elif (entry.get("end_offset") or 0) >= st.st_size:
-                continue  # fully consumed -> skip cheaply
+            elif (entry.get("end_offset") or 0) >= st.st_size and not entry.get(
+                "shrink_pending"
+            ):
+                # Fully consumed -> skip cheaply. EXCEPT a shrink_pending entry (task 4):
+                # between tick 1 and tick 2 the durable cursor is still above EOF -- skipping
+                # here would drop the file from the sweep and tick 2 would never arrive,
+                # stranding the marker itself.
+                continue
             # else: seen with cursor behind EOF -> pending/failed tail (or a grown file).
             candidates.append((st.st_mtime, jsonl_file, st.st_size))
         # Oldest-first: the longest-waiting transcript is enqueued before newer ones, so a

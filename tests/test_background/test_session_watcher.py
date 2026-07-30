@@ -1279,7 +1279,8 @@ def test_incremental_defers_small_append(engine, tmp_path):
 # --- Test 13: Shrink resets the cursor ---
 
 def test_shrink_resets_cursor(engine, tmp_path):
-    """A file that shrinks below the stored offset is re-ingested from the start."""
+    """A file that shrinks below the stored offset is re-ingested from the start, once the
+    shrink is confirmed on a second tick (task 4: a single stat() is not durable proof)."""
     watch_dir = tmp_path / "projects"
     project_dir = watch_dir / "-Users-alice-Code-proj"
     project_dir.mkdir(parents=True)
@@ -1301,6 +1302,10 @@ def test_shrink_resets_cursor(engine, tmp_path):
 
         _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset
         _mark_idle(jsonl)  # shrunk session, below flush_bytes → idle flush
+        # Tick 1: shrink observed but unconfirmed — marker persisted, no re-ingest yet.
+        assert _ingest_session(engine, jsonl, state, watch_dir,
+                               min_turns=5) == IngestResult.NO_PROGRESS
+        # Tick 2: shrink confirmed — durable reset, full re-ingest.
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " in captured[1]
@@ -1833,6 +1838,11 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset → full re-ingest
     _mark_idle(jsonl)  # shrunk session, below flush_bytes → idle flush
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        # Tick 1: shrink observed but not yet confirmed — marker persisted, no re-ingest.
+        assert _ingest_session(engine, jsonl, state, watch_dir,
+                               min_turns=5) == IngestResult.NO_PROGRESS
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        # Tick 2: shrink confirmed — durable reset, full re-ingest.
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     # Full re-ingest (prev_offset reset to 0): stale node_ids must not be concatenated,
@@ -2446,6 +2456,41 @@ def test_reconcile_recovers_partial_tail_without_mtime_change(engine, tmp_path):
         assert handler.reconcile() == 1               # picked up via end_offset != size
         _drain_all(handler)
     assert handler._state[rel]["end_offset"] == jsonl.stat().st_size
+
+
+def test_reconcile_selects_marked_file_whose_cursor_is_above_eof(engine, tmp_path):
+    """Task 4 / trap 3: between tick 1 and tick 2 the durable cursor is still above EOF —
+    the reset has not committed yet. The fully-consumed skip predicate must not drop a
+    shrink_pending entry from the sweep, or tick 2 never arrives and the marker becomes
+    the very stranding bug it exists to avoid."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1
+        _drain_all(handler)
+    full_size = jsonl.stat().st_size
+    assert handler._state[rel]["end_offset"] == full_size
+
+    # Shrink the file and drive tick 1 through the real live path: installs the marker
+    # without touching end_offset, which now sits ABOVE the shrunk file's EOF.
+    _make_jsonl(jsonl, user_turns=2)
+    _mark_idle(jsonl)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+    assert handler._state[rel]["shrink_pending"]
+    assert handler._state[rel]["end_offset"] == full_size   # still above the shrunk EOF
+
+    # The naive predicate (`end_offset >= size` alone) would now call this file fully
+    # consumed and skip it forever. It must still be selected as a candidate.
+    assert handler.reconcile() == 1
 
 
 def test_reconcile_while_live_ingesting_does_not_double_enqueue(engine, tmp_path):
@@ -3928,23 +3973,33 @@ class TestAboveCapOrphanRecovery:
         with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
             assert _ingest_session(engine, jsonl, state, watch_dir,
                                    min_turns=5) == IngestResult.OK
-        assert state[rel]["end_offset"] == jsonl.stat().st_size
-        # The transcript is rewritten smaller (compaction/rewrite) — a legitimate retreat.
+        old_size = jsonl.stat().st_size
+        assert state[rel]["end_offset"] == old_size
+        # The transcript is rewritten smaller (compaction/rewrite) — a legitimate retreat,
+        # but task 4 requires it confirmed on a SECOND tick before it is published durably.
         _make_jsonl(jsonl, user_turns=2)
         _mark_idle(jsonl)
         new_size = jsonl.stat().st_size
         with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
             assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=1) == IngestResult.NO_PROGRESS
+        assert state[rel]["end_offset"] == old_size          # tick 1: unchanged, pending
+        assert state[rel]["shrink_pending"]
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
                                    min_turns=1) == IngestResult.OK
         # A naive monotonic clamp would freeze the cursor above EOF and reconcile
-        # (session_watcher.py:1390) would skip this file forever.
+        # would skip this file forever.
         assert state[rel]["end_offset"] == new_size
+        assert "shrink_pending" not in state[rel]
 
     def test_shrunk_file_with_no_safe_boundary_is_not_stranded(self, engine, tmp_path):
         # council C2 (codex): a shrunk rewrite with NO closed boundary used to return
         # NO_PROGRESS without any commit, leaving the durable cursor above EOF —
-        # _idle_with_unsafe_tail sees size <= cursor and reconcile skips the file
-        # forever. The shrink reset must persist even on a no-progress tick.
+        # reconcile would skip the file forever. Task 4: the reset now waits for a
+        # confirming second tick, but once confirmed it must still persist even on a
+        # no-progress tick — the stranding window becomes ONE reconcile interval, not
+        # forever.
         watch_dir = tmp_path / "projects"
         proj = watch_dir / "-test-space"
         proj.mkdir(parents=True)
@@ -3963,8 +4018,50 @@ class TestAboveCapOrphanRecovery:
         }) + "\n")
         _mark_idle(jsonl)
         with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.NO_PROGRESS
+        assert state[rel]["shrink_pending"]                # tick 1: pending, not stranded yet
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
             _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
         assert state[rel]["end_offset"] <= jsonl.stat().st_size
+        assert "shrink_pending" not in state[rel]
+
+    def test_transient_truncation_is_not_durably_honoured(self, engine, tmp_path):
+        """Task 4 regression: a single stat() observing size < cursor must NOT publish a
+        durable end_offset=0. An in-place editor's truncate-then-rewrite window is
+        milliseconds; treating one stat() as proof would re-ingest the whole file from
+        zero the moment the writer finishes restoring it."""
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "transient.jsonl"
+        _make_jsonl(jsonl, user_turns=6)
+        _mark_idle(jsonl)
+        rel = str(jsonl.relative_to(watch_dir))
+        original_bytes = jsonl.read_bytes()
+        state: dict = {}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.OK
+        cursor = state[rel]["end_offset"]
+        assert cursor == len(original_bytes)
+
+        # Transient truncation (e.g. an editor mid-rewrite): below the stored cursor.
+        jsonl.write_bytes(original_bytes[: cursor // 2])
+        _mark_idle(jsonl)
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+        assert result == IngestResult.NO_PROGRESS
+        assert state[rel]["end_offset"] == cursor           # NOT reset to 0
+        assert state[rel]["shrink_pending"]                 # tick 1 marker persisted
+
+        # The writer finishes: the file is restored to its original full content.
+        jsonl.write_bytes(original_bytes)
+        _mark_idle(jsonl)
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+        assert "shrink_pending" not in state[rel]            # marker cleared
+        assert state[rel]["end_offset"] == cursor             # no whole-file re-ingest
 
 
 class TestCommitStateMonotonic:
