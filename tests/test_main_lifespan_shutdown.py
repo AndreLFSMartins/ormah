@@ -268,7 +268,20 @@ async def test_each_lifespan_gets_its_own_stop_event(tmp_path, monkeypatch):
     monkeypatch.setattr("ormah.main.MemoryEngine", lambda settings: _FakeEngine())
     monkeypatch.setattr(
         "ormah.main.settings",
-        type("S", (), {"port": 8787, "memory_dir": str(tmp_path)})(),
+        type(
+            "S",
+            (),
+            {
+                "port": 8787,
+                "memory_dir": str(tmp_path),
+                # #154 task 3: lifespan() now calls validate_llm_runtime_config(settings)
+                # first thing, which reads these two fields. claude_cli/haiku mirrors the
+                # _S fake later in this file (L496-499) — these tests exercise shutdown
+                # behaviour, not config validation, so the guard must pass silently.
+                "llm_provider": "claude_cli",
+                "llm_model": "haiku",
+            },
+        )(),
     )
     monkeypatch.setattr("ormah.main.MaintenanceManager", lambda *a, **kw: object())
 
@@ -352,7 +365,20 @@ async def test_lifespan_shutdown_drains_always_on_worker(monkeypatch, tmp_path):
     monkeypatch.setattr("ormah.main.MemoryEngine", lambda settings: _FakeEngine())
     monkeypatch.setattr(
         "ormah.main.settings",
-        type("S", (), {"port": 8787, "memory_dir": str(tmp_path)})(),
+        type(
+            "S",
+            (),
+            {
+                "port": 8787,
+                "memory_dir": str(tmp_path),
+                # #154 task 3: lifespan() now calls validate_llm_runtime_config(settings)
+                # first thing, which reads these two fields. claude_cli/haiku mirrors the
+                # _S fake later in this file (L496-499) — these tests exercise shutdown
+                # behaviour, not config validation, so the guard must pass silently.
+                "llm_provider": "claude_cli",
+                "llm_model": "haiku",
+            },
+        )(),
     )
     monkeypatch.setattr("ormah.main.MaintenanceManager", lambda *a, **kw: object())
 
@@ -399,7 +425,20 @@ def _fake_lifespan_deps(tmp_path, monkeypatch, *, watcher_raises: bool = False):
     monkeypatch.setattr("ormah.main.MemoryEngine", lambda settings: _FakeEngine())
     monkeypatch.setattr(
         "ormah.main.settings",
-        type("S", (), {"port": 8787, "memory_dir": str(tmp_path)})(),
+        type(
+            "S",
+            (),
+            {
+                "port": 8787,
+                "memory_dir": str(tmp_path),
+                # #154 task 3: lifespan() now calls validate_llm_runtime_config(settings)
+                # first thing, which reads these two fields. claude_cli/haiku mirrors the
+                # _S fake later in this file (L496-499) — these tests exercise shutdown
+                # behaviour, not config validation, so the guard must pass silently.
+                "llm_provider": "claude_cli",
+                "llm_model": "haiku",
+            },
+        )(),
     )
     monkeypatch.setattr("ormah.main.MaintenanceManager", lambda *a, **kw: object())
 
