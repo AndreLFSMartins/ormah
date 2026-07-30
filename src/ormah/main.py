@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from ormah.api.middleware import AgentMiddleware
+from ormah.api.local_auth import load_or_create_local_admin_token
 from ormah.api.routes_account import router as account_router
 from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
@@ -46,10 +47,23 @@ except PackageNotFoundError:
     APP_VERSION = "0.0.0"
 
 
+def _initialize_local_admin(app: FastAPI) -> None:
+    """Enable sensitive local routes without making them a core-server dependency."""
+    try:
+        app.state.local_admin_token = load_or_create_local_admin_token()
+    except RuntimeError:
+        app.state.local_admin_token = None
+        logger.warning(
+            "Local account and billing routes are disabled because their capability "
+            "could not be secured."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting ormah server on port %d...", settings.port)
+    _initialize_local_admin(app)
     logger.info("Initializing memory engine...")
     engine = MemoryEngine(settings)
     engine.startup()

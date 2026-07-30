@@ -9,9 +9,10 @@ handoff — never a backup or verification run.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from ormah.api.local_auth import require_local_admin
 from ormah.cloud.billing import (
     BillingError,
     BillingErrorCode,
@@ -21,7 +22,11 @@ from ormah.cloud.billing import (
     validate_protection_intent_id,
 )
 
-router = APIRouter(prefix="/admin/account", tags=["account"])
+router = APIRouter(
+    prefix="/admin/account",
+    tags=["account"],
+    dependencies=[Depends(require_local_admin)],
+)
 
 _ERROR_STATUS: dict[BillingErrorCode, int] = {
     BillingErrorCode.SIGN_IN_REQUIRED: 401,
@@ -67,6 +72,11 @@ def _cloud_client(request: Request):
     return getattr(request.app.state, "cloud_client", None)
 
 
+def _cloud_state_dir(request: Request):
+    """Optional test seam; production uses the canonical per-user state directory."""
+    return getattr(request.app.state, "cloud_state_dir", None)
+
+
 def _http_error(exc: BillingError) -> HTTPException:
     """Map a stable billing reason code onto a local HTTP error."""
     return HTTPException(
@@ -96,6 +106,7 @@ def account_checkout(body: CheckoutRequest, request: Request):
             _settings(request),
             body.protection_intent_id,
             client=_cloud_client(request),
+            state_dir=_cloud_state_dir(request),
         )
     except BillingError as exc:
         raise _http_error(exc) from exc
@@ -103,7 +114,7 @@ def account_checkout(body: CheckoutRequest, request: Request):
 
 
 @router.post("/portal")
-def account_portal(request: Request, body: PortalRequest | None = None):
+def account_portal(body: PortalRequest, request: Request):
     """Create a hosted billing-portal handoff for the signed-in account."""
     try:
         handoff = open_portal(_settings(request), client=_cloud_client(request))

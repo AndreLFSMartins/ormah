@@ -382,8 +382,9 @@ def test_create_checkout_session_sends_only_intent_id():
 @respx.mock
 def test_create_checkout_session_rejects_non_uuid_intent():
     with CloudClient(BASE_URL, TOKEN) as client:
-        with pytest.raises(CloudError, match="protection_intent_id"):
+        with pytest.raises(CloudError, match="protection_intent_id") as exc_info:
             client.create_checkout_session("not-a-uuid")
+    assert exc_info.value.status_code == 400
 
 
 @pytest.mark.parametrize("status", ["already_subscribed", "subscription_pending"])
@@ -449,7 +450,13 @@ def test_create_checkout_session_fails_closed_on_malformed_checkout_required(pay
         "https://evilcheckout.stripe.com/c/pay/cs_test",
         "https://checkout.stripe.com.evil.com/c/pay/cs_test",
         "https://attacker@checkout.stripe.com/c/pay/cs_test",
+        "https://@checkout.stripe.com/c/pay/cs_test",
+        "https://:@checkout.stripe.com/c/pay/cs_test",
         "https://user:pass@checkout.stripe.com/c/pay/cs_test",
+        "https://checkout.stripe.com/c/pay/cs_test\x00ignored",
+        "https://checkout.stripe.com/c/pay/cs_test\u200b",
+        "https://checkout.stripe.com/c/pay/cs_tést",
+        "https://checkout.stripe.com",
         "https://billing.stripe.com/c/pay/cs_test",
         "https://[invalid/c/pay/cs_test",
         "not-a-url",
@@ -509,7 +516,10 @@ def test_create_portal_session_returns_validated_url():
         "https://billing.stripe.com:8443/session/xyz",
         "https://evilbilling.stripe.com/session/xyz",
         "https://billing.stripe.com.evil.com/session/xyz",
+        "https://@billing.stripe.com/session/xyz",
         "https://user:pass@billing.stripe.com/session/xyz",
+        "https://billing.stripe.com/session/xyz\x1f",
+        "https://billing.stripe.com/session/xyz\u2060",
         "https://checkout.stripe.com/session/xyz",
         None,
         123,

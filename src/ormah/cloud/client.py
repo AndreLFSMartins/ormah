@@ -51,9 +51,9 @@ def _validate_uuid4(value: Any, label: str) -> str:
     try:
         parsed = uuid.UUID(value)
     except (ValueError, AttributeError, TypeError) as exc:
-        raise CloudError(f"Invalid {label}; expected UUIDv4.") from exc
+        raise CloudError(f"Invalid {label}; expected UUIDv4.", status_code=400) from exc
     if parsed.version != 4 or parsed.variant != uuid.RFC_4122:
-        raise CloudError(f"Invalid {label}; expected UUIDv4.")
+        raise CloudError(f"Invalid {label}; expected UUIDv4.", status_code=400)
     return str(parsed)
 
 
@@ -67,7 +67,7 @@ def _validate_stripe_url(url: Any, expected_host: str) -> str:
         not isinstance(url, str)
         or not url
         or len(url) > MAX_HOSTED_URL_CHARS
-        or any(char.isspace() for char in url)
+        or any(ord(char) < 0x21 or ord(char) > 0x7E for char in url)
     ):
         raise CloudError("Ormah Cloud returned an invalid billing URL.", status_code=200)
     try:
@@ -77,10 +77,11 @@ def _validate_stripe_url(url: Any, expected_host: str) -> str:
         raise CloudError("Ormah Cloud returned an invalid billing URL.", status_code=200) from exc
     if (
         parts.scheme != "https"
-        or parts.username
-        or parts.password
+        or parts.username is not None
+        or parts.password is not None
         or port not in (None, 443)
         or parts.hostname != expected_host
+        or not parts.path.startswith("/")
     ):
         raise CloudError("Ormah Cloud returned an invalid billing URL.", status_code=200)
     return url

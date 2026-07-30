@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import StrEnum
 import logging
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 import uuid
 
 from ormah.cloud.client import CloudClient, CloudError, client_from_settings
+from ormah.cloud.keys import STORE_ID_NAME, get_or_create_store_id
+from ormah.cloud.state import (
+    CloudState,
+    CloudStateError,
+    ProtectionIntentStatus,
+    load_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +126,19 @@ def validate_protection_intent_id(value: Any) -> str:
     return str(parsed)
 
 
+def _canonical_account_id(value: Any) -> str:
+    """Validate the opaque account identifier returned by authenticated cloud metadata."""
+    if not isinstance(value, str):
+        raise BillingError(BillingErrorCode.BILLING_UNAVAILABLE)
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        raise BillingError(BillingErrorCode.BILLING_UNAVAILABLE) from None
+    if parsed.version != 4 or parsed.variant != uuid.RFC_4122 or str(parsed) != value.lower():
+        raise BillingError(BillingErrorCode.BILLING_UNAVAILABLE)
+    return str(parsed)
+
+
 def _map_cloud_error(exc: CloudError) -> BillingError:
     if exc.status_code is None:
         return BillingError(BillingErrorCode.CLOUD_UNREACHABLE)
@@ -134,17 +156,13 @@ def _require_account(settings) -> None:
 def _invoke(
     settings,
     client: CloudClient | None,
-    method_name: str,
-    *args: Any,
+    operation: Callable[[CloudClient], dict[str, Any]],
 ) -> dict[str, Any]:
     _require_account(settings)
     owned_client = client is None
     client = client or client_from_settings(settings)
     try:
-        method = getattr(client, method_name, None)
-        if not callable(method):
-            raise BillingError(BillingErrorCode.BILLING_UNAVAILABLE)
-        payload = method(*args)
+        payload = operation(client)
     except CloudError as exc:
         raise _map_cloud_error(exc) from exc
     finally:
@@ -155,10 +173,44 @@ def _invoke(
     return payload
 
 
+def _pending_checkout_state(
+    settings,
+    protection_intent_id: str,
+    *,
+    state_dir: Path | None,
+) -> CloudState:
+    """Load and validate the store-bound half of a durable Checkout intent."""
+    memory_dir = Path(settings.memory_dir).expanduser()
+    if not (memory_dir / STORE_ID_NAME).is_file():
+        raise BillingError(BillingErrorCode.CONFLICT)
+    try:
+        store_id = get_or_create_store_id(memory_dir)
+        state = load_state(store_id, state_dir=state_dir)
+    except (OSError, ValueError, CloudStateError):
+        raise BillingError(BillingErrorCode.CONFLICT) from None
+
+    now = datetime.now(timezone.utc)
+    if (
+        state.pending_protection_intent_id != protection_intent_id
+        or state.pending_protection_store_id != store_id
+        or state.pending_protection_account_id is None
+        or state.pending_protection_created_at is None
+        or state.pending_protection_expires_at is None
+        or state.pending_protection_expires_at <= now
+        or state.pending_protection_status
+        not in {
+            ProtectionIntentStatus.ACCOUNT_BOUND,
+            ProtectionIntentStatus.CHECKOUT_PENDING,
+        }
+    ):
+        raise BillingError(BillingErrorCode.CONFLICT)
+    return state
+
+
 def get_offer(settings, *, client: CloudClient | None = None) -> BillingOffer:
     """Return the authenticated account's configured subscription offer."""
 
-    payload = _invoke(settings, client, "get_billing_offer")
+    payload = _invoke(settings, client, lambda cloud: cloud.get_billing_offer())
     try:
         offer = BillingOffer(
             name=payload["name"],
@@ -178,11 +230,27 @@ def start_checkout(
     protection_intent_id: str,
     *,
     client: CloudClient | None = None,
+    state_dir: Path | None = None,
 ) -> CheckoutHandoff:
     """Create or resume Checkout for one durable protection intent."""
 
-    intent_id = validate_protection_intent_id(protection_intent_id)
-    payload = _invoke(settings, client, "create_checkout_session", intent_id)
+    try:
+        intent_id = validate_protection_intent_id(protection_intent_id)
+    except ValueError:
+        raise BillingError(BillingErrorCode.INVALID_REQUEST) from None
+    _require_account(settings)
+    state = _pending_checkout_state(settings, intent_id, state_dir=state_dir)
+
+    def create_for_bound_account(cloud: CloudClient) -> dict[str, Any]:
+        entitlements = cloud.get_entitlements()
+        if not isinstance(entitlements, dict):
+            raise BillingError(BillingErrorCode.BILLING_UNAVAILABLE)
+        account_id = _canonical_account_id(entitlements.get("account_id"))
+        if account_id != state.pending_protection_account_id:
+            raise BillingError(BillingErrorCode.CONFLICT)
+        return cloud.create_checkout_session(intent_id)
+
+    payload = _invoke(settings, client, create_for_bound_account)
     try:
         status = CheckoutStatus(payload["status"])
         if status is CheckoutStatus.CHECKOUT_REQUIRED:
@@ -202,7 +270,7 @@ def start_checkout(
 def open_portal(settings, *, client: CloudClient | None = None) -> PortalHandoff:
     """Create a Stripe Customer Portal handoff for the signed-in account."""
 
-    payload = _invoke(settings, client, "create_portal_session")
+    payload = _invoke(settings, client, lambda cloud: cloud.create_portal_session())
     try:
         handoff = PortalHandoff(url=payload["url"])
     except (KeyError, TypeError):
