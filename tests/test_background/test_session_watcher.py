@@ -3796,3 +3796,67 @@ class TestAboveCapOrphanRecovery:
         errs = list((handler.spool.root / "failed").glob("*.error"))
         assert errs and "no_safe_boundary" in errs[0].read_text()
 
+    def test_abandoned_range_magnitude_is_pinned(self, engine, tmp_path):
+        """Review follow-up: every OTHER fixture in this class places the trailing orphan
+        one small record from EOF, so the abandoned range those tests exercise is tiny and
+        its size is never actually checked. Here the trailing orphan record itself is made
+        deliberately huge (pad=20000) so the abandoned range [orphan_start, size) is large
+        AND exactly computable from the fixture -- a future change that silently enlarges or
+        shrinks what gets discarded must fail this test, not just "still returns OK"."""
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "bigorphan.jsonl"
+        _write_orphan_tail_jsonl(jsonl, pairs=2, pad=20000)   # trailing record alone ~20 KB
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        last_line_bytes = len((jsonl.read_text().splitlines()[-1] + "\n").encode())
+        orphan_start = size - last_line_bytes
+        rel = str(jsonl.relative_to(watch_dir))
+        # A legacy mid-response cursor parked right before the (huge) trailing orphan record,
+        # far below the probe's safe boundary (EOF) once recovery runs.
+        state = {rel: {"hash": "stale", "end_offset": orphan_start}}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            result = _ingest_session(engine, jsonl, state, watch_dir,
+                                     min_turns=1, flush_bytes=2000)
+        assert result == IngestResult.OK
+        # Cursor-monotonicity: the abandonment never retreats below the parked cursor, and
+        # lands exactly at EOF (the probe's safe boundary), never short of it.
+        assert state[rel]["end_offset"] >= orphan_start
+        assert state[rel]["end_offset"] == size
+        skipped = state[rel]["skipped_slices"]
+        assert len(skipped) == 1
+        assert skipped[0]["reason"] == "orphan_above_cap"
+        # Exact, fixture-derived numbers -- not a loose bound. The abandoned range is
+        # precisely the huge trailing record, nothing more, nothing less.
+        assert skipped[0]["start"] == orphan_start
+        assert skipped[0]["end"] == size
+        assert skipped[0]["end"] - skipped[0]["start"] == last_line_bytes
+
+    def test_abandonment_commit_oserror_propagates_not_swallowed(self, engine, tmp_path, monkeypatch):
+        """council R3: the abandonment COMMIT lives OUTSIDE the broad parse `try`, so a
+        storage failure must surface as itself -- never be swallowed by the `except
+        Exception` there and returned as NO_PROGRESS, which would route a valid transcript
+        into frozen-prefix/dead-letter handling. Patches `_commit_state`, not `_save_state`:
+        `_commit_state` is the exact call the abandonment block makes, so this pins the call
+        site itself; `_save_state` sits one level deeper, inside `_commit_state`'s own
+        lock-branching, which is an implementation detail this test should not depend on."""
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "commitfails.jsonl"
+        _write_orphan_tail_jsonl(jsonl)
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        last_line_bytes = len((jsonl.read_text().splitlines()[-1] + "\n").encode())
+        orphan_start = size - last_line_bytes
+        rel = str(jsonl.relative_to(watch_dir))
+        state = {rel: {"hash": "stale", "end_offset": orphan_start}}
+
+        def _raise_oserror(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("ormah.background.session_watcher._commit_state", _raise_oserror)
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), pytest.raises(OSError):
+            _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_bytes=2000)
+
