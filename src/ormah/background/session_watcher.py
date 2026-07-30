@@ -890,13 +890,11 @@ def _ingest_session(
     # which must be re-parsed (so recovery can run) even when the hash is unchanged.
     if existing and existing.get("hash") == h and prev_offset >= size:
         return IngestResult.NO_PROGRESS
-    allow_rewind = False
     if prev_offset > size:
         prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
         # The ONLY legitimate cursor retreat: the old offset no longer exists in the
         # file. Without this opt-in the monotonic clamp would freeze the cursor above
         # EOF and reconcile (:1390) would drop the file from the sweep forever.
-        allow_rewind = True
         # Persist the reset NOW (council C2): if this very tick finds no safe boundary
         # (malformed/unclosed rewrite), _ingest_session returns NO_PROGRESS without any
         # commit, the durable cursor stays above EOF, _idle_with_unsafe_tail sees
@@ -964,6 +962,21 @@ def _ingest_session(
                 # no loss record (council R1). Abandon EXPLICITLY: decided here, but
                 # COMMITTED below, outside this try — a storage error must surface as
                 # itself, never as a fake parse failure -> NO_PROGRESS (council R3).
+                #
+                # This range can never hold a completed user<->assistant pair (verified
+                # against parser.py): _would_overshoot() only refuses a candidate close
+                # once something is already safe (_safe_len > 0), so a byte cap can never
+                # suppress the FIRST close, and both close sites (a new user-turn boundary
+                # and a terminal assistant record) require it. So if any user turn followed
+                # by a terminal assistant existed past the cursor, the from-cursor parse
+                # above would already have closed there and should_rewind() could not have
+                # fired. Reaching this branch means it did not -- the whole [original_offset,
+                # probe_safe_end) span is the tail of the ONE still-open leading response
+                # (possibly a multi-record tool chain) that the uncapped probe finally closed
+                # once replayed from 0 with its true prompt back in view. That is why the
+                # write-off is bounded to ~1 KB in practice, not a whole conversation -- and
+                # why a future change to should_rewind or to these close sites could silently
+                # widen it.
                 abandon_range = (original_offset, probe_safe_end)
     except Exception as e:  # noqa: BLE001 - transcript parsers can raise provider-specific errors
         logger.warning("Session transcript parse error for %s: %s", path, e)
@@ -1090,7 +1103,7 @@ def _ingest_session(
             })
             skip_entry.pop("extract_fail_offset", None)
             skip_entry.pop("extract_fail_count", None)
-            _commit_state(state, rel, skip_entry, state_lock, watch_dir, allow_rewind=allow_rewind)
+            _commit_state(state, rel, skip_entry, state_lock, watch_dir)
             logger.error(
                 "Session watcher SKIPPING un-processable slice for %s after %d failures (%s): "
                 "cursor %d->%d, %d chars dropped (observable data loss)",
@@ -1106,13 +1119,17 @@ def _ingest_session(
         # Not yet capped: persist the counter (cursor stays) and retry.
         fail_entry = dict(existing or {})
         fail_entry.update({
+            # fail_key_offset, not prev_offset: outside a rewind they're equal; inside
+            # one, fail_key_offset is the durable pre-rewind cursor (== current), so this
+            # is exactly what the monotonic clamp would restore -- writing it directly
+            # means the clamp never has to act, and its own backstop warning (a LOGIC-bug
+            # signal) never fires on this intended path.
             "hash": h,
-            "end_offset": prev_offset,  # clamped by _commit_state inside a rewind
+            "end_offset": fail_key_offset,
             "extract_fail_offset": fail_key_offset,
             "extract_fail_count": fail_count,
         })
-        _commit_state(state, rel, fail_entry, state_lock, watch_dir,
-                      allow_rewind=allow_rewind)
+        _commit_state(state, rel, fail_entry, state_lock, watch_dir)
         return IngestResult.TRANSIENT
 
     try:
@@ -1187,7 +1204,7 @@ def _ingest_session(
     })
     entry.pop("extract_fail_offset", None)  # a success at this offset clears the retry counter
     entry.pop("extract_fail_count", None)
-    _commit_state(state, rel, entry, state_lock, watch_dir, allow_rewind=allow_rewind)
+    _commit_state(state, rel, entry, state_lock, watch_dir)
 
     logger.info(
         "Session watcher ingested %s (%d new turns, %d memories extracted, %d signals recorded)",
