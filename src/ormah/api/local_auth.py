@@ -68,6 +68,8 @@ async def require_local_admin(
     if (
         not isinstance(expected, str)
         or not isinstance(provided, str)
+        or not expected.isascii()
+        or not provided.isascii()
         or not secrets.compare_digest(provided, expected)
     ):
         raise HTTPException(status_code=401, detail="Local admin authentication required.")

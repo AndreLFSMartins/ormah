@@ -9,3 +9,7 @@ The desktop integration must keep this boundary native: Tauri reads the owner-on
 adds the header to requests it makes to the local Python server. React asks a narrow Tauri command
 to perform the request; React never receives either the local capability or
 `ORMAH_ACCOUNT_TOKEN`. Browser-only callers cannot use these billing routes.
+
+`POST /admin/account/portal` requires an explicit empty JSON object (`{}`). The body carries no
+customer or redirect input; requiring JSON ensures browser requests are preflighted before the
+owner-only capability is checked.

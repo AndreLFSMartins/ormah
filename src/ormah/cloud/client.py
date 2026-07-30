@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import time
 import uuid
+from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ DEFAULT_MAX_CIPHERTEXT_BYTES = 512 * 1024 * 1024
 CHECKOUT_HOST = "checkout.stripe.com"
 PORTAL_HOST = "billing.stripe.com"
 MAX_HOSTED_URL_CHARS = 2048
+MAX_CHECKOUT_SESSION_SECONDS = 24 * 60 * 60
+HOSTED_SESSION_CLOCK_SKEW_SECONDS = 5 * 60
 _BILLING_INTERVALS = {"day", "week", "month", "year"}
 _CHECKOUT_STATUSES = {"checkout_required", "already_subscribed", "subscription_pending"}
 
@@ -88,7 +91,13 @@ def _validate_stripe_url(url: Any, expected_host: str) -> str:
 
 
 def _validate_expiry(value: Any) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+    now = int(datetime.now(timezone.utc).timestamp())
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value <= now
+        or value > now + MAX_CHECKOUT_SESSION_SECONDS + HOSTED_SESSION_CLOCK_SKEW_SECONDS
+    ):
         raise CloudError("Ormah Cloud returned an invalid billing expiry.", status_code=200)
     return value
 

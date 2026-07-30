@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 import logging
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 import uuid
 
 from ormah.cloud.client import CloudClient, CloudError, client_from_settings
@@ -17,6 +17,7 @@ from ormah.cloud.state import (
     CloudStateError,
     ProtectionIntentStatus,
     load_state,
+    mutate_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ class BillingErrorCode(StrEnum):
     RATE_LIMITED = "rate_limited"
     CLOUD_UNREACHABLE = "cloud_unreachable"
     BILLING_UNAVAILABLE = "billing_unavailable"
+    STATE_UNAVAILABLE = "state_unavailable"
 
 
 _ERROR_MESSAGES = {
@@ -44,6 +46,7 @@ _ERROR_MESSAGES = {
     BillingErrorCode.RATE_LIMITED: "Too many billing requests; try again shortly.",
     BillingErrorCode.CLOUD_UNREACHABLE: "Could not reach Ormah Cloud.",
     BillingErrorCode.BILLING_UNAVAILABLE: "Ormah Cloud billing is unavailable right now.",
+    BillingErrorCode.STATE_UNAVAILABLE: "Local protection state is unavailable right now.",
 }
 
 _STATUS_ERROR_CODES = {
@@ -111,32 +114,41 @@ class PortalHandoff:
         return {"url": self.url}
 
 
-def validate_protection_intent_id(value: Any) -> str:
-    """Accept only the canonical dashed UUIDv4 used by durable protection state."""
-
-    message = "protection_intent_id must be a canonical UUIDv4 string"
+def _canonical_uuid4(value: Any, message: str, *, require_canonical: bool) -> str:
     if not isinstance(value, str):
         raise ValueError(message)
     try:
         parsed = uuid.UUID(value)
     except ValueError as exc:
         raise ValueError(message) from exc
-    if parsed.version != 4 or parsed.variant != uuid.RFC_4122 or str(parsed) != value.lower():
+    if (
+        parsed.version != 4
+        or parsed.variant != uuid.RFC_4122
+        or (require_canonical and str(parsed) != value)
+    ):
         raise ValueError(message)
     return str(parsed)
 
 
+def validate_protection_intent_id(value: Any) -> str:
+    """Accept only the canonical dashed UUIDv4 used by durable protection state."""
+    return _canonical_uuid4(
+        value,
+        "protection_intent_id must be a canonical UUIDv4 string",
+        require_canonical=True,
+    )
+
+
 def _canonical_account_id(value: Any) -> str:
     """Validate the opaque account identifier returned by authenticated cloud metadata."""
-    if not isinstance(value, str):
-        raise BillingError(BillingErrorCode.BILLING_UNAVAILABLE)
     try:
-        parsed = uuid.UUID(value)
+        return _canonical_uuid4(
+            value,
+            "account_id must be a UUIDv4 string",
+            require_canonical=False,
+        )
     except ValueError:
         raise BillingError(BillingErrorCode.BILLING_UNAVAILABLE) from None
-    if parsed.version != 4 or parsed.variant != uuid.RFC_4122 or str(parsed) != value.lower():
-        raise BillingError(BillingErrorCode.BILLING_UNAVAILABLE)
-    return str(parsed)
 
 
 def _map_cloud_error(exc: CloudError) -> BillingError:
@@ -178,17 +190,36 @@ def _pending_checkout_state(
     protection_intent_id: str,
     *,
     state_dir: Path | None,
-) -> CloudState:
+) -> tuple[str, CloudState]:
     """Load and validate the store-bound half of a durable Checkout intent."""
     memory_dir = Path(settings.memory_dir).expanduser()
     if not (memory_dir / STORE_ID_NAME).is_file():
-        raise BillingError(BillingErrorCode.CONFLICT)
+        _raise_state_unavailable(FileNotFoundError())
     try:
         store_id = get_or_create_store_id(memory_dir)
         state = load_state(store_id, state_dir=state_dir)
-    except (OSError, ValueError, CloudStateError):
-        raise BillingError(BillingErrorCode.CONFLICT) from None
+    except (OSError, ValueError, CloudStateError) as exc:
+        _raise_state_unavailable(exc)
 
+    _validate_pending_checkout(state, protection_intent_id, store_id)
+    return store_id, state
+
+
+def _raise_state_unavailable(exc: BaseException) -> NoReturn:
+    logger.warning(
+        "Durable protection state is unavailable; error_type=%s",
+        type(exc).__name__,
+    )
+    raise BillingError(BillingErrorCode.STATE_UNAVAILABLE) from None
+
+
+def _validate_pending_checkout(
+    state: CloudState,
+    protection_intent_id: str,
+    store_id: str,
+    *,
+    account_id: str | None = None,
+) -> None:
     now = datetime.now(timezone.utc)
     if (
         state.pending_protection_intent_id != protection_intent_id
@@ -204,7 +235,53 @@ def _pending_checkout_state(
         }
     ):
         raise BillingError(BillingErrorCode.CONFLICT)
-    return state
+
+    try:
+        stored_account_id = _canonical_uuid4(
+            state.pending_protection_account_id,
+            "pending account binding must be a UUIDv4 string",
+            require_canonical=False,
+        )
+    except ValueError as exc:
+        _raise_state_unavailable(exc)
+    if account_id is not None and stored_account_id != account_id:
+        raise BillingError(BillingErrorCode.CONFLICT)
+
+
+def _mark_checkout_pending(
+    settings,
+    store_id: str,
+    protection_intent_id: str,
+    account_id: str,
+    *,
+    state_dir: Path | None,
+) -> CloudState:
+    """Atomically revalidate and reserve this durable intent for Checkout."""
+
+    def transition(state: CloudState) -> CloudState:
+        _validate_pending_checkout(
+            state,
+            protection_intent_id,
+            store_id,
+            account_id=account_id,
+        )
+        return replace(
+            state,
+            pending_protection_account_id=account_id,
+            pending_protection_status=ProtectionIntentStatus.CHECKOUT_PENDING,
+        )
+
+    try:
+        return mutate_state(
+            store_id,
+            transition,
+            memory_dir=Path(settings.memory_dir),
+            state_dir=state_dir,
+        )
+    except BillingError:
+        raise
+    except (OSError, ValueError, CloudStateError, TimeoutError) as exc:
+        _raise_state_unavailable(exc)
 
 
 def get_offer(settings, *, client: CloudClient | None = None) -> BillingOffer:
@@ -239,15 +316,20 @@ def start_checkout(
     except ValueError:
         raise BillingError(BillingErrorCode.INVALID_REQUEST) from None
     _require_account(settings)
-    state = _pending_checkout_state(settings, intent_id, state_dir=state_dir)
+    store_id, _ = _pending_checkout_state(settings, intent_id, state_dir=state_dir)
 
     def create_for_bound_account(cloud: CloudClient) -> dict[str, Any]:
         entitlements = cloud.get_entitlements()
         if not isinstance(entitlements, dict):
             raise BillingError(BillingErrorCode.BILLING_UNAVAILABLE)
         account_id = _canonical_account_id(entitlements.get("account_id"))
-        if account_id != state.pending_protection_account_id:
-            raise BillingError(BillingErrorCode.CONFLICT)
+        _mark_checkout_pending(
+            settings,
+            store_id,
+            intent_id,
+            account_id,
+            state_dir=state_dir,
+        )
         return cloud.create_checkout_session(intent_id)
 
     payload = _invoke(settings, client, create_for_bound_account)

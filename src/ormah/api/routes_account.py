@@ -37,6 +37,7 @@ _ERROR_STATUS: dict[BillingErrorCode, int] = {
     BillingErrorCode.RATE_LIMITED: 429,
     BillingErrorCode.CLOUD_UNREACHABLE: 503,
     BillingErrorCode.BILLING_UNAVAILABLE: 502,
+    BillingErrorCode.STATE_UNAVAILABLE: 503,
 }
 
 

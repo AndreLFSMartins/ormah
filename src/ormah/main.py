@@ -51,7 +51,7 @@ def _initialize_local_admin(app: FastAPI) -> None:
     """Enable sensitive local routes without making them a core-server dependency."""
     try:
         app.state.local_admin_token = load_or_create_local_admin_token()
-    except RuntimeError:
+    except (OSError, RuntimeError):
         app.state.local_admin_token = None
         logger.warning(
             "Local account and billing routes are disabled because their capability "

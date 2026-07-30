@@ -442,6 +442,25 @@ def test_create_checkout_session_fails_closed_on_malformed_checkout_required(pay
             client.create_checkout_session(intent_id)
 
 
+@pytest.mark.parametrize("offset_seconds", [-60, 2 * 24 * 60 * 60])
+@respx.mock
+def test_create_checkout_session_rejects_past_or_absurd_expiry(offset_seconds):
+    intent_id = str(uuid.uuid4())
+    respx.post(f"{BASE_URL}/billing/checkout-session").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "checkout_required",
+                "url": "https://checkout.stripe.com/c/pay/cs_test_abc",
+                "expires_at": int(time.time()) + offset_seconds,
+            },
+        )
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError, match="billing expiry"):
+            client.create_checkout_session(intent_id)
+
+
 @pytest.mark.parametrize(
     "bad_url",
     [

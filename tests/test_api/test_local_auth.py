@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import stat
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from ormah.api.local_auth import load_or_create_local_admin_token, require_loopback
+from ormah.api.local_auth import (
+    load_or_create_local_admin_token,
+    require_local_admin,
+    require_loopback,
+)
 
 
 def test_local_admin_token_is_stable_and_owner_only(tmp_path):
@@ -65,3 +70,15 @@ async def test_loopback_dependency_rejects_lan_peers():
         await require_loopback(request)
 
     assert exc_info.value.status_code == 403
+
+
+async def test_local_admin_rejects_non_ascii_header_without_compare_digest_error():
+    app = SimpleNamespace(state=SimpleNamespace(local_admin_token="a" * 64))
+    request = Request(
+        {"type": "http", "client": ("127.0.0.1", 50000), "app": app}
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await require_local_admin(request, "é" * 64, None)
+
+    assert exc_info.value.status_code == 401

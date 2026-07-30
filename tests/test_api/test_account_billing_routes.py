@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -19,7 +20,10 @@ from ormah.cloud.client import CloudError
 from ormah.cloud.keys import get_or_create_store_id
 from ormah.cloud.state import (
     CloudState,
+    CloudStateLoadError,
     ProtectionIntentStatus,
+    load_state,
+    mutate_state,
     save_state,
 )
 from ormah.config import Settings
@@ -52,14 +56,28 @@ OFFER_PAYLOAD = {
 
 
 class FakeCloudClient:
-    def __init__(self, *, offer=None, checkout=None, portal=None, entitlements=None, error=None):
+    def __init__(
+        self,
+        *,
+        offer=None,
+        checkout=None,
+        portal=None,
+        entitlements=None,
+        error=None,
+        checkout_error=None,
+        entitlements_hook=None,
+    ):
         self._results = {
             "get_billing_offer": offer,
             "create_checkout_session": checkout,
             "create_portal_session": portal,
-            "get_entitlements": entitlements or {"account_id": ACCOUNT_ID},
+            "get_entitlements": (
+                {"account_id": ACCOUNT_ID} if entitlements is None else entitlements
+            ),
         }
         self._error = error
+        self._checkout_error = checkout_error
+        self._entitlements_hook = entitlements_hook
         self.calls: list[tuple] = []
         self.closed = False
 
@@ -73,9 +91,16 @@ class FakeCloudClient:
         return self._respond("get_billing_offer")
 
     def create_checkout_session(self, protection_intent_id):
+        if self._checkout_error is not None:
+            self.calls.append(("create_checkout_session", protection_intent_id))
+            raise self._checkout_error
         return self._respond("create_checkout_session", protection_intent_id)
 
     def get_entitlements(self):
+        if self._entitlements_hook is not None:
+            self.calls.append(("get_entitlements",))
+            self._entitlements_hook()
+            return self._results["get_entitlements"]
         return self._respond("get_entitlements")
 
     def create_portal_session(self):
@@ -237,6 +262,7 @@ def test_checkout_non_handoff_statuses_drop_urls(tmp_memory_dir, status):
     "intent_id",
     [
         "not-a-uuid",
+        INTENT_ID.upper(),
         "00000000-0000-0000-0000-000000000000",
         "3f1a6c4e4b0a4d5f9a2b8c7d6e5f4a3b",
         "urn:uuid:3f1a6c4e-4b0a-4d5f-9a2b-8c7d6e5f4a3b",
@@ -330,6 +356,162 @@ def test_checkout_fails_closed_when_service_omits_authenticated_account_id(tmp_m
     assert response.status_code == 502
     assert response.json()["detail"]["error"] == "billing_unavailable"
     assert fake.calls == [("get_entitlements",)]
+
+
+def test_checkout_rechecks_cancellation_after_entitlement_fetch(tmp_memory_dir):
+    store_id = get_or_create_store_id(tmp_memory_dir)
+    state_dir = tmp_memory_dir.parent / "cloud-state"
+
+    def cancel_intent():
+        mutate_state(
+            store_id,
+            lambda state: replace(
+                state,
+                pending_protection_status=ProtectionIntentStatus.CANCELED,
+            ),
+            memory_dir=tmp_memory_dir,
+            state_dir=state_dir,
+        )
+
+    fake = FakeCloudClient(
+        entitlements_hook=cancel_intent,
+        checkout={
+            "status": "checkout_required",
+            "url": CHECKOUT_URL,
+            "expires_at": EXPIRES_AT,
+        },
+    )
+    engine, test_app = build_client(tmp_memory_dir, cloud_client=fake)
+    with TestClient(test_app, headers=LOCAL_ADMIN_HEADERS) as http:
+        response = http.post(
+            "/admin/account/checkout",
+            json={"protection_intent_id": INTENT_ID},
+        )
+    engine.shutdown()
+
+    assert response.status_code == 409
+    assert fake.calls == [("get_entitlements",)]
+    assert load_state(store_id, state_dir=state_dir).pending_protection_status is (
+        ProtectionIntentStatus.CANCELED
+    )
+
+
+def test_failed_checkout_stays_pending_for_idempotent_retry(tmp_memory_dir):
+    fake = FakeCloudClient(
+        checkout_error=CloudError("provider detail", status_code=None),
+    )
+    engine, test_app = build_client(tmp_memory_dir, cloud_client=fake)
+    store_id = get_or_create_store_id(tmp_memory_dir)
+    state_dir = test_app.state.cloud_state_dir
+    with TestClient(test_app, headers=LOCAL_ADMIN_HEADERS) as http:
+        response = http.post(
+            "/admin/account/checkout",
+            json={"protection_intent_id": INTENT_ID},
+        )
+    engine.shutdown()
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"] == "cloud_unreachable"
+    assert fake.calls == [
+        ("get_entitlements",),
+        ("create_checkout_session", INTENT_ID),
+    ]
+    state = load_state(store_id, state_dir=state_dir)
+    assert state.pending_protection_status is ProtectionIntentStatus.CHECKOUT_PENDING
+    assert state.pending_protection_account_id == ACCOUNT_ID
+
+
+def test_checkout_canonicalizes_stored_account_binding(tmp_memory_dir):
+    state = bound_intent_state(
+        tmp_memory_dir,
+        pending_protection_account_id=ACCOUNT_ID.upper(),
+    )
+    fake = FakeCloudClient(
+        checkout={
+            "status": "checkout_required",
+            "url": CHECKOUT_URL,
+            "expires_at": EXPIRES_AT,
+        }
+    )
+    engine, test_app = build_client(
+        tmp_memory_dir,
+        cloud_client=fake,
+        intent_state=state,
+    )
+    store_id = get_or_create_store_id(tmp_memory_dir)
+    state_dir = test_app.state.cloud_state_dir
+    with TestClient(test_app, headers=LOCAL_ADMIN_HEADERS) as http:
+        response = http.post(
+            "/admin/account/checkout",
+            json={"protection_intent_id": INTENT_ID},
+        )
+    engine.shutdown()
+
+    assert response.status_code == 200
+    persisted = load_state(store_id, state_dir=state_dir)
+    assert persisted.pending_protection_account_id == ACCOUNT_ID
+    assert persisted.pending_protection_status is ProtectionIntentStatus.CHECKOUT_PENDING
+
+
+def test_invalid_durable_account_binding_is_state_unavailable(tmp_memory_dir, fake_client):
+    state = bound_intent_state(
+        tmp_memory_dir,
+        pending_protection_account_id="not-an-account-id",
+    )
+    engine, test_app = build_client(
+        tmp_memory_dir,
+        cloud_client=fake_client,
+        intent_state=state,
+    )
+    with TestClient(test_app, headers=LOCAL_ADMIN_HEADERS) as http:
+        response = http.post(
+            "/admin/account/checkout",
+            json={"protection_intent_id": INTENT_ID},
+        )
+    engine.shutdown()
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"] == "state_unavailable"
+    assert fake_client.calls == []
+
+
+def test_missing_store_identity_is_state_unavailable(tmp_memory_dir, fake_client):
+    engine, test_app = build_client(tmp_memory_dir, cloud_client=fake_client)
+    (tmp_memory_dir / ".store_id").unlink()
+    with TestClient(test_app, headers=LOCAL_ADMIN_HEADERS) as http:
+        response = http.post(
+            "/admin/account/checkout",
+            json={"protection_intent_id": INTENT_ID},
+        )
+    engine.shutdown()
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"] == "state_unavailable"
+    assert fake_client.calls == []
+
+
+def test_state_load_failure_is_sanitized_and_not_reported_as_conflict(
+    tmp_memory_dir, fake_client, monkeypatch, caplog
+):
+    engine, test_app = build_client(tmp_memory_dir, cloud_client=fake_client)
+
+    def fail_load(*args, **kwargs):
+        raise CloudStateLoadError("secret path /home/person/cloud-state.json")
+
+    monkeypatch.setattr(billing, "load_state", fail_load)
+    with caplog.at_level(logging.WARNING):
+        with TestClient(test_app, headers=LOCAL_ADMIN_HEADERS) as http:
+            response = http.post(
+                "/admin/account/checkout",
+                json={"protection_intent_id": INTENT_ID},
+            )
+    engine.shutdown()
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"] == "state_unavailable"
+    assert "error_type=CloudStateLoadError" in caplog.text
+    assert "secret path" not in caplog.text
+    assert fake_client.calls == []
 
 
 def test_checkout_never_logs_hosted_url(client, caplog):
