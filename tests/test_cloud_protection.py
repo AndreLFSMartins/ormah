@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from types import SimpleNamespace
 
@@ -8,7 +7,7 @@ import pytest
 
 from ormah.cloud import jobs, protection, state
 from ormah.cloud.entitlements import EntitlementStatus
-from ormah.cloud.protection import CloudProtectionService, CloudProtectionStatus
+from ormah.cloud.protection import CloudProtectionService
 from ormah.cloud.state import (
     ProtectionOperation,
     ProtectionOperationKind,
@@ -18,6 +17,7 @@ from ormah.cloud.state import (
     load_state,
     state_path,
 )
+from ormah.cloud.store_lock import StoreLockTimeout
 from tests.test_cloud_jobs import (
     FakeCloudClient,
     _patch_upload_prerequisites,
@@ -56,6 +56,27 @@ def test_backup_now_returns_typed_completed_operation(tmp_path, monkeypatch, clo
     durable = load_state(store_id)
     assert durable.last_operation_id == result.operation_id
     assert durable.last_operation_phase is ProtectionOperationPhase.COMPLETED
+
+
+def test_backup_now_passes_the_operation_reason_into_the_bundle(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, _store_id = _settings(tmp_path)
+    client = FakeCloudClient()
+    _patch_upload_prerequisites(monkeypatch, client)
+    captured = {}
+
+    def capture_bundle(backup_dir, out_path, recipients, **kwargs):
+        captured.update(kwargs)
+        out_path.write_bytes(b"age-encrypted-bundle")
+        return out_path
+
+    monkeypatch.setattr(protection, "build_bundle", capture_bundle)
+
+    result = CloudProtectionService(settings).backup_now(reason="manual-ui")
+
+    assert result.phase is ProtectionOperationPhase.COMPLETED
+    assert captured["reason"] == "manual-ui"
 
 
 def test_failed_put_returns_typed_failure_and_never_finalizes(
@@ -114,10 +135,16 @@ def test_verifying_an_older_snapshot_does_not_claim_latest_backup_is_protected(
     tmp_path, monkeypatch, cloud_state_dir
 ):
     settings, store_id = _settings(tmp_path)
+    previous_verified_at = protection._utc_now()
     state.update_state(
         store_id,
         memory_dir=settings.memory_dir,
         last_successful_backup_snapshot_id="01NEWER",
+        last_verify_at=previous_verified_at,
+        last_verify_ok=True,
+        last_verify_snapshot_id="01NEWER",
+        last_successful_verify_at=previous_verified_at,
+        last_verified_snapshot_id="01NEWER",
         protection_state=ProtectionState.CHANGES_PENDING,
     )
     bundle, identity = _verification_bundle(tmp_path, settings, store_id)
@@ -128,7 +155,50 @@ def test_verifying_an_older_snapshot_does_not_claim_latest_backup_is_protected(
 
     assert result.phase is ProtectionOperationPhase.COMPLETED
     assert result.state is ProtectionState.CHANGES_PENDING
-    assert load_state(store_id).protection_state is ProtectionState.CHANGES_PENDING
+    durable = load_state(store_id)
+    assert durable.protection_state is ProtectionState.CHANGES_PENDING
+    assert durable.last_verify_at == previous_verified_at
+    assert durable.last_verify_ok is True
+    assert durable.last_verify_snapshot_id == "01NEWER"
+    assert durable.last_successful_verify_at == previous_verified_at
+    assert durable.last_verified_snapshot_id == "01NEWER"
+
+
+def test_failure_verifying_an_older_snapshot_preserves_latest_verification_health(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, store_id = _settings(tmp_path)
+    previous_verified_at = protection._utc_now()
+    state.update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        last_successful_backup_snapshot_id="01NEWER",
+        last_verify_at=previous_verified_at,
+        last_verify_ok=True,
+        last_verify_snapshot_id="01NEWER",
+        last_successful_verify_at=previous_verified_at,
+        last_verified_snapshot_id="01NEWER",
+        protection_state=ProtectionState.PROTECTED,
+    )
+    bundle, identity = _verification_bundle(tmp_path, settings, store_id)
+    client = FakeCloudClient(bundle=bundle)
+    _patch_verification(monkeypatch, client, bundle, identity)
+    monkeypatch.setattr(
+        protection,
+        "open_bundle",
+        lambda *args, **kwargs: (_ for _ in ()).throw(protection.BundleError("corrupt")),
+    )
+
+    result = CloudProtectionService(settings).verify_now("01SNAPSHOT")
+
+    assert result.phase is ProtectionOperationPhase.FAILED
+    durable = load_state(store_id)
+    assert durable.protection_state is ProtectionState.PROTECTED
+    assert durable.last_verify_at == previous_verified_at
+    assert durable.last_verify_ok is True
+    assert durable.last_verify_snapshot_id == "01NEWER"
+    assert durable.last_successful_verify_at == previous_verified_at
+    assert durable.last_verified_snapshot_id == "01NEWER"
 
 
 def test_expired_entitlement_pauses_only_direct_upload(tmp_path, monkeypatch, cloud_state_dir):
@@ -151,6 +221,71 @@ def test_expired_entitlement_pauses_only_direct_upload(tmp_path, monkeypatch, cl
     assert result.phase is ProtectionOperationPhase.CANCELED
     assert result.state is ProtectionState.PAUSED
     assert result.reason_code is ProtectionReasonCode.ENTITLEMENT_EXPIRED
+
+
+def test_stopped_protection_blocks_direct_upload_before_entitlement(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, store_id = _settings(tmp_path)
+    state.update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        protection_state=ProtectionState.STOPPED,
+    )
+    monkeypatch.setattr(
+        protection,
+        "key_file_exists",
+        lambda: (_ for _ in ()).throw(AssertionError("key guard should not run")),
+    )
+    monkeypatch.setattr(
+        protection,
+        "check_entitlement",
+        lambda settings: (_ for _ in ()).throw(AssertionError("entitlement should not run")),
+    )
+
+    result = CloudProtectionService(settings).backup_now()
+
+    assert result.phase is ProtectionOperationPhase.CANCELED
+    assert result.state is ProtectionState.STOPPED
+    assert result.reason_code is ProtectionReasonCode.PROTECTION_STOPPED
+
+
+@pytest.mark.parametrize(
+    ("method_name", "kind"),
+    [
+        ("backup_now", ProtectionOperationKind.BACKUP),
+        ("verify_now", ProtectionOperationKind.VERIFY),
+    ],
+)
+def test_store_busy_is_transient_and_preserves_durable_health(
+    tmp_path, monkeypatch, cloud_state_dir, method_name, kind
+):
+    settings, store_id = _settings(tmp_path)
+    verified_at = protection._utc_now()
+    state.update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        last_verify_at=verified_at,
+        last_verify_ok=True,
+        last_verify_snapshot_id="01VERIFIED",
+        last_successful_verify_at=verified_at,
+        last_verified_snapshot_id="01VERIFIED",
+        protection_state=ProtectionState.PROTECTED,
+    )
+    before = load_state(store_id).to_dict()
+    monkeypatch.setattr(
+        protection,
+        "StoreLock",
+        lambda *args, **kwargs: (_ for _ in ()).throw(StoreLockTimeout("busy")),
+    )
+
+    result = getattr(CloudProtectionService(settings), method_name)()
+
+    assert result.kind is kind
+    assert result.phase is ProtectionOperationPhase.CANCELED
+    assert result.reason_code is ProtectionReasonCode.STORE_BUSY
+    assert result.state is ProtectionState.PROTECTED
+    assert load_state(store_id).to_dict() == before
 
 
 def test_corrupt_state_stops_backup_and_verification_before_network(
@@ -212,7 +347,9 @@ def test_scheduler_adapters_delegate_and_keep_legacy_results(monkeypatch):
             calls.append(("verify", snapshot_id))
             return verify
 
-    engine = SimpleNamespace(settings=SimpleNamespace(cloud_backup_enabled=True))
+    engine = SimpleNamespace(
+        settings=SimpleNamespace(cloud_backup_enabled=True, account_token="test-token")
+    )
     monkeypatch.setattr(jobs, "CloudProtectionService", FakeService)
 
     assert jobs.run_cloud_backup(engine) == "01BACKUP"
@@ -233,35 +370,25 @@ def test_scheduler_adapters_swallow_unexpected_exceptions(monkeypatch, caplog, a
     class BrokenService:
         @classmethod
         def from_engine(cls, engine):
-            raise RuntimeError("https://objects.example/secret?token=do-not-log")
+            raise RuntimeError(
+                "upstream failed with test-token at "
+                "https://objects.example/secret?token=do-not-log"
+            )
 
     monkeypatch.setattr(jobs, "CloudProtectionService", BrokenService)
 
-    engine = SimpleNamespace(settings=SimpleNamespace(cloud_backup_enabled=True))
+    engine = SimpleNamespace(
+        settings=SimpleNamespace(cloud_backup_enabled=True, account_token="test-token")
+    )
     with caplog.at_level(logging.WARNING):
         assert adapter(engine) is fallback
 
     assert "RuntimeError" in caplog.text
+    assert "upstream failed" in caplog.text
+    assert "<redacted-url>" in caplog.text
+    assert "test-token" not in caplog.text
     assert "objects.example" not in caplog.text
     assert "do-not-log" not in caplog.text
-
-
-def test_status_is_typed_and_corrupt_state_fails_closed(tmp_path, monkeypatch, cloud_state_dir):
-    settings, store_id = _settings(tmp_path)
-    path = state_path(store_id)
-    path.parent.mkdir(parents=True)
-    path.write_text('{"protection_state":"protected","last_verify_ok":"yes"}', encoding="utf-8")
-    before = path.read_bytes()
-    monkeypatch.setattr(protection, "check_entitlement", lambda settings: EntitlementStatus.ACTIVE)
-
-    result = CloudProtectionService(settings).status()
-
-    assert isinstance(result, CloudProtectionStatus)
-    assert result.protection_state is ProtectionState.ATTENTION_REQUIRED
-    assert result.state_error is not None
-    assert result.last_verify_ok is None
-    assert path.read_bytes() == before
-    assert json.loads(path.read_text(encoding="utf-8"))["protection_state"] == "protected"
 
 
 def test_service_can_be_constructed_from_engine(tmp_path):

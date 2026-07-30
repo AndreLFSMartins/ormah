@@ -5,6 +5,7 @@ from multiprocessing import get_context
 import os
 from pathlib import Path
 import stat
+import threading
 import time
 import uuid
 
@@ -133,6 +134,32 @@ def test_store_lock_is_reentrant_in_one_thread(tmp_path):
 
     with first, second:
         assert os.path.samefile(first.path, second.path)
+
+
+def test_store_lock_timeout_covers_another_thread_in_the_same_process(tmp_path):
+    memory_dir = tmp_path / "memory"
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with StoreLock(memory_dir, timeout=1):
+            acquired.set()
+            assert release.wait(2)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    try:
+        assert acquired.wait(1)
+        started = time.monotonic()
+        with pytest.raises(StoreLockTimeout, match="Memory store is busy"):
+            with StoreLock(memory_dir, timeout=0.1):
+                pass
+        assert time.monotonic() - started < 0.5
+    finally:
+        release.set()
+        holder.join(2)
+
+    assert not holder.is_alive()
 
 
 def test_permission_failure_does_not_leave_store_locked(tmp_path, monkeypatch):

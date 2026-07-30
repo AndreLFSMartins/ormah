@@ -521,9 +521,9 @@ cross-machine truth. `CloudProtectionService.backup_now()` calls `finalize_uploa
 `advance_head`, and the scheduler's `run_cloud_backup()` is now only a guarded adapter over that
 shared service.
 
-`CloudProtectionService` is also the reusable Python owner of backup status, immediate backup, and
-restore verification. CLI, local REST, scheduler, and the desktop app can therefore use the same
-state transitions and failure recording instead of duplicating the cloud workflow. Direct
+`CloudProtectionService` is the reusable Python owner of immediate backup and restore verification;
+`cloud_status_payload()` is the single status derivation used by CLI, local REST, and UI consumers.
+These entry points keep state transitions and failure recording out of presentation adapters. Direct
 `backup_now()` means run now; only the scheduler passes `only_if_due=true`. Manual verification is
 still permitted after protection is stopped because retained downloads are never entitlement- or
 scheduler-gated. A successful verification marks the store protected only when it verifies the

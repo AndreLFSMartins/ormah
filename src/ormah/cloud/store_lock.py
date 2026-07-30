@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import threading
+import time
 
 from filelock import FileLock, Timeout as FileLockTimeout
 
@@ -67,12 +68,24 @@ class StoreLock:
         self._depth = 0
 
     def acquire(self) -> StoreLock:
-        self._entry.thread_lock.acquire()
+        deadline = None if self.timeout < 0 else time.monotonic() + self.timeout
+        if deadline is None:
+            thread_acquired = self._entry.thread_lock.acquire()
+        else:
+            thread_acquired = self._entry.thread_lock.acquire(timeout=self.timeout)
+        if not thread_acquired:
+            raise StoreLockTimeout(
+                f"Memory store is busy; timed out waiting for {self.path}."
+            )
+
         process_acquired = False
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                self._entry.process_lock.acquire(timeout=self.timeout)
+                process_timeout = (
+                    -1 if deadline is None else max(0.0, deadline - time.monotonic())
+                )
+                self._entry.process_lock.acquire(timeout=process_timeout)
                 process_acquired = True
             except FileLockTimeout as exc:
                 raise StoreLockTimeout(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from ormah.cloud.protection import CloudProtectionService
+from ormah.cloud.protection import CloudProtectionService, safe_error_message
 from ormah.cloud.state import ProtectionOperationPhase
 
 
@@ -21,7 +21,12 @@ def run_cloud_backup(engine) -> str | None:
         if result.phase is ProtectionOperationPhase.COMPLETED:
             return result.snapshot_id
     except Exception as exc:
-        logger.warning("Scheduled Ormah Cloud backup failed with %s", type(exc).__name__)
+        message = safe_error_message(exc, getattr(engine.settings, "account_token", None))
+        logger.warning(
+            "Scheduled Ormah Cloud backup failed with %s: %s",
+            type(exc).__name__,
+            message,
+        )
     return None
 
 
@@ -35,7 +40,10 @@ def run_restore_verification(engine) -> bool:
         result = CloudProtectionService.from_engine(engine).verify_now()
         return result.phase is ProtectionOperationPhase.COMPLETED
     except Exception as exc:
+        message = safe_error_message(exc, getattr(engine.settings, "account_token", None))
         logger.warning(
-            "Scheduled Ormah Cloud restore verification failed with %s", type(exc).__name__
+            "Scheduled Ormah Cloud restore verification failed with %s: %s",
+            type(exc).__name__,
+            message,
         )
         return False
