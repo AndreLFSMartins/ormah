@@ -123,24 +123,21 @@ def get_device_name() -> str:
 
 def persist_account_credentials(token: str, email: str) -> None:
     """Persist account credentials without dropping unrelated environment keys."""
-    from ormah.setup import _read_env_file, _write_env_file
+    from ormah.cloud.settings import update_settings_env
 
-    env = _read_env_file()
-    env[ACCOUNT_TOKEN_KEY] = token
-    env[ACCOUNT_EMAIL_KEY] = email.strip().lower()
-    _write_env_file(env)
+    update_settings_env(
+        {
+            ACCOUNT_TOKEN_KEY: token,
+            ACCOUNT_EMAIL_KEY: email.strip().lower(),
+        }
+    )
 
 
 def remove_account_credentials() -> None:
     """Remove only Ormah account credentials from the global environment file."""
-    from ormah.setup import _read_env_file, _write_env_file
+    from ormah.cloud.settings import update_settings_env
 
-    env = _read_env_file()
-    changed = ACCOUNT_TOKEN_KEY in env or ACCOUNT_EMAIL_KEY in env
-    env.pop(ACCOUNT_TOKEN_KEY, None)
-    env.pop(ACCOUNT_EMAIL_KEY, None)
-    if changed:
-        _write_env_file(env)
+    update_settings_env({}, remove=(ACCOUNT_TOKEN_KEY, ACCOUNT_EMAIL_KEY))
 
 
 class CloudClient:

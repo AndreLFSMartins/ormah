@@ -93,12 +93,14 @@ def _backup_service_from_request(request: Request):
 
 
 def _persist_backup_settings(backup_dir: Path, retention_count: int) -> None:
-    from ormah.setup import _read_env_file, _write_env_file
+    from ormah.cloud.settings import update_settings_env
 
-    env = _read_env_file()
-    env["ORMAH_BACKUP_DIR"] = str(backup_dir)
-    env["ORMAH_BACKUP_RETENTION_COUNT"] = str(retention_count)
-    _write_env_file(env)
+    update_settings_env(
+        {
+            "ORMAH_BACKUP_DIR": str(backup_dir),
+            "ORMAH_BACKUP_RETENTION_COUNT": str(retention_count),
+        }
+    )
 
 
 @router.get("/health")

@@ -42,6 +42,9 @@ def test_state_round_trip_is_atomic_and_owner_only(tmp_path):
         protection_state=ProtectionState.ATTENTION_REQUIRED,
         pending_protection_intent_id="intent-1",
         pending_protection_status=ProtectionIntentStatus.RUNNING,
+        pending_protection_snapshot_id="snapshot-1",
+        pending_protection_created_store=True,
+        pending_protection_origin_state=ProtectionState.STOPPED,
         last_operation_id="operation-1",
         last_operation_kind=ProtectionOperationKind.VERIFY,
         last_operation_phase=ProtectionOperationPhase.FAILED,
@@ -261,6 +264,7 @@ def test_cloud_status_derives_stale_and_verification_warnings(tmp_path):
             last_verify_at=now - timedelta(days=1),
             last_verify_ok=False,
             last_verify_error="bundle truncated",
+            protection_state=ProtectionState.ATTENTION_REQUIRED,
         ),
         memory_dir=memory_dir,
         state_dir=tmp_path / "state",
@@ -281,7 +285,7 @@ def test_cloud_status_derives_stale_and_verification_warnings(tmp_path):
     assert payload["store_id"] == store_id
     assert payload["last_upload_age_seconds"] == 49 * 3600
     assert payload["entitlement"] == "expired"
-    assert "protection_state" not in payload
+    assert payload["protection_state"] == ProtectionState.ATTENTION_REQUIRED.value
     assert payload["state_error"] is None
     assert any("stale" in warning for warning in payload["warnings"])
     assert any("bundle truncated" in warning for warning in payload["warnings"])
@@ -304,9 +308,168 @@ def test_cloud_status_reports_corrupt_state_without_claiming_protection(tmp_path
     )
 
     assert payload["state_error"] is not None
-    assert "protection_state" not in payload
+    assert payload["protection_state"] == ProtectionState.ATTENTION_REQUIRED.value
     assert any("was not overwritten" in warning for warning in payload["warnings"])
     assert json.loads(path.read_text(encoding="utf-8"))["protection_state"] == "protected"
+
+
+def test_cloud_status_exposes_pollable_intent_without_account_binding(tmp_path):
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    store_id = str(uuid.uuid4())
+    intent_id = str(uuid.uuid4())
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+    save_state(
+        store_id,
+        CloudState(
+            protection_state=ProtectionState.SUBSCRIPTION_REQUIRED,
+            pending_protection_intent_id=intent_id,
+            pending_protection_account_id=str(uuid.uuid4()),
+            pending_protection_store_id=store_id,
+            pending_protection_created_at=now,
+            pending_protection_expires_at=now + timedelta(minutes=30),
+            pending_protection_status=ProtectionIntentStatus.ACCOUNT_BOUND,
+            last_operation_id=intent_id,
+            last_operation_kind=ProtectionOperationKind.ENABLE,
+            last_operation_phase=ProtectionOperationPhase.PENDING,
+        ),
+        memory_dir=memory_dir,
+        state_dir=tmp_path / "state",
+    )
+
+    payload = cloud_status_payload(
+        Settings(memory_dir=memory_dir),
+        entitlement="expired",
+        now=now,
+        state_dir=tmp_path / "state",
+    )
+
+    assert payload["protection_state"] == ProtectionState.SUBSCRIPTION_REQUIRED.value
+    assert payload["protection_intent_id"] == intent_id
+    assert payload["protection_intent_status"] == ProtectionIntentStatus.ACCOUNT_BOUND.value
+    assert payload["last_operation_id"] == intent_id
+    serialized = json.dumps(payload)
+    assert "pending_protection_account_id" not in serialized
+
+
+def test_cloud_status_never_reports_protected_when_invariant_is_incomplete(tmp_path):
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    store_id = str(uuid.uuid4())
+    intent_id = str(uuid.uuid4())
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    save_state(
+        store_id,
+        CloudState(
+            protection_state=ProtectionState.PROTECTED,
+            pending_protection_intent_id=intent_id,
+            pending_protection_status=ProtectionIntentStatus.COMPLETED,
+            last_successful_backup_snapshot_id="snapshot-a",
+            last_verified_snapshot_id="snapshot-b",
+            last_verify_ok=True,
+        ),
+        memory_dir=memory_dir,
+        state_dir=tmp_path / "state",
+    )
+
+    payload = cloud_status_payload(
+        Settings(memory_dir=memory_dir, cloud_backup_enabled=True),
+        entitlement="active",
+        state_dir=tmp_path / "state",
+    )
+
+    assert payload["protection_state"] == ProtectionState.ATTENTION_REQUIRED.value
+    assert any("verification must finish" in item for item in payload["warnings"])
+
+
+def test_cloud_status_fails_closed_for_future_protection_state(tmp_path):
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    store_id = str(uuid.uuid4())
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    path = state_path(store_id, state_dir=tmp_path / "state")
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": CURRENT_CLOUD_STATE_SCHEMA_VERSION + 1,
+                "protection_state": "future_protected",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = cloud_status_payload(
+        Settings(memory_dir=memory_dir, cloud_backup_enabled=True),
+        entitlement="active",
+        state_dir=tmp_path / "state",
+    )
+
+    assert payload["protection_state"] == ProtectionState.ATTENTION_REQUIRED.value
+    assert any("newer Ormah version" in item for item in payload["warnings"])
+    assert json.loads(path.read_text(encoding="utf-8"))["protection_state"] == (
+        "future_protected"
+    )
+
+
+def test_cloud_status_derives_paused_when_upload_entitlement_ends(tmp_path):
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    store_id = str(uuid.uuid4())
+    intent_id = str(uuid.uuid4())
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    save_state(
+        store_id,
+        CloudState(
+            protection_state=ProtectionState.PROTECTED,
+            pending_protection_intent_id=intent_id,
+            pending_protection_status=ProtectionIntentStatus.COMPLETED,
+            last_successful_backup_snapshot_id="snapshot-a",
+            last_verified_snapshot_id="snapshot-a",
+            last_verify_ok=True,
+        ),
+        memory_dir=memory_dir,
+        state_dir=tmp_path / "state",
+    )
+
+    payload = cloud_status_payload(
+        Settings(memory_dir=memory_dir, cloud_backup_enabled=True),
+        entitlement="expired",
+        state_dir=tmp_path / "state",
+    )
+
+    assert payload["protection_state"] == ProtectionState.PAUSED.value
+
+
+def test_cloud_status_requires_sign_in_after_logout_of_protected_store(tmp_path):
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    store_id = str(uuid.uuid4())
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    save_state(
+        store_id,
+        CloudState(
+            protection_state=ProtectionState.PROTECTED,
+            last_successful_backup_snapshot_id="snapshot-a",
+            last_verified_snapshot_id="snapshot-a",
+            last_verify_ok=True,
+        ),
+        memory_dir=memory_dir,
+        state_dir=tmp_path / "state",
+    )
+
+    payload = cloud_status_payload(
+        Settings(
+            memory_dir=memory_dir,
+            cloud_backup_enabled=True,
+            account_token=None,
+        ),
+        entitlement="none",
+        state_dir=tmp_path / "state",
+    )
+
+    assert payload["protection_state"] == ProtectionState.SIGN_IN_REQUIRED.value
 
 
 def test_cloud_state_json_contains_only_plain_metadata(tmp_path):

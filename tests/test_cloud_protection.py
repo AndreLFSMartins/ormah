@@ -126,6 +126,36 @@ def test_failed_put_returns_typed_failure_and_never_finalizes(
     assert client.finalized == []
 
 
+def test_uncertain_finalize_blocks_automatic_reupload(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, store_id = _settings(tmp_path)
+    client = FakeCloudClient()
+    _patch_upload_prerequisites(monkeypatch, client)
+    real_finalize = client.finalize_upload
+
+    def timeout_after_commit(store_id, upload_id):
+        real_finalize(store_id, upload_id)
+        raise CloudError("finalize response lost")
+
+    client.finalize_upload = timeout_after_commit
+
+    first = CloudProtectionService(settings).backup_now()
+    monkeypatch.setattr(
+        client,
+        "create_upload",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("unknown finalize must block a new upload")
+        ),
+    )
+    second = CloudProtectionService(settings).backup_now()
+
+    assert first.reason_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
+    assert second.reason_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
+    assert client.finalized == [(store_id, "upload-1")]
+    assert load_state(store_id).last_error_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
+
+
 def test_upload_rejects_invalid_server_snapshot_id_before_put(
     tmp_path, monkeypatch, cloud_state_dir
 ):
