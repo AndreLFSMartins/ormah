@@ -577,3 +577,38 @@ async def test_shutdown_cancels_llm_calls_when_the_lifespan_body_raises(tmp_path
     assert cancels, "an abnormal shutdown skipped the LLM cancel (cancel not in a finally)"
     assert cancels[0] is True
 
+
+# ---------------------------------------------------------------------------
+# 7. #154 task 3: lifespan() must actually call validate_llm_runtime_config(settings)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_lifespan_calls_validate_llm_runtime_config(tmp_path, monkeypatch):
+    """Pin the wiring, not just the guard's own unit tests in test_config.py.
+
+    Nothing previously asserted that lifespan() actually calls
+    validate_llm_runtime_config(settings) -- deleting that call left the whole suite
+    green. Drive a settings fake with the exact bad pair (llm_provider=ollama + an
+    Anthropic-looking llm_model, mirroring the good claude_cli/haiku fakes used by the
+    other tests in this file) and assert the ValueError surfaces through lifespan()
+    itself. This must fail red if the guard call is removed from main.py.
+    """
+    monkeypatch.setattr(
+        "ormah.main.settings",
+        type(
+            "S",
+            (),
+            {
+                "port": 8787,
+                "memory_dir": str(tmp_path),
+                "llm_provider": "ollama",
+                "llm_model": "claude-haiku-4-5",
+            },
+        )(),
+    )
+
+    app = FastAPI(lifespan=main.lifespan)
+    with pytest.raises(ValueError, match="llm_provider=ollama"):
+        async with main.lifespan(app):
+            pass
+
