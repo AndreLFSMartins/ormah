@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import socket
+import time
 import uuid
+from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -13,6 +17,22 @@ DATA_DIR = Path.home() / ".local" / "share" / "ormah"
 DEVICE_ID_PATH = DATA_DIR / "device_id"
 ACCOUNT_TOKEN_KEY = "ORMAH_ACCOUNT_TOKEN"
 ACCOUNT_EMAIL_KEY = "ORMAH_ACCOUNT_EMAIL"
+PROTOCOL_CACHE_SECONDS = 300
+DEFAULT_MAX_CIPHERTEXT_BYTES = 512 * 1024 * 1024
+CHECKOUT_HOST = "checkout.stripe.com"
+PORTAL_HOST = "billing.stripe.com"
+MAX_HOSTED_URL_CHARS = 2048
+MAX_CHECKOUT_SESSION_SECONDS = 24 * 60 * 60
+HOSTED_SESSION_CLOCK_SKEW_SECONDS = 5 * 60
+_BILLING_INTERVALS = {"day", "week", "month", "year"}
+_CHECKOUT_STATUSES = {"checkout_required", "already_subscribed", "subscription_pending"}
+
+
+def _client_version() -> str:
+    try:
+        return package_version("ormah")
+    except PackageNotFoundError:
+        return "0.0.0"
 
 
 class CloudError(RuntimeError):
@@ -30,14 +50,56 @@ class CloudError(RuntimeError):
         self.payload = payload
 
 
-def _uuid4(value: str, path: Path) -> str:
+def _validate_uuid4(value: Any, label: str) -> str:
     try:
         parsed = uuid.UUID(value)
-    except ValueError as exc:
-        raise CloudError(f"Invalid device id at {path}; expected UUIDv4.") from exc
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise CloudError(f"Invalid {label}; expected UUIDv4.", status_code=400) from exc
     if parsed.version != 4 or parsed.variant != uuid.RFC_4122:
-        raise CloudError(f"Invalid device id at {path}; expected UUIDv4.")
+        raise CloudError(f"Invalid {label}; expected UUIDv4.", status_code=400)
     return str(parsed)
+
+
+def _uuid4(value: str, path: Path) -> str:
+    return _validate_uuid4(value, f"device id at {path}")
+
+
+def _validate_stripe_url(url: Any, expected_host: str) -> str:
+    """Fail closed unless url is an https URL for exactly expected_host on the default port."""
+    if (
+        not isinstance(url, str)
+        or not url
+        or len(url) > MAX_HOSTED_URL_CHARS
+        or any(ord(char) < 0x21 or ord(char) > 0x7E for char in url)
+    ):
+        raise CloudError("Ormah Cloud returned an invalid billing URL.", status_code=200)
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as exc:
+        raise CloudError("Ormah Cloud returned an invalid billing URL.", status_code=200) from exc
+    if (
+        parts.scheme != "https"
+        or parts.username is not None
+        or parts.password is not None
+        or port not in (None, 443)
+        or parts.hostname != expected_host
+        or not parts.path.startswith("/")
+    ):
+        raise CloudError("Ormah Cloud returned an invalid billing URL.", status_code=200)
+    return url
+
+
+def _validate_expiry(value: Any) -> int:
+    now = int(datetime.now(timezone.utc).timestamp())
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value <= now
+        or value > now + MAX_CHECKOUT_SESSION_SECONDS + HOSTED_SESSION_CLOCK_SKEW_SECONDS
+    ):
+        raise CloudError("Ormah Cloud returned an invalid billing expiry.", status_code=200)
+    return value
 
 
 def get_or_create_device_id(path: Path | None = None) -> str:
@@ -96,6 +158,7 @@ class CloudClient:
         self.base_url = base_url.rstrip("/") + "/"
         self.token = token
         self.device_id = device_id
+        self._protocol_cache: tuple[float, dict[str, Any]] | None = None
         self._http = httpx.Client(
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout),
@@ -111,10 +174,14 @@ class CloudClient:
     def __exit__(self, *args) -> None:
         self.close()
 
-    def _headers(self) -> dict[str, str]:
-        if not self.token:
-            return {}
-        return {"Authorization": f"Bearer {self.token}"}
+    def _headers(self, authenticated: bool) -> dict[str, str]:
+        headers = {
+            "X-Ormah-Client-Version": _client_version(),
+            "X-Request-ID": str(uuid.uuid4()),
+        }
+        if authenticated and self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     def _request_json(
         self,
@@ -125,10 +192,14 @@ class CloudClient:
         **kwargs,
     ) -> dict[str, Any]:
         try:
+            headers = self._headers(authenticated)
+            supplied_headers = kwargs.pop("headers", None)
+            if supplied_headers:
+                headers.update(supplied_headers)
             response = self._http.request(
                 method,
                 path,
-                headers=self._headers() if authenticated else {},
+                headers=headers,
                 **kwargs,
             )
         except httpx.HTTPError as exc:
@@ -193,6 +264,106 @@ class CloudClient:
     def get_entitlements(self) -> dict[str, Any]:
         return self._request_json("GET", "me/entitlements")
 
+    def get_billing_offer(self) -> dict[str, Any]:
+        """Return validated, display-safe subscription price metadata."""
+        payload = self._request_json("GET", "billing/offer")
+        name = payload.get("name")
+        unit_amount = payload.get("unit_amount")
+        currency = payload.get("currency")
+        interval = payload.get("interval")
+        interval_count = payload.get("interval_count")
+        if not isinstance(name, str) or not name.strip():
+            raise CloudError("Ormah Cloud returned an invalid billing offer name.", status_code=200)
+        if not isinstance(unit_amount, int) or isinstance(unit_amount, bool) or unit_amount < 0:
+            raise CloudError(
+                "Ormah Cloud returned an invalid billing offer amount.", status_code=200
+            )
+        if (
+            not isinstance(currency, str)
+            or len(currency) != 3
+            or not currency.isascii()
+            or not currency.isalpha()
+        ):
+            raise CloudError(
+                "Ormah Cloud returned an invalid billing offer currency.", status_code=200
+            )
+        if interval not in _BILLING_INTERVALS:
+            raise CloudError(
+                "Ormah Cloud returned an invalid billing offer interval.", status_code=200
+            )
+        if (
+            not isinstance(interval_count, int)
+            or isinstance(interval_count, bool)
+            or interval_count < 1
+        ):
+            raise CloudError(
+                "Ormah Cloud returned an invalid billing offer interval count.", status_code=200
+            )
+        return {
+            "name": name.strip(),
+            "unit_amount": unit_amount,
+            "currency": currency.lower(),
+            "interval": interval,
+            "interval_count": interval_count,
+        }
+
+    def create_checkout_session(self, protection_intent_id: str) -> dict[str, Any]:
+        """Start or resolve a Stripe Checkout session for a pending Protect intent."""
+        intent_id = _validate_uuid4(protection_intent_id, "protection_intent_id")
+        payload = self._request_json(
+            "POST",
+            "billing/checkout-session",
+            json={"protection_intent_id": intent_id},
+        )
+        status = payload.get("status")
+        if status not in _CHECKOUT_STATUSES:
+            raise CloudError(
+                "Ormah Cloud returned an unrecognized checkout status.", status_code=200
+            )
+        result: dict[str, Any] = {"status": status}
+        if status == "checkout_required":
+            result["url"] = _validate_stripe_url(payload.get("url"), CHECKOUT_HOST)
+            result["expires_at"] = _validate_expiry(payload.get("expires_at"))
+        return result
+
+    def create_portal_session(self) -> dict[str, Any]:
+        """Return a validated Stripe-hosted billing Portal URL."""
+        payload = self._request_json("POST", "billing/portal-session")
+        return {"url": _validate_stripe_url(payload.get("url"), PORTAL_HOST)}
+
+    def get_protocol(self, *, refresh: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        if (
+            not refresh
+            and self._protocol_cache is not None
+            and now - self._protocol_cache[0] < PROTOCOL_CACHE_SECONDS
+        ):
+            return self._protocol_cache[1]
+        payload = self._request_json("GET", "protocol", authenticated=False)
+        self._protocol_cache = (now, payload)
+        return payload
+
+    def processing_limit(self, *, require_hardened_write: bool) -> int:
+        try:
+            protocol = self.get_protocol()
+        except CloudError:
+            if require_hardened_write:
+                raise
+            return DEFAULT_MAX_CIPHERTEXT_BYTES
+        capabilities = protocol.get("capabilities")
+        limit = protocol.get("max_ciphertext_bytes")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise CloudError("Ormah Cloud advertised an invalid ciphertext processing limit.")
+        if require_hardened_write and (
+            protocol.get("protocol_version") != 2
+            or not isinstance(capabilities, list)
+            or "immutable-promotion" not in capabilities
+        ):
+            raise CloudError(
+                "Ormah Cloud does not advertise immutable upload promotion; upload stopped."
+            )
+        return min(limit, DEFAULT_MAX_CIPHERTEXT_BYTES)
+
     def revoke_token(self) -> dict[str, Any]:
         device_id = self.device_id or get_or_create_device_id()
         payload = self._request_json("GET", "me/tokens")
@@ -214,6 +385,11 @@ class CloudClient:
         return self._request_json("POST", "me/tokens/revoke", json={"token_id": token_id})
 
     def create_upload(self, store_id: str, size: int, sha256: str) -> dict[str, Any]:
+        limit = self.processing_limit(require_hardened_write=True)
+        if size > limit:
+            raise CloudError(
+                f"Encrypted bundle is larger than the supported {limit}-byte processing limit."
+            )
         return self._request_json(
             "POST",
             f"stores/{store_id}/uploads",

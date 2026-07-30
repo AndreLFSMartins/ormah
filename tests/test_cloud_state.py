@@ -7,8 +7,18 @@ import stat
 from types import SimpleNamespace
 import uuid
 
+import pytest
+
 from ormah.cloud.state import (
+    CURRENT_CLOUD_STATE_SCHEMA_VERSION,
     CloudState,
+    CloudStateLoadError,
+    CloudStateVersionError,
+    ProtectionIntentStatus,
+    ProtectionOperationKind,
+    ProtectionOperationPhase,
+    ProtectionReasonCode,
+    ProtectionState,
     cloud_status_payload,
     load_state,
     save_state,
@@ -28,9 +38,17 @@ def test_state_round_trip_is_atomic_and_owner_only(tmp_path):
         last_verify_ok=False,
         last_verify_snapshot_id="01VERIFY",
         last_verify_error="hash mismatch",
+        protection_enabled_at=now,
+        protection_state=ProtectionState.ATTENTION_REQUIRED,
+        pending_protection_intent_id="intent-1",
+        pending_protection_status=ProtectionIntentStatus.RUNNING,
+        last_operation_id="operation-1",
+        last_operation_kind=ProtectionOperationKind.VERIFY,
+        last_operation_phase=ProtectionOperationPhase.FAILED,
+        last_error_code=ProtectionReasonCode.VERIFICATION_FAILED,
     )
 
-    save_state(store_id, state, state_dir=tmp_path)
+    save_state(store_id, state, memory_dir=tmp_path / "memory", state_dir=tmp_path)
 
     path = state_path(store_id, state_dir=tmp_path)
     assert load_state(store_id, state_dir=tmp_path) == state
@@ -43,11 +61,13 @@ def test_update_preserves_unmodified_fields(tmp_path):
     save_state(
         store_id,
         CloudState(last_upload_snapshot_id="old", last_verify_ok=True),
+        memory_dir=tmp_path / "memory",
         state_dir=tmp_path,
     )
 
     updated = update_state(
         store_id,
+        memory_dir=tmp_path / "memory",
         state_dir=tmp_path,
         last_upload_error="offline",
     )
@@ -65,30 +85,157 @@ def test_update_preserves_future_state_fields(tmp_path):
         encoding="utf-8",
     )
 
-    update_state(store_id, state_dir=tmp_path, last_upload_error="retrying")
+    update_state(
+        store_id,
+        memory_dir=tmp_path / "memory",
+        state_dir=tmp_path,
+        last_upload_error="retrying",
+    )
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["last_synced_snapshot_id"] == "future-e06"
     assert payload["last_upload_error"] == "retrying"
 
 
+def test_legacy_state_migrates_success_fields_and_protection_state(tmp_path):
+    store_id = str(uuid.uuid4())
+    now = "2026-07-13T12:00:00+00:00"
+    path = state_path(store_id, state_dir=tmp_path)
+    path.write_text(
+        json.dumps(
+            {
+                "last_upload_at": now,
+                "last_upload_snapshot_id": "01VERIFIED",
+                "last_verify_at": now,
+                "last_verify_ok": True,
+                "last_verify_snapshot_id": "01VERIFIED",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = load_state(store_id, state_dir=tmp_path)
+
+    assert state.schema_version == CURRENT_CLOUD_STATE_SCHEMA_VERSION
+    assert state.protection_state is ProtectionState.PROTECTED
+    assert state.last_successful_upload_at == state.last_upload_at
+    assert state.last_successful_backup_snapshot_id == "01VERIFIED"
+    assert state.last_successful_verify_at == state.last_verify_at
+    assert state.last_verified_snapshot_id == "01VERIFIED"
+
+
+def test_newer_schema_is_readable_but_an_older_writer_refuses_to_overwrite_it(tmp_path):
+    store_id = str(uuid.uuid4())
+    path = state_path(store_id, state_dir=tmp_path)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 99,
+                "protection_state": "future_safe_state",
+                "last_operation_kind": "future_operation",
+                "future_c03_field": {"head": "01HEAD"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    before = path.read_bytes()
+    state = load_state(store_id, state_dir=tmp_path)
+
+    assert state.schema_version == 99
+    assert state.protection_state == "future_safe_state"
+    assert state.last_operation_kind == "future_operation"
+    assert state.extra["future_c03_field"] == {"head": "01HEAD"}
+    with pytest.raises(CloudStateVersionError, match="newer than this client's schema"):
+        update_state(
+            store_id,
+            memory_dir=tmp_path / "memory",
+            state_dir=tmp_path,
+            last_upload_error="offline",
+        )
+    with pytest.raises(CloudStateVersionError, match="newer than this client's schema"):
+        save_state(
+            store_id,
+            CloudState(last_upload_error="offline"),
+            memory_dir=tmp_path / "memory",
+            state_dir=tmp_path,
+        )
+
+    assert path.read_bytes() == before
+
+
 def test_two_stores_never_share_state(tmp_path):
     first = str(uuid.uuid4())
     second = str(uuid.uuid4())
 
-    update_state(first, state_dir=tmp_path, last_upload_snapshot_id="first")
-    update_state(second, state_dir=tmp_path, last_upload_snapshot_id="second")
+    update_state(
+        first,
+        memory_dir=tmp_path / "first-memory",
+        state_dir=tmp_path,
+        last_upload_snapshot_id="first",
+    )
+    update_state(
+        second,
+        memory_dir=tmp_path / "second-memory",
+        state_dir=tmp_path,
+        last_upload_snapshot_id="second",
+    )
 
     assert load_state(first, state_dir=tmp_path).last_upload_snapshot_id == "first"
     assert load_state(second, state_dir=tmp_path).last_upload_snapshot_id == "second"
     assert state_path(first, state_dir=tmp_path) != state_path(second, state_dir=tmp_path)
 
 
-def test_missing_or_malformed_state_loads_empty(tmp_path):
+def test_missing_state_loads_empty_but_malformed_state_fails_closed(tmp_path):
     store_id = str(uuid.uuid4())
     assert load_state(store_id, state_dir=tmp_path) == CloudState()
-    state_path(store_id, state_dir=tmp_path).write_text("{not-json", encoding="utf-8")
-    assert load_state(store_id, state_dir=tmp_path) == CloudState()
+    path = state_path(store_id, state_dir=tmp_path)
+    path.write_text("{not-json", encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(CloudStateLoadError, match="is invalid"):
+        load_state(store_id, state_dir=tmp_path)
+    with pytest.raises(CloudStateLoadError, match="is invalid"):
+        update_state(
+            store_id,
+            memory_dir=tmp_path / "memory",
+            state_dir=tmp_path,
+            last_upload_error="must not replace corrupt state",
+        )
+    with pytest.raises(CloudStateLoadError, match="is invalid"):
+        save_state(
+            store_id,
+            CloudState(last_upload_error="must not replace corrupt state"),
+            memory_dir=tmp_path / "memory",
+            state_dir=tmp_path,
+        )
+
+    assert path.read_bytes() == before
+
+
+def test_one_invalid_field_cannot_erase_durable_protection_state(tmp_path):
+    store_id = str(uuid.uuid4())
+    path = state_path(store_id, state_dir=tmp_path)
+    payload = {
+        "schema_version": 2,
+        "last_upload_at": 1_753_000_000,
+        "protection_enabled_at": "2026-07-13T12:00:00+00:00",
+        "protection_state": "protected",
+        "pending_protection_intent_id": str(uuid.uuid4()),
+        "future_c03_field": {"head": "01HEAD"},
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(CloudStateLoadError, match="timestamps must be ISO-8601"):
+        update_state(
+            store_id,
+            memory_dir=tmp_path / "memory",
+            state_dir=tmp_path,
+            last_verify_error="routine writer",
+        )
+
+    assert path.read_bytes() == before
 
 
 def test_state_path_rejects_path_traversal(tmp_path):
@@ -115,6 +262,7 @@ def test_cloud_status_derives_stale_and_verification_warnings(tmp_path):
             last_verify_ok=False,
             last_verify_error="bundle truncated",
         ),
+        memory_dir=memory_dir,
         state_dir=tmp_path / "state",
     )
     settings = Settings(
@@ -133,26 +281,50 @@ def test_cloud_status_derives_stale_and_verification_warnings(tmp_path):
     assert payload["store_id"] == store_id
     assert payload["last_upload_age_seconds"] == 49 * 3600
     assert payload["entitlement"] == "expired"
+    assert "protection_state" not in payload
+    assert payload["state_error"] is None
     assert any("stale" in warning for warning in payload["warnings"])
     assert any("bundle truncated" in warning for warning in payload["warnings"])
 
 
+def test_cloud_status_reports_corrupt_state_without_claiming_protection(tmp_path):
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    store_id = str(uuid.uuid4())
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    path = state_path(store_id, state_dir=tmp_path / "state")
+    path.parent.mkdir(parents=True)
+    path.write_text('{"protection_state":"protected","last_verify_ok":"yes"}', encoding="utf-8")
+    settings = Settings(memory_dir=memory_dir, cloud_backup_enabled=True)
+
+    payload = cloud_status_payload(
+        settings,
+        entitlement="active",
+        state_dir=tmp_path / "state",
+    )
+
+    assert payload["state_error"] is not None
+    assert "protection_state" not in payload
+    assert any("was not overwritten" in warning for warning in payload["warnings"])
+    assert json.loads(path.read_text(encoding="utf-8"))["protection_state"] == "protected"
+
+
 def test_cloud_state_json_contains_only_plain_metadata(tmp_path):
     store_id = str(uuid.uuid4())
-    save_state(store_id, CloudState(last_upload_snapshot_id="01SAFE"), state_dir=tmp_path)
+    save_state(
+        store_id,
+        CloudState(last_upload_snapshot_id="01SAFE"),
+        memory_dir=tmp_path / "memory",
+        state_dir=tmp_path,
+    )
 
     payload = json.loads(state_path(store_id, state_dir=tmp_path).read_text(encoding="utf-8"))
 
     assert payload["last_upload_snapshot_id"] == "01SAFE"
-    assert set(payload) == {
-        "last_upload_at",
-        "last_upload_snapshot_id",
-        "last_upload_error",
-        "last_verify_at",
-        "last_verify_ok",
-        "last_verify_snapshot_id",
-        "last_verify_error",
-    }
+    assert set(payload) == set(CloudState().to_dict())
+    serialized = json.dumps(payload).lower()
+    for forbidden in ("account_token", "presigned", "age-secret-key", "recovery_phrase"):
+        assert forbidden not in serialized
 
 
 def test_admin_cloud_status_is_thin_wrapper(monkeypatch):

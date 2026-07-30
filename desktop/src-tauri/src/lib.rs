@@ -240,6 +240,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building the Ormah desktop app")
         .run(|_app_handle, _event| {
+            // macOS fires Reopen when the Dock icon is clicked while the app
+            // has no visible windows (e.g. after closing to tray) — without
+            // this, only the tray menu's "Open Ormah" item can bring the
+            // window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                commands::open_graph(_app_handle);
+            }
+
             // Server is a daemon — it outlives the app process intentionally.
         });
 }

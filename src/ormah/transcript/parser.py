@@ -363,3 +363,17 @@ def parse_transcript(
         source=source,
         capped=_capped,
     )
+
+
+def should_rewind(result: TranscriptResult, start_offset: int) -> bool:
+    """Gate the leading-orphan recovery on forward progress (ADR-0003, bug #149).
+
+    Rewind (re-parse from offset 0) only when the flagged parse made no forward
+    progress — the orphan consumed the whole slice, i.e. a genuine legacy
+    mid-response cursor. When the safe boundary still advanced past the cursor,
+    the orphan is a false positive (e.g. an "API Error" assistant record right
+    after a terminal stop_reason): the fragment is dropped and the cursor moves
+    on. Rewinding there re-ingests the whole file on every tick forever, because
+    the trigger is a permanent property of the file's bytes.
+    """
+    return result.leading_orphan and result.safe_end_offset <= start_offset

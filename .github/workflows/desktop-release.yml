@@ -35,6 +35,17 @@ jobs:
             exit 1
           fi
 
+      - name: Verify bundled Ormah release
+        shell: bash
+        run: |
+          PY_VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)
+          PYPI_VERSION=$(curl -fsSL https://pypi.org/pypi/ormah/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
+          if [ "$PY_VERSION" != "$PYPI_VERSION" ]; then
+            echo "Desktop embeds ormah $PY_VERSION, but PyPI latest is $PYPI_VERSION" >&2
+            echo "Publish the Python release before tagging the desktop app." >&2
+            exit 1
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -68,13 +79,88 @@ jobs:
         working-directory: desktop/src-tauri
         run: cargo tauri icon icons/icon.png
 
+      # `cargo tauri build` signs with whatever identity is in the keychain
+      # search path but does not import a certificate itself — that's a
+      # separate, explicit step. The keychain is scoped to this one job on an
+      # ephemeral runner, so its unlock password only needs to be unique for
+      # the run, not a secret in its own right.
+      - name: Import Apple Developer certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
+          rm certificate.p12
+
+      # Notarization authenticates with an App Store Connect API key (JWT signed
+      # locally), not the Apple ID + app-specific-password flow — the latter
+      # routes through an interactive-auth endpoint that fails intermittently on
+      # CI runners (NSURLErrorDomain -1009 "no network route" during upload).
+      - name: Stage App Store Connect API key
+        if: runner.os == 'macOS'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: echo "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+
+      # macos-14 runners have a known mDNSResponder bug: sustained network
+      # activity (notarytool's long-poll against Apple's notary API) exhausts
+      # the resolver's connection pool and it wedges, so every DNS lookup
+      # after that fails with "no network route" — this reproduced twice,
+      # ~48min in, regardless of notarization auth method, which is what
+      # points at the runner's DNS rather than our credentials. Periodically
+      # restarting the resolver during the build keeps it from wedging.
+      # See https://github.com/actions/runner-images/issues/9628
+      - name: Start DNS resolver keepalive
+        if: runner.os == 'macOS'
+        run: |
+          ( while true; do
+              sleep 180
+              sudo dscacheutil -flushcache
+              sudo killall -HUP mDNSResponder 2>/dev/null || true
+            done ) &
+          echo "DNS_KEEPALIVE_PID=$!" >> "$GITHUB_ENV"
+
       - name: Build and bundle (macOS)
         if: runner.os == 'macOS'
         working-directory: desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: cargo tauri build --target ${{ matrix.target }}
+
+      # tauri-bundler notarizes and staples the .app, then builds the .dmg
+      # around it and code-signs the dmg container — but never submits the
+      # dmg itself for notarization. Without this, Gatekeeper rejects the
+      # downloaded dmg on open (spctl: "Unnotarized Developer ID") even
+      # though the .app inside is validly notarized.
+      - name: Notarize and staple dmg (macOS)
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+        run: |
+          DMG=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -name '*.dmg')
+          xcrun notarytool submit "$DMG" --key-id "$APPLE_API_KEY" --key "$APPLE_API_KEY_PATH" --issuer "$APPLE_API_ISSUER" --wait
+          xcrun stapler staple "$DMG"
+
+      - name: Stop DNS resolver keepalive
+        if: runner.os == 'macOS' && always()
+        run: kill "$DNS_KEEPALIVE_PID" 2>/dev/null || true
 
       - name: Build and bundle (Linux)
         if: runner.os == 'Linux'

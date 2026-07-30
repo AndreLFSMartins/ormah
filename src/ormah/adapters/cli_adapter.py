@@ -26,7 +26,7 @@ def _api(fn):
     try:
         return fn()
     except httpx.ConnectError:
-        print("Ormah server not running. Start it with: ormah server start", file=sys.stderr)
+        print("Ormah server not running. Start it with: ormah server start -d", file=sys.stderr)
         sys.exit(1)
     except httpx.HTTPStatusError as e:
         print(f"Error: {e.response.status_code} {e.response.text}", file=sys.stderr)
@@ -284,9 +284,27 @@ def cmd_whisper_inject(args):
             r = c.post("/agent/whisper", json=body)
             r.raise_for_status()
             text = r.json().get("text", "")
+    except httpx.ConnectError:
+        warning_key = f"server-down-warning:{session_id or 'unknown'}"
+        cursors = _load_cursors()
+        if not cursors.get(warning_key):
+            cursors[warning_key] = True
+            _save_cursors(cursors)
+            print(json.dumps({
+                "systemMessage": (
+                    "Ormah's backend is unavailable. Automatic memory recall and capture "
+                    "are paused. Run `ormah server start -d` to restore it."
+                )
+            }))
+        sys.exit(0)
     except Exception:
         # Server down, timeout, or any error — exit silently
         sys.exit(0)
+
+    warning_key = f"server-down-warning:{session_id or 'unknown'}"
+    cursors = _load_cursors()
+    if cursors.pop(warning_key, None) is not None:
+        _save_cursors(cursors)
 
     if not text.strip():
         text = ""
@@ -452,15 +470,24 @@ def cmd_whisper_store(args):
     if start_offset >= path.stat().st_size:
         sys.exit(0)
 
-    from ormah.transcript.parser import parse_transcript
+    from ormah.transcript.parser import parse_transcript, should_rewind
 
     try:
         result = parse_transcript(path, start_offset=start_offset)
-        if result.leading_orphan:
-            # Cursor left mid-response by an older version: re-parse from the start to
-            # recover the dropped tail with its prompt (one-time full re-extract).
+        if should_rewind(result, start_offset):
+            # Orphan with NO forward progress: a genuine cursor left mid-response by an
+            # older version — re-parse from the start to recover the dropped tail with its
+            # prompt. With forward progress the orphan is a false positive (ADR-0003,
+            # #149): drop the fragment and advance, or every hook fire re-extracts the
+            # whole transcript.
+            original_offset = start_offset
             start_offset = 0
             result = parse_transcript(path, start_offset=0)
+            if result.safe_end_offset <= original_offset:
+                # The rewind made no progress: the "orphan" tail is a still-open in-flight
+                # response, not a recoverable one. ADR-0003: a no-progress transcript
+                # parks, it does not re-extract the closed prefix on every hook fire.
+                sys.exit(0)
     except Exception:
         sys.exit(0)
 
