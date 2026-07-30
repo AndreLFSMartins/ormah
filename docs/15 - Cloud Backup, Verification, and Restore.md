@@ -517,8 +517,17 @@ pairing improves the new-machine experience without giving the service the plain
 | Sync | Converge changes between machines | Eventually, after merge/publication | Yes, using CAS |
 
 This separation is intentional. A scheduled backup must never silently publish itself as the latest
-cross-machine truth. In code, `run_cloud_backup()` calls `finalize_upload()` without
-`advance_head`.
+cross-machine truth. `CloudProtectionService.backup_now()` calls `finalize_upload()` without
+`advance_head`, and the scheduler's `run_cloud_backup()` is now only a guarded adapter over that
+shared service.
+
+`CloudProtectionService` is the reusable Python owner of immediate backup and restore verification;
+`cloud_status_payload()` is the single status derivation used by CLI, local REST, and UI consumers.
+These entry points keep state transitions and failure recording out of presentation adapters. Direct
+`backup_now()` means run now; only the scheduler passes `only_if_due=true`. Manual verification is
+still permitted after protection is stopped because retained downloads are never entitlement- or
+scheduler-gated. A successful verification marks the store protected only when it verifies the
+latest successful backup, never merely because an older recovery point was restorable.
 
 ## Current experience versus the planned product experience
 
