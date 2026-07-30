@@ -72,6 +72,31 @@ def _make_jsonl(path: Path, user_turns: int = 6) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def _write_orphan_tail_jsonl(path: Path, pairs: int = 6, pad: int = 600) -> None:
+    """#154 fixture: `pairs` closed user/assistant pairs, one final closed pair, then a
+    TRAILING assistant(end_turn) WITH text and no user after it. Parsed from any cursor
+    sitting just before the trailing record it is a leading orphan with no forward
+    progress (rewind fires); parsed from 0 the same record CLOSES (safe boundary reaches
+    EOF), so the uncapped probe authorises recovery. With flush_bytes below the file size
+    the capped drain then lands BELOW the original cursor — the #154 loop trigger."""
+    filler = "x" * pad
+    lines = []
+    for i in range(pairs):
+        lines.append({"type": "user",
+                      "message": {"role": "user", "content": f"User {i} {filler}"}})
+        lines.append({"type": "assistant",
+                      "message": {"role": "assistant", "stop_reason": "end_turn",
+                                  "content": [{"type": "text", "text": f"Answer {i} {filler}"}]}})
+    lines.append({"type": "user", "message": {"role": "user", "content": f"Final ask {filler}"}})
+    lines.append({"type": "assistant",
+                  "message": {"role": "assistant", "stop_reason": "end_turn",
+                              "content": [{"type": "text", "text": f"Final answer {filler}"}]}})
+    lines.append({"type": "assistant",
+                  "message": {"role": "assistant", "stop_reason": "end_turn",
+                              "content": [{"type": "text", "text": f"Trailing orphan {filler}"}]}})
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+
 def _mark_idle(path: Path) -> None:
     """Backdate mtime so _ingest_session treats the transcript as finished (idle flush).
 
@@ -3655,4 +3680,119 @@ def test_rewind_recovery_honours_the_accepted_boundary(engine, tmp_path, caplog)
     assert "A LATER prompt appended after the nudge" not in prompt     # past the ceiling
     assert "A later answer nobody nudged" not in prompt               # never ingested
     assert state[rel]["end_offset"] <= boundary
+
+
+class TestAboveCapOrphanRecovery:
+    """#154 above-flush_bytes class: recovery must never move the cursor backward, and
+    an un-drainable tail is abandoned EXPLICITLY (skipped_slices), not looped over."""
+
+    def test_cursor_never_retreats_and_abandons_explicitly(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "loop154.jsonl"
+        _write_orphan_tail_jsonl(jsonl)          # ~10 KB total
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        rel = str(jsonl.relative_to(watch_dir))
+        state: dict = {}
+        offsets = []
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as llm:
+            for _ in range(12):
+                _ingest_session(engine, jsonl, state, watch_dir,
+                                min_turns=5, flush_bytes=2000)
+                offsets.append(state[rel]["end_offset"])
+                _mark_idle(jsonl)                # ingest re-stats; keep it idle
+        for prev, cur in zip(offsets, offsets[1:]):
+            assert cur >= prev, f"cursor retreated: {offsets}"
+        # The un-drainable tail is abandoned explicitly: cursor lands at EOF with a
+        # durable loss record, and the LLM is never called again afterwards.
+        assert offsets[-1] == size
+        skipped = state[rel]["skipped_slices"]
+        assert len(skipped) == 1
+        assert skipped[0]["reason"] == "orphan_above_cap"
+        assert skipped[0]["end"] == size
+        assert skipped[0]["start"] < size
+        assert llm.call_count <= 8, f"re-extraction loop: {llm.call_count} LLM calls"
+
+    def test_small_file_recovery_is_still_one_shot(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "oneshot.jsonl"
+        _write_orphan_tail_jsonl(jsonl, pairs=1, pad=10)   # well below flush_bytes
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        last_line_bytes = len((jsonl.read_text().splitlines()[-1] + "\n").encode())
+        orphan_start = size - last_line_bytes
+        rel = str(jsonl.relative_to(watch_dir))
+        # A legacy mid-response cursor parked right before the trailing orphan record.
+        state = {rel: {"hash": "stale", "end_offset": orphan_start}}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            result = _ingest_session(engine, jsonl, state, watch_dir,
+                                     min_turns=1, flush_bytes=60000)
+        assert result == IngestResult.OK
+        assert state[rel]["end_offset"] == size   # recovered to EOF in one slice, no retreat
+        assert not state[rel].get("skipped_slices")   # nothing was abandoned
+
+    def test_run_job_completes_abandoned_orphan_without_dead_letter(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "loop154.jsonl"
+        _write_orphan_tail_jsonl(jsonl)
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        rel = str(jsonl.relative_to(watch_dir))
+        handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool",
+                                      min_turns=5, idle_threshold=30.0)
+        handler.flush_bytes = 2000
+        handler.spool.enqueue(jsonl, boundary=size, reason="drain")
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _drain_all(handler)
+            _mark_idle(jsonl)
+            _drain_all(handler)          # second pass drains any capped continuations
+        assert _spool_idle(handler.spool), "job neither completed nor drained"
+        entry = handler._state[rel]
+        assert entry["end_offset"] == size
+        # The EXPLICIT path leaves the durable record; the frozen-prefix side effect
+        # (_mark_frozen_prefix_consumed) would have advanced the cursor WITHOUT it.
+        assert entry["skipped_slices"][0]["reason"] == "orphan_above_cap"
+
+    def test_abandonment_with_unclosed_tail_composes_with_frozen_prefix(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "loop154tail.jsonl"
+        _write_orphan_tail_jsonl(jsonl)
+        # An UNCLOSED in-flight record after the closing orphan: probe_safe_end < size.
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": None,
+                            "content": [{"type": "text", "text": "still streaming"}]},
+            }) + "\n")
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        rel = str(jsonl.relative_to(watch_dir))
+        handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool",
+                                      min_turns=5, idle_threshold=30.0)
+        handler.flush_bytes = 2000
+        handler.spool.enqueue(jsonl, boundary=size, reason="drain")
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _drain_all(handler)
+            _mark_idle(jsonl)
+            _drain_all(handler)
+        entry = handler._state[rel]
+        # The abandonment recorded ITS range durably...
+        skipped = entry["skipped_slices"]
+        assert skipped[0]["reason"] == "orphan_above_cap"
+        assert skipped[0]["end"] < size            # == probe_safe_end, before the unclosed tail
+        # ...and the residual tail followed the standard frozen-prefix path (cursor at the
+        # accepted boundary, job dead-lettered as no_safe_boundary — pre-existing behavior).
+        assert entry["end_offset"] == size
+        assert list((handler.spool.root / "failed").glob("*.json")), \
+            "residual unclosed tail must be dead-lettered, not silently completed"
+        errs = list((handler.spool.root / "failed").glob("*.error"))
+        assert errs and "no_safe_boundary" in errs[0].read_text()
 

@@ -864,6 +864,7 @@ def _ingest_session(
     # Deriving force_flush from `boundary is not None` leaked the bypass to Observer/reconcile
     # jobs (which also carry a boundary), fragmenting active sessions. The caller now passes
     # force_flush from the job's reason; boundary keeps pinning the ceiling for all jobs.
+    abandon_range: tuple[int, int] | None = None
     try:
         result = parse_transcript(
             path, start_offset=prev_offset, max_bytes=flush_bytes, stop_offset=boundary
@@ -888,14 +889,59 @@ def _ingest_session(
                 # in-flight response, not a recoverable one. ADR-0003: a no-progress
                 # transcript parks, it does not re-extract the closed prefix every tick.
                 return IngestResult.NO_PROGRESS
+            # Abandonment target (council R2/R3): the probe's CLOSED-turn boundary.
+            # Line-aligned by construction and never past the accepted stop_offset —
+            # unlike raw min(size, boundary) (mid-write boundary can bisect a record)
+            # or end_offset (f.tell() can overrun the ceiling on a straddling record).
+            probe_safe_end = result.safe_end_offset
             # There is something to recover: drain capped as usual so the ingest slice
             # honours flush_bytes; later ticks continue incrementally from the new cursor.
             result = parse_transcript(
                 path, start_offset=0, max_bytes=flush_bytes, stop_offset=boundary
             )
+            if result.safe_end_offset <= original_offset:
+                # The capped drain cannot get PAST the original cursor in one slice.
+                # Committing it would move the cursor backward; later ticks would climb
+                # back to the orphan and rewind again — a permanent re-extraction loop
+                # (#154 above-flush_bytes class, measured at 5,342 re-ingests of one
+                # file). A bare NO_PROGRESS is no better: _run_job would treat the idle
+                # unsafe tail as frozen and bump the cursor to EOF by SIDE EFFECT, with
+                # no loss record (council R1). Abandon EXPLICITLY: decided here, but
+                # COMMITTED below, outside this try — a storage error must surface as
+                # itself, never as a fake parse failure -> NO_PROGRESS (council R3).
+                abandon_range = (original_offset, probe_safe_end)
     except Exception as e:  # noqa: BLE001 - transcript parsers can raise provider-specific errors
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return IngestResult.NO_PROGRESS
+
+    if abandon_range is not None:
+        abandon_from, abandon_to = abandon_range
+        if abandon_to <= abandon_from:
+            return IngestResult.NO_PROGRESS  # nothing safely closed past the cursor
+        skip_entry = dict(existing or {})
+        skipped_slices = list(skip_entry.get("skipped_slices", []))
+        skipped_slices.append({
+            "start": abandon_from,
+            "end": abandon_to,
+            "source_hash": h,
+            "reason": "orphan_above_cap",
+            "at": datetime.now(UTC).isoformat(),
+        })
+        skip_entry.update({
+            "hash": h,
+            "end_offset": abandon_to,
+            "skipped_slices": skipped_slices,
+        })
+        skip_entry.pop("extract_fail_offset", None)
+        skip_entry.pop("extract_fail_count", None)
+        _commit_state(state, rel, skip_entry, state_lock, watch_dir)
+        logger.error(
+            "Session watcher ABANDONING above-cap orphan recovery for %s: "
+            "cursor %d->%d, %d bytes recorded in skipped_slices "
+            "(observable data loss)",
+            rel, abandon_from, abandon_to, abandon_to - abandon_from,
+        )
+        return IngestResult.OK
 
     # Commit only the "safe" payload — the closed boundary, content proven complete by a
     # terminal stop_reason (Claude Code), a Codex task_complete event, or a following user
