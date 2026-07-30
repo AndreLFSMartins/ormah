@@ -3833,14 +3833,22 @@ class TestAboveCapOrphanRecovery:
         assert skipped[0]["end"] == size
         assert skipped[0]["end"] - skipped[0]["start"] == last_line_bytes
 
-    def test_abandonment_commit_oserror_propagates_not_swallowed(self, engine, tmp_path, monkeypatch):
+    def test_abandonment_commit_oserror_propagates(self, engine, tmp_path, monkeypatch):
         """council R3: the abandonment COMMIT lives OUTSIDE the broad parse `try`, so a
         storage failure must surface as itself -- never be swallowed by the `except
         Exception` there and returned as NO_PROGRESS, which would route a valid transcript
         into frozen-prefix/dead-letter handling. Patches `_commit_state`, not `_save_state`:
         `_commit_state` is the exact call the abandonment block makes, so this pins the call
         site itself; `_save_state` sits one level deeper, inside `_commit_state`'s own
-        lock-branching, which is an implementation detail this test should not depend on."""
+        lock-branching, which is an implementation detail this test should not depend on.
+
+        The stub records what it was HANDED and asserts on it (not just that SOME OSError
+        propagated): every `_commit_state` call in `_ingest_session` sits outside the parse
+        `try` (abandonment, quarantine, happy path alike), so a bare `pytest.raises(OSError)`
+        would stay green even if this fixture stopped reaching the abandonment branch at all
+        -- e.g. once Task 2 adds its `allow_rewind` preamble. The positional prefix matches
+        `_commit_state(state, rel, entry, ...)`; the `*args, **kwargs` tail absorbs whatever
+        Task 2 appends (e.g. a keyword-only `allow_rewind`) without breaking this pin."""
         watch_dir = tmp_path / "projects"
         proj = watch_dir / "-test-space"
         proj.mkdir(parents=True)
@@ -3853,10 +3861,15 @@ class TestAboveCapOrphanRecovery:
         rel = str(jsonl.relative_to(watch_dir))
         state = {rel: {"hash": "stale", "end_offset": orphan_start}}
 
-        def _raise_oserror(*args, **kwargs):
+        calls = []
+
+        def _raise_oserror(state_, rel_, entry, *args, **kwargs):
+            calls.append(entry)
             raise OSError("disk full")
 
         monkeypatch.setattr("ormah.background.session_watcher._commit_state", _raise_oserror)
         with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), pytest.raises(OSError):
             _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_bytes=2000)
+        assert calls, "abandonment commit was never reached"
+        assert calls[-1]["skipped_slices"][-1]["reason"] == "orphan_above_cap"
 
