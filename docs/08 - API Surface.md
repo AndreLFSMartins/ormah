@@ -152,6 +152,27 @@ importance_scorer
 
 `index_updater` is part of the run-all path even though it is not a standalone imported background module in `_TASK_RUNNERS`.
 
+## Account Billing Routes
+
+**Code**: `src/ormah/api/routes_account.py`
+
+These loopback routes are thin adapters over the authenticated Ormah Cloud client:
+
+- `GET /admin/account/offer`
+- `POST /admin/account/checkout`
+- `POST /admin/account/portal`
+
+They require a locally configured Ormah account token. Checkout accepts only a canonical
+`protection_intent_id` UUIDv4; callers cannot supply an email, Stripe customer, price, or return
+URL. Offer responses contain only `name`, `unit_amount`, `currency`, `interval`, and
+`interval_count`. Checkout and Portal return a short-lived, purpose-specific `url`; the cloud
+client accepts only exact `checkout.stripe.com` or `billing.stripe.com` HTTPS hosts with no
+embedded credentials.
+
+The routes never run backup or verification work and never return account tokens or Stripe
+provider identifiers. Stripe webhooks and reconciliation remain authoritative for entitlement;
+receiving a Checkout URL does not activate cloud backup.
+
 ## Ingest Routes
 
 **Code**: `src/ormah/api/routes_ingest.py`

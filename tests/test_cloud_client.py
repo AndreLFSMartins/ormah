@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -37,9 +38,7 @@ def test_auth_and_entitlement_requests_match_service_shapes():
 
     with CloudClient(BASE_URL) as client:
         client.request_code("Person@Example.com")
-        assert client.verify_code(
-            "Person@Example.com", "123456", device_id, "Test laptop"
-        ) == TOKEN
+        assert client.verify_code("Person@Example.com", "123456", device_id, "Test laptop") == TOKEN
         assert client.get_entitlements()["plan_status"] == "active"
 
     assert request_route.calls[0].request.content == b'{"email":"person@example.com"}'
@@ -96,9 +95,7 @@ def test_upload_blob_and_head_methods_match_service_shapes():
             json={"upload_id": "upload", "snapshot_id": "snapshot", "put_url": "https://put"},
         )
     )
-    finalize_route = respx.post(
-        f"{BASE_URL}/stores/{store_id}/uploads/upload/finalize"
-    ).mock(
+    finalize_route = respx.post(f"{BASE_URL}/stores/{store_id}/uploads/upload/finalize").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -224,9 +221,7 @@ def test_upload_rejects_bundle_above_negotiated_limit_before_reservation():
 
 @respx.mock
 def test_network_errors_are_wrapped():
-    respx.get(f"{BASE_URL}/me/entitlements").mock(
-        side_effect=httpx.ConnectError("offline")
-    )
+    respx.get(f"{BASE_URL}/me/entitlements").mock(side_effect=httpx.ConnectError("offline"))
     with CloudClient(BASE_URL, TOKEN) as client:
         with pytest.raises(CloudError, match="Could not reach"):
             client.get_entitlements()
@@ -259,10 +254,291 @@ def test_corrupt_device_id_fails_closed(tmp_path):
         get_or_create_device_id(path)
 
 
-def test_client_factory_reads_settings():
-    client = client_from_settings(
-        SimpleNamespace(cloud_api_url=BASE_URL, account_token=TOKEN)
+@respx.mock
+def test_get_billing_offer_returns_safe_display_metadata():
+    respx.get(f"{BASE_URL}/billing/offer").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "Ormah Protection",
+                "unit_amount": 900,
+                "currency": "USD",
+                "interval": "month",
+                "interval_count": 1,
+                "stripe_price_id": "price_internal_do_not_expose",
+            },
+        )
     )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        offer = client.get_billing_offer()
+
+    assert offer == {
+        "name": "Ormah Protection",
+        "unit_amount": 900,
+        "currency": "usd",
+        "interval": "month",
+        "interval_count": 1,
+    }
+    assert "stripe_price_id" not in offer
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {
+            "name": "",
+            "unit_amount": 900,
+            "currency": "usd",
+            "interval": "month",
+            "interval_count": 1,
+        },
+        {
+            "name": "Ormah",
+            "unit_amount": "900",
+            "currency": "usd",
+            "interval": "month",
+            "interval_count": 1,
+        },
+        {
+            "name": "Ormah",
+            "unit_amount": -1,
+            "currency": "usd",
+            "interval": "month",
+            "interval_count": 1,
+        },
+        {
+            "name": "Ormah",
+            "unit_amount": True,
+            "currency": "usd",
+            "interval": "month",
+            "interval_count": 1,
+        },
+        {
+            "name": "Ormah",
+            "unit_amount": 900,
+            "currency": "us",
+            "interval": "month",
+            "interval_count": 1,
+        },
+        {
+            "name": "Ormah",
+            "unit_amount": 900,
+            "currency": "u\u0455d",
+            "interval": "month",
+            "interval_count": 1,
+        },
+        {
+            "name": "Ormah",
+            "unit_amount": 900,
+            "currency": "usd",
+            "interval": "fortnight",
+            "interval_count": 1,
+        },
+        {
+            "name": "Ormah",
+            "unit_amount": 900,
+            "currency": "usd",
+            "interval": "month",
+            "interval_count": 0,
+        },
+    ],
+)
+@respx.mock
+def test_get_billing_offer_fails_closed_on_malformed_payload(payload):
+    respx.get(f"{BASE_URL}/billing/offer").mock(return_value=httpx.Response(200, json=payload))
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError, match="billing offer"):
+            client.get_billing_offer()
+
+
+@respx.mock
+def test_create_checkout_session_sends_only_intent_id():
+    intent_id = str(uuid.uuid4())
+    expires_at = int(time.time()) + 3600
+    route = respx.post(f"{BASE_URL}/billing/checkout-session").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "checkout_required",
+                "url": "https://checkout.stripe.com/c/pay/cs_test_abc",
+                "expires_at": expires_at,
+            },
+        )
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        result = client.create_checkout_session(intent_id)
+
+    assert result == {
+        "status": "checkout_required",
+        "url": "https://checkout.stripe.com/c/pay/cs_test_abc",
+        "expires_at": expires_at,
+    }
+    assert route.calls[0].request.content == (
+        b'{"protection_intent_id":"' + intent_id.encode() + b'"}'
+    )
+
+
+@respx.mock
+def test_create_checkout_session_rejects_non_uuid_intent():
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError, match="protection_intent_id"):
+            client.create_checkout_session("not-a-uuid")
+
+
+@pytest.mark.parametrize("status", ["already_subscribed", "subscription_pending"])
+@respx.mock
+def test_create_checkout_session_handles_non_checkout_statuses(status):
+    intent_id = str(uuid.uuid4())
+    respx.post(f"{BASE_URL}/billing/checkout-session").mock(
+        return_value=httpx.Response(200, json={"status": status})
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        result = client.create_checkout_session(intent_id)
+
+    assert result == {"status": status}
+    assert "url" not in result
+    assert "expires_at" not in result
+
+
+@respx.mock
+def test_create_checkout_session_rejects_unrecognized_status():
+    intent_id = str(uuid.uuid4())
+    respx.post(f"{BASE_URL}/billing/checkout-session").mock(
+        return_value=httpx.Response(200, json={"status": "mystery_status"})
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError, match="checkout status"):
+            client.create_checkout_session(intent_id)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "checkout_required"},
+        {"status": "checkout_required", "url": "https://checkout.stripe.com/c/x"},
+        {"status": "checkout_required", "expires_at": 4_000_000_000},
+        {
+            "status": "checkout_required",
+            "url": "https://checkout.stripe.com/c/x",
+            "expires_at": "not-a-timestamp",
+        },
+        {
+            "status": "checkout_required",
+            "url": "https://checkout.stripe.com/c/x",
+            "expires_at": 0,
+        },
+    ],
+)
+@respx.mock
+def test_create_checkout_session_fails_closed_on_malformed_checkout_required(payload):
+    intent_id = str(uuid.uuid4())
+    respx.post(f"{BASE_URL}/billing/checkout-session").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError):
+            client.create_checkout_session(intent_id)
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://checkout.stripe.com/c/pay/cs_test",
+        "https://checkout.stripe.com:8443/c/pay/cs_test",
+        "https://evilcheckout.stripe.com/c/pay/cs_test",
+        "https://checkout.stripe.com.evil.com/c/pay/cs_test",
+        "https://attacker@checkout.stripe.com/c/pay/cs_test",
+        "https://user:pass@checkout.stripe.com/c/pay/cs_test",
+        "https://billing.stripe.com/c/pay/cs_test",
+        "https://[invalid/c/pay/cs_test",
+        "not-a-url",
+        "",
+    ],
+)
+@respx.mock
+def test_create_checkout_session_rejects_unsafe_checkout_urls(bad_url):
+    intent_id = str(uuid.uuid4())
+    respx.post(f"{BASE_URL}/billing/checkout-session").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "checkout_required",
+                "url": bad_url,
+                "expires_at": int(time.time()) + 3600,
+            },
+        )
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError, match="billing URL"):
+            client.create_checkout_session(intent_id)
+
+
+@respx.mock
+def test_create_checkout_session_propagates_rate_limit():
+    intent_id = str(uuid.uuid4())
+    respx.post(f"{BASE_URL}/billing/checkout-session").mock(
+        return_value=httpx.Response(
+            429,
+            json={"detail": "billing_rate_limited"},
+        )
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError, match="billing_rate_limited") as exc_info:
+            client.create_checkout_session(intent_id)
+
+    assert exc_info.value.status_code == 429
+
+
+@respx.mock
+def test_create_portal_session_returns_validated_url():
+    route = respx.post(f"{BASE_URL}/billing/portal-session").mock(
+        return_value=httpx.Response(200, json={"url": "https://billing.stripe.com/session/xyz"})
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        result = client.create_portal_session()
+
+    assert result == {"url": "https://billing.stripe.com/session/xyz"}
+    assert route.calls[0].request.content == b""
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://billing.stripe.com/session/xyz",
+        "https://billing.stripe.com:8443/session/xyz",
+        "https://evilbilling.stripe.com/session/xyz",
+        "https://billing.stripe.com.evil.com/session/xyz",
+        "https://user:pass@billing.stripe.com/session/xyz",
+        "https://checkout.stripe.com/session/xyz",
+        None,
+        123,
+    ],
+)
+@respx.mock
+def test_create_portal_session_rejects_unsafe_urls(bad_url):
+    respx.post(f"{BASE_URL}/billing/portal-session").mock(
+        return_value=httpx.Response(200, json={"url": bad_url})
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError, match="billing URL"):
+            client.create_portal_session()
+
+
+@respx.mock
+def test_create_portal_session_propagates_rate_limit():
+    respx.post(f"{BASE_URL}/billing/portal-session").mock(
+        return_value=httpx.Response(429, json={"detail": "billing_rate_limited"})
+    )
+    with CloudClient(BASE_URL, TOKEN) as client:
+        with pytest.raises(CloudError, match="billing_rate_limited") as exc_info:
+            client.create_portal_session()
+
+    assert exc_info.value.status_code == 429
+
+
+def test_client_factory_reads_settings():
+    client = client_from_settings(SimpleNamespace(cloud_api_url=BASE_URL, account_token=TOKEN))
     try:
         assert client.base_url == f"{BASE_URL}/"
         assert client.token == TOKEN

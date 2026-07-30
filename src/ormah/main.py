@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from ormah.api.middleware import AgentMiddleware
+from ormah.api.routes_account import router as account_router
 from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
 from ormah.api.routes_ingest import router as ingest_router
@@ -143,6 +144,7 @@ app.add_middleware(AgentMiddleware)
 
 app.include_router(agent_router)
 app.include_router(admin_router)
+app.include_router(account_router)
 app.include_router(stats_router)
 app.include_router(ui_router)
 app.include_router(ingest_router)
