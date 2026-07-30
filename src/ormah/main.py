@@ -184,6 +184,17 @@ def _bounded_scheduler_shutdown(scheduler) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail fast (#154 task 3): llm_provider=ollama + an Anthropic-looking (or empty)
+    # llm_model silently 404s every maintenance call forever, with only a per-call
+    # WARNING. This is the seam the PRODUCTION path actually executes — `ormah server
+    # start` -> uvicorn.run("ormah.main:app") runs lifespan() on ASGI startup, while
+    # this module's `if __name__ == "__main__":` block never runs under the launchd
+    # wrapper. `ormah setup` and other CLI subcommands never construct the app, so
+    # they never hit this guard and stay usable as the repair path for the bad pair.
+    from ormah.config import validate_llm_runtime_config
+
+    validate_llm_runtime_config(settings)
+
     # Startup
     logger.info("Starting ormah server on port %d...", settings.port)
     logger.info("Initializing memory engine...")

@@ -804,4 +804,24 @@ class Settings(BaseSettings):
         return self.memory_dir / "index.db"
 
 
+def validate_llm_runtime_config(settings: "Settings") -> None:
+    """Server-startup guard — deliberately NOT a pydantic validator (council C2): the
+    eager global `settings` singleton is imported by `ormah setup`, and a model
+    validator would crash the exact repair path a user with this legacy pair needs
+    (the installer runs `ormah setup --update` under `set -e`). The server process is
+    where the misconfiguration does silent damage (404 per maintenance call), so the
+    server is where it fails loudly. Rejects BOTH failure shapes (council C3): an
+    Anthropic model id (the field default leaking through) and an empty/whitespace
+    model (ORMAH_LLM_MODEL= overrides the default with "", which Ollama also 404s).
+    """
+    if settings.llm_provider == "ollama":
+        model = (settings.llm_model or "").strip()
+        if not model or model.startswith("claude-"):
+            raise ValueError(
+                "llm_model is empty or looks like an Anthropic model id but "
+                "llm_provider=ollama; set ORMAH_LLM_MODEL to an installed Ollama "
+                "model (e.g. gemma3:12b-it-qat)"
+            )
+
+
 settings = Settings()
