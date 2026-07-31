@@ -423,6 +423,11 @@ manifest/file hashes, Markdown parsing, scratch-index rebuild, and search probe.
 privacy-safe: they can identify the failed stage but never persist a node filename or malformed
 frontmatter content.
 
+The blob-list wire contract always includes `sha256`: a lowercase 64-character value for a
+service-verified ciphertext, or JSON `null` for an older blob whose checksum was never attested. A
+missing key identifies an older service deployment, not an unverified blob, and verification asks
+for the service to be updated rather than guessing.
+
 For our three-file example, the scratch index must rebuild exactly `2` active nodes. The deleted
 node is parsed and integrity-checked but correctly does not become an active search result.
 

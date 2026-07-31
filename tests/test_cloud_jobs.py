@@ -454,6 +454,42 @@ def test_restore_verification_rejects_invalid_active_self_pointer(
     )
 
 
+def test_restore_verification_reports_malformed_self_node_as_parse_failure(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    from ormah.cloud import jobs
+
+    settings, store_id = _settings(tmp_path, with_node=False)
+    self_node = MemoryNode(
+        title="Self",
+        content="The active user identity.",
+        type=NodeType.person,
+        source="system:self",
+    )
+    FileStore(settings.memory_dir / "nodes").save(self_node)
+    backup = service_from_settings(settings).create(reason="malformed-self-fixture")
+    node_path = next((backup.path / "nodes").glob("*.md"))
+    secret = "private-self-frontmatter"
+    node_path.write_text(f"---\ntags: [\n---\n{secret}\n", encoding="utf-8")
+    identity = generate_identity()
+    bundle = tmp_path / "malformed-self.age"
+    build_bundle(
+        backup.path,
+        bundle,
+        [identity.to_public()],
+        store_id=store_id,
+        reason="cloud-backup",
+    )
+    client = FakeCloudClient(bundle=bundle)
+    _patch_verification(monkeypatch, client, bundle, identity)
+
+    assert jobs.run_restore_verification(SimpleNamespace(settings=settings)) is False
+    durable = load_state(store_id)
+    assert durable.last_error_code is ProtectionReasonCode.NODE_PARSE_FAILED
+    assert durable.last_verify_error == "A restored memory node could not be parsed."
+    assert secret not in durable.last_verify_error
+
+
 def test_restore_verification_cleans_temporary_tree_on_failure(
     tmp_path, monkeypatch, cloud_state_dir
 ):
