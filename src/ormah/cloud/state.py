@@ -13,7 +13,7 @@ import uuid
 
 
 CLOUD_STATE_DIR = Path.home() / ".local" / "share" / "ormah" / "cloud"
-CURRENT_CLOUD_STATE_SCHEMA_VERSION = 2
+CURRENT_CLOUD_STATE_SCHEMA_VERSION = 3
 _STATE_LOCK = threading.RLock()
 
 
@@ -40,6 +40,7 @@ class ProtectionState(StrEnum):
     VERIFYING_FIRST_BACKUP = "verifying_first_backup"
     PROTECTED = "protected"
     CHANGES_PENDING = "changes_pending"
+    VERIFICATION_PENDING = "verification_pending"
     OFFLINE = "offline"
     PAUSED = "paused"
     STOPPED = "stopped"
@@ -57,6 +58,15 @@ class ProtectionIntentStatus(StrEnum):
     COMPLETED = "completed"
     CANCELED = "canceled"
     EXPIRED = "expired"
+
+
+TERMINAL_PROTECTION_INTENT_STATUSES = frozenset(
+    {
+        ProtectionIntentStatus.COMPLETED,
+        ProtectionIntentStatus.CANCELED,
+        ProtectionIntentStatus.EXPIRED,
+    }
+)
 
 
 class ProtectionOperationKind(StrEnum):
@@ -78,6 +88,13 @@ class ProtectionOperationPhase(StrEnum):
     CANCELED = "canceled"
 
 
+class UploadJournalPhase(StrEnum):
+    """Durable client phases around the only ambiguous upload boundary."""
+
+    RESERVED = "reserved"
+    FINALIZING = "finalizing"
+
+
 class ProtectionReasonCode(StrEnum):
     """Stable machine-readable causes shared by CLI, REST, and desktop clients."""
 
@@ -91,15 +108,30 @@ class ProtectionReasonCode(StrEnum):
     KEY_INVALID = "key_invalid"
     UPLOAD_FAILED = "upload_failed"
     VERIFICATION_FAILED = "verification_failed"
+    DOWNLOAD_FAILED = "download_failed"
+    CIPHERTEXT_HASH_UNAVAILABLE = "ciphertext_hash_unavailable"
+    CIPHERTEXT_HASH_MISMATCH = "ciphertext_hash_mismatch"
+    DECRYPT_FAILED = "decrypt_failed"
+    MANIFEST_VERIFICATION_FAILED = "manifest_verification_failed"
+    NODE_PARSE_FAILED = "node_parse_failed"
     BUNDLE_CORRUPT = "bundle_corrupt"
     INDEX_ENVIRONMENT_UNAVAILABLE = "index_environment_unavailable"
+    INDEX_REBUILD_FAILED = "index_rebuild_failed"
+    SEARCH_PROBE_FAILED = "search_probe_failed"
+    SELF_POINTER_INVALID = "self_pointer_invalid"
+    PROCESSING_LIMIT_EXCEEDED = "processing_limit_exceeded"
     DISK_SPACE_INSUFFICIENT = "disk_space_insufficient"
     OPERATION_INTERRUPTED = "operation_interrupted"
     STORE_BUSY = "store_busy"
     PROTECTION_STOPPED = "protection_stopped"
     CLIENT_UPDATE_REQUIRED = "client_update_required"
+    SERVICE_UPDATE_REQUIRED = "service_update_required"
     NO_BACKUPABLE_MEMORY = "no_backupable_memory"
     NOT_DUE = "not_due"
+    INTENT_EXPIRED = "intent_expired"
+    INTENT_CANCELED = "intent_canceled"
+    ACCOUNT_CHANGED = "account_changed"
+    UPLOAD_STATUS_UNKNOWN = "upload_status_unknown"
 
 
 @dataclass(frozen=True)
@@ -113,6 +145,7 @@ class ProtectionOperation:
     reason_code: ProtectionReasonCode | None = None
     message: str | None = None
     snapshot_id: str | None = None
+    protection_intent_id: str | None = None
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -193,6 +226,9 @@ class CloudState:
     pending_protection_created_at: datetime | None = None
     pending_protection_expires_at: datetime | None = None
     pending_protection_status: ProtectionIntentStatus | str | None = None
+    pending_protection_snapshot_id: str | None = None
+    pending_protection_created_store: bool = False
+    pending_protection_origin_state: ProtectionState | str | None = None
     protection_disabled_at: datetime | None = None
     last_operation_id: str | None = None
     last_operation_kind: ProtectionOperationKind | str | None = None
@@ -208,6 +244,12 @@ class CloudState:
     recovery_kit_verified_at: datetime | None = None
     next_scheduled_upload_at: datetime | None = None
     next_scheduled_verify_at: datetime | None = None
+    pending_upload_id: str | None = None
+    pending_upload_snapshot_id: str | None = None
+    pending_upload_operation_id: str | None = None
+    pending_upload_protection_intent_id: str | None = None
+    pending_upload_phase: UploadJournalPhase | str | None = None
+    pending_upload_expires_at: datetime | None = None
     extra: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -236,6 +278,11 @@ class CloudState:
                 "pending_protection_status": _serialize_enum(
                     self.pending_protection_status
                 ),
+                "pending_protection_snapshot_id": self.pending_protection_snapshot_id,
+                "pending_protection_created_store": self.pending_protection_created_store,
+                "pending_protection_origin_state": _serialize_enum(
+                    self.pending_protection_origin_state
+                ),
                 "protection_disabled_at": _serialize_time(self.protection_disabled_at),
                 "last_operation_id": self.last_operation_id,
                 "last_operation_kind": _serialize_enum(self.last_operation_kind),
@@ -253,6 +300,16 @@ class CloudState:
                 "recovery_kit_verified_at": _serialize_time(self.recovery_kit_verified_at),
                 "next_scheduled_upload_at": _serialize_time(self.next_scheduled_upload_at),
                 "next_scheduled_verify_at": _serialize_time(self.next_scheduled_verify_at),
+                "pending_upload_id": self.pending_upload_id,
+                "pending_upload_snapshot_id": self.pending_upload_snapshot_id,
+                "pending_upload_operation_id": self.pending_upload_operation_id,
+                "pending_upload_protection_intent_id": (
+                    self.pending_upload_protection_intent_id
+                ),
+                "pending_upload_phase": _serialize_enum(self.pending_upload_phase),
+                "pending_upload_expires_at": _serialize_time(
+                    self.pending_upload_expires_at
+                ),
             }
         )
         return payload
@@ -289,6 +346,7 @@ class CloudState:
             "recovery_kit_verified_at",
             "next_scheduled_upload_at",
             "next_scheduled_verify_at",
+            "pending_upload_expires_at",
         )
         for key in time_fields:
             values[key] = _parse_time(values.get(key))
@@ -301,11 +359,16 @@ class CloudState:
             "pending_protection_intent_id",
             "pending_protection_account_id",
             "pending_protection_store_id",
+            "pending_protection_snapshot_id",
             "last_operation_id",
             "last_successful_backup_snapshot_id",
             "last_verified_snapshot_id",
             "last_error_message",
             "local_graph_fingerprint_at_upload",
+            "pending_upload_id",
+            "pending_upload_snapshot_id",
+            "pending_upload_operation_id",
+            "pending_upload_protection_intent_id",
         )
         for key in string_fields:
             value = values.get(key)
@@ -316,12 +379,19 @@ class CloudState:
         if verify_ok is not None and not isinstance(verify_ok, bool):
             raise ValueError("last_verify_ok must be a boolean or null")
 
+        created_store = values.get("pending_protection_created_store", False)
+        if not isinstance(created_store, bool):
+            raise ValueError("pending_protection_created_store must be a boolean")
+        values["pending_protection_created_store"] = created_store
+
         enum_fields = {
             "protection_state": ProtectionState,
             "pending_protection_status": ProtectionIntentStatus,
+            "pending_protection_origin_state": ProtectionState,
             "last_operation_kind": ProtectionOperationKind,
             "last_operation_phase": ProtectionOperationPhase,
             "last_error_code": ProtectionReasonCode,
+            "pending_upload_phase": UploadJournalPhase,
         }
         for key, enum_type in enum_fields.items():
             if key in values:
@@ -456,6 +526,24 @@ def _existing_store_id(memory_dir: Path) -> str | None:
     return get_or_create_store_id(Path(memory_dir))
 
 
+def is_protected_and_verified(state: CloudState, *, enabled: bool) -> bool:
+    """Return whether durable metadata satisfies the user-facing protection claim."""
+
+    intent_complete = (
+        state.pending_protection_intent_id is None
+        or state.pending_protection_status in TERMINAL_PROTECTION_INTENT_STATUSES
+    )
+    snapshot_id = state.last_successful_backup_snapshot_id
+    return (
+        enabled
+        and intent_complete
+        and state.pending_upload_phase is not UploadJournalPhase.FINALIZING
+        and snapshot_id is not None
+        and snapshot_id == state.last_verified_snapshot_id
+        and state.last_verify_ok is True
+    )
+
+
 def cloud_status_payload(
     settings,
     *,
@@ -509,6 +597,44 @@ def cloud_status_payload(
         detail = f": {state.last_verify_error}" if state.last_verify_error else "."
         warnings.append(f"Cloud restore verification failed{detail}")
 
+    raw_protection_state = (
+        ProtectionState.ATTENTION_REQUIRED
+        if state_error is not None or store_error is not None
+        else state.protection_state
+    )
+    protection_state = raw_protection_state
+    if not isinstance(protection_state, ProtectionState):
+        protection_state = ProtectionState.ATTENTION_REQUIRED
+        warnings.append(
+            "Cloud protection state requires a newer Ormah version."
+        )
+    protected_invariant_failed = (
+        protection_state is ProtectionState.PROTECTED
+        and not is_protected_and_verified(
+            state,
+            enabled=settings.cloud_backup_enabled,
+        )
+    )
+    if protected_invariant_failed:
+        protection_state = ProtectionState.ATTENTION_REQUIRED
+        warnings.append(
+            "Cloud protection metadata is incomplete; verification must finish before "
+            "this memory can be reported as protected."
+        )
+    if protection_state in {
+        ProtectionState.PROTECTED,
+        ProtectionState.CHANGES_PENDING,
+        ProtectionState.VERIFICATION_PENDING,
+    }:
+        if entitlement == "expired":
+            protection_state = ProtectionState.PAUSED
+        elif entitlement == "none":
+            protection_state = (
+                ProtectionState.OFFLINE
+                if getattr(settings, "account_token", None)
+                else ProtectionState.SIGN_IN_REQUIRED
+            )
+
     return {
         "schema_version": state.schema_version,
         "enabled": settings.cloud_backup_enabled,
@@ -516,6 +642,20 @@ def cloud_status_payload(
         "state_error": state_error,
         "interval_hours": settings.cloud_backup_interval_hours,
         "entitlement": entitlement,
+        "protection_state": _serialize_enum(protection_state),
+        "protection_enabled_at": _serialize_time(state.protection_enabled_at),
+        "protection_disabled_at": _serialize_time(state.protection_disabled_at),
+        "protection_intent_id": state.pending_protection_intent_id,
+        "protection_intent_status": _serialize_enum(state.pending_protection_status),
+        "protection_intent_created_at": _serialize_time(
+            state.pending_protection_created_at
+        ),
+        "protection_intent_expires_at": _serialize_time(
+            state.pending_protection_expires_at
+        ),
+        "last_operation_id": state.last_operation_id,
+        "last_operation_kind": _serialize_enum(state.last_operation_kind),
+        "last_operation_phase": _serialize_enum(state.last_operation_phase),
         "last_upload_at": (
             state.last_upload_at.isoformat() if state.last_upload_at is not None else None
         ),

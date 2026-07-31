@@ -14,7 +14,8 @@ from ormah.cloud import protection
 from ormah.cloud.bundle import build_bundle
 from ormah.cloud.crypto import generate_identity
 from ormah.cloud.entitlements import EntitlementStatus
-from ormah.cloud.state import load_state, save_state, CloudState
+from ormah.cloud.state import CloudState, ProtectionReasonCode, load_state, save_state
+from ormah.cloud.transfer import sha256_file
 from ormah.config import Settings
 from ormah.index.db import Database
 from ormah.models.node import MemoryNode, NodeType
@@ -48,7 +49,14 @@ class FakeCloudClient:
 
     def list_blobs(self, store_id):
         return {
-            "blobs": [{"snapshot_id": SNAPSHOT_ID, "created_at": NOW.isoformat(), "size_bytes": 1}]
+            "blobs": [
+                {
+                    "snapshot_id": SNAPSHOT_ID,
+                    "created_at": NOW.isoformat(),
+                    "size_bytes": 1,
+                    "sha256": sha256_file(self.bundle) if self.bundle is not None else "0" * 64,
+                }
+            ]
         }
 
     def presign_download(self, store_id, snapshot_id):
@@ -439,7 +447,47 @@ def test_restore_verification_rejects_invalid_active_self_pointer(
     _patch_verification(monkeypatch, client, bundle, identity)
 
     assert jobs.run_restore_verification(SimpleNamespace(settings=settings)) is False
-    assert "exact system:self node is not present" in load_state(store_id).last_verify_error
+    durable = load_state(store_id)
+    assert durable.last_error_code is ProtectionReasonCode.SELF_POINTER_INVALID
+    assert durable.last_verify_error == (
+        "The backup's active Self pointer does not match the restored memory graph."
+    )
+
+
+def test_restore_verification_reports_malformed_self_node_as_parse_failure(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    from ormah.cloud import jobs
+
+    settings, store_id = _settings(tmp_path, with_node=False)
+    self_node = MemoryNode(
+        title="Self",
+        content="The active user identity.",
+        type=NodeType.person,
+        source="system:self",
+    )
+    FileStore(settings.memory_dir / "nodes").save(self_node)
+    backup = service_from_settings(settings).create(reason="malformed-self-fixture")
+    node_path = next((backup.path / "nodes").glob("*.md"))
+    secret = "private-self-frontmatter"
+    node_path.write_text(f"---\ntags: [\n---\n{secret}\n", encoding="utf-8")
+    identity = generate_identity()
+    bundle = tmp_path / "malformed-self.age"
+    build_bundle(
+        backup.path,
+        bundle,
+        [identity.to_public()],
+        store_id=store_id,
+        reason="cloud-backup",
+    )
+    client = FakeCloudClient(bundle=bundle)
+    _patch_verification(monkeypatch, client, bundle, identity)
+
+    assert jobs.run_restore_verification(SimpleNamespace(settings=settings)) is False
+    durable = load_state(store_id)
+    assert durable.last_error_code is ProtectionReasonCode.NODE_PARSE_FAILED
+    assert durable.last_verify_error == "A restored memory node could not be parsed."
+    assert secret not in durable.last_verify_error
 
 
 def test_restore_verification_cleans_temporary_tree_on_failure(

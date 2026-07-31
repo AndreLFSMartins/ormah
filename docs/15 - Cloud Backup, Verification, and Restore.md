@@ -1,6 +1,6 @@
 # Cloud Backup, Verification, and Restore
 
-Verified against the current Ormah client and the hardened C01 cloud protocol on 2026-07-29.
+Verified against the current Ormah client and the hardened C01 cloud protocol on 2026-07-31.
 
 This guide explains what happens when Ormah protects a memory graph in the cloud. It starts with a
 small worked example, then adds the security and failure-handling details one layer at a time.
@@ -356,6 +356,26 @@ For this example it records the successful upload time, snapshot ID, and clears 
 error. State is keyed by `store_id`, so two different `ORMAH_MEMORY_DIR` values do not share backup
 health accidentally.
 
+The same file contains a two-phase upload journal:
+
+- `reserved` means the PUT has not crossed the ambiguous commit boundary and can be replaced after
+  interruption;
+- `finalizing` means the service may have committed the object even if the client did not receive
+  the response, so the client retries the same `upload_id` and never creates a second reservation;
+- a finalizing upload is abandoned only when the service returns its structured `upload_expired`
+  response and the locally recorded reservation lease has also expired.
+
+Writers serialize this state with the store lock and replace the JSON atomically. Schema version 3
+is deliberately fail-closed: an older client that encounters a newer state schema asks the user to
+update Ormah instead of rewriting fields it does not understand. Rolling the binary back therefore
+does not imply that protection state can safely be rolled back.
+
+Protection status distinguishes a proven recovery point from a newly uploaded one. A successful
+upload moves the store to `verification_pending` until that exact snapshot passes the restore
+rehearsal. An older verified snapshot still remains downloadable, but the UI must not describe the
+newest snapshot as protected yet. `finalizing` is different: its commit result is unknown, so status
+becomes `attention_required` until the same upload ID is reconciled.
+
 Upload success now proves:
 
 - an encrypted object was committed;
@@ -380,21 +400,33 @@ For the latest committed snapshot, the current verification path:
 
 1. asks the service to list committed snapshots;
 2. rejects an object larger than the client's advertised safe processing limit;
-3. requests a presigned GET URL;
-4. streams the ciphertext into a newly created temporary directory;
-5. decrypts it using all retained local age identities;
-6. accepts only regular allowlisted paths: `nodes/*.md`, `deleted/*.md`, `backup.json`, and
+3. requires the SHA-256 that the service verified during immutable promotion;
+4. requests a presigned GET URL;
+5. streams the ciphertext into a newly created temporary directory;
+6. recomputes the ciphertext SHA-256 and compares it with the committed metadata;
+7. decrypts it using all retained local age identities;
+8. accepts only regular allowlisted paths: `nodes/*.md`, `deleted/*.md`, `backup.json`, and
    `bundle-manifest.json`;
-7. rejects absolute paths, `..`, backslashes, links, duplicates, Unicode/case collisions, excess
+9. rejects absolute paths, `..`, backslashes, links, duplicates, Unicode/case collisions, excess
    members, and excess expanded bytes;
-8. recomputes every file size and SHA-256 and compares them with the encrypted manifest;
-9. validates that `backup.json`'s active Self pointer names the exact included `system:self` node;
-10. parses every active and deleted Markdown node;
-11. creates a throwaway SQLite database and rebuilds its index from the extracted active nodes;
-12. requires the rebuilt active-node count to equal `manifest.node_count`;
-13. runs an FTS search and requires it to return a known restored node;
-14. records `last_verify_ok=true` and the exact snapshot ID;
-15. deletes the temporary directory in `finally`, whether verification succeeds or fails.
+10. recomputes every file size and SHA-256 and compares them with the encrypted manifest;
+11. validates that `backup.json`'s active Self pointer names the exact included `system:self` node;
+12. parses every active and deleted Markdown node;
+13. creates a throwaway SQLite database and rebuilds its index from the extracted active nodes;
+14. requires the rebuilt active-node count to equal `manifest.node_count`;
+15. runs an FTS search and requires it to return a known restored node;
+16. records `last_verify_ok=true` and the exact snapshot ID;
+17. deletes the temporary directory in `finally`, whether verification succeeds or fails.
+
+Those checks are reported as seven stable proof stages: download, ciphertext hash, decryption,
+manifest/file hashes, Markdown parsing, scratch-index rebuild, and search probe. Error messages are
+privacy-safe: they can identify the failed stage but never persist a node filename or malformed
+frontmatter content.
+
+The blob-list wire contract always includes `sha256`: a lowercase 64-character value for a
+service-verified ciphertext, or JSON `null` for an older blob whose checksum was never attested. A
+missing key identifies an older service deployment, not an unverified blob, and verification asks
+for the service to be updated rather than guessing.
 
 For our three-file example, the scratch index must rebuild exactly `2` active nodes. The deleted
 node is parsed and integrity-checked but correctly does not become an active search result.
@@ -493,7 +525,8 @@ the snapshot. Cancellation pauses new uploads; it does not turn recovery into a 
 | Bundle exceeds safe client limit | Client refuses before upload or download processing |
 | PUT fails or URL expires | Client does not finalize; pending reservation/object is cleaned later |
 | Finalize sees wrong size/checksum | Snapshot is not committed |
-| Process dies during promotion | Durable lease/state lets janitor reconcile safely rather than guessing |
+| Client loses the finalize response | Durable journal retries the same upload ID; no duplicate is reserved |
+| Process dies during promotion | Durable service lease/state lets janitor reconcile safely rather than guessing |
 | Ciphertext is truncated or altered | Age decryption or archive/manifest verification fails |
 | A Markdown file is malformed | Parse stage fails; snapshot is not marked verified |
 | Active Self pointer is missing, invalid, or ambiguous | Verification/restore fails closed before replacing the live graph |
