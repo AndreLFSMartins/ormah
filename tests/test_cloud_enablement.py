@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import uuid
@@ -17,6 +18,7 @@ from ormah.cloud.state import (
     ProtectionOperationPhase,
     ProtectionReasonCode,
     ProtectionState,
+    UploadJournalPhase,
     load_state,
     update_state,
 )
@@ -117,7 +119,7 @@ def test_repeated_create_and_bind_keep_one_stable_operation_id(tmp_path, monkeyp
     assert bound.operation_id == first.operation_id
 
 
-def test_create_after_completed_protection_is_idempotent(tmp_path):
+def test_create_after_completed_protection_is_idempotent(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
     service = CloudProtectionService(settings)
     first = service.create_intent()
@@ -132,12 +134,47 @@ def test_create_after_completed_protection_is_idempotent(tmp_path):
         last_verify_ok=True,
     )
     settings.cloud_backup_enabled = True
+    monkeypatch.setattr(
+        protection,
+        "check_entitlement",
+        lambda settings: protection.EntitlementStatus.ACTIVE,
+    )
 
     repeated = service.create_intent()
 
     assert repeated.operation_id == first.operation_id
     assert repeated.phase is ProtectionOperationPhase.COMPLETED
     assert repeated.snapshot_id == SNAPSHOT_ID
+
+
+def test_offline_entitlement_lookup_does_not_replace_completed_intent(
+    tmp_path, monkeypatch
+):
+    settings = _settings(tmp_path)
+    service = CloudProtectionService(settings)
+    first = service.create_intent()
+    store_id = _store_id(settings)
+    update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        protection_state=ProtectionState.PROTECTED,
+        pending_protection_status=ProtectionIntentStatus.COMPLETED,
+        last_successful_backup_snapshot_id=SNAPSHOT_ID,
+        last_verified_snapshot_id=SNAPSHOT_ID,
+        last_verify_ok=True,
+    )
+    settings.cloud_backup_enabled = True
+    monkeypatch.setattr(
+        protection,
+        "check_entitlement",
+        lambda settings: protection.EntitlementStatus.NONE,
+    )
+
+    repeated = service.create_intent()
+
+    assert repeated.operation_id == first.operation_id
+    assert repeated.phase is ProtectionOperationPhase.COMPLETED
+    assert load_state(store_id).pending_protection_status is ProtectionIntentStatus.COMPLETED
 
 
 def test_completed_enable_never_returns_false_protected_state(tmp_path):
@@ -568,7 +605,7 @@ def test_verification_failure_keeps_committed_snapshot_but_never_protected(
     assert durable.last_operation_phase is ProtectionOperationPhase.FAILED
 
 
-def test_ambiguous_upload_is_not_automatically_retried(tmp_path, monkeypatch):
+def test_interruption_before_upload_reservation_resumes_cleanly(tmp_path, monkeypatch):
     settings, service, intent, _ = _ready_intent(tmp_path, monkeypatch)
     store_id = _store_id(settings)
     update_state(
@@ -592,20 +629,44 @@ def test_ambiguous_upload_is_not_automatically_retried(tmp_path, monkeypatch):
         "set_cloud_backup_enabled",
         lambda settings, enabled: setattr(settings, "cloud_backup_enabled", enabled),
     )
-    monkeypatch.setattr(
-        service,
-        "_backup_now",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("ambiguous upload must not be retried")
-        ),
+    calls = []
+
+    def resumed_backup(*args, **kwargs):
+        calls.append(kwargs)
+        return ProtectionOperation(
+            intent,
+            ProtectionOperationKind.BACKUP,
+            ProtectionOperationPhase.FAILED,
+            ProtectionState.ATTENTION_REQUIRED,
+            ProtectionReasonCode.UPLOAD_FAILED,
+            "probe stopped after proving retry",
+        )
+
+    monkeypatch.setattr(service, "_backup_now", resumed_backup)
+
+    result = service.enable(intent)
+
+    assert result.reason_code is ProtectionReasonCode.UPLOAD_FAILED
+    assert len(calls) == 1
+    assert load_state(store_id).pending_protection_status is ProtectionIntentStatus.RUNNING
+
+
+def test_finalizing_upload_journal_is_the_only_ambiguous_marker(tmp_path):
+    settings = _settings(tmp_path)
+    service = CloudProtectionService(settings)
+    intent = service.create_intent().protection_intent_id
+    store_id = _store_id(settings)
+    update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        pending_upload_id="upload-id",
+        pending_upload_snapshot_id=SNAPSHOT_ID,
+        pending_upload_operation_id=intent,
+        pending_upload_protection_intent_id=intent,
+        pending_upload_phase=UploadJournalPhase.FINALIZING,
     )
 
-    first = service.enable(intent)
-    second = service.enable(intent)
-
-    assert first.reason_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
-    assert second.reason_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
-    assert load_state(store_id).pending_protection_status is ProtectionIntentStatus.RUNNING
+    assert service._upload_status_is_unknown(load_state(store_id)) is True
 
 
 def test_second_store_cannot_replace_canonical_recovery_kit(tmp_path, monkeypatch):
@@ -668,6 +729,78 @@ def test_disable_persists_stopped_before_setting_and_preserves_history(
     assert durable.protection_disabled_at == disabled_at
     assert durable.last_successful_verify_at == verified_at
     assert durable.pending_protection_intent_id == intent
+
+
+def test_disable_is_idempotent_for_legacy_enrolled_store(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    store_id = protection.get_or_create_store_id(settings.memory_dir)
+    update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        protection_state=ProtectionState.PROTECTED,
+        last_successful_backup_snapshot_id=SNAPSHOT_ID,
+    )
+    settings.cloud_backup_enabled = True
+    monkeypatch.setattr(
+        protection,
+        "set_cloud_backup_enabled",
+        lambda settings, enabled: setattr(settings, "cloud_backup_enabled", enabled),
+    )
+    service = CloudProtectionService(settings)
+
+    first = service.disable()
+    second = service.disable()
+
+    assert first.state is ProtectionState.STOPPED
+    assert second.state is ProtectionState.STOPPED
+    assert load_state(store_id).protection_state is ProtectionState.STOPPED
+
+
+def test_expired_protected_store_gets_reactivation_intent_and_preserves_origin(
+    tmp_path, monkeypatch
+):
+    settings = _settings(tmp_path)
+    service = CloudProtectionService(settings)
+    original = service.create_intent().protection_intent_id
+    store_id = _store_id(settings)
+    update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        protection_state=ProtectionState.PROTECTED,
+        pending_protection_status=ProtectionIntentStatus.COMPLETED,
+        last_successful_backup_snapshot_id=SNAPSHOT_ID,
+        last_verified_snapshot_id=SNAPSHOT_ID,
+        last_verify_ok=True,
+    )
+    settings.cloud_backup_enabled = True
+    monkeypatch.setattr(
+        protection,
+        "check_entitlement",
+        lambda settings: protection.EntitlementStatus.EXPIRED,
+    )
+
+    replacement = service.create_intent()
+
+    assert replacement.protection_intent_id != original
+    assert replacement.state is ProtectionState.PAUSED
+    durable = load_state(store_id)
+    assert durable.pending_protection_origin_state is ProtectionState.PROTECTED
+
+    monkeypatch.setattr(
+        protection,
+        "client_from_settings",
+        lambda settings: FakeClient(backup=False),
+    )
+    bound = service.bind_intent(replacement.protection_intent_id)
+    assert bound.state is ProtectionState.SUBSCRIPTION_REQUIRED
+    assert (
+        load_state(store_id).pending_protection_status
+        is ProtectionIntentStatus.ACCOUNT_BOUND
+    )
+
+    canceled = service.cancel_intent(replacement.protection_intent_id)
+    assert canceled.state is ProtectionState.PROTECTED
+    assert load_state(store_id).protection_state is ProtectionState.PROTECTED
 
 
 def test_disable_before_enrollment_remains_local_only(tmp_path, monkeypatch):
@@ -767,6 +900,45 @@ def test_invalid_intent_does_not_mutate_current_store_health(
     assert result.reason_code is ProtectionReasonCode.INTENT_CANCELED
     assert load_state(store_id) == before
     assert valid.protection_intent_id == before.pending_protection_intent_id
+
+
+@pytest.mark.parametrize("method_name", ["bind_intent", "cancel_intent", "enable"])
+def test_intent_methods_report_client_update_required_for_newer_state(
+    tmp_path, method_name
+):
+    settings = _settings(tmp_path)
+    service = CloudProtectionService(settings)
+    intent = service.create_intent().protection_intent_id
+    store_id = _store_id(settings)
+    path = state.state_path(store_id)
+    payload = load_state(store_id).to_dict()
+    payload["schema_version"] = 99
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
+
+    result = getattr(service, method_name)(intent)
+
+    assert result.phase is ProtectionOperationPhase.CANCELED
+    assert result.reason_code is ProtectionReasonCode.CLIENT_UPDATE_REQUIRED
+    assert path.read_bytes() == before
+
+
+def test_disable_reports_client_update_required_for_newer_state(tmp_path):
+    settings = _settings(tmp_path)
+    service = CloudProtectionService(settings)
+    service.create_intent()
+    store_id = _store_id(settings)
+    path = state.state_path(store_id)
+    payload = load_state(store_id).to_dict()
+    payload["schema_version"] = 99
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
+
+    result = service.disable()
+
+    assert result.phase is ProtectionOperationPhase.CANCELED
+    assert result.reason_code is ProtectionReasonCode.CLIENT_UPDATE_REQUIRED
+    assert path.read_bytes() == before
 
 
 def test_active_intent_blocks_legacy_verification_promotion():

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import errno
 import logging
 from pathlib import Path
 import re
@@ -52,6 +53,7 @@ from ormah.cloud.state import (
     ProtectionOperationPhase,
     ProtectionReasonCode,
     ProtectionState,
+    UploadJournalPhase,
     is_protected_and_verified,
     load_state,
     update_state,
@@ -75,6 +77,8 @@ _QUERY_SECRET_RE = re.compile(
     r"access_token|token|signature)=)[^&\s]+"
 )
 _SNAPSHOT_ID_RE = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
+_NODE_PATH_RE = re.compile(r"\b(nodes|deleted)/[^\s'\",)\]]+\.md\b")
+_DISK_FULL_ERRNOS = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 
 
 def _utc_now() -> datetime:
@@ -89,6 +93,7 @@ def safe_error_message(value: object, *sensitive_values: str | None) -> str:
     message = _QUERY_SECRET_RE.sub(r"\1<redacted>", message)
     message = _BEARER_RE.sub("Bearer <redacted>", message)
     message = _AGE_SECRET_RE.sub("<redacted-age-key>", message)
+    message = _NODE_PATH_RE.sub(r"\1/<redacted>.md", message)
     for sensitive in sensitive_values:
         if sensitive:
             message = message.replace(sensitive, "<redacted>")
@@ -160,19 +165,27 @@ def _known_state(state: CloudState) -> ProtectionState:
     return value if isinstance(value, ProtectionState) else ProtectionState.ATTENTION_REQUIRED
 
 
-def _state_after_backup(state: CloudState) -> ProtectionState:
+def _state_after_backup(
+    state: CloudState,
+    *,
+    protection_intent_id: str | None = None,
+) -> ProtectionState:
     current = _known_state(state)
+    if protection_intent_id is not None:
+        return ProtectionState.VERIFYING_FIRST_BACKUP
     if current is ProtectionState.LOCAL_ONLY:
         return ProtectionState.VERIFYING_FIRST_BACKUP
     if current is ProtectionState.STOPPED:
         return ProtectionState.STOPPED
     if current is ProtectionState.UPLOADING_FIRST_BACKUP:
         return ProtectionState.VERIFYING_FIRST_BACKUP
-    return ProtectionState.CHANGES_PENDING
+    return ProtectionState.VERIFICATION_PENDING
 
 
 def _state_after_verification(state: CloudState, snapshot_id: str) -> ProtectionState:
     current = _known_state(state)
+    if state.pending_upload_phase is UploadJournalPhase.FINALIZING:
+        return current
     if snapshot_id != state.last_successful_backup_snapshot_id:
         return current
     if (
@@ -190,6 +203,7 @@ def _state_after_verification(state: CloudState, snapshot_id: str) -> Protection
     if current in {
         ProtectionState.VERIFYING_FIRST_BACKUP,
         ProtectionState.CHANGES_PENDING,
+        ProtectionState.VERIFICATION_PENDING,
         ProtectionState.ATTENTION_REQUIRED,
         ProtectionState.OFFLINE,
         ProtectionState.PROTECTED,
@@ -208,10 +222,32 @@ def _state_after_failure(
     return requested
 
 
+def _cleared_upload_journal() -> dict[str, object]:
+    return {
+        "pending_upload_id": None,
+        "pending_upload_snapshot_id": None,
+        "pending_upload_operation_id": None,
+        "pending_upload_protection_intent_id": None,
+        "pending_upload_phase": None,
+        "pending_upload_expires_at": None,
+    }
+
+
 def _is_offline_error(error: object) -> bool:
     return isinstance(error, httpx.RequestError) or (
         isinstance(error, CloudError) and error.status_code is None
     )
+
+
+def _is_disk_full_error(error: object) -> bool:
+    return isinstance(error, OSError) and error.errno in _DISK_FULL_ERRNOS
+
+
+def _is_quota_error(error: object) -> bool:
+    if not isinstance(error, CloudError) or error.status_code != 413:
+        return False
+    detail = error.payload.get("detail") if isinstance(error.payload, dict) else error.payload
+    return "quota" in str(detail).lower()
 
 
 def _validated_snapshot_id(value: object) -> str:
@@ -249,8 +285,21 @@ def _verify_extracted_bundle(extracted: Path, expected_store_id: str, info) -> i
 
     database = Database(extracted / "scratch-index" / "index.db")
     try:
-        database.init_schema()
-        rebuilt = IndexBuilder(database, FileStore(extracted / "nodes")).full_rebuild()
+        try:
+            database.init_schema()
+            rebuilt = IndexBuilder(database, FileStore(extracted / "nodes")).full_rebuild()
+        except OSError as exc:
+            if _is_disk_full_error(exc):
+                raise
+            raise _VerificationStageError(
+                "The scratch search index could not be rebuilt in this environment.",
+                ProtectionReasonCode.INDEX_ENVIRONMENT_UNAVAILABLE,
+            ) from exc
+        except Exception as exc:
+            raise _VerificationStageError(
+                "The scratch search index could not be rebuilt in this environment.",
+                ProtectionReasonCode.INDEX_ENVIRONMENT_UNAVAILABLE,
+            ) from exc
         if rebuilt != info.node_count:
             raise RuntimeError(
                 f"Scratch index rebuilt {rebuilt} nodes; bundle manifest declares {info.node_count}."
@@ -288,6 +337,10 @@ class CloudProtectionService:
                     return self._client_update_required_operation(
                         operation_id, ProtectionOperationKind.ENABLE
                     )
+                signed_in = bool(
+                    isinstance(getattr(self.settings, "account_token", None), str)
+                    and self.settings.account_token.strip()
+                )
 
                 now = _utc_now()
                 if (
@@ -317,7 +370,7 @@ class CloudProtectionService:
                         protection_intent_id=state.pending_protection_intent_id,
                     )
 
-                if (
+                completed_protection = (
                     state.protection_state is ProtectionState.PROTECTED
                     and state.pending_protection_intent_id is not None
                     and state.pending_protection_status
@@ -326,6 +379,18 @@ class CloudProtectionService:
                         state,
                         enabled=bool(self.settings.cloud_backup_enabled),
                     )
+                )
+                completed_entitlement = (
+                    check_entitlement(self.settings)
+                    if completed_protection
+                    else None
+                )
+                if completed_entitlement in {
+                    EntitlementStatus.ACTIVE,
+                    EntitlementStatus.GRACE,
+                } or (
+                    signed_in
+                    and completed_entitlement is EntitlementStatus.NONE
                 ):
                     operation_id = state.pending_protection_intent_id
                     return ProtectionOperation(
@@ -338,12 +403,11 @@ class CloudProtectionService:
                     )
 
                 intent_id = operation_id
-                signed_in = bool(
-                    isinstance(getattr(self.settings, "account_token", None), str)
-                    and self.settings.account_token.strip()
-                )
                 next_state = (
-                    state.protection_state
+                    ProtectionState.PAUSED
+                    if signed_in
+                    and completed_entitlement is EntitlementStatus.EXPIRED
+                    else state.protection_state
                     if signed_in
                     else ProtectionState.SIGN_IN_REQUIRED
                 )
@@ -414,6 +478,11 @@ class CloudProtectionService:
             if exc.reason_code is ProtectionReasonCode.INTENT_CANCELED:
                 return self._invalid_intent_operation(operation_id, intent_id)
             return self._enable_failure(operation_id, exc, intent_id=intent_id)
+        except CloudStateVersionError:
+            return self._client_update_required_operation(
+                operation_id,
+                ProtectionOperationKind.ENABLE,
+            )
         except Exception as exc:
             return self._enable_failure(operation_id, exc, intent_id=intent_id)
 
@@ -647,6 +716,11 @@ class CloudProtectionService:
             if exc.reason_code is ProtectionReasonCode.INTENT_CANCELED:
                 return self._invalid_intent_operation(operation_id, intent_id)
             return self._enable_failure(operation_id, exc, intent_id=intent_id)
+        except CloudStateVersionError:
+            return self._client_update_required_operation(
+                operation_id,
+                ProtectionOperationKind.ENABLE,
+            )
         except Exception as exc:
             return self._enable_failure(operation_id, exc, intent_id=intent_id)
 
@@ -712,8 +786,6 @@ class CloudProtectionService:
                 state = _load_writable_state(store_id)
                 snapshot_id = self._retry_snapshot(state, intent_id)
                 if snapshot_id is None:
-                    if self._upload_status_is_unknown(state):
-                        return self._unknown_upload_operation(store_id, intent_id)
                     update_state(
                         store_id,
                         memory_dir=self.settings.memory_dir,
@@ -810,6 +882,11 @@ class CloudProtectionService:
                 intent_id=intent_id,
                 reason_code=exc.reason_code,
             )
+        except CloudStateVersionError:
+            return self._client_update_required_operation(
+                operation_id,
+                ProtectionOperationKind.ENABLE,
+            )
         except Exception as exc:
             return self._enable_failure(operation_id, exc, intent_id=intent_id)
 
@@ -830,10 +907,13 @@ class CloudProtectionService:
                     pending_status = state.pending_protection_status
                     protection_started = (
                         bool(self.settings.cloud_backup_enabled)
+                        or state.protection_state is ProtectionState.STOPPED
+                        or state.protection_disabled_at is not None
+                        or state.last_successful_backup_snapshot_id is not None
                         or pending_status
                         in {
-                        ProtectionIntentStatus.RUNNING,
-                        ProtectionIntentStatus.COMPLETED,
+                            ProtectionIntentStatus.RUNNING,
+                            ProtectionIntentStatus.COMPLETED,
                         }
                         or state.protection_enabled_at is not None
                     )
@@ -877,6 +957,11 @@ class CloudProtectionService:
                 )
         except StoreLockTimeout:
             return self._store_busy_operation(operation_id, ProtectionOperationKind.DISABLE)
+        except CloudStateVersionError:
+            return self._client_update_required_operation(
+                operation_id,
+                ProtectionOperationKind.DISABLE,
+            )
         except Exception as exc:
             return self._enable_failure(
                 operation_id,
@@ -925,8 +1010,14 @@ class CloudProtectionService:
 
     @staticmethod
     def _new_intent_origin(state: CloudState) -> ProtectionState:
-        if state.protection_state is ProtectionState.STOPPED:
-            return ProtectionState.STOPPED
+        if isinstance(state.protection_state, ProtectionState) and state.protection_state not in {
+            ProtectionState.SIGN_IN_REQUIRED,
+            ProtectionState.SUBSCRIPTION_REQUIRED,
+            ProtectionState.INITIALIZING,
+            ProtectionState.UPLOADING_FIRST_BACKUP,
+            ProtectionState.VERIFYING_FIRST_BACKUP,
+        }:
+            return state.protection_state
         return ProtectionState.LOCAL_ONLY
 
     def _expire_intent_if_needed(self, store_id: str, state: CloudState) -> bool:
@@ -1007,42 +1098,8 @@ class CloudProtectionService:
     @staticmethod
     def _upload_status_is_unknown(state: CloudState) -> bool:
         return (
-            state.pending_protection_status is ProtectionIntentStatus.RUNNING
-            and state.pending_protection_snapshot_id is None
-            and (
-                state.protection_state is ProtectionState.UPLOADING_FIRST_BACKUP
-                or state.last_error_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
-            )
-        )
-
-    def _unknown_upload_operation(
-        self,
-        store_id: str,
-        intent_id: str,
-    ) -> ProtectionOperation:
-        message = (
-            "Ormah was interrupted while committing the first backup. "
-            "Upload status must be reconciled before retrying."
-        )
-        update_state(
-            store_id,
-            memory_dir=self.settings.memory_dir,
-            protection_state=ProtectionState.ATTENTION_REQUIRED,
-            last_operation_id=intent_id,
-            last_operation_kind=ProtectionOperationKind.ENABLE,
-            last_operation_phase=ProtectionOperationPhase.FAILED,
-            last_error_code=ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN,
-            last_error_message=message,
-            last_error_at=_utc_now(),
-        )
-        return ProtectionOperation(
-            intent_id,
-            ProtectionOperationKind.ENABLE,
-            ProtectionOperationPhase.FAILED,
-            ProtectionState.ATTENTION_REQUIRED,
-            ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN,
-            message,
-            protection_intent_id=intent_id,
+            state.pending_upload_phase is UploadJournalPhase.FINALIZING
+            or state.last_error_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
         )
 
     @staticmethod
@@ -1186,6 +1243,79 @@ class CloudProtectionService:
         except Exception as exc:
             return self._backup_failure(operation_id, exc)
 
+    def _record_upload_success(
+        self,
+        *,
+        store_id: str,
+        operation_id: str,
+        snapshot_id: str,
+        protection_intent_id: str | None,
+    ) -> ProtectionOperation:
+        state = _load_writable_state(store_id)
+        next_state = _state_after_backup(
+            state,
+            protection_intent_id=protection_intent_id,
+        )
+        uploaded_at = _utc_now()
+        changes: dict[str, object] = {
+            "last_upload_at": uploaded_at,
+            "last_upload_snapshot_id": snapshot_id,
+            "last_upload_error": None,
+            "last_successful_upload_at": uploaded_at,
+            "last_successful_backup_snapshot_id": snapshot_id,
+            "protection_state": next_state,
+            "last_operation_id": operation_id,
+            "last_operation_kind": ProtectionOperationKind.BACKUP,
+            "last_operation_phase": ProtectionOperationPhase.COMPLETED,
+            "last_error_code": None,
+            "last_error_message": None,
+            "last_error_at": None,
+            **_cleared_upload_journal(),
+        }
+        if protection_intent_id is not None:
+            changes["pending_protection_snapshot_id"] = snapshot_id
+        update_state(
+            store_id,
+            memory_dir=self.settings.memory_dir,
+            **changes,
+        )
+        logger.info("Uploaded encrypted Ormah Cloud snapshot %s", self._message(snapshot_id))
+        return ProtectionOperation(
+            operation_id,
+            ProtectionOperationKind.BACKUP,
+            ProtectionOperationPhase.COMPLETED,
+            next_state,
+            snapshot_id=snapshot_id,
+        )
+
+    def _reconcile_finalizing_upload(
+        self,
+        *,
+        store_id: str,
+        state: CloudState,
+        operation_id: str,
+        protection_intent_id: str | None,
+        client,
+    ) -> ProtectionOperation:
+        upload_id = state.pending_upload_id
+        snapshot_id = state.pending_upload_snapshot_id
+        if not isinstance(upload_id, str) or not upload_id:
+            raise RuntimeError("Finalizing upload is missing its upload id.")
+        snapshot_id = _validated_snapshot_id(snapshot_id)
+        finalized = client.finalize_upload(store_id, upload_id)
+        finalized_snapshot = _validated_snapshot_id(finalized.get("snapshot_id"))
+        if finalized.get("status") != "committed" or finalized_snapshot != snapshot_id:
+            raise RuntimeError("Cloud upload finalize response was malformed.")
+        return self._record_upload_success(
+            store_id=store_id,
+            operation_id=operation_id,
+            snapshot_id=snapshot_id,
+            protection_intent_id=(
+                protection_intent_id
+                or state.pending_upload_protection_intent_id
+            ),
+        )
+
     def _backup_now(
         self,
         operation_id: str,
@@ -1233,6 +1363,27 @@ class CloudProtectionService:
                     ProtectionState.STOPPED,
                     ProtectionReasonCode.PROTECTION_STOPPED,
                     "Cloud protection is stopped for this memory store.",
+                )
+            if state is not None and state.pending_upload_phase is not None:
+                if not isinstance(state.pending_upload_phase, UploadJournalPhase):
+                    return self._client_update_required_operation(
+                        operation_id,
+                        ProtectionOperationKind.BACKUP,
+                    )
+                if state.pending_upload_phase is UploadJournalPhase.FINALIZING:
+                    client = client_from_settings(settings)
+                    finalize_attempted = True
+                    return self._reconcile_finalizing_upload(
+                        store_id=store_id,
+                        state=state,
+                        operation_id=operation_id,
+                        protection_intent_id=protection_intent_id,
+                        client=client,
+                    )
+                state = update_state(
+                    store_id,
+                    memory_dir=settings.memory_dir,
+                    **_cleared_upload_journal(),
                 )
             if (
                 state is not None
@@ -1341,45 +1492,57 @@ class CloudProtectionService:
                 ):
                     raise RuntimeError("Cloud upload reservation headers were malformed.")
 
+                update_state(
+                    store_id,
+                    memory_dir=settings.memory_dir,
+                    pending_upload_id=upload_id,
+                    pending_upload_snapshot_id=snapshot_id,
+                    pending_upload_operation_id=operation_id,
+                    pending_upload_protection_intent_id=protection_intent_id,
+                    pending_upload_phase=UploadJournalPhase.RESERVED,
+                    pending_upload_expires_at=parsed_expiry,
+                )
                 put_file(put_url, bundle, required_headers)
+                update_state(
+                    store_id,
+                    memory_dir=settings.memory_dir,
+                    pending_upload_phase=UploadJournalPhase.FINALIZING,
+                )
                 finalize_attempted = True
                 finalized = client.finalize_upload(store_id, upload_id)
                 finalized_snapshot = _validated_snapshot_id(finalized.get("snapshot_id"))
                 if finalized.get("status") != "committed" or finalized_snapshot != snapshot_id:
                     raise RuntimeError("Cloud upload finalize response was malformed.")
 
-            uploaded_at = _utc_now()
-            next_state = _state_after_backup(state)
-            changes: dict[str, object] = {
-                "last_upload_at": uploaded_at,
-                "last_upload_snapshot_id": snapshot_id,
-                "last_upload_error": None,
-                "last_successful_upload_at": uploaded_at,
-                "last_successful_backup_snapshot_id": snapshot_id,
-                "protection_state": next_state,
-                "last_operation_id": operation_id,
-                "last_operation_kind": ProtectionOperationKind.BACKUP,
-                "last_operation_phase": ProtectionOperationPhase.COMPLETED,
-                "last_error_code": None,
-                "last_error_message": None,
-                "last_error_at": None,
-            }
-            if protection_intent_id is not None:
-                changes["pending_protection_snapshot_id"] = snapshot_id
-            update_state(
-                store_id,
-                memory_dir=settings.memory_dir,
-                **changes,
+            return self._record_upload_success(
+                store_id=store_id,
+                operation_id=operation_id,
+                snapshot_id=snapshot_id,
+                protection_intent_id=protection_intent_id,
             )
-            logger.info("Uploaded encrypted Ormah Cloud snapshot %s", self._message(snapshot_id))
-            return ProtectionOperation(
+        except CloudStateVersionError:
+            return self._client_update_required_operation(
                 operation_id,
                 ProtectionOperationKind.BACKUP,
-                ProtectionOperationPhase.COMPLETED,
-                next_state,
-                snapshot_id=snapshot_id,
             )
         except Exception as exc:
+            if not finalize_attempted and store_id is not None:
+                try:
+                    current = _load_writable_state(store_id)
+                    if (
+                        current.pending_upload_operation_id == operation_id
+                        and current.pending_upload_phase is UploadJournalPhase.RESERVED
+                    ):
+                        update_state(
+                            store_id,
+                            memory_dir=settings.memory_dir,
+                            **_cleared_upload_journal(),
+                        )
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Could not clear an abandoned upload reservation: %s",
+                        self._message(cleanup_error),
+                    )
             if finalize_attempted:
                 return self._backup_failure(
                     operation_id,
@@ -1395,6 +1558,20 @@ class CloudProtectionService:
                     store_id=store_id,
                     reason_code=ProtectionReasonCode.OFFLINE,
                     protection_state=ProtectionState.OFFLINE,
+                )
+            if _is_quota_error(exc):
+                return self._backup_failure(
+                    operation_id,
+                    exc,
+                    store_id=store_id,
+                    reason_code=ProtectionReasonCode.QUOTA_EXCEEDED,
+                )
+            if _is_disk_full_error(exc):
+                return self._backup_failure(
+                    operation_id,
+                    exc,
+                    store_id=store_id,
+                    reason_code=ProtectionReasonCode.DISK_SPACE_INSUFFICIENT,
                 )
             return self._backup_failure(operation_id, exc, store_id=store_id)
         finally:
@@ -1557,14 +1734,19 @@ class CloudProtectionService:
 
             verified_at = _utc_now()
             next_state = _state_after_verification(state, snapshot_id)
+            latest_state = _load_writable_state(store_id)
+            preserve_upload_ambiguity = self._upload_status_is_unknown(latest_state)
             changes: dict[str, object] = {
                 "last_operation_id": operation_id,
                 "last_operation_kind": ProtectionOperationKind.VERIFY,
                 "last_operation_phase": ProtectionOperationPhase.COMPLETED,
-                "last_error_code": None,
-                "last_error_message": None,
-                "last_error_at": None,
             }
+            if not preserve_upload_ambiguity:
+                changes.update(
+                    last_error_code=None,
+                    last_error_message=None,
+                    last_error_at=None,
+                )
             if tracks_latest_snapshot:
                 changes.update(
                     last_verify_at=verified_at,
@@ -1590,9 +1772,11 @@ class CloudProtectionService:
             offline = _is_offline_error(exc)
             reason_code = (
                 exc.reason_code
-                if isinstance(exc, _VerificationPrerequisiteError)
+                if isinstance(exc, (_VerificationPrerequisiteError, _VerificationStageError))
                 else ProtectionReasonCode.OFFLINE
                 if offline
+                else ProtectionReasonCode.DISK_SPACE_INSUFFICIENT
+                if _is_disk_full_error(exc)
                 else ProtectionReasonCode.BUNDLE_CORRUPT
                 if isinstance(exc, BundleError)
                 else ProtectionReasonCode.VERIFICATION_FAILED
@@ -1751,6 +1935,12 @@ class CloudProtectionService:
 
 
 class _VerificationPrerequisiteError(RuntimeError):
+    def __init__(self, message: str, reason_code: ProtectionReasonCode) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+class _VerificationStageError(RuntimeError):
     def __init__(self, message: str, reason_code: ProtectionReasonCode) -> None:
         super().__init__(message)
         self.reason_code = reason_code

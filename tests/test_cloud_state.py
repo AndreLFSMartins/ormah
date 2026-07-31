@@ -19,6 +19,7 @@ from ormah.cloud.state import (
     ProtectionOperationPhase,
     ProtectionReasonCode,
     ProtectionState,
+    UploadJournalPhase,
     cloud_status_payload,
     load_state,
     save_state,
@@ -49,6 +50,12 @@ def test_state_round_trip_is_atomic_and_owner_only(tmp_path):
         last_operation_kind=ProtectionOperationKind.VERIFY,
         last_operation_phase=ProtectionOperationPhase.FAILED,
         last_error_code=ProtectionReasonCode.VERIFICATION_FAILED,
+        pending_upload_id="upload-1",
+        pending_upload_snapshot_id="01PENDING",
+        pending_upload_operation_id="operation-1",
+        pending_upload_protection_intent_id="intent-1",
+        pending_upload_phase=UploadJournalPhase.FINALIZING,
+        pending_upload_expires_at=now + timedelta(minutes=15),
     )
 
     save_state(store_id, state, memory_dir=tmp_path / "memory", state_dir=tmp_path)
@@ -440,6 +447,33 @@ def test_cloud_status_derives_paused_when_upload_entitlement_ends(tmp_path):
     )
 
     assert payload["protection_state"] == ProtectionState.PAUSED.value
+
+
+def test_cloud_status_reports_uploaded_snapshot_awaiting_verification(tmp_path):
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    store_id = str(uuid.uuid4())
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    save_state(
+        store_id,
+        CloudState(
+            protection_state=ProtectionState.VERIFICATION_PENDING,
+            last_successful_backup_snapshot_id="snapshot-new",
+            last_verified_snapshot_id="snapshot-old",
+            last_verify_ok=True,
+        ),
+        memory_dir=memory_dir,
+        state_dir=tmp_path / "state",
+    )
+
+    payload = cloud_status_payload(
+        Settings(memory_dir=memory_dir, cloud_backup_enabled=True),
+        entitlement="active",
+        state_dir=tmp_path / "state",
+    )
+
+    assert payload["protection_state"] == ProtectionState.VERIFICATION_PENDING.value
+    assert not any("changes pending" in item.lower() for item in payload["warnings"])
 
 
 def test_cloud_status_requires_sign_in_after_logout_of_protected_store(tmp_path):

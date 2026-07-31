@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import logging
 import threading
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from ormah.cloud.state import (
     ProtectionOperationPhase,
     ProtectionReasonCode,
     ProtectionState,
+    UploadJournalPhase,
     load_state,
     state_path,
 )
@@ -54,12 +56,13 @@ def test_backup_now_returns_typed_completed_operation(tmp_path, monkeypatch, clo
     assert isinstance(result, ProtectionOperation)
     assert result.kind is ProtectionOperationKind.BACKUP
     assert result.phase is ProtectionOperationPhase.COMPLETED
-    assert result.state is ProtectionState.CHANGES_PENDING
+    assert result.state is ProtectionState.VERIFICATION_PENDING
     assert result.snapshot_id == SNAPSHOT_ID
     assert client.finalized == [(store_id, "upload-1")]
     durable = load_state(store_id)
     assert durable.last_operation_id == result.operation_id
     assert durable.last_operation_phase is ProtectionOperationPhase.COMPLETED
+    assert durable.pending_upload_phase is None
 
 
 def test_legacy_opted_in_store_reaches_protected_after_first_backup_and_verification(
@@ -126,7 +129,40 @@ def test_failed_put_returns_typed_failure_and_never_finalizes(
     assert client.finalized == []
 
 
-def test_uncertain_finalize_blocks_automatic_reupload(
+def test_quota_and_disk_failures_have_actionable_reason_codes(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    quota_settings, _ = _settings(tmp_path / "quota")
+    quota_client = FakeCloudClient()
+    _patch_upload_prerequisites(monkeypatch, quota_client)
+    quota_client.create_upload = lambda *args: (_ for _ in ()).throw(
+        CloudError(
+            "Account storage quota exceeded.",
+            status_code=413,
+            payload={"detail": "Account storage quota exceeded."},
+        )
+    )
+
+    quota = CloudProtectionService(quota_settings).backup_now()
+
+    disk_settings, _ = _settings(tmp_path / "disk")
+    disk_client = FakeCloudClient()
+    _patch_upload_prerequisites(monkeypatch, disk_client)
+    monkeypatch.setattr(
+        protection,
+        "build_bundle",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError(errno.ENOSPC, "No space left on device")
+        ),
+    )
+
+    disk = CloudProtectionService(disk_settings).backup_now()
+
+    assert quota.reason_code is ProtectionReasonCode.QUOTA_EXCEEDED
+    assert disk.reason_code is ProtectionReasonCode.DISK_SPACE_INSUFFICIENT
+
+
+def test_uncertain_finalize_retries_the_same_upload_without_new_reservation(
     tmp_path, monkeypatch, cloud_state_dir
 ):
     settings, store_id = _settings(tmp_path)
@@ -141,6 +177,7 @@ def test_uncertain_finalize_blocks_automatic_reupload(
     client.finalize_upload = timeout_after_commit
 
     first = CloudProtectionService(settings).backup_now()
+    client.finalize_upload = real_finalize
     monkeypatch.setattr(
         client,
         "create_upload",
@@ -151,9 +188,66 @@ def test_uncertain_finalize_blocks_automatic_reupload(
     second = CloudProtectionService(settings).backup_now()
 
     assert first.reason_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
-    assert second.reason_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
+    assert second.phase is ProtectionOperationPhase.COMPLETED
+    assert client.finalized == [(store_id, "upload-1"), (store_id, "upload-1")]
+    durable = load_state(store_id)
+    assert durable.last_error_code is None
+    assert durable.pending_upload_phase is None
+
+
+def test_reserved_upload_from_interrupted_put_is_safe_to_replace(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, store_id = _settings(tmp_path)
+    state.update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        pending_upload_id="abandoned-upload",
+        pending_upload_snapshot_id="01J11111111111111111111111",
+        pending_upload_operation_id="abandoned-operation",
+        pending_upload_phase=UploadJournalPhase.RESERVED,
+        pending_upload_expires_at=protection._utc_now() + protection.timedelta(minutes=10),
+    )
+    client = FakeCloudClient()
+    _patch_upload_prerequisites(monkeypatch, client)
+
+    result = CloudProtectionService(settings).backup_now()
+
+    assert result.phase is ProtectionOperationPhase.COMPLETED
+    assert len(client.created) == 1
     assert client.finalized == [(store_id, "upload-1")]
-    assert load_state(store_id).last_error_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
+    durable = load_state(store_id)
+    assert durable.pending_upload_phase is None
+    assert durable.last_successful_backup_snapshot_id == SNAPSHOT_ID
+
+
+def test_successful_verification_does_not_clear_ambiguous_upload_journal(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, store_id = _settings(tmp_path)
+    state.update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        protection_state=ProtectionState.ATTENTION_REQUIRED,
+        last_successful_backup_snapshot_id=SNAPSHOT_ID,
+        last_error_code=ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN,
+        last_error_message="finalize response lost",
+        pending_upload_id="upload-1",
+        pending_upload_snapshot_id=SNAPSHOT_ID,
+        pending_upload_operation_id="operation-1",
+        pending_upload_phase=UploadJournalPhase.FINALIZING,
+    )
+    bundle, identity = _verification_bundle(tmp_path, settings, store_id)
+    client = FakeCloudClient(bundle=bundle)
+    _patch_verification(monkeypatch, client, bundle, identity)
+
+    result = CloudProtectionService(settings).verify_now(SNAPSHOT_ID)
+
+    assert result.phase is ProtectionOperationPhase.COMPLETED
+    durable = load_state(store_id)
+    assert durable.protection_state is ProtectionState.ATTENTION_REQUIRED
+    assert durable.last_error_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
+    assert durable.pending_upload_phase is UploadJournalPhase.FINALIZING
 
 
 def test_upload_rejects_invalid_server_snapshot_id_before_put(
@@ -205,6 +299,49 @@ def test_verification_rejects_invalid_server_snapshot_id_before_tempfile(
 
     assert result.phase is ProtectionOperationPhase.FAILED
     assert result.reason_code is ProtectionReasonCode.VERIFICATION_FAILED
+
+
+def test_index_rebuild_failure_is_not_reported_as_backup_corruption(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, store_id = _settings(tmp_path)
+    state.update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        last_successful_backup_snapshot_id=SNAPSHOT_ID,
+        protection_state=ProtectionState.VERIFICATION_PENDING,
+    )
+    bundle, identity = _verification_bundle(tmp_path, settings, store_id)
+    client = FakeCloudClient(bundle=bundle)
+    _patch_verification(monkeypatch, client, bundle, identity)
+    monkeypatch.setattr(
+        protection,
+        "IndexBuilder",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("embedding model is unavailable")
+        ),
+    )
+
+    result = CloudProtectionService(settings).verify_now(SNAPSHOT_ID)
+
+    assert result.phase is ProtectionOperationPhase.FAILED
+    assert (
+        result.reason_code
+        is ProtectionReasonCode.INDEX_ENVIRONMENT_UNAVAILABLE
+    )
+
+
+def test_safe_error_message_redacts_plaintext_node_slugs():
+    message = protection.safe_error_message(
+        "Hash mismatch for 'nodes/fact_my-therapist-said-secret_a1b2.md' "
+        "and deleted/event_private-diagnosis_c3d4.md"
+    )
+
+    assert "therapist" not in message
+    assert "diagnosis" not in message
+    assert message == (
+        "Hash mismatch for 'nodes/<redacted>.md' and deleted/<redacted>.md"
+    )
 
 
 def test_offline_upload_preserves_verification_health_and_redacts_persisted_error(

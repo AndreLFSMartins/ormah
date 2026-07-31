@@ -40,6 +40,7 @@ class ProtectionState(StrEnum):
     VERIFYING_FIRST_BACKUP = "verifying_first_backup"
     PROTECTED = "protected"
     CHANGES_PENDING = "changes_pending"
+    VERIFICATION_PENDING = "verification_pending"
     OFFLINE = "offline"
     PAUSED = "paused"
     STOPPED = "stopped"
@@ -76,6 +77,13 @@ class ProtectionOperationPhase(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELED = "canceled"
+
+
+class UploadJournalPhase(StrEnum):
+    """Durable client phases around the only ambiguous upload boundary."""
+
+    RESERVED = "reserved"
+    FINALIZING = "finalizing"
 
 
 class ProtectionReasonCode(StrEnum):
@@ -216,6 +224,12 @@ class CloudState:
     recovery_kit_verified_at: datetime | None = None
     next_scheduled_upload_at: datetime | None = None
     next_scheduled_verify_at: datetime | None = None
+    pending_upload_id: str | None = None
+    pending_upload_snapshot_id: str | None = None
+    pending_upload_operation_id: str | None = None
+    pending_upload_protection_intent_id: str | None = None
+    pending_upload_phase: UploadJournalPhase | str | None = None
+    pending_upload_expires_at: datetime | None = None
     extra: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -266,6 +280,16 @@ class CloudState:
                 "recovery_kit_verified_at": _serialize_time(self.recovery_kit_verified_at),
                 "next_scheduled_upload_at": _serialize_time(self.next_scheduled_upload_at),
                 "next_scheduled_verify_at": _serialize_time(self.next_scheduled_verify_at),
+                "pending_upload_id": self.pending_upload_id,
+                "pending_upload_snapshot_id": self.pending_upload_snapshot_id,
+                "pending_upload_operation_id": self.pending_upload_operation_id,
+                "pending_upload_protection_intent_id": (
+                    self.pending_upload_protection_intent_id
+                ),
+                "pending_upload_phase": _serialize_enum(self.pending_upload_phase),
+                "pending_upload_expires_at": _serialize_time(
+                    self.pending_upload_expires_at
+                ),
             }
         )
         return payload
@@ -302,6 +326,7 @@ class CloudState:
             "recovery_kit_verified_at",
             "next_scheduled_upload_at",
             "next_scheduled_verify_at",
+            "pending_upload_expires_at",
         )
         for key in time_fields:
             values[key] = _parse_time(values.get(key))
@@ -320,6 +345,10 @@ class CloudState:
             "last_verified_snapshot_id",
             "last_error_message",
             "local_graph_fingerprint_at_upload",
+            "pending_upload_id",
+            "pending_upload_snapshot_id",
+            "pending_upload_operation_id",
+            "pending_upload_protection_intent_id",
         )
         for key in string_fields:
             value = values.get(key)
@@ -342,6 +371,7 @@ class CloudState:
             "last_operation_kind": ProtectionOperationKind,
             "last_operation_phase": ProtectionOperationPhase,
             "last_error_code": ProtectionReasonCode,
+            "pending_upload_phase": UploadJournalPhase,
         }
         for key, enum_type in enum_fields.items():
             if key in values:
@@ -487,6 +517,7 @@ def is_protected_and_verified(state: CloudState, *, enabled: bool) -> bool:
     return (
         enabled
         and intent_complete
+        and state.pending_upload_phase is None
         and snapshot_id is not None
         and snapshot_id == state.last_verified_snapshot_id
         and state.last_verify_ok is True
@@ -573,6 +604,7 @@ def cloud_status_payload(
     if protection_state in {
         ProtectionState.PROTECTED,
         ProtectionState.CHANGES_PENDING,
+        ProtectionState.VERIFICATION_PENDING,
     }:
         if entitlement == "expired":
             protection_state = ProtectionState.PAUSED

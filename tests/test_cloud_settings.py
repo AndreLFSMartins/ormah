@@ -8,7 +8,7 @@ import pytest
 
 from ormah import setup
 from ormah.cloud.client import persist_account_credentials
-from ormah.cloud.settings import set_cloud_backup_enabled
+from ormah.cloud.settings import persist_settings_delta, set_cloud_backup_enabled
 from ormah.config import Settings
 
 
@@ -101,6 +101,22 @@ def test_account_and_protection_updates_are_serialized_without_lost_keys(
     assert "ORMAH_CLOUD_BACKUP_ENABLED=true" in text
     assert "ORMAH_ACCOUNT_TOKEN=account-token" in text
     assert "ORMAH_ACCOUNT_EMAIL=person@example.com" in text
+
+
+def test_setup_delta_does_not_overwrite_a_concurrent_protection_setting(env_path):
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text("ORMAH_LLM_PROVIDER=none\n", encoding="utf-8")
+    stale_before = setup._read_env_file()
+    desired = dict(stale_before)
+    desired["ORMAH_LLM_PROVIDER"] = "ollama"
+
+    settings = Settings(cloud_backup_enabled=False)
+    set_cloud_backup_enabled(settings, True)
+    persist_settings_delta(stale_before, desired)
+
+    persisted = setup._read_env_file()
+    assert persisted["ORMAH_LLM_PROVIDER"] == "ollama"
+    assert persisted["ORMAH_CLOUD_BACKUP_ENABLED"] == "true"
 
 
 def test_admin_backup_settings_use_the_shared_serialized_writer(monkeypatch, tmp_path):

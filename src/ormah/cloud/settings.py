@@ -31,6 +31,21 @@ def update_settings_env(
         setup._write_env_file(env)
 
 
+def persist_settings_delta(
+    before: Mapping[str, str],
+    after: Mapping[str, str],
+) -> None:
+    """Persist only keys changed by a caller, serialized with every other writer."""
+
+    updates = {
+        key: value
+        for key, value in after.items()
+        if before.get(key) != value
+    }
+    removed = set(before) - set(after)
+    update_settings_env(updates, remove=removed)
+
+
 def set_cloud_backup_enabled(settings, enabled: bool) -> None:
     """Persist and apply cloud protection without dropping unrelated settings."""
 

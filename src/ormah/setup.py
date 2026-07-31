@@ -1230,6 +1230,14 @@ def _disable_llm(env: dict[str, str]) -> None:
         env.pop(key, None)
 
 
+def _persist_env_delta(before: dict[str, str], after: dict[str, str]) -> None:
+    """Apply this setup action's changes without overwriting concurrent writers."""
+
+    from ormah.cloud.settings import persist_settings_delta
+
+    persist_settings_delta(before, after)
+
+
 def _enable_llm(
     env: dict[str, str],
     provider: str,
@@ -1262,8 +1270,9 @@ def configure_llm() -> None:
         answer = ""
     if answer not in ("y", "yes"):
         env = _read_env_file()
+        before = dict(env)
         _disable_llm(env)
-        _write_env_file(env)
+        _persist_env_delta(before, env)
         print()
         info("Server-side LLM disabled — core memory works without one")
         info("Run 'ormah setup' again to enable later")
@@ -1282,14 +1291,16 @@ def configure_llm() -> None:
     # Handle "None" selection
     if provider == "none":
         env = _read_env_file()
+        before = dict(env)
         _disable_llm(env)
-        _write_env_file(env)
+        _persist_env_delta(before, env)
         print()
         info("No LLM configured \u2014 core memory works without one")
         info("Run 'ormah setup' again to add an LLM later")
         return
 
     env = _read_env_file()
+    before = dict(env)
 
     if api_key_var:
         hint = _cost_hint(default_model)
@@ -1332,7 +1343,7 @@ def configure_llm() -> None:
         ok(f"Using {display_name} with model '{default_model}'")
         info("Make sure Ollama is running: https://ollama.com")
 
-    _write_env_file(env)
+    _persist_env_delta(before, env)
 
 
 _COST_PER_MTOK: dict[str, tuple[float, float]] = {
@@ -1548,8 +1559,9 @@ def configure_agent_maintenance(agents: list[AgentDescriptor]) -> bool:
         answer = ""
     if answer not in ("n", "no"):
         env = _read_env_file()
+        before = dict(env)
         env["ORMAH_CLAUDE_MAINTENANCE_ENABLED"] = "true"
-        _write_env_file(env)
+        _persist_env_delta(before, env)
         if any(agent.id == "codex" for agent in agents):
             _enable_codex_feature("multi_agent")
         ok(f"Automatic maintenance enabled — {agent_label} can run run_maintenance when signalled")
@@ -2791,8 +2803,9 @@ def run_setup(
     # 3. Configure LLM — skip if agent-backed maintenance is handling background jobs
     if ci:
         env = _read_env_file()
+        before = dict(env)
         _disable_llm(env)
-        _write_env_file(env)
+        _persist_env_delta(before, env)
         info("CI mode — LLM set to none")
     elif update:
         env = _read_env_file()
@@ -2803,8 +2816,9 @@ def run_setup(
             info("Cloud LLM key inheritance is disabled; run 'ormah setup' to opt in")
     elif agent_maintenance:
         env = _read_env_file()
+        before = dict(env)
         _disable_llm(env)
-        _write_env_file(env)
+        _persist_env_delta(before, env)
     else:
         configure_llm()
 
