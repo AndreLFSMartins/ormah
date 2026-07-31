@@ -1796,7 +1796,12 @@ class CloudProtectionService:
                     "Cloud snapshot exceeds this client's safe processing limit.",
                     ProtectionReasonCode.PROCESSING_LIMIT_EXCEEDED,
                 )
-            expected_sha256 = _validated_sha256(selected.get("sha256"))
+            if "sha256" not in selected:
+                raise _VerificationStageError(
+                    "Ormah Cloud must be updated before restore verification can continue.",
+                    ProtectionReasonCode.SERVICE_UPDATE_REQUIRED,
+                )
+            expected_sha256 = _validated_sha256(selected["sha256"])
 
             presigned = client.presign_download(store_id, snapshot_id)
             get_url = presigned.get("get_url")

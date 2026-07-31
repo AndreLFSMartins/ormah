@@ -482,7 +482,7 @@ def test_verification_reports_the_failed_restore_stage(
     assert secret not in (durable.last_verify_error or "")
 
 
-def test_verification_requires_server_attested_ciphertext_hash(
+def test_verification_distinguishes_old_service_from_unverified_legacy_blob(
     tmp_path, monkeypatch, cloud_state_dir
 ):
     settings, store_id = _settings(tmp_path)
@@ -493,9 +493,23 @@ def test_verification_requires_server_attested_ciphertext_hash(
         "blobs": [{"snapshot_id": SNAPSHOT_ID, "size_bytes": bundle.stat().st_size}]
     }
 
-    result = CloudProtectionService(settings).verify_now()
+    old_service = CloudProtectionService(settings).verify_now()
+    client.list_blobs = lambda store_id: {
+        "blobs": [
+            {
+                "snapshot_id": SNAPSHOT_ID,
+                "size_bytes": bundle.stat().st_size,
+                "sha256": None,
+            }
+        ]
+    }
+    unverified_legacy = CloudProtectionService(settings).verify_now()
 
-    assert result.reason_code is ProtectionReasonCode.CIPHERTEXT_HASH_UNAVAILABLE
+    assert old_service.reason_code is ProtectionReasonCode.SERVICE_UPDATE_REQUIRED
+    assert (
+        unverified_legacy.reason_code
+        is ProtectionReasonCode.CIPHERTEXT_HASH_UNAVAILABLE
+    )
 
 
 def test_verification_reports_local_processing_limit_as_local_failure(

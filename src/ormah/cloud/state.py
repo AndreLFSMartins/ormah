@@ -125,6 +125,7 @@ class ProtectionReasonCode(StrEnum):
     STORE_BUSY = "store_busy"
     PROTECTION_STOPPED = "protection_stopped"
     CLIENT_UPDATE_REQUIRED = "client_update_required"
+    SERVICE_UPDATE_REQUIRED = "service_update_required"
     NO_BACKUPABLE_MEMORY = "no_backupable_memory"
     NOT_DUE = "not_due"
     INTENT_EXPIRED = "intent_expired"
