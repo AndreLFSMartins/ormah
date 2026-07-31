@@ -301,14 +301,6 @@ def _verify_extracted_bundle(extracted: Path, expected_store_id: str, info) -> i
         )
 
     try:
-        resolve_backup_user_node_id(extracted)
-    except Exception as exc:
-        raise _VerificationStageError(
-            "The backup's active Self pointer does not match the restored memory graph.",
-            ProtectionReasonCode.SELF_POINTER_INVALID,
-        ) from exc
-
-    try:
         active_nodes = []
         for dirname in ("nodes", "deleted"):
             for path in sorted((extracted / dirname).glob("*.md")):
@@ -328,6 +320,20 @@ def _verify_extracted_bundle(extracted: Path, expected_store_id: str, info) -> i
             ProtectionReasonCode.NODE_PARSE_FAILED,
         ) from exc
 
+    try:
+        resolve_backup_user_node_id(extracted)
+    except OSError as exc:
+        if _is_disk_full_error(exc):
+            raise
+        raise _VerificationStageError(
+            "The backup's active Self pointer does not match the restored memory graph.",
+            ProtectionReasonCode.SELF_POINTER_INVALID,
+        ) from exc
+    except Exception as exc:
+        raise _VerificationStageError(
+            "The backup's active Self pointer does not match the restored memory graph.",
+            ProtectionReasonCode.SELF_POINTER_INVALID,
+        ) from exc
     database = Database(extracted / "scratch-index" / "index.db")
     try:
         try:

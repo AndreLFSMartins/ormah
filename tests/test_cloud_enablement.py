@@ -887,6 +887,40 @@ def test_terminal_intent_does_not_invalidate_verified_protection(
     assert not any("metadata is incomplete" in warning for warning in payload["warnings"])
 
 
+@pytest.mark.parametrize(
+    "active_or_unknown_status",
+    [
+        ProtectionIntentStatus.PENDING,
+        ProtectionIntentStatus.ACCOUNT_BOUND,
+        ProtectionIntentStatus.CHECKOUT_PENDING,
+        ProtectionIntentStatus.READY,
+        ProtectionIntentStatus.RUNNING,
+        "future_intent_status",
+    ],
+)
+def test_active_or_unknown_intent_blocks_verified_protection_claim(
+    tmp_path, active_or_unknown_status
+):
+    settings = _settings(tmp_path)
+    store_id = protection.get_or_create_store_id(settings.memory_dir)
+    settings.cloud_backup_enabled = True
+    update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        protection_state=ProtectionState.PROTECTED,
+        pending_protection_intent_id=str(uuid.uuid4()),
+        pending_protection_status=active_or_unknown_status,
+        last_successful_backup_snapshot_id=SNAPSHOT_ID,
+        last_verified_snapshot_id=SNAPSHOT_ID,
+        last_verify_ok=True,
+    )
+
+    payload = cloud_status_payload(settings, entitlement="active")
+
+    assert payload["protection_state"] == ProtectionState.ATTENTION_REQUIRED.value
+    assert any("metadata is incomplete" in warning for warning in payload["warnings"])
+
+
 def test_replacing_expired_subscription_intent_preserves_protected_origin(
     tmp_path, monkeypatch
 ):
