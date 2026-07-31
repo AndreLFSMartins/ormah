@@ -99,8 +99,16 @@ class ProtectionReasonCode(StrEnum):
     KEY_INVALID = "key_invalid"
     UPLOAD_FAILED = "upload_failed"
     VERIFICATION_FAILED = "verification_failed"
+    DOWNLOAD_FAILED = "download_failed"
+    CIPHERTEXT_HASH_UNAVAILABLE = "ciphertext_hash_unavailable"
+    CIPHERTEXT_HASH_MISMATCH = "ciphertext_hash_mismatch"
+    DECRYPT_FAILED = "decrypt_failed"
+    MANIFEST_VERIFICATION_FAILED = "manifest_verification_failed"
+    NODE_PARSE_FAILED = "node_parse_failed"
     BUNDLE_CORRUPT = "bundle_corrupt"
     INDEX_ENVIRONMENT_UNAVAILABLE = "index_environment_unavailable"
+    INDEX_REBUILD_FAILED = "index_rebuild_failed"
+    SEARCH_PROBE_FAILED = "search_probe_failed"
     DISK_SPACE_INSUFFICIENT = "disk_space_insufficient"
     OPERATION_INTERRUPTED = "operation_interrupted"
     STORE_BUSY = "store_busy"
@@ -517,7 +525,7 @@ def is_protected_and_verified(state: CloudState, *, enabled: bool) -> bool:
     return (
         enabled
         and intent_complete
-        and state.pending_upload_phase is None
+        and state.pending_upload_phase is not UploadJournalPhase.FINALIZING
         and snapshot_id is not None
         and snapshot_id == state.last_verified_snapshot_id
         and state.last_verify_ok is True

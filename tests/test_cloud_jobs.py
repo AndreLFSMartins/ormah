@@ -14,7 +14,8 @@ from ormah.cloud import protection
 from ormah.cloud.bundle import build_bundle
 from ormah.cloud.crypto import generate_identity
 from ormah.cloud.entitlements import EntitlementStatus
-from ormah.cloud.state import load_state, save_state, CloudState
+from ormah.cloud.state import CloudState, ProtectionReasonCode, load_state, save_state
+from ormah.cloud.transfer import sha256_file
 from ormah.config import Settings
 from ormah.index.db import Database
 from ormah.models.node import MemoryNode, NodeType
@@ -48,7 +49,14 @@ class FakeCloudClient:
 
     def list_blobs(self, store_id):
         return {
-            "blobs": [{"snapshot_id": SNAPSHOT_ID, "created_at": NOW.isoformat(), "size_bytes": 1}]
+            "blobs": [
+                {
+                    "snapshot_id": SNAPSHOT_ID,
+                    "created_at": NOW.isoformat(),
+                    "size_bytes": 1,
+                    "sha256": sha256_file(self.bundle) if self.bundle is not None else "0" * 64,
+                }
+            ]
         }
 
     def presign_download(self, store_id, snapshot_id):
@@ -439,7 +447,9 @@ def test_restore_verification_rejects_invalid_active_self_pointer(
     _patch_verification(monkeypatch, client, bundle, identity)
 
     assert jobs.run_restore_verification(SimpleNamespace(settings=settings)) is False
-    assert "exact system:self node is not present" in load_state(store_id).last_verify_error
+    durable = load_state(store_id)
+    assert durable.last_error_code is ProtectionReasonCode.NODE_PARSE_FAILED
+    assert durable.last_verify_error == "A restored memory node could not be parsed."
 
 
 def test_restore_verification_cleans_temporary_tree_on_failure(

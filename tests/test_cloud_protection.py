@@ -195,6 +195,77 @@ def test_uncertain_finalize_retries_the_same_upload_without_new_reservation(
     assert durable.pending_upload_phase is None
 
 
+def test_definitively_expired_finalize_is_replaced_after_local_expiry(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, store_id = _settings(tmp_path)
+    client = FakeCloudClient()
+    _patch_upload_prerequisites(monkeypatch, client)
+    state.update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        pending_upload_id="expired-upload",
+        pending_upload_snapshot_id="01J11111111111111111111111",
+        pending_upload_operation_id="expired-operation",
+        pending_upload_phase=UploadJournalPhase.FINALIZING,
+        pending_upload_expires_at=protection._utc_now() - protection.timedelta(seconds=1),
+        last_error_code=ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN,
+    )
+    real_finalize = client.finalize_upload
+
+    def finalize(store_id, upload_id):
+        if upload_id == "expired-upload":
+            raise CloudError(
+                "Upload expired.",
+                status_code=409,
+                payload={"detail": {"code": "upload_expired"}},
+            )
+        return real_finalize(store_id, upload_id)
+
+    client.finalize_upload = finalize
+
+    result = CloudProtectionService(settings).backup_now()
+
+    assert result.phase is ProtectionOperationPhase.COMPLETED
+    assert len(client.created) == 1
+    assert client.finalized == [(store_id, "upload-1")]
+    durable = load_state(store_id)
+    assert durable.pending_upload_phase is None
+    assert durable.last_error_code is None
+
+
+def test_server_expiry_before_local_expiry_keeps_ambiguous_upload(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, store_id = _settings(tmp_path)
+    state.update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        pending_upload_id="ambiguous-upload",
+        pending_upload_snapshot_id="01J11111111111111111111111",
+        pending_upload_operation_id="ambiguous-operation",
+        pending_upload_phase=UploadJournalPhase.FINALIZING,
+        pending_upload_expires_at=protection._utc_now() + protection.timedelta(minutes=1),
+    )
+    client = FakeCloudClient()
+    _patch_upload_prerequisites(monkeypatch, client)
+    client.create_upload = lambda *args: (_ for _ in ()).throw(
+        AssertionError("an ambiguous upload must not be replaced")
+    )
+    client.finalize_upload = lambda *args: (_ for _ in ()).throw(
+        CloudError(
+            "Upload expired.",
+            status_code=409,
+            payload={"detail": {"code": "upload_expired"}},
+        )
+    )
+
+    result = CloudProtectionService(settings).backup_now()
+
+    assert result.reason_code is ProtectionReasonCode.UPLOAD_STATUS_UNKNOWN
+    assert load_state(store_id).pending_upload_phase is UploadJournalPhase.FINALIZING
+
+
 def test_reserved_upload_from_interrupted_put_is_safe_to_replace(
     tmp_path, monkeypatch, cloud_state_dir
 ):
@@ -331,6 +402,102 @@ def test_index_rebuild_failure_is_not_reported_as_backup_corruption(
     )
 
 
+@pytest.mark.parametrize(
+    ("failure", "reason_code"),
+    [
+        ("download", ProtectionReasonCode.DOWNLOAD_FAILED),
+        ("ciphertext", ProtectionReasonCode.CIPHERTEXT_HASH_MISMATCH),
+        ("decrypt", ProtectionReasonCode.DECRYPT_FAILED),
+        ("manifest", ProtectionReasonCode.MANIFEST_VERIFICATION_FAILED),
+        ("node", ProtectionReasonCode.NODE_PARSE_FAILED),
+        ("search", ProtectionReasonCode.SEARCH_PROBE_FAILED),
+    ],
+)
+def test_verification_reports_the_failed_restore_stage(
+    tmp_path, monkeypatch, cloud_state_dir, failure, reason_code
+):
+    settings, store_id = _settings(tmp_path)
+    state.update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        last_successful_backup_snapshot_id=SNAPSHOT_ID,
+        protection_state=ProtectionState.VERIFICATION_PENDING,
+    )
+    bundle, identity = _verification_bundle(tmp_path, settings, store_id)
+    client = FakeCloudClient(bundle=bundle)
+    _patch_verification(monkeypatch, client, bundle, identity)
+    secret = "private-frontmatter-must-not-escape"
+
+    if failure == "download":
+        monkeypatch.setattr(
+            protection,
+            "download_file",
+            lambda *args: (_ for _ in ()).throw(RuntimeError("object unavailable")),
+        )
+    elif failure == "ciphertext":
+        client.list_blobs = lambda store_id: {
+            "blobs": [
+                {
+                    "snapshot_id": SNAPSHOT_ID,
+                    "size_bytes": bundle.stat().st_size,
+                    "sha256": "0" * 64,
+                }
+            ]
+        }
+    elif failure == "decrypt":
+        monkeypatch.setattr(
+            protection,
+            "open_bundle",
+            lambda *args: (_ for _ in ()).throw(
+                protection.CloudCryptoError("wrong recovery key")
+            ),
+        )
+    elif failure == "manifest":
+        monkeypatch.setattr(
+            protection,
+            "open_bundle",
+            lambda *args: (_ for _ in ()).throw(
+                TypeError(f"nodes\\{secret}.md manifest entry is malformed")
+            ),
+        )
+    elif failure == "node":
+        monkeypatch.setattr(
+            protection,
+            "parse_node",
+            lambda *args: (_ for _ in ()).throw(ValueError(secret)),
+        )
+    else:
+        monkeypatch.setattr(
+            protection,
+            "_probe_search",
+            lambda *args: (_ for _ in ()).throw(RuntimeError("probe failed")),
+        )
+
+    result = CloudProtectionService(settings).verify_now(SNAPSHOT_ID)
+
+    assert result.phase is ProtectionOperationPhase.FAILED
+    assert result.reason_code is reason_code
+    durable = load_state(store_id)
+    assert durable.last_error_code is reason_code
+    assert secret not in (durable.last_verify_error or "")
+
+
+def test_verification_requires_server_attested_ciphertext_hash(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, store_id = _settings(tmp_path)
+    bundle, identity = _verification_bundle(tmp_path, settings, store_id)
+    client = FakeCloudClient(bundle=bundle)
+    _patch_verification(monkeypatch, client, bundle, identity)
+    client.list_blobs = lambda store_id: {
+        "blobs": [{"snapshot_id": SNAPSHOT_ID, "size_bytes": bundle.stat().st_size}]
+    }
+
+    result = CloudProtectionService(settings).verify_now()
+
+    assert result.reason_code is ProtectionReasonCode.CIPHERTEXT_HASH_UNAVAILABLE
+
+
 def test_safe_error_message_redacts_plaintext_node_slugs():
     message = protection.safe_error_message(
         "Hash mismatch for 'nodes/fact_my-therapist-said-secret_a1b2.md' "
@@ -342,6 +509,14 @@ def test_safe_error_message_redacts_plaintext_node_slugs():
     assert message == (
         "Hash mismatch for 'nodes/<redacted>.md' and deleted/<redacted>.md"
     )
+
+
+def test_safe_error_message_redacts_windows_node_paths():
+    message = protection.safe_error_message(
+        r"Hash mismatch for nodes\fact_private-diagnosis_a1b2.md"
+    )
+
+    assert message == "Hash mismatch for nodes/<redacted>.md"
 
 
 def test_offline_upload_preserves_verification_health_and_redacts_persisted_error(

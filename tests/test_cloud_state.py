@@ -21,6 +21,7 @@ from ormah.cloud.state import (
     ProtectionState,
     UploadJournalPhase,
     cloud_status_payload,
+    is_protected_and_verified,
     load_state,
     save_state,
     state_path,
@@ -64,6 +65,23 @@ def test_state_round_trip_is_atomic_and_owner_only(tmp_path):
     assert load_state(store_id, state_dir=tmp_path) == state
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_reserved_upload_does_not_hide_last_verified_protection():
+    values = {
+        "last_successful_backup_snapshot_id": "01J00000000000000000000000",
+        "last_verified_snapshot_id": "01J00000000000000000000000",
+        "last_verify_ok": True,
+    }
+
+    assert is_protected_and_verified(
+        CloudState(**values, pending_upload_phase=UploadJournalPhase.RESERVED),
+        enabled=True,
+    )
+    assert not is_protected_and_verified(
+        CloudState(**values, pending_upload_phase=UploadJournalPhase.FINALIZING),
+        enabled=True,
+    )
 
 
 def test_update_preserves_unmodified_fields(tmp_path):

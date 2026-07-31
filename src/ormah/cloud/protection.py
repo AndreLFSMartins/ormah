@@ -25,6 +25,7 @@ from ormah.backup import (
 from ormah.cloud.bundle import BundleError, build_bundle, open_bundle
 from ormah.cloud.billing import validate_protection_intent_id
 from ormah.cloud.client import CloudError, client_from_settings
+from ormah.cloud.crypto import CloudCryptoError
 from ormah.cloud.entitlements import (
     EntitlementStatus,
     cache_entitlements,
@@ -77,7 +78,8 @@ _QUERY_SECRET_RE = re.compile(
     r"access_token|token|signature)=)[^&\s]+"
 )
 _SNAPSHOT_ID_RE = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
-_NODE_PATH_RE = re.compile(r"\b(nodes|deleted)/[^\s'\",)\]]+\.md\b")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_NODE_PATH_RE = re.compile(r"\b(nodes|deleted)[/\\][^\s'\",)\]]+\.md\b")
 _DISK_FULL_ERRNOS = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 
 
@@ -250,9 +252,39 @@ def _is_quota_error(error: object) -> bool:
     return "quota" in str(detail).lower()
 
 
+def _cloud_error_code(error: object) -> str | None:
+    if not isinstance(error, CloudError) or not isinstance(error.payload, dict):
+        return None
+    detail = error.payload.get("detail")
+    if not isinstance(detail, dict):
+        return None
+    code = detail.get("code")
+    return code if isinstance(code, str) else None
+
+
+def _finalize_is_definitively_expired(state: CloudState, error: object) -> bool:
+    """Return whether replacing a failed finalize cannot create a duplicate snapshot."""
+
+    expires_at = state.pending_upload_expires_at
+    return (
+        _cloud_error_code(error) == "upload_expired"
+        and expires_at is not None
+        and expires_at <= _utc_now()
+    )
+
+
 def _validated_snapshot_id(value: object) -> str:
     if not isinstance(value, str) or _SNAPSHOT_ID_RE.fullmatch(value) is None:
         raise RuntimeError("Cloud response contained an invalid snapshot id.")
+    return value
+
+
+def _validated_sha256(value: object) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise _VerificationStageError(
+            "Cloud metadata does not contain a verified ciphertext hash.",
+            ProtectionReasonCode.CIPHERTEXT_HASH_UNAVAILABLE,
+        )
     return value
 
 
@@ -274,14 +306,26 @@ def _verify_extracted_bundle(extracted: Path, expected_store_id: str, info) -> i
             f"Bundle store id {info.store_id!r} does not match local store {expected_store_id!r}."
         )
 
-    resolve_backup_user_node_id(extracted)
-
-    active_nodes = []
-    for dirname in ("nodes", "deleted"):
-        for path in sorted((extracted / dirname).glob("*.md")):
-            node = parse_node(path.read_text(encoding="utf-8"))
-            if dirname == "nodes":
-                active_nodes.append(node)
+    try:
+        resolve_backup_user_node_id(extracted)
+        active_nodes = []
+        for dirname in ("nodes", "deleted"):
+            for path in sorted((extracted / dirname).glob("*.md")):
+                node = parse_node(path.read_text(encoding="utf-8"))
+                if dirname == "nodes":
+                    active_nodes.append(node)
+    except OSError as exc:
+        if _is_disk_full_error(exc):
+            raise
+        raise _VerificationStageError(
+            "A restored memory node could not be parsed.",
+            ProtectionReasonCode.NODE_PARSE_FAILED,
+        ) from exc
+    except Exception as exc:
+        raise _VerificationStageError(
+            "A restored memory node could not be parsed.",
+            ProtectionReasonCode.NODE_PARSE_FAILED,
+        ) from exc
 
     database = Database(extracted / "scratch-index" / "index.db")
     try:
@@ -301,10 +345,17 @@ def _verify_extracted_bundle(extracted: Path, expected_store_id: str, info) -> i
                 ProtectionReasonCode.INDEX_ENVIRONMENT_UNAVAILABLE,
             ) from exc
         if rebuilt != info.node_count:
-            raise RuntimeError(
-                f"Scratch index rebuilt {rebuilt} nodes; bundle manifest declares {info.node_count}."
+            raise _VerificationStageError(
+                "The scratch index node count did not match the verified manifest.",
+                ProtectionReasonCode.INDEX_REBUILD_FAILED,
             )
-        _probe_search(database, active_nodes)
+        try:
+            _probe_search(database, active_nodes)
+        except Exception as exc:
+            raise _VerificationStageError(
+                "The scratch search probe did not return a restored memory.",
+                ProtectionReasonCode.SEARCH_PROBE_FAILED,
+            ) from exc
         return rebuilt
     finally:
         database.close()
@@ -1010,6 +1061,12 @@ class CloudProtectionService:
 
     @staticmethod
     def _new_intent_origin(state: CloudState) -> ProtectionState:
+        if (
+            state.pending_protection_intent_id is not None
+            and state.pending_protection_status is not ProtectionIntentStatus.COMPLETED
+            and isinstance(state.pending_protection_origin_state, ProtectionState)
+        ):
+            return state.pending_protection_origin_state
         if isinstance(state.protection_state, ProtectionState) and state.protection_state not in {
             ProtectionState.SIGN_IN_REQUIRED,
             ProtectionState.SUBSCRIPTION_REQUIRED,
@@ -1373,13 +1430,29 @@ class CloudProtectionService:
                 if state.pending_upload_phase is UploadJournalPhase.FINALIZING:
                     client = client_from_settings(settings)
                     finalize_attempted = True
-                    return self._reconcile_finalizing_upload(
-                        store_id=store_id,
-                        state=state,
-                        operation_id=operation_id,
-                        protection_intent_id=protection_intent_id,
-                        client=client,
-                    )
+                    try:
+                        return self._reconcile_finalizing_upload(
+                            store_id=store_id,
+                            state=state,
+                            operation_id=operation_id,
+                            protection_intent_id=protection_intent_id,
+                            client=client,
+                        )
+                    except CloudError as exc:
+                        if not _finalize_is_definitively_expired(state, exc):
+                            raise
+                        self._close_client(client)
+                        client = None
+                        finalize_attempted = False
+                        state = update_state(
+                            store_id,
+                            memory_dir=settings.memory_dir,
+                            last_upload_error=None,
+                            last_error_code=None,
+                            last_error_message=None,
+                            last_error_at=None,
+                            **_cleared_upload_journal(),
+                        )
                 state = update_state(
                     store_id,
                     memory_dir=settings.memory_dir,
@@ -1719,6 +1792,7 @@ class CloudProtectionService:
                 raise RuntimeError("Cloud snapshot listing did not include a valid size.")
             if size_bytes > client.processing_limit(require_hardened_write=False):
                 raise CloudError("Cloud snapshot exceeds this client's safe processing limit.")
+            expected_sha256 = _validated_sha256(selected.get("sha256"))
 
             presigned = client.presign_download(store_id, snapshot_id)
             get_url = presigned.get("get_url")
@@ -1728,8 +1802,44 @@ class CloudProtectionService:
             tmp_root = Path(tempfile.mkdtemp(prefix="ormah-restore-verify-"))
             bundle = tmp_root / f"{snapshot_id}.age"
             extracted = tmp_root / "snapshot"
-            download_file(get_url, bundle)
-            info = open_bundle(bundle, extracted, load_identities())
+            try:
+                download_file(get_url, bundle)
+            except httpx.RequestError:
+                raise
+            except OSError as exc:
+                if _is_disk_full_error(exc):
+                    raise
+                raise _VerificationStageError(
+                    "The encrypted snapshot could not be downloaded.",
+                    ProtectionReasonCode.DOWNLOAD_FAILED,
+                ) from exc
+            except Exception as exc:
+                raise _VerificationStageError(
+                    "The encrypted snapshot could not be downloaded.",
+                    ProtectionReasonCode.DOWNLOAD_FAILED,
+                ) from exc
+            if sha256_file(bundle) != expected_sha256:
+                raise _VerificationStageError(
+                    "The downloaded ciphertext hash did not match cloud metadata.",
+                    ProtectionReasonCode.CIPHERTEXT_HASH_MISMATCH,
+                )
+            try:
+                info = open_bundle(bundle, extracted, load_identities())
+            except CloudCryptoError as exc:
+                raise _VerificationStageError(
+                    "The encrypted snapshot could not be decrypted with this recovery key.",
+                    ProtectionReasonCode.DECRYPT_FAILED,
+                ) from exc
+            except BundleError as exc:
+                raise _VerificationStageError(
+                    "The decrypted snapshot failed manifest and file-integrity verification.",
+                    ProtectionReasonCode.MANIFEST_VERIFICATION_FAILED,
+                ) from exc
+            except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+                raise _VerificationStageError(
+                    "The decrypted snapshot failed manifest and file-integrity verification.",
+                    ProtectionReasonCode.MANIFEST_VERIFICATION_FAILED,
+                ) from exc
             _verify_extracted_bundle(extracted, store_id, info)
 
             verified_at = _utc_now()

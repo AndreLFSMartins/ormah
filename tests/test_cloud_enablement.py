@@ -803,6 +803,52 @@ def test_expired_protected_store_gets_reactivation_intent_and_preserves_origin(
     assert load_state(store_id).protection_state is ProtectionState.PROTECTED
 
 
+def test_replacing_expired_subscription_intent_preserves_protected_origin(
+    tmp_path, monkeypatch
+):
+    settings = _settings(tmp_path)
+    service = CloudProtectionService(settings)
+    service.create_intent()
+    store_id = _store_id(settings)
+    update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        protection_state=ProtectionState.PROTECTED,
+        pending_protection_status=ProtectionIntentStatus.COMPLETED,
+        last_successful_backup_snapshot_id=SNAPSHOT_ID,
+        last_verified_snapshot_id=SNAPSHOT_ID,
+        last_verify_ok=True,
+    )
+    settings.cloud_backup_enabled = True
+    monkeypatch.setattr(
+        protection,
+        "check_entitlement",
+        lambda settings: protection.EntitlementStatus.EXPIRED,
+    )
+    first = service.create_intent()
+    monkeypatch.setattr(
+        protection,
+        "client_from_settings",
+        lambda settings: FakeClient(backup=False),
+    )
+    service.bind_intent(first.protection_intent_id)
+    update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        pending_protection_expires_at=NOW - timedelta(seconds=1),
+    )
+
+    replacement = service.create_intent()
+
+    assert replacement.protection_intent_id != first.protection_intent_id
+    assert (
+        load_state(store_id).pending_protection_origin_state
+        is ProtectionState.PROTECTED
+    )
+    canceled = service.cancel_intent(replacement.protection_intent_id)
+    assert canceled.state is ProtectionState.PROTECTED
+
+
 def test_disable_before_enrollment_remains_local_only(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
     monkeypatch.setattr(
