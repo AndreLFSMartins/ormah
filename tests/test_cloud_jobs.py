@@ -448,8 +448,10 @@ def test_restore_verification_rejects_invalid_active_self_pointer(
 
     assert jobs.run_restore_verification(SimpleNamespace(settings=settings)) is False
     durable = load_state(store_id)
-    assert durable.last_error_code is ProtectionReasonCode.NODE_PARSE_FAILED
-    assert durable.last_verify_error == "A restored memory node could not be parsed."
+    assert durable.last_error_code is ProtectionReasonCode.SELF_POINTER_INVALID
+    assert durable.last_verify_error == (
+        "The backup's active Self pointer does not match the restored memory graph."
+    )
 
 
 def test_restore_verification_cleans_temporary_tree_on_failure(

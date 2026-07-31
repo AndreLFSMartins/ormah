@@ -60,6 +60,15 @@ class ProtectionIntentStatus(StrEnum):
     EXPIRED = "expired"
 
 
+TERMINAL_PROTECTION_INTENT_STATUSES = frozenset(
+    {
+        ProtectionIntentStatus.COMPLETED,
+        ProtectionIntentStatus.CANCELED,
+        ProtectionIntentStatus.EXPIRED,
+    }
+)
+
+
 class ProtectionOperationKind(StrEnum):
     ENABLE = "enable"
     DISABLE = "disable"
@@ -109,6 +118,8 @@ class ProtectionReasonCode(StrEnum):
     INDEX_ENVIRONMENT_UNAVAILABLE = "index_environment_unavailable"
     INDEX_REBUILD_FAILED = "index_rebuild_failed"
     SEARCH_PROBE_FAILED = "search_probe_failed"
+    SELF_POINTER_INVALID = "self_pointer_invalid"
+    PROCESSING_LIMIT_EXCEEDED = "processing_limit_exceeded"
     DISK_SPACE_INSUFFICIENT = "disk_space_insufficient"
     OPERATION_INTERRUPTED = "operation_interrupted"
     STORE_BUSY = "store_busy"
@@ -519,7 +530,7 @@ def is_protected_and_verified(state: CloudState, *, enabled: bool) -> bool:
 
     intent_complete = (
         state.pending_protection_intent_id is None
-        or state.pending_protection_status is ProtectionIntentStatus.COMPLETED
+        or state.pending_protection_status in TERMINAL_PROTECTION_INTENT_STATUSES
     )
     snapshot_id = state.last_successful_backup_snapshot_id
     return (

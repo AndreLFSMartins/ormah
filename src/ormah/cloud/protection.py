@@ -54,6 +54,7 @@ from ormah.cloud.state import (
     ProtectionOperationPhase,
     ProtectionReasonCode,
     ProtectionState,
+    TERMINAL_PROTECTION_INTENT_STATUSES,
     UploadJournalPhase,
     is_protected_and_verified,
     load_state,
@@ -192,14 +193,7 @@ def _state_after_verification(state: CloudState, snapshot_id: str) -> Protection
         return current
     if (
         state.pending_protection_intent_id is not None
-        and state.pending_protection_status
-        in {
-            ProtectionIntentStatus.PENDING,
-            ProtectionIntentStatus.ACCOUNT_BOUND,
-            ProtectionIntentStatus.CHECKOUT_PENDING,
-            ProtectionIntentStatus.READY,
-            ProtectionIntentStatus.RUNNING,
-        }
+        and state.pending_protection_status not in TERMINAL_PROTECTION_INTENT_STATUSES
     ):
         return current
     if current in {
@@ -308,6 +302,13 @@ def _verify_extracted_bundle(extracted: Path, expected_store_id: str, info) -> i
 
     try:
         resolve_backup_user_node_id(extracted)
+    except Exception as exc:
+        raise _VerificationStageError(
+            "The backup's active Self pointer does not match the restored memory graph.",
+            ProtectionReasonCode.SELF_POINTER_INVALID,
+        ) from exc
+
+    try:
         active_nodes = []
         for dirname in ("nodes", "deleted"):
             for path in sorted((extracted / dirname).glob("*.md")):
@@ -423,9 +424,6 @@ class CloudProtectionService:
 
                 completed_protection = (
                     state.protection_state is ProtectionState.PROTECTED
-                    and state.pending_protection_intent_id is not None
-                    and state.pending_protection_status
-                    is ProtectionIntentStatus.COMPLETED
                     and is_protected_and_verified(
                         state,
                         enabled=bool(self.settings.cloud_backup_enabled),
@@ -443,7 +441,7 @@ class CloudProtectionService:
                     signed_in
                     and completed_entitlement is EntitlementStatus.NONE
                 ):
-                    operation_id = state.pending_protection_intent_id
+                    operation_id = state.pending_protection_intent_id or operation_id
                     return ProtectionOperation(
                         operation_id,
                         ProtectionOperationKind.ENABLE,
@@ -669,6 +667,9 @@ class CloudProtectionService:
         elif has_subscription:
             status = ProtectionIntentStatus.READY
             next_state = self._intent_origin_state(state)
+        elif state.pending_protection_status is ProtectionIntentStatus.CHECKOUT_PENDING:
+            status = ProtectionIntentStatus.CHECKOUT_PENDING
+            next_state = ProtectionState.SUBSCRIPTION_REQUIRED
         else:
             status = ProtectionIntentStatus.ACCOUNT_BOUND
             next_state = ProtectionState.SUBSCRIPTION_REQUIRED
@@ -1791,7 +1792,10 @@ class CloudProtectionService:
             if not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or size_bytes <= 0:
                 raise RuntimeError("Cloud snapshot listing did not include a valid size.")
             if size_bytes > client.processing_limit(require_hardened_write=False):
-                raise CloudError("Cloud snapshot exceeds this client's safe processing limit.")
+                raise _VerificationStageError(
+                    "Cloud snapshot exceeds this client's safe processing limit.",
+                    ProtectionReasonCode.PROCESSING_LIMIT_EXCEEDED,
+                )
             expected_sha256 = _validated_sha256(selected.get("sha256"))
 
             presigned = client.presign_download(store_id, snapshot_id)

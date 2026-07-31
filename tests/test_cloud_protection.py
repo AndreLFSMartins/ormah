@@ -498,6 +498,22 @@ def test_verification_requires_server_attested_ciphertext_hash(
     assert result.reason_code is ProtectionReasonCode.CIPHERTEXT_HASH_UNAVAILABLE
 
 
+def test_verification_reports_local_processing_limit_as_local_failure(
+    tmp_path, monkeypatch, cloud_state_dir
+):
+    settings, store_id = _settings(tmp_path)
+    bundle, identity = _verification_bundle(tmp_path, settings, store_id)
+    client = FakeCloudClient(bundle=bundle)
+    _patch_verification(monkeypatch, client, bundle, identity)
+    client.processing_limit = lambda **kwargs: 0
+
+    result = CloudProtectionService(settings).verify_now()
+
+    assert result.reason_code is ProtectionReasonCode.PROCESSING_LIMIT_EXCEEDED
+    assert result.state is ProtectionState.ATTENTION_REQUIRED
+    assert load_state(store_id).last_verify_ok is False
+
+
 def test_safe_error_message_redacts_plaintext_node_slugs():
     message = protection.safe_error_message(
         "Hash mismatch for 'nodes/fact_my-therapist-said-secret_a1b2.md' "

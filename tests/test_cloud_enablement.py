@@ -19,6 +19,7 @@ from ormah.cloud.state import (
     ProtectionReasonCode,
     ProtectionState,
     UploadJournalPhase,
+    cloud_status_payload,
     load_state,
     update_state,
 )
@@ -145,6 +146,32 @@ def test_create_after_completed_protection_is_idempotent(tmp_path, monkeypatch):
     assert repeated.operation_id == first.operation_id
     assert repeated.phase is ProtectionOperationPhase.COMPLETED
     assert repeated.snapshot_id == SNAPSHOT_ID
+
+
+def test_create_is_idempotent_for_legacy_protected_store(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    store_id = protection.get_or_create_store_id(settings.memory_dir)
+    update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        protection_state=ProtectionState.PROTECTED,
+        last_successful_backup_snapshot_id=SNAPSHOT_ID,
+        last_verified_snapshot_id=SNAPSHOT_ID,
+        last_verify_ok=True,
+    )
+    settings.cloud_backup_enabled = True
+    monkeypatch.setattr(
+        protection,
+        "check_entitlement",
+        lambda settings: protection.EntitlementStatus.ACTIVE,
+    )
+
+    result = CloudProtectionService(settings).create_intent()
+
+    assert result.phase is ProtectionOperationPhase.COMPLETED
+    assert result.state is ProtectionState.PROTECTED
+    assert result.protection_intent_id is None
+    assert load_state(store_id).pending_protection_intent_id is None
 
 
 def test_offline_entitlement_lookup_does_not_replace_completed_intent(
@@ -326,6 +353,33 @@ def test_bind_requires_subscription_without_canceling_intent(tmp_path, monkeypat
     assert result.reason_code is ProtectionReasonCode.SUBSCRIPTION_REQUIRED
     durable = load_state(_store_id(settings))
     assert durable.pending_protection_status is ProtectionIntentStatus.ACCOUNT_BOUND
+
+
+def test_rebinding_while_checkout_is_pending_preserves_checkout_status(
+    tmp_path, monkeypatch
+):
+    settings = _settings(tmp_path)
+    service = CloudProtectionService(settings)
+    intent = service.create_intent().protection_intent_id
+    store_id = _store_id(settings)
+    update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        pending_protection_status=ProtectionIntentStatus.CHECKOUT_PENDING,
+        protection_state=ProtectionState.SUBSCRIPTION_REQUIRED,
+    )
+    monkeypatch.setattr(
+        protection,
+        "client_from_settings",
+        lambda settings: FakeClient(backup=False),
+    )
+
+    service.bind_intent(intent)
+
+    assert (
+        load_state(store_id).pending_protection_status
+        is ProtectionIntentStatus.CHECKOUT_PENDING
+    )
 
 
 def test_cloud_service_failure_is_not_misreported_as_missing_subscription(
@@ -801,6 +855,36 @@ def test_expired_protected_store_gets_reactivation_intent_and_preserves_origin(
     canceled = service.cancel_intent(replacement.protection_intent_id)
     assert canceled.state is ProtectionState.PROTECTED
     assert load_state(store_id).protection_state is ProtectionState.PROTECTED
+    assert cloud_status_payload(settings, entitlement="active")["protection_state"] == (
+        ProtectionState.PROTECTED.value
+    )
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [ProtectionIntentStatus.CANCELED, ProtectionIntentStatus.EXPIRED],
+)
+def test_terminal_intent_does_not_invalidate_verified_protection(
+    tmp_path, terminal_status
+):
+    settings = _settings(tmp_path)
+    store_id = protection.get_or_create_store_id(settings.memory_dir)
+    settings.cloud_backup_enabled = True
+    update_state(
+        store_id,
+        memory_dir=settings.memory_dir,
+        protection_state=ProtectionState.PROTECTED,
+        pending_protection_intent_id=str(uuid.uuid4()),
+        pending_protection_status=terminal_status,
+        last_successful_backup_snapshot_id=SNAPSHOT_ID,
+        last_verified_snapshot_id=SNAPSHOT_ID,
+        last_verify_ok=True,
+    )
+
+    payload = cloud_status_payload(settings, entitlement="active")
+
+    assert payload["protection_state"] == ProtectionState.PROTECTED.value
+    assert not any("metadata is incomplete" in warning for warning in payload["warnings"])
 
 
 def test_replacing_expired_subscription_intent_preserves_protected_origin(
