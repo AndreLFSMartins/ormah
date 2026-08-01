@@ -19,11 +19,13 @@ import {
   productBridge,
   protectionPresentation,
   protectionRepairAction,
+  recoveryKitSectionVisible,
   type AccountStatus,
   type BillingOffer,
   type ProtectionOperation,
   type ProtectionStatus,
 } from "../productBridge";
+import RecoveryKitSection from "./RecoveryKitSection";
 
 interface Props {
   open: boolean;
@@ -112,6 +114,8 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
   const [error, setError] = useState<string | null>(null);
   const [checkoutPolling, setCheckoutPolling] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState<"save" | "print" | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const checkoutCheckInFlight = useRef(false);
   const offerRequested = useRef(false);
@@ -374,6 +378,43 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
     }
   }, [refresh]);
 
+  const saveRecoveryKit = useCallback(async () => {
+    setRecoveryBusy("save");
+    setRecoveryError(null);
+    try {
+      const result = await productBridge.saveRecoveryKit();
+      if (result.status === "canceled") return;
+      if (!result.recovery_kit_verified_at) {
+        throw new Error("The saved recovery kit could not be verified.");
+      }
+      await refresh();
+      onToast(
+        result.device_loss_recovery_ready
+          ? "Recovery kit saved and verified."
+          : "Recovery kit saved and verified; recovery readiness is waiting for current protection verification.",
+        "success",
+      );
+    } catch (err) {
+      setRecoveryError(errorMessage(err, "The recovery kit could not be saved."));
+    } finally {
+      setRecoveryBusy(null);
+    }
+  }, [onToast, refresh]);
+
+  const openPrintableRecoveryKit = useCallback(async () => {
+    setRecoveryBusy("print");
+    setRecoveryError(null);
+    try {
+      const result = await productBridge.openPrintableRecoveryKit();
+      if (!result.opened) throw new Error("The printable copy could not be opened.");
+      onToast("Recovery kit sent to your system viewer.", "info");
+    } catch (err) {
+      setRecoveryError(errorMessage(err, "The printable copy could not be opened."));
+    } finally {
+      setRecoveryBusy(null);
+    }
+  }, [onToast]);
+
   const presentation = useMemo(
     () => protectionPresentation(operation?.protection_state || status?.protection_state || "local_only"),
     [operation?.protection_state, status?.protection_state],
@@ -575,6 +616,17 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
               <div><span>Last encrypted upload</span><strong>{formatDate(status.last_successful_upload_at)}</strong></div>
               <div><span>Cloud can read</span><strong>metadata only</strong></div>
             </section>
+          )}
+
+          {recoveryKitSectionVisible(status) && view === "summary" && (
+            <RecoveryKitSection
+              ready={Boolean(status?.device_loss_recovery_ready)}
+              verifiedAt={formatDate(status?.recovery_kit_verified_at ?? null)}
+              busy={recoveryBusy}
+              error={recoveryError}
+              onSave={() => void saveRecoveryKit()}
+              onOpenPrintable={() => void openPrintableRecoveryKit()}
+            />
           )}
 
           {status?.warnings?.length ? (

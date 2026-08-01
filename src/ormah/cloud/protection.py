@@ -43,6 +43,7 @@ from ormah.cloud.keys import (
     load_identities,
     write_recovery_kit,
 )
+from ormah.cloud.recovery import RecoveryKitService
 from ormah.cloud.settings import set_cloud_backup_enabled
 from ormah.cloud.state import (
     CURRENT_CLOUD_STATE_SCHEMA_VERSION,
@@ -81,6 +82,10 @@ _QUERY_SECRET_RE = re.compile(
 _SNAPSHOT_ID_RE = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _NODE_PATH_RE = re.compile(r"\b(nodes|deleted)[/\\][^\s'\",)\]]+\.md\b")
+_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:/[A-Za-z0-9._~+@%=-]+)+|"
+    r"(?<![A-Za-z0-9])[A-Za-z]:\\(?:[^\\\s:;,]+\\)*[^\\\s:;,]+"
+)
 _DISK_FULL_ERRNOS = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 
 
@@ -101,6 +106,13 @@ def safe_error_message(value: object, *sensitive_values: str | None) -> str:
         if sensitive:
             message = message.replace(sensitive, "<redacted>")
     return message[:1000]
+
+
+def safe_product_error_message(value: object, *sensitive_values: str | None) -> str:
+    """Redact local paths in addition to secrets before crossing into the webview."""
+
+    message = safe_error_message(value, *sensitive_values)
+    return _ABSOLUTE_PATH_RE.sub("<redacted-path>", message)
 
 
 def _existing_store_id(memory_dir: Path) -> str | None:
@@ -823,6 +835,7 @@ class CloudProtectionService:
                         store_id,
                         account_email=getattr(self.settings, "account_email", None),
                     )
+                    RecoveryKitService(self.settings).validate_canonical_kit()
                 except _EnablePrerequisiteError:
                     raise
                 except CloudKeyError as exc:
