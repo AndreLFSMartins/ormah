@@ -123,6 +123,26 @@ def test_partial_valid_verdicts_stay_partial_and_log_discarded_ids(caplog):
     )
 
 
+def test_duplicate_pair_ids_are_ambiguous_and_log_diagnostics(caplog):
+    raw = json.dumps({"verdicts": [
+        {"pair_id": 0, "value": "first"},
+        {"pair_id": 0, "value": "second"},
+        {"pair_id": 0, "value": "third"},
+        {"pair_id": 1, "value": "kept"},
+    ]})
+
+    with caplog.at_level("WARNING", logger=pair_batch.__name__):
+        out = pair_batch.parse_batch_verdicts(raw, {0, 1})
+
+    assert out == {1: {"pair_id": 1, "value": "kept"}}
+    assert any(
+        "discarded ambiguous duplicate pair_id" in message
+        and "expected=[0, 1]" in message
+        and "received=[0, 0, 0, 1]" in message
+        for message in caplog.messages
+    )
+
+
 def test_diagnostics_do_not_log_textual_or_container_pair_id_contents(caplog):
     secret = "PAIR_ID_SECRET_1234567890"
     nested = ["CONTAINER_SECRET", {"still": "secret"}]
