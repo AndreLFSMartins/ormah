@@ -249,7 +249,26 @@ async def test_each_lifespan_gets_its_own_stop_event(tmp_path, monkeypatch):
 
     # --- lightweight fakes ---
 
+    _fake_settings = type(
+        "S",
+        (),
+        {
+            "port": 8787,
+            "memory_dir": str(tmp_path),
+            # #154 task 3: lifespan() now calls validate_llm_runtime_config(settings)
+            # first thing, which reads these two fields. claude_cli/haiku mirrors the
+            # _S fake later in this file (L496-499) — these tests exercise shutdown
+            # behaviour, not config validation, so the guard must pass silently.
+            "llm_provider": "claude_cli",
+            "llm_model": "haiku",
+        },
+    )()
+
     class _FakeEngine:
+        # upstream 0.14.5: lifespan calls resume_interrupted_enable(engine, ...),
+        # which reads engine.settings.memory_dir.
+        settings = _fake_settings
+
         def startup(self): pass
         def shutdown(self): pass
 
@@ -266,10 +285,7 @@ async def test_each_lifespan_gets_its_own_stop_event(tmp_path, monkeypatch):
         return _FakeScheduler(), _FakeTracker()
 
     monkeypatch.setattr("ormah.main.MemoryEngine", lambda settings: _FakeEngine())
-    monkeypatch.setattr(
-        "ormah.main.settings",
-        type("S", (), {"port": 8787, "memory_dir": str(tmp_path)})(),
-    )
+    monkeypatch.setattr("ormah.main.settings", _fake_settings)
     monkeypatch.setattr("ormah.main.MaintenanceManager", lambda *a, **kw: object())
 
     # Use monkeypatch.setitem so pytest restores sys.modules on teardown,
@@ -336,7 +352,26 @@ async def test_lifespan_shutdown_drains_always_on_worker(monkeypatch, tmp_path):
     writing the new app.state attribute while shutdown still reads the old observers one."""
     import sys
 
+    _fake_settings = type(
+        "S",
+        (),
+        {
+            "port": 8787,
+            "memory_dir": str(tmp_path),
+            # #154 task 3: lifespan() now calls validate_llm_runtime_config(settings)
+            # first thing, which reads these two fields. claude_cli/haiku mirrors the
+            # _S fake later in this file (L496-499) — these tests exercise shutdown
+            # behaviour, not config validation, so the guard must pass silently.
+            "llm_provider": "claude_cli",
+            "llm_model": "haiku",
+        },
+    )()
+
     class _FakeEngine:
+        # upstream 0.14.5: lifespan calls resume_interrupted_enable(engine, ...),
+        # which reads engine.settings.memory_dir.
+        settings = _fake_settings
+
         def startup(self): pass
         def shutdown(self): pass
 
@@ -350,10 +385,7 @@ async def test_lifespan_shutdown_drains_always_on_worker(monkeypatch, tmp_path):
         return _FakeScheduler(), _FakeTracker()
 
     monkeypatch.setattr("ormah.main.MemoryEngine", lambda settings: _FakeEngine())
-    monkeypatch.setattr(
-        "ormah.main.settings",
-        type("S", (), {"port": 8787, "memory_dir": str(tmp_path)})(),
-    )
+    monkeypatch.setattr("ormah.main.settings", _fake_settings)
     monkeypatch.setattr("ormah.main.MaintenanceManager", lambda *a, **kw: object())
 
     _fake_hippocampus = type(sys)("_fake_hippo")
@@ -389,7 +421,26 @@ def _fake_lifespan_deps(tmp_path, monkeypatch, *, watcher_raises: bool = False):
     """Patch main.lifespan's heavy dependencies. Mirrors the fakes at L249-288."""
     import sys
 
+    _fake_settings = type(
+        "S",
+        (),
+        {
+            "port": 8787,
+            "memory_dir": str(tmp_path),
+            # #154 task 3: lifespan() now calls validate_llm_runtime_config(settings)
+            # first thing, which reads these two fields. claude_cli/haiku mirrors the
+            # _S fake later in this file (L496-499) — these tests exercise shutdown
+            # behaviour, not config validation, so the guard must pass silently.
+            "llm_provider": "claude_cli",
+            "llm_model": "haiku",
+        },
+    )()
+
     class _FakeEngine:
+        # upstream 0.14.5: lifespan calls resume_interrupted_enable(engine, ...),
+        # which reads engine.settings.memory_dir.
+        settings = _fake_settings
+
         def startup(self): pass
         def shutdown(self): pass
 
@@ -397,10 +448,7 @@ def _fake_lifespan_deps(tmp_path, monkeypatch, *, watcher_raises: bool = False):
         def shutdown(self, wait=True): pass
 
     monkeypatch.setattr("ormah.main.MemoryEngine", lambda settings: _FakeEngine())
-    monkeypatch.setattr(
-        "ormah.main.settings",
-        type("S", (), {"port": 8787, "memory_dir": str(tmp_path)})(),
-    )
+    monkeypatch.setattr("ormah.main.settings", _fake_settings)
     monkeypatch.setattr("ormah.main.MaintenanceManager", lambda *a, **kw: object())
 
     _fake_hippocampus = type(sys)("_fake_hippo")
@@ -537,4 +585,39 @@ async def test_shutdown_cancels_llm_calls_when_the_lifespan_body_raises(tmp_path
 
     assert cancels, "an abnormal shutdown skipped the LLM cancel (cancel not in a finally)"
     assert cancels[0] is True
+
+
+# ---------------------------------------------------------------------------
+# 7. #154 task 3: lifespan() must actually call validate_llm_runtime_config(settings)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_lifespan_calls_validate_llm_runtime_config(tmp_path, monkeypatch):
+    """Pin the wiring, not just the guard's own unit tests in test_config.py.
+
+    Nothing previously asserted that lifespan() actually calls
+    validate_llm_runtime_config(settings) -- deleting that call left the whole suite
+    green. Drive a settings fake with the exact bad pair (llm_provider=ollama + an
+    Anthropic-looking llm_model, mirroring the good claude_cli/haiku fakes used by the
+    other tests in this file) and assert the ValueError surfaces through lifespan()
+    itself. This must fail red if the guard call is removed from main.py.
+    """
+    monkeypatch.setattr(
+        "ormah.main.settings",
+        type(
+            "S",
+            (),
+            {
+                "port": 8787,
+                "memory_dir": str(tmp_path),
+                "llm_provider": "ollama",
+                "llm_model": "claude-haiku-4-5",
+            },
+        )(),
+    )
+
+    app = FastAPI(lifespan=main.lifespan)
+    with pytest.raises(ValueError, match="llm_provider=ollama"):
+        async with main.lifespan(app):
+            pass
 

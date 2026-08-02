@@ -26,6 +26,9 @@ PLIST_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_PATH = PLIST_DIR / f"{LAUNCHD_LABEL}.plist"
 LOG_DIR = Path.home() / ".local" / "share" / "ormah" / "logs"
 
+_GRACEFUL_STOP_TIMEOUT_SECONDS = 15.0
+_FORCED_STOP_TIMEOUT_SECONDS = 5.0
+
 SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
 SYSTEMD_UNIT = SYSTEMD_DIR / "ormah.service"
 
@@ -96,9 +99,8 @@ def is_server_running() -> bool:
 def is_port_in_use(host: str, port: int) -> bool:
     """Return True if something is already accepting connections on host:port.
 
-    Used as a pre-flight before binding: if another process (typically an
-    already-running ormah server) owns the port, the launcher exits cleanly
-    instead of letting uvicorn crash on bind and KeepAlive respawn it in a loop.
+    Used as a pre-flight before binding so the launcher can distinguish an
+    existing Ormah server from a foreign listener before starting uvicorn.
     """
     try:
         with socket.create_connection((host, port), timeout=0.5):
@@ -262,6 +264,29 @@ def _wait_for_pid_exit(pid: int, timeout: float = 5.0) -> bool:
     return False
 
 
+def _terminate_pid(pid: int) -> bool:
+    """Stop a process, escalating only after its graceful shutdown window."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+    if _wait_for_pid_exit(pid, timeout=_GRACEFUL_STOP_TIMEOUT_SECONDS):
+        return True
+
+    print(f"Warning: process {pid} did not exit after SIGTERM; sending SIGKILL.")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+    return _wait_for_pid_exit(pid, timeout=_FORCED_STOP_TIMEOUT_SECONDS)
+
+
 @dataclass
 class _StopServerResult:
     found: bool = False
@@ -356,15 +381,10 @@ def _stop_running_server() -> _StopServerResult:
     killed = 0
     for pid in _find_manual_server_pids():
         res.found = True
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            res.failed = True
-            continue
-        if _wait_for_pid_exit(pid):
+        if _terminate_pid(pid):
             killed += 1
         else:
-            print(f"Warning: process {pid} did not exit after SIGTERM.")
+            print(f"Failed to stop process {pid}.")
             res.failed = True
 
     if killed:
@@ -376,6 +396,38 @@ def _stop_running_server() -> _StopServerResult:
         print("No running Ormah server found.")
 
     return res
+
+
+def restart_with_autostart(
+    ormah_bin: str,
+    wrapper_path: str | None = None,
+    *,
+    show_progress: bool = False,
+) -> bool:
+    """Replace any running server with one owned by launchd/systemd.
+
+    A reachable port does not prove that the process is supervised. Stop the
+    existing process first and fail closed if ownership cannot be established.
+    """
+    stop_result = _stop_running_server()
+    if stop_result.failed:
+        print("Could not stop the existing Ormah server; auto-start was not installed.")
+        return False
+
+    if is_port_in_use(settings.host, settings.port):
+        print(
+            f"Port {settings.port} is still in use after stopping Ormah; "
+            "auto-start was not installed."
+        )
+        return False
+
+    try:
+        install_autostart(ormah_bin, wrapper_path=wrapper_path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Could not install Ormah auto-start: {exc}")
+        return False
+
+    return wait_for_server(show_progress=show_progress)
 
 
 def stop_running_server() -> bool:

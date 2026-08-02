@@ -16,6 +16,7 @@ from ormah.background.session_watcher import (
     MAX_EXTRACT_FAILURES,
     IngestResult,
     SessionHandler,
+    _commit_state,
     _ingest_session,
     _load_state,
     _record_whisper_usage_signals,
@@ -70,6 +71,32 @@ def _make_jsonl(path: Path, user_turns: int = 6) -> None:
             ]},
         }))
     path.write_text("\n".join(lines) + "\n")
+
+
+def _write_orphan_tail_jsonl(path: Path, pairs: int = 6, pad: int = 600) -> None:
+    """#154 fixture: `pairs` closed user/assistant pairs, one final closed pair, then a
+    TRAILING assistant(end_turn) WITH text and no user after it. Parsed from any cursor
+    sitting just before the trailing record it is a leading orphan with no forward
+    progress (rewind fires); parsed from 0 the same record CLOSES (safe boundary reaches
+    EOF), so the uncapped probe authorises recovery. With flush_chars below the file's
+    cleaned length the capped drain then lands BELOW the original cursor — the #154 loop
+    trigger."""
+    filler = "x" * pad
+    lines = []
+    for i in range(pairs):
+        lines.append({"type": "user",
+                      "message": {"role": "user", "content": f"User {i} {filler}"}})
+        lines.append({"type": "assistant",
+                      "message": {"role": "assistant", "stop_reason": "end_turn",
+                                  "content": [{"type": "text", "text": f"Answer {i} {filler}"}]}})
+    lines.append({"type": "user", "message": {"role": "user", "content": f"Final ask {filler}"}})
+    lines.append({"type": "assistant",
+                  "message": {"role": "assistant", "stop_reason": "end_turn",
+                              "content": [{"type": "text", "text": f"Final answer {filler}"}]}})
+    lines.append({"type": "assistant",
+                  "message": {"role": "assistant", "stop_reason": "end_turn",
+                              "content": [{"type": "text", "text": f"Trailing orphan {filler}"}]}})
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
 
 
 def _mark_idle(path: Path) -> None:
@@ -1253,7 +1280,8 @@ def test_incremental_defers_small_append(engine, tmp_path):
 # --- Test 13: Shrink resets the cursor ---
 
 def test_shrink_resets_cursor(engine, tmp_path):
-    """A file that shrinks below the stored offset is re-ingested from the start."""
+    """A file that shrinks below the stored offset is re-ingested from the start, once the
+    shrink is confirmed on a second tick (task 4: a single stat() is not durable proof)."""
     watch_dir = tmp_path / "projects"
     project_dir = watch_dir / "-Users-alice-Code-proj"
     project_dir.mkdir(parents=True)
@@ -1275,6 +1303,10 @@ def test_shrink_resets_cursor(engine, tmp_path):
 
         _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset
         _mark_idle(jsonl)  # shrunk session, below flush_chars → idle flush
+        # Tick 1: shrink observed but unconfirmed — marker persisted, no re-ingest yet.
+        assert _ingest_session(engine, jsonl, state, watch_dir,
+                               min_turns=5) == IngestResult.NO_PROGRESS
+        # Tick 2: shrink confirmed — durable reset, full re-ingest.
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     assert "User message 0 " in captured[1]
@@ -1807,6 +1839,11 @@ def test_shrink_resets_node_ids(engine, tmp_path):
     _make_jsonl(jsonl, user_turns=5)  # smaller file → size < stored end_offset → full re-ingest
     _mark_idle(jsonl)  # shrunk session, below flush_chars → idle flush
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        # Tick 1: shrink observed but not yet confirmed — marker persisted, no re-ingest.
+        assert _ingest_session(engine, jsonl, state, watch_dir,
+                               min_turns=5) == IngestResult.NO_PROGRESS
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        # Tick 2: shrink confirmed — durable reset, full re-ingest.
         assert _ingest_session(engine, jsonl, state, watch_dir, min_turns=5) == IngestResult.OK
 
     # Full re-ingest (prev_offset reset to 0): stale node_ids must not be concatenated,
@@ -2420,6 +2457,75 @@ def test_reconcile_recovers_partial_tail_without_mtime_change(engine, tmp_path):
         assert handler.reconcile() == 1               # picked up via end_offset != size
         _drain_all(handler)
     assert handler._state[rel]["end_offset"] == jsonl.stat().st_size
+
+
+def test_reconcile_selects_marked_file_whose_cursor_is_above_eof(engine, tmp_path):
+    """Task 4 / trap 3: between tick 1 and tick 2 the durable cursor is still above EOF —
+    the reset has not committed yet. The fully-consumed skip predicate must not drop a
+    shrink_pending entry from the sweep, or tick 2 never arrives and the marker becomes
+    the very stranding bug it exists to avoid."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1
+        _drain_all(handler)
+    full_size = jsonl.stat().st_size
+    assert handler._state[rel]["end_offset"] == full_size
+
+    # Shrink the file and drive tick 1 through the real live path: installs the marker
+    # without touching end_offset, which now sits ABOVE the shrunk file's EOF.
+    _make_jsonl(jsonl, user_turns=2)
+    _mark_idle(jsonl)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+    assert handler._state[rel]["shrink_pending"]
+    assert handler._state[rel]["end_offset"] == full_size   # still above the shrunk EOF
+
+    # The naive predicate (`end_offset >= size` alone) would now call this file fully
+    # consumed and skip it forever. It must still be selected as a candidate.
+    assert handler.reconcile() == 1
+
+
+def test_shrink_tick_one_requeues_without_reconcile(engine, tmp_path):
+    """Task 4 review follow-up (Change 1): an acceptance-only root has discover=False and
+    is NEVER swept by reconcile (session_watcher.py: discover on SessionWatch, and
+    run_session_reconcile's `if w.discover`). If tick 1 `complete`d its job, a transcript
+    whose last-ever nudge happened to land on the shrink would strand its marker (and its
+    cursor above EOF) forever. Tick 1 must instead requeue via the spool's own backoff, so
+    a second observation is reachable through the spool ALONE -- no reconcile call
+    anywhere in this test."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-test-space"
+    proj.mkdir(parents=True)
+    jsonl = proj / "shrunk.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+    assert handler._state[rel]["end_offset"] == jsonl.stat().st_size
+
+    _make_jsonl(jsonl, user_turns=2)   # shrink below the stored cursor
+    _mark_idle(jsonl)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)  # tick 1 only: a backed-off job is left pending, not reclaimed
+    assert handler._state[rel]["shrink_pending"]
+    # The job must be requeued (pending, backed off) -- NOT completed, NOT dead-lettered.
+    assert handler.spool.pending_count() == 1
+    failed_dir = handler.spool.root / "failed"
+    assert not any(p.name.endswith(".json") for p in failed_dir.iterdir())
 
 
 def test_reconcile_while_live_ingesting_does_not_double_enqueue(engine, tmp_path):
@@ -3655,4 +3761,428 @@ def test_rewind_recovery_honours_the_accepted_boundary(engine, tmp_path, caplog)
     assert "A LATER prompt appended after the nudge" not in prompt     # past the ceiling
     assert "A later answer nobody nudged" not in prompt               # never ingested
     assert state[rel]["end_offset"] <= boundary
+
+
+class TestAboveCapOrphanRecovery:
+    """#154 above-cap class: recovery must never move the cursor backward, and an
+    un-drainable tail is abandoned EXPLICITLY (skipped_slices), not looped over.
+
+    The caps below are measured against `_write_orphan_tail_jsonl`'s cleaned content, not
+    its raw bytes: one closed turn is ~1235 chars and the trailing orphan ~620, so a slice
+    budget at or above ~1855 swallows both in one drain and no leading orphan ever forms —
+    the class stops being exercised while the tests still pass. 1500 admits a full turn and
+    stays below that cliff. The tests that park the cursor immediately before the orphan
+    reach the class from any budget and keep their own values."""
+
+    def test_cursor_never_retreats_and_abandons_explicitly(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "loop154.jsonl"
+        _write_orphan_tail_jsonl(jsonl)          # ~10 KB total
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        rel = str(jsonl.relative_to(watch_dir))
+        state: dict = {}
+        offsets = []
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as llm:
+            for _ in range(12):
+                _ingest_session(engine, jsonl, state, watch_dir,
+                                min_turns=5, flush_chars=1500)
+                offsets.append(state[rel]["end_offset"])
+                _mark_idle(jsonl)                # ingest re-stats; keep it idle
+        for prev, cur in zip(offsets, offsets[1:]):
+            assert cur >= prev, f"cursor retreated: {offsets}"
+        # The un-drainable tail is abandoned explicitly: cursor lands at EOF with a
+        # durable loss record, and the LLM is never called again afterwards.
+        assert offsets[-1] == size
+        skipped = state[rel]["skipped_slices"]
+        assert len(skipped) == 1
+        assert skipped[0]["reason"] == "orphan_above_cap"
+        assert skipped[0]["end"] == size
+        assert skipped[0]["start"] < size
+        assert llm.call_count <= 8, f"re-extraction loop: {llm.call_count} LLM calls"
+
+    def test_small_file_recovery_is_still_one_shot(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "oneshot.jsonl"
+        _write_orphan_tail_jsonl(jsonl, pairs=1, pad=10)   # well below flush_bytes
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        last_line_bytes = len((jsonl.read_text().splitlines()[-1] + "\n").encode())
+        orphan_start = size - last_line_bytes
+        rel = str(jsonl.relative_to(watch_dir))
+        # A legacy mid-response cursor parked right before the trailing orphan record.
+        state = {rel: {"hash": "stale", "end_offset": orphan_start}}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            result = _ingest_session(engine, jsonl, state, watch_dir,
+                                     min_turns=1, flush_chars=60000)
+        assert result == IngestResult.OK
+        assert state[rel]["end_offset"] == size   # recovered to EOF in one slice, no retreat
+        assert not state[rel].get("skipped_slices")   # nothing was abandoned
+
+    def test_run_job_completes_abandoned_orphan_without_dead_letter(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "loop154.jsonl"
+        _write_orphan_tail_jsonl(jsonl)
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        rel = str(jsonl.relative_to(watch_dir))
+        handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool",
+                                      min_turns=5, idle_threshold=30.0)
+        handler.flush_chars = 1500
+        handler.spool.enqueue(jsonl, boundary=size, reason="drain")
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _drain_all(handler)
+            _mark_idle(jsonl)
+            _drain_all(handler)          # second pass drains any capped continuations
+        assert _spool_idle(handler.spool), "job neither completed nor drained"
+        entry = handler._state[rel]
+        assert entry["end_offset"] == size
+        # The EXPLICIT path leaves the durable record; the frozen-prefix side effect
+        # (_mark_frozen_prefix_consumed) would have advanced the cursor WITHOUT it.
+        assert entry["skipped_slices"][0]["reason"] == "orphan_above_cap"
+
+    def test_abandonment_with_unclosed_tail_composes_with_frozen_prefix(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "loop154tail.jsonl"
+        _write_orphan_tail_jsonl(jsonl)
+        # An UNCLOSED in-flight record after the closing orphan: probe_safe_end < size.
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": None,
+                            "content": [{"type": "text", "text": "still streaming"}]},
+            }) + "\n")
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        rel = str(jsonl.relative_to(watch_dir))
+        handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool",
+                                      min_turns=5, idle_threshold=30.0)
+        handler.flush_chars = 1500
+        handler.spool.enqueue(jsonl, boundary=size, reason="drain")
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _drain_all(handler)
+            _mark_idle(jsonl)
+            _drain_all(handler)
+        entry = handler._state[rel]
+        # The abandonment recorded ITS range durably...
+        skipped = entry["skipped_slices"]
+        assert skipped[0]["reason"] == "orphan_above_cap"
+        assert skipped[0]["end"] < size            # == probe_safe_end, before the unclosed tail
+        # ...and the residual tail followed the standard frozen-prefix path (cursor at the
+        # accepted boundary, job dead-lettered as no_safe_boundary — pre-existing behavior).
+        assert entry["end_offset"] == size
+        assert list((handler.spool.root / "failed").glob("*.json")), \
+            "residual unclosed tail must be dead-lettered, not silently completed"
+        errs = list((handler.spool.root / "failed").glob("*.error"))
+        assert errs and "no_safe_boundary" in errs[0].read_text()
+
+    def test_abandoned_range_magnitude_is_pinned(self, engine, tmp_path):
+        """Review follow-up: every OTHER fixture in this class places the trailing orphan
+        one small record from EOF, so the abandoned range those tests exercise is tiny and
+        its size is never actually checked. Here the trailing orphan record itself is made
+        deliberately huge (pad=20000) so the abandoned range [orphan_start, size) is large
+        AND exactly computable from the fixture -- a future change that silently enlarges or
+        shrinks what gets discarded must fail this test, not just "still returns OK"."""
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "bigorphan.jsonl"
+        _write_orphan_tail_jsonl(jsonl, pairs=2, pad=20000)   # trailing record alone ~20 KB
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        last_line_bytes = len((jsonl.read_text().splitlines()[-1] + "\n").encode())
+        orphan_start = size - last_line_bytes
+        rel = str(jsonl.relative_to(watch_dir))
+        # A legacy mid-response cursor parked right before the (huge) trailing orphan record,
+        # far below the probe's safe boundary (EOF) once recovery runs.
+        state = {rel: {"hash": "stale", "end_offset": orphan_start}}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            result = _ingest_session(engine, jsonl, state, watch_dir,
+                                     min_turns=1, flush_chars=2000)
+        assert result == IngestResult.OK
+        # Cursor-monotonicity: the abandonment never retreats below the parked cursor, and
+        # lands exactly at EOF (the probe's safe boundary), never short of it.
+        assert state[rel]["end_offset"] >= orphan_start
+        assert state[rel]["end_offset"] == size
+        skipped = state[rel]["skipped_slices"]
+        assert len(skipped) == 1
+        assert skipped[0]["reason"] == "orphan_above_cap"
+        # Exact, fixture-derived numbers -- not a loose bound. The abandoned range is
+        # precisely the huge trailing record, nothing more, nothing less.
+        assert skipped[0]["start"] == orphan_start
+        assert skipped[0]["end"] == size
+        assert skipped[0]["end"] - skipped[0]["start"] == last_line_bytes
+
+    def test_abandonment_commit_oserror_propagates(self, engine, tmp_path, monkeypatch):
+        """council R3: the abandonment COMMIT lives OUTSIDE the broad parse `try`, so a
+        storage failure must surface as itself -- never be swallowed by the `except
+        Exception` there and returned as NO_PROGRESS, which would route a valid transcript
+        into frozen-prefix/dead-letter handling. Patches `_commit_state`, not `_save_state`:
+        `_commit_state` is the exact call the abandonment block makes, so this pins the call
+        site itself; `_save_state` sits one level deeper, inside `_commit_state`'s own
+        lock-branching, which is an implementation detail this test should not depend on.
+
+        The stub records what it was HANDED and asserts on it (not just that SOME OSError
+        propagated): every `_commit_state` call in `_ingest_session` sits outside the parse
+        `try` (abandonment, quarantine, happy path alike), so a bare `pytest.raises(OSError)`
+        would stay green even if this fixture stopped reaching the abandonment branch at all
+        -- e.g. once Task 2 adds its `allow_rewind` preamble. The positional prefix matches
+        `_commit_state(state, rel, entry, ...)`; the `*args, **kwargs` tail absorbs whatever
+        Task 2 appends (e.g. a keyword-only `allow_rewind`) without breaking this pin."""
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "commitfails.jsonl"
+        _write_orphan_tail_jsonl(jsonl)
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        last_line_bytes = len((jsonl.read_text().splitlines()[-1] + "\n").encode())
+        orphan_start = size - last_line_bytes
+        rel = str(jsonl.relative_to(watch_dir))
+        state = {rel: {"hash": "stale", "end_offset": orphan_start}}
+
+        calls = []
+
+        def _raise_oserror(state_, rel_, entry, *args, **kwargs):
+            calls.append(entry)
+            raise OSError("disk full")
+
+        monkeypatch.setattr("ormah.background.session_watcher._commit_state", _raise_oserror)
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), pytest.raises(OSError):
+            _ingest_session(engine, jsonl, state, watch_dir, min_turns=1, flush_chars=2000)
+        assert calls, "abandonment commit was never reached"
+        assert calls[-1]["skipped_slices"][-1]["reason"] == "orphan_above_cap"
+
+    def test_extract_failure_during_rewind_keeps_cursor(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "failrewind.jsonl"
+        _write_orphan_tail_jsonl(jsonl, pairs=1, pad=10)   # small file: rewind proceeds
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        last_line_bytes = len((jsonl.read_text().splitlines()[-1] + "\n").encode())
+        orphan_start = size - last_line_bytes
+        rel = str(jsonl.relative_to(watch_dir))
+        state = {rel: {"hash": "stale", "end_offset": orphan_start}}
+        # Slice-specific failure: the LLM answers, but with unparseable content — the
+        # deterministic class that goes through _record_extract_failure (not TRANSIENT-early).
+        with patch(_LLM_PATCH, return_value="not-json"):
+            result = _ingest_session(engine, jsonl, state, watch_dir,
+                                     min_turns=1, flush_chars=60000)
+        assert result == IngestResult.TRANSIENT
+        # Pre-fix this is 0: the rewind zeroed prev_offset and the fail path committed it.
+        assert state[rel]["end_offset"] == orphan_start
+        # Council R1 (Cursor): the counter is keyed on the durable pre-rewind cursor, so
+        # the persisted pair is consistent — not extract_fail_offset=0 with a real cursor.
+        assert state[rel]["extract_fail_offset"] == orphan_start
+        assert state[rel]["extract_fail_count"] == 1
+        # Council R3 (Codex): one failure cannot distinguish correct keying from a
+        # counter that resets to 1 forever. A SECOND failed rewind must accumulate...
+        with patch(_LLM_PATCH, return_value="not-json"):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=1, flush_chars=60000) == IngestResult.TRANSIENT
+        assert state[rel]["extract_fail_count"] == 2
+        # ...and the THIRD reaches MAX_EXTRACT_FAILURES: the toxic slice is quarantined
+        # (skipped_slices) and the cursor finally advances — the counter converges
+        # instead of pinning the cursor forever.
+        with patch(_LLM_PATCH, return_value="not-json"):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=1, flush_chars=60000) == IngestResult.OK
+        assert state[rel]["end_offset"] > orphan_start
+        # council C2: the quarantine's loss record starts at the durable pre-rewind
+        # cursor — NOT at 0, which would make the backfill replay ingested history.
+        assert state[rel]["skipped_slices"][0]["start"] == orphan_start
+        assert "extract_fail_count" not in state[rel]
+
+    def test_file_shrink_still_rewinds_cursor(self, engine, tmp_path):
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "shrunk.jsonl"
+        _make_jsonl(jsonl, user_turns=6)
+        _mark_idle(jsonl)
+        rel = str(jsonl.relative_to(watch_dir))
+        state: dict = {}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.OK
+        old_size = jsonl.stat().st_size
+        assert state[rel]["end_offset"] == old_size
+        # The transcript is rewritten smaller (compaction/rewrite) — a legitimate retreat,
+        # but task 4 requires it confirmed on a SECOND tick before it is published durably.
+        _make_jsonl(jsonl, user_turns=2)
+        _mark_idle(jsonl)
+        new_size = jsonl.stat().st_size
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=1) == IngestResult.NO_PROGRESS
+        assert state[rel]["end_offset"] == old_size          # tick 1: unchanged, pending
+        assert state[rel]["shrink_pending"]
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=1) == IngestResult.OK
+        # A naive monotonic clamp would freeze the cursor above EOF and reconcile
+        # would skip this file forever.
+        assert state[rel]["end_offset"] == new_size
+        assert "shrink_pending" not in state[rel]
+
+    def test_shrunk_file_with_no_safe_boundary_is_not_stranded(self, engine, tmp_path):
+        # council C2 (codex): a shrunk rewrite with NO closed boundary used to return
+        # NO_PROGRESS without any commit, leaving the durable cursor above EOF —
+        # reconcile would skip the file forever. Task 4: the reset now waits for a
+        # confirming second tick, but once confirmed it must still persist even on a
+        # no-progress tick — the stranding window becomes ONE reconcile interval, not
+        # forever.
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "shrunkbad.jsonl"
+        _make_jsonl(jsonl, user_turns=6)
+        _mark_idle(jsonl)
+        rel = str(jsonl.relative_to(watch_dir))
+        state: dict = {}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.OK
+        # Rewritten smaller with NO closed boundary: a single open user turn.
+        jsonl.write_text(json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": "only an open turn"},
+        }) + "\n")
+        _mark_idle(jsonl)
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.NO_PROGRESS
+        assert state[rel]["shrink_pending"]                # tick 1: pending, not stranded yet
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+        assert state[rel]["end_offset"] <= jsonl.stat().st_size
+        assert "shrink_pending" not in state[rel]
+
+    def test_transient_truncation_is_not_durably_honoured(self, engine, tmp_path):
+        """Task 4 regression: a single stat() observing size < cursor must NOT publish a
+        durable end_offset=0. An in-place editor's truncate-then-rewrite window is
+        milliseconds; treating one stat() as proof would re-ingest the whole file from
+        zero the moment the writer finishes restoring it."""
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "transient.jsonl"
+        _make_jsonl(jsonl, user_turns=6)
+        _mark_idle(jsonl)
+        rel = str(jsonl.relative_to(watch_dir))
+        original_bytes = jsonl.read_bytes()
+        state: dict = {}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.OK
+        cursor = state[rel]["end_offset"]
+        assert cursor == len(original_bytes)
+
+        # Transient truncation (e.g. an editor mid-rewrite): below the stored cursor.
+        jsonl.write_bytes(original_bytes[: cursor // 2])
+        _mark_idle(jsonl)
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            result = _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+        assert result == IngestResult.NO_PROGRESS
+        assert state[rel]["end_offset"] == cursor           # NOT reset to 0
+        assert state[rel]["shrink_pending"]                 # tick 1 marker persisted
+
+        # The writer finishes: the file is restored to its original full content.
+        jsonl.write_bytes(original_bytes)
+        _mark_idle(jsonl)
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _ingest_session(engine, jsonl, state, watch_dir, min_turns=5)
+        assert "shrink_pending" not in state[rel]            # marker cleared
+        assert state[rel]["end_offset"] == cursor             # no whole-file re-ingest
+
+    def test_shrink_marker_size_mismatch_does_not_confirm(self, engine, tmp_path):
+        """Review follow-up (Change 3): the marker records the observed size so two
+        INDEPENDENT transient truncations of different sizes cannot confirm each other.
+        A different-size second observation re-arms the marker instead of confirming."""
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "shrunk.jsonl"
+        _make_jsonl(jsonl, user_turns=10)
+        _mark_idle(jsonl)
+        rel = str(jsonl.relative_to(watch_dir))
+        state: dict = {}
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.OK
+        cursor = state[rel]["end_offset"]
+
+        _make_jsonl(jsonl, user_turns=4)   # first transient truncation
+        _mark_idle(jsonl)
+        size_a = jsonl.stat().st_size
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.NO_PROGRESS
+        assert state[rel]["shrink_pending"]["size"] == size_a
+        assert state[rel]["end_offset"] == cursor
+
+        _make_jsonl(jsonl, user_turns=2)   # a DIFFERENT, unrelated truncation size
+        _mark_idle(jsonl)
+        size_b = jsonl.stat().st_size
+        assert size_b != size_a
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            # Size mismatch: re-armed, NOT confirmed.
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=5) == IngestResult.NO_PROGRESS
+        assert state[rel]["shrink_pending"]["size"] == size_b   # re-armed with the NEW size
+        assert state[rel]["end_offset"] == cursor                # still not reset
+
+        # NOW confirm: same size as the re-armed marker, observed again.
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            assert _ingest_session(engine, jsonl, state, watch_dir,
+                                   min_turns=1) == IngestResult.OK
+        assert "shrink_pending" not in state[rel]
+
+
+class TestCommitStateMonotonic:
+    def test_stale_lower_commit_is_clamped(self, tmp_path):
+        state: dict = {}
+        lock = threading.Lock()
+        _commit_state(state, "a.jsonl", {"end_offset": 200}, lock, tmp_path)
+        # A writer that decided on stale data commits a LOWER offset afterwards —
+        # the ordering Codex flagged. The clamp re-reads under the lock, so the
+        # retreat is refused no matter when the stale decision was made.
+        _commit_state(state, "a.jsonl", {"end_offset": 150, "extra": "kept"}, lock, tmp_path)
+        assert state["a.jsonl"]["end_offset"] == 200
+        assert state["a.jsonl"]["extra"] == "kept"      # only the offset is clamped
+        assert _load_state(tmp_path)["a.jsonl"]["end_offset"] == 200
+
+    def test_allow_rewind_accepts_lower_commit(self, tmp_path):
+        state: dict = {}
+        _commit_state(state, "a.jsonl", {"end_offset": 200}, None, tmp_path)
+        _commit_state(state, "a.jsonl", {"end_offset": 50}, None, tmp_path,
+                      allow_rewind=True)
+        assert state["a.jsonl"]["end_offset"] == 50
+
+    def test_save_failure_does_not_publish_in_memory(self, tmp_path, monkeypatch):
+        # council R2 (codex): a failed persist must not leave the shared in-memory dict
+        # claiming the new cursor — the retry would look already-consumed while disk
+        # kept the old offset.
+        state: dict = {}
+        _commit_state(state, "a.jsonl", {"end_offset": 100}, None, tmp_path)
+
+        def _boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("ormah.background.session_watcher._save_state", _boom)
+        with pytest.raises(OSError):
+            _commit_state(state, "a.jsonl", {"end_offset": 200}, None, tmp_path)
+        assert state["a.jsonl"]["end_offset"] == 100   # not published on failed persist
+        monkeypatch.undo()
+        assert _load_state(tmp_path)["a.jsonl"]["end_offset"] == 100
 

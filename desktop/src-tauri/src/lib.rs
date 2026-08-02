@@ -6,6 +6,7 @@
 //! No global hotkey, no native graph, no settings beyond start-at-login.
 
 mod commands;
+mod product_bridge;
 mod sidecar;
 mod stats;
 mod tray;
@@ -149,6 +150,7 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -166,6 +168,26 @@ pub fn run() {
             commands::start_server,
             commands::stop_server,
             commands::server_status,
+            commands::retry_runtime_setup,
+            product_bridge::desktop_bridge_info,
+            product_bridge::account_status,
+            product_bridge::request_account_code,
+            product_bridge::verify_account_code,
+            product_bridge::logout_account,
+            product_bridge::billing_offer,
+            product_bridge::protection_status,
+            product_bridge::create_protection_intent,
+            product_bridge::bind_protection_intent,
+            product_bridge::cancel_protection_intent,
+            product_bridge::enable_protection,
+            product_bridge::disable_protection,
+            product_bridge::backup_now,
+            product_bridge::verify_now,
+            product_bridge::operation_status,
+            product_bridge::open_checkout,
+            product_bridge::open_billing_portal,
+            product_bridge::save_recovery_kit,
+            product_bridge::open_printable_recovery_kit,
         ])
         .setup(|app| {
             // Linux: refuse to start a second instance so we never spawn a
@@ -240,6 +262,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building the Ormah desktop app")
         .run(|_app_handle, _event| {
+            // macOS fires Reopen when the Dock icon is clicked while the app
+            // has no visible windows (e.g. after closing to tray) — without
+            // this, only the tray menu's "Open Ormah" item can bring the
+            // window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                commands::open_graph(_app_handle);
+            }
+
             // Server is a daemon — it outlives the app process intentionally.
         });
 }

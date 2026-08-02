@@ -143,8 +143,13 @@ gate local backups or cloud downloads.
 ### Cloud Backup (Paid)
 
 Ormah can encrypt local memory backups on your machine and upload only the
-ciphertext to Ormah Cloud. Sign in, initialize the store key, and enable the
-scheduled uploader:
+ciphertext to Ormah Cloud. In Ormah Desktop, open **Protection** and select
+**Protect this memory**. The app guides email-code sign-in, opens Stripe
+Checkout in the system browser when a subscription is needed, then immediately
+creates an encrypted backup and proves it restorable in scratch space. It does
+not report the memory as protected until that exact snapshot passes verification.
+
+The equivalent CLI setup remains available:
 
 ```bash
 ormah account login
@@ -158,6 +163,16 @@ to decrypt current and pre-rotation snapshots, plus the store ID that locates
 them. Keep it offline and separate from the machine and cloud account it
 protects. Anyone with the kit can read the backups; without it, nobody can,
 including Ormah.
+
+Snapshot protection and device-loss recovery are reported separately in Ormah
+Desktop. **Protected and verified** means the encrypted snapshot was restored
+and checked on this device. **Device-loss recovery ready** appears only after
+Desktop saves the current recovery kit through the native file picker, reopens
+the saved file, and verifies it against this memory's active store and complete
+identity set. Canceling the picker does not affect cloud protection; the
+recovery action remains incomplete. **Open printable copy** opens the kit in the
+system viewer but does not claim that a durable copy was saved. Key rotation
+clears readiness until the new kit is saved and checked again.
 
 `ormah uninstall` removes local data and account configuration, but it always
 preserves `~/.config/ormah/cloud.key` and

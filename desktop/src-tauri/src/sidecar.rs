@@ -10,46 +10,99 @@
 //! sidecar is absent (dev builds).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_shell::ShellExt;
 
 // Injected by build.rs from the repo's pyproject.toml, so the pinned Python
 // package version can never drift from the released one.
 const ORMAH_VERSION: &str = env!("ORMAH_PY_VERSION");
+const INSTALL_ATTEMPTS: u8 = 3;
+static SETUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Phase emitted on the "ormah://status" event so the UI can show progress.
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Phase {
-    Installing { version: &'static str },
+    Installing {
+        version: &'static str,
+        attempt: u8,
+        attempts: u8,
+    },
+    Retrying {
+        version: &'static str,
+        attempt: u8,
+        attempts: u8,
+        delay_seconds: u64,
+    },
     Starting,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+        can_retry: bool,
+    },
 }
 
-pub fn start<R: Runtime>(app: AppHandle<R>) {
+/// Start runtime setup once. Returns false when another attempt is still active.
+pub fn start<R: Runtime>(app: AppHandle<R>) -> bool {
+    if SETUP_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
     tauri::async_runtime::spawn(async move {
         ensure_running(app).await;
+        SETUP_IN_PROGRESS.store(false, Ordering::Release);
     });
+    true
 }
 
 async fn ensure_running<R: Runtime>(app: AppHandle<R>) {
-    if find_ormah().is_none() {
-        let _ = app.emit("ormah://status", Phase::Installing { version: ORMAH_VERSION });
-        if !install_via_uv(&app).await {
-            let _ = app.emit(
-                "ormah://status",
-                Phase::Failed {
-                    reason: "Could not install ormah. Check your internet connection.".into(),
-                },
-            );
-            return;
+    let installed = find_ormah().is_some();
+    let runtime_action = choose_runtime_action(installed, installed && needs_upgrade());
+    let runtime_changed = match runtime_action {
+        RuntimeAction::Install | RuntimeAction::Upgrade => {
+            if let Err(failure) = install_with_retry(&app).await {
+                eprintln!("uv install failed after retries:\n{}", failure.details);
+                let _ = app.emit(
+                    "ormah://status",
+                    Phase::Failed {
+                        reason: failure.public_reason(),
+                        can_retry: true,
+                    },
+                );
+                return;
+            }
+            true
         }
-    } else if needs_upgrade() {
-        let _ = app.emit("ormah://status", Phase::Installing { version: ORMAH_VERSION });
-        let _ = install_via_uv(&app).await;
+        RuntimeAction::Reuse => false,
+    };
+
+    // A uv reinstall replaces files on disk but cannot replace modules in the already-running
+    // daemon. Restart after successful install/upgrade so migrations and model provisioning run
+    // under the newly pinned Python package.
+    if runtime_changed {
+        stop_daemon();
     }
     let _ = app.emit("ormah://status", Phase::Starting);
     start_daemon();
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeAction {
+    Install,
+    Upgrade,
+    Reuse,
+}
+
+fn choose_runtime_action(installed: bool, upgrade_needed: bool) -> RuntimeAction {
+    if !installed {
+        RuntimeAction::Install
+    } else if upgrade_needed {
+        RuntimeAction::Upgrade
+    } else {
+        RuntimeAction::Reuse
+    }
 }
 
 /// Find the ormah binary. Checks uv tool install locations first (GUI apps
@@ -131,7 +184,23 @@ fn needs_upgrade() -> bool {
     else {
         return false;
     };
-    !String::from_utf8_lossy(&out.stdout).contains(ORMAH_VERSION)
+    if !out.status.success() {
+        return true;
+    }
+    should_upgrade(&out.stdout, ORMAH_VERSION)
+}
+
+fn should_upgrade(output: &[u8], required: &str) -> bool {
+    let Ok(required) = semver::Version::parse(required) else {
+        return true;
+    };
+    let installed = String::from_utf8_lossy(output)
+        .split_whitespace()
+        .find_map(|word| semver::Version::parse(word).ok());
+    match installed {
+        Some(installed) => installed < required,
+        None => true,
+    }
 }
 
 /// Remove Python env vars that AppImage sets and that corrupt child Python runtimes.
@@ -145,21 +214,154 @@ fn clean_python_env(mut cmd: std::process::Command) -> std::process::Command {
     cmd
 }
 
-async fn install_via_uv<R: Runtime>(app: &AppHandle<R>) -> bool {
+#[derive(Debug)]
+struct InstallFailure {
+    details: String,
+    transient: bool,
+}
+
+impl InstallFailure {
+    fn public_reason(&self) -> String {
+        if self.transient {
+            "Ormah could not reach the package service. Check your connection, then try again."
+                .into()
+        } else {
+            "Ormah could not install its runtime. Try again; if it keeps failing, reinstall the desktop app."
+                .into()
+        }
+    }
+}
+
+fn transient_install_error(details: &str) -> bool {
+    let details = details.to_ascii_lowercase();
+    [
+        "dns error",
+        "failed to lookup address",
+        "temporary failure in name resolution",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "network is unreachable",
+    ]
+    .iter()
+    .any(|pattern| details.contains(pattern))
+}
+
+async fn install_with_retry<R: Runtime>(app: &AppHandle<R>) -> Result<(), InstallFailure> {
+    for attempt in 1..=INSTALL_ATTEMPTS {
+        let _ = app.emit(
+            "ormah://status",
+            Phase::Installing {
+                version: ORMAH_VERSION,
+                attempt,
+                attempts: INSTALL_ATTEMPTS,
+            },
+        );
+        match install_via_uv(app).await {
+            Ok(()) => return Ok(()),
+            Err(failure) if failure.transient && attempt < INSTALL_ATTEMPTS => {
+                let delay_seconds = if attempt == 1 { 2 } else { 5 };
+                eprintln!(
+                    "transient uv install failure on attempt {attempt}/{INSTALL_ATTEMPTS}: {}",
+                    failure.details
+                );
+                let _ = app.emit(
+                    "ormah://status",
+                    Phase::Retrying {
+                        version: ORMAH_VERSION,
+                        attempt,
+                        attempts: INSTALL_ATTEMPTS,
+                        delay_seconds,
+                    },
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(delay_seconds)).await;
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
+    unreachable!("the bounded install loop always returns")
+}
+
+async fn install_via_uv<R: Runtime>(app: &AppHandle<R>) -> Result<(), InstallFailure> {
     let uv = match app.shell().sidecar("uv") {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("uv sidecar not available ({e}); ormah must be on PATH");
-            return false;
+            return Err(InstallFailure {
+                details: format!("uv sidecar not available ({e})"),
+                transient: false,
+            });
         }
     };
     let spec = format!("ormah=={}", ORMAH_VERSION);
     match uv.args(["tool", "install", "--reinstall", &spec]).output().await {
-        Ok(out) if out.status.success() => { eprintln!("uv: installed {spec}"); true }
-        Ok(out) => {
-            eprintln!("uv install failed:\n{}", String::from_utf8_lossy(&out.stderr));
-            false
+        Ok(out) if out.status.success() => {
+            eprintln!("uv: installed {spec}");
+            Ok(())
         }
-        Err(e) => { eprintln!("uv sidecar error: {e}"); false }
+        Ok(out) => {
+            let details = String::from_utf8_lossy(&out.stderr).into_owned();
+            Err(InstallFailure {
+                transient: transient_install_error(&details),
+                details,
+            })
+        }
+        Err(e) => {
+            let details = e.to_string();
+            Err(InstallFailure {
+                transient: transient_install_error(&details),
+                details,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{choose_runtime_action, should_upgrade, transient_install_error, RuntimeAction};
+
+    #[test]
+    fn installs_when_runtime_is_missing() {
+        assert_eq!(choose_runtime_action(false, false), RuntimeAction::Install);
+    }
+
+    #[test]
+    fn upgrades_when_installed_runtime_is_old() {
+        assert_eq!(choose_runtime_action(true, true), RuntimeAction::Upgrade);
+    }
+
+    #[test]
+    fn reuses_matching_or_newer_runtime() {
+        assert_eq!(choose_runtime_action(true, false), RuntimeAction::Reuse);
+    }
+
+    #[test]
+    fn upgrades_an_older_cli() {
+        assert!(should_upgrade(b"ormah 0.13.6\n", "0.14.0"));
+    }
+
+    #[test]
+    fn leaves_the_pinned_cli_unchanged() {
+        assert!(!should_upgrade(b"ormah 0.14.0\n", "0.14.0"));
+    }
+
+    #[test]
+    fn never_downgrades_a_newer_cli() {
+        assert!(!should_upgrade(b"ormah 0.15.0\n", "0.14.0"));
+    }
+
+    #[test]
+    fn repairs_unparseable_version_output() {
+        assert!(should_upgrade(b"unknown\n", "0.14.0"));
+    }
+
+    #[test]
+    fn retries_only_transient_install_failures() {
+        assert!(transient_install_error(
+            "Temporary failure in name resolution while fetching pypi.org"
+        ));
+        assert!(transient_install_error("operation timed out"));
+        assert!(!transient_install_error("No solution found when resolving dependencies"));
+        assert!(!transient_install_error("permission denied"));
     }
 }

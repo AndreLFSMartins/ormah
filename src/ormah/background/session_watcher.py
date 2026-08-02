@@ -11,7 +11,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from threading import Event, Lock, Thread, Timer
@@ -31,7 +31,12 @@ from ormah.engine.memory_engine import (
     MemoryEngine,
 )
 from ormah.text.tokens import distinctive_tokens
-from ormah.transcript.parser import TranscriptResult, TranscriptTurn, parse_transcript, should_rewind
+from ormah.transcript.parser import (
+    TranscriptResult,
+    TranscriptTurn,
+    parse_transcript,
+    should_rewind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -431,7 +436,7 @@ def _record_whisper_usage_signals(
     if not rows:
         return 0
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     recorded = 0
 
     heuristic_records: list[dict] = []
@@ -771,15 +776,50 @@ def _save_state(watch_dir: Path, state: dict) -> None:
             os.close(dir_fd)
 
 
-def _commit_state(state: dict, rel: str, entry: dict, state_lock, watch_dir: Path) -> None:
-    """Write one state entry and persist, honoring the optional cross-thread lock."""
+def _commit_state(
+    state: dict, rel: str, entry: dict, state_lock, watch_dir: Path,
+    *, allow_rewind: bool = False,
+) -> None:
+    """Write one state entry and persist, honoring the optional cross-thread lock.
+
+    Monotonic invariant (#154): ``end_offset`` never moves backward. The read-clamp-
+    write sequence is ONE critical section — a stale read outside the lock would let
+    two writers interleave a higher then a lower offset and persist the retreat anyway
+    (council R1). Only the offset field is clamped — the rest of the entry
+    (extract_fail_count, skipped_slices…) always persists, so a refused retreat can
+    never lose the failure/quarantine trail (council-pr I1). Callers with a LEGITIMATE
+    retreat (file shrank; deliberate backfill) opt in with ``allow_rewind=True``.
+    Threat model: same-path concurrent writers do not exist in-process — _run_job
+    serializes per path via _ingesting_guard — so the clamp is a backstop against
+    LOGIC bugs (a code path that computes a lower offset), not a substitute for that
+    ownership. Cross-PROCESS writers are NOT covered (threading.Lock is per-process)
+    — the pre-existing #150-class spool limitation, unchanged here.
+    """
+    def _clamp_and_save() -> None:
+        committed = entry
+        if not allow_rewind:
+            current = (state.get(rel) or {}).get("end_offset")
+            new = entry.get("end_offset")
+            if current is not None and new is not None and new < current:
+                logger.warning(
+                    "Session watcher refusing cursor retreat for %s: %d -> %d (clamped)",
+                    rel, current, new,
+                )
+                committed = {**entry, "end_offset": current}
+        # Persist FIRST, publish SECOND (council R2, codex): if _save_state raises, the
+        # shared in-memory dict must not already claim the new cursor — a requeued job
+        # would look consumed while disk kept the old offset, and a restart would undo
+        # a supposedly durable commit.
+        snapshot = dict(state)
+        snapshot[rel] = committed
+        _save_state(watch_dir, snapshot)
+        state[rel] = committed
+
     if state_lock is not None:
         with state_lock:
-            state[rel] = entry
-            _save_state(watch_dir, state)
+            _clamp_and_save()
     else:
-        state[rel] = entry
-        _save_state(watch_dir, state)
+        _clamp_and_save()
 
 
 def _should_flush(is_idle: bool, capped: bool) -> bool:
@@ -849,11 +889,83 @@ def _ingest_session(
     prev_offset = existing.get("end_offset", 0) if existing else 0
     # Skip an unchanged file only if the previous ingest already consumed it whole. A stored
     # offset behind EOF means a pending tail or a legacy mid-response cursor still to process,
-    # which must be re-parsed (so recovery can run) even when the hash is unchanged.
-    if existing and existing.get("hash") == h and prev_offset >= size:
+    # which must be re-parsed (so recovery can run) even when the hash is unchanged. The
+    # shrink_pending exemption (task 4) matters for the marker-CLEARING tick below: once a
+    # truncated file is restored, hash and offset can both coincide with this pre-shrink
+    # observation again, which would otherwise return here before the marker is ever
+    # cleared -- stranding the reconcile predicate's shrink_pending bypass open forever.
+    if (
+        existing
+        and existing.get("hash") == h
+        and prev_offset >= size
+        and not existing.get("shrink_pending")
+    ):
         return IngestResult.NO_PROGRESS
     if prev_offset > size:
-        prev_offset = 0  # file shrank (compaction/rewrite) -> re-ingest whole
+        # File shrank (compaction/rewrite). A single stat() cannot tell a real shrink from
+        # an in-place editor's truncate-then-rewrite window (milliseconds) -- task 4, council-
+        # pr M: durably publishing end_offset=0 from ONE observation let a transient
+        # truncation re-ingest the whole file the moment the writer finished restoring it.
+        # Require the shrink to be observed on a SECOND, independent tick (separated by a
+        # reconcile interval of minutes, which cannot fit inside that window) before it is
+        # trusted durably.
+        marker = (existing or {}).get("shrink_pending")
+        # `not marker` (never `marker is None`): a falsy-but-present marker must also take
+        # the re-arm branch below, not the confirmed-reset one -- the reconcile predicate
+        # and the clearing branch already key off truthiness, and drifting from that here
+        # would let an edge-case falsy marker confirm on its very first observation.
+        if not marker or marker.get("size") != size:
+            # Tick 1 (no marker yet), OR a marker IS present but recorded a DIFFERENT size
+            # than this observation: two independent transient truncations of different
+            # sizes must not confirm each other (review follow-up, Change 3) -- that would
+            # durably reset on a coincidence of "shrunk twice", not "shrunk the same way
+            # twice". Re-arm with THIS observation's size/timestamp and wait for it, in
+            # turn, to be confirmed. This does not catch two same-size independent
+            # truncations (a stricter identity check would need file content, not just
+            # size) -- accepted, since the primary defense is the multi-order-of-magnitude
+            # gap between a millisecond truncate-then-rewrite window and the multi-second
+            # spool backoff (or reconcile interval) separating any two observations.
+            #
+            # Persist WITHOUT touching hash or end_offset. If this tick stored the NEW
+            # (shrunk-file) hash instead, a later confirming tick -- where the file is
+            # STILL shrunk, so prev_offset >= size still holds -- would see that hash match
+            # too and hit the early-return guard above before ever reaching this branch,
+            # deadlocking the marker permanently. Leaving hash at its old value keeps the
+            # two hashes distinct until the confirmed reset below actually commits the new
+            # one.
+            pending_entry = dict(existing or {})
+            pending_entry["shrink_pending"] = {
+                "size": size, "at": datetime.now(UTC).isoformat(),
+            }
+            _commit_state(state, rel, pending_entry, state_lock, watch_dir)
+            return IngestResult.NO_PROGRESS
+        # Tick 2: the SAME shrink confirmed on a second, independent observation (marker
+        # present AND its recorded size matches this tick's) -> durable reset.
+        # The ONLY legitimate cursor retreat: the old offset no longer exists in the file.
+        # Without this opt-in the monotonic clamp would freeze the cursor above EOF and
+        # reconcile would drop the file from the sweep forever. Persist the reset NOW
+        # (council C2): if this very tick finds no safe boundary (malformed/unclosed
+        # rewrite), _ingest_session returns NO_PROGRESS without any further commit, the
+        # durable cursor stays at 0 (not above EOF), and reconcile re-selects it normally on
+        # the next sweep. This reset commit runs BEFORE any quarantine/fail/happy-path commit
+        # later in THIS SAME tick (trap 2): once 0 is published, none of those later commits
+        # can be a retreat, so none of them needs (or may re-acquire) allow_rewind.
+        prev_offset = 0
+        reset_entry = dict(existing or {})
+        reset_entry.update({"hash": h, "end_offset": 0})
+        reset_entry.pop("shrink_pending", None)
+        _commit_state(state, rel, reset_entry, state_lock, watch_dir, allow_rewind=True)
+        existing = state.get(rel)
+    elif existing and existing.get("shrink_pending"):
+        # File is no longer shrunk relative to the stored cursor, but a marker survives:
+        # the transient-truncation case this two-tick gate exists to catch. The old cursor
+        # was valid all along -- clear the marker (persisted, so it does not strand the
+        # reconcile predicate's bypass open forever) and continue normally; end_offset is
+        # untouched (no retreat here, so no allow_rewind is needed for this commit).
+        cleared_entry = dict(existing)
+        cleared_entry.pop("shrink_pending", None)
+        _commit_state(state, rel, cleared_entry, state_lock, watch_dir)
+        existing = state.get(rel)
 
     # Two INDEPENDENT effects of a nudge, decoupled (council-pr F3): the `boundary`
     # stop_offset ceiling applies to EVERY producer's job (never read past accepted bytes),
@@ -861,6 +973,12 @@ def _ingest_session(
     # Deriving force_flush from `boundary is not None` leaked the bypass to Observer/reconcile
     # jobs (which also carry a boundary), fragmenting active sessions. The caller now passes
     # force_flush from the job's reason; boundary keeps pinning the ceiling for all jobs.
+    abandon_range: tuple[int, int] | None = None
+    # Durable pre-rewind cursor for the failure-counter key (council R1, Cursor). Re-pointed
+    # to the true pre-rewind offset inside the orphan-recovery branch below, before that
+    # branch zeroes prev_offset — so a clamped fail-path entry stays consistent with the
+    # cursor the invariant refuses to retreat.
+    fail_key_offset = prev_offset
     try:
         result = parse_transcript(
             path, start_offset=prev_offset, max_conversation_chars=flush_chars,
@@ -873,6 +991,7 @@ def _ingest_session(
             # #149): the fragment is dropped and the cursor advances — rewinding there
             # would re-ingest the whole file on every tick forever.
             original_offset = prev_offset
+            fail_key_offset = original_offset
             logger.info("Session watcher recovering legacy mid-response cursor for %s", rel)
             prev_offset = 0
             # Uncapped probe: decide progress on the true whole-file boundary. A capped
@@ -886,15 +1005,75 @@ def _ingest_session(
                 # in-flight response, not a recoverable one. ADR-0003: a no-progress
                 # transcript parks, it does not re-extract the closed prefix every tick.
                 return IngestResult.NO_PROGRESS
+            # Abandonment target (council R2/R3): the probe's CLOSED-turn boundary.
+            # Line-aligned by construction and never past the accepted stop_offset —
+            # unlike raw min(size, boundary) (mid-write boundary can bisect a record)
+            # or end_offset (f.tell() can overrun the ceiling on a straddling record).
+            probe_safe_end = result.safe_end_offset
             # There is something to recover: drain capped as usual so the ingest slice
             # honours flush_chars; later ticks continue incrementally from the new cursor.
             result = parse_transcript(
                 path, start_offset=0, max_conversation_chars=flush_chars,
                 max_raw_bytes=max_raw_bytes, stop_offset=boundary,
             )
-    except Exception as e:
+            if result.safe_end_offset <= original_offset:
+                # The capped drain cannot get PAST the original cursor in one slice.
+                # Committing it would move the cursor backward; later ticks would climb
+                # back to the orphan and rewind again — a permanent re-extraction loop
+                # (#154 above-flush_bytes class, measured at 5,342 re-ingests of one
+                # file). A bare NO_PROGRESS is no better: _run_job would treat the idle
+                # unsafe tail as frozen and bump the cursor to EOF by SIDE EFFECT, with
+                # no loss record (council R1). Abandon EXPLICITLY: decided here, but
+                # COMMITTED below, outside this try — a storage error must surface as
+                # itself, never as a fake parse failure -> NO_PROGRESS (council R3).
+                #
+                # This range can never hold a completed user<->assistant pair (verified
+                # against parser.py): _would_overshoot() only refuses a candidate close
+                # once something is already safe (_safe_len > 0), so a byte cap can never
+                # suppress the FIRST close, and both close sites (a new user-turn boundary
+                # and a terminal assistant record) require it. So if any user turn followed
+                # by a terminal assistant existed past the cursor, the from-cursor parse
+                # above would already have closed there and should_rewind() could not have
+                # fired. Reaching this branch means it did not -- the whole [original_offset,
+                # probe_safe_end) span is the tail of the ONE still-open leading response
+                # (possibly a multi-record tool chain) that the uncapped probe finally closed
+                # once replayed from 0 with its true prompt back in view. That is why the
+                # write-off is bounded to ~1 KB in practice, not a whole conversation -- and
+                # why a future change to should_rewind or to these close sites could silently
+                # widen it.
+                abandon_range = (original_offset, probe_safe_end)
+    except Exception as e:  # noqa: BLE001 - transcript parsers can raise provider-specific errors
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return IngestResult.NO_PROGRESS
+
+    if abandon_range is not None:
+        abandon_from, abandon_to = abandon_range
+        if abandon_to <= abandon_from:
+            return IngestResult.NO_PROGRESS  # nothing safely closed past the cursor
+        skip_entry = dict(existing or {})
+        skipped_slices = list(skip_entry.get("skipped_slices", []))
+        skipped_slices.append({
+            "start": abandon_from,
+            "end": abandon_to,
+            "source_hash": h,
+            "reason": "orphan_above_cap",
+            "at": datetime.now(UTC).isoformat(),
+        })
+        skip_entry.update({
+            "hash": h,
+            "end_offset": abandon_to,
+            "skipped_slices": skipped_slices,
+        })
+        skip_entry.pop("extract_fail_offset", None)
+        skip_entry.pop("extract_fail_count", None)
+        _commit_state(state, rel, skip_entry, state_lock, watch_dir)
+        logger.error(
+            "Session watcher ABANDONING above-cap orphan recovery for %s: "
+            "cursor %d->%d, %d bytes recorded in skipped_slices "
+            "(observable data loss)",
+            rel, abandon_from, abandon_to, abandon_to - abandon_from,
+        )
+        return IngestResult.OK
 
     # Commit only the "safe" payload — the closed boundary, content proven complete by a
     # terminal stop_reason (Claude Code), a Codex task_complete event, or a following user
@@ -961,23 +1140,26 @@ def _ingest_session(
         failure cannot pin the cursor either (council-pr I1)."""
         fail_count = (
             existing.get("extract_fail_count", 0) + 1
-            if existing and existing.get("extract_fail_offset") == prev_offset
+            if existing and existing.get("extract_fail_offset") == fail_key_offset
             else 1
         )
         if fail_count >= MAX_EXTRACT_FAILURES:
             skip_entry = dict(existing or {})
             skipped_slices = list(skip_entry.get("skipped_slices", []))
             skipped_slices.append({
-                "start": prev_offset,
+                # council C2: the durable pre-rewind cursor, not the transient zeroed
+                # prev_offset — otherwise a rewind quarantine records [0, payload_offset)
+                # and the deferred backfill would replay already-ingested history.
+                "start": fail_key_offset,
                 "end": payload_offset,
                 "source_hash": h,
                 "reason": reason,
-                "at": datetime.now(timezone.utc).isoformat(),
+                "at": datetime.now(UTC).isoformat(),
             })
             skip_entry.update({
                 "hash": h,
                 "end_offset": payload_offset,  # advance past the toxic slice
-                "last_ingested": datetime.now(timezone.utc).isoformat(),
+                "last_ingested": datetime.now(UTC).isoformat(),
                 "session_id": result.session_id,
                 "source": result.source,
                 "space": space,
@@ -989,7 +1171,8 @@ def _ingest_session(
             logger.error(
                 "Session watcher SKIPPING un-processable slice for %s after %d failures (%s): "
                 "cursor %d->%d, %d chars dropped (observable data loss)",
-                rel, fail_count, reason, prev_offset, payload_offset, payload_offset - prev_offset,
+                rel, fail_count, reason, fail_key_offset, payload_offset,
+                payload_offset - fail_key_offset,
             )
             # The cursor advanced -> progress, like a successful empty extraction. If more
             # closed content remains past this slice, drain it now instead of waiting for the
@@ -1000,9 +1183,14 @@ def _ingest_session(
         # Not yet capped: persist the counter (cursor stays) and retry.
         fail_entry = dict(existing or {})
         fail_entry.update({
+            # fail_key_offset, not prev_offset: outside a rewind they're equal; inside
+            # one, fail_key_offset is the durable pre-rewind cursor (== current), so this
+            # is exactly what the monotonic clamp would restore -- writing it directly
+            # means the clamp never has to act, and its own backstop warning (a LOGIC-bug
+            # signal) never fires on this intended path.
             "hash": h,
-            "end_offset": prev_offset,  # cursor unchanged; slice will be retried
-            "extract_fail_offset": prev_offset,
+            "end_offset": fail_key_offset,
+            "extract_fail_offset": fail_key_offset,
             "extract_fail_count": fail_count,
         })
         _commit_state(state, rel, fail_entry, state_lock, watch_dir)
@@ -1028,7 +1216,7 @@ def _ingest_session(
         # Filesystem-level transient failure — same reasoning as the SQLite lock above.
         logger.warning("Session watcher transient I/O error for %s: %s", path, e)
         return IngestResult.TRANSIENT
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - engine providers surface heterogeneous failures
         logger.warning("Session watcher ingestion error for %s: %s", path, e)
         # A DETERMINISTIC exception (e.g. a memory whose content always breaks a write) would pin
         # the cursor forever, re-calling the LLM every tick — count it toward the per-slice cap so
@@ -1070,7 +1258,7 @@ def _ingest_session(
     entry.update({
         "hash": h,
         "end_offset": payload_offset,
-        "last_ingested": datetime.now(timezone.utc).isoformat(),
+        "last_ingested": datetime.now(UTC).isoformat(),
         "session_id": result.session_id,
         "source": result.source,
         "space": space,
@@ -1146,6 +1334,8 @@ class SessionHandler(FileSystemEventHandler):
             return
         key = str(path)
         with self._lock:
+            if self._stop_event.is_set():
+                return
             if key in self._timers:
                 self._timers[key].cancel()
             timer = Timer(self.debounce_seconds, self._enqueue_path, args=(path, "observer"))
@@ -1292,6 +1482,20 @@ class SessionHandler(FileSystemEventHandler):
             self._mark_frozen_prefix_consumed(path, rel, job.boundary)
             self.spool.requeue(job, failure_class="no_safe_boundary")
             return
+        if self._state.get(rel, {}).get("shrink_pending"):
+            # Task 4 review follow-up: tick 1 of the shrink gate returns NO_PROGRESS with
+            # no guaranteed second observation -- an acceptance-only root (`discover=False`
+            # on SessionWatch; run_session_reconcile only sweeps `if w.discover`) is NEVER
+            # reconciled, so `complete`-ing this job would strand the marker (and the
+            # cursor above EOF) forever if no further nudge ever arrives for this path.
+            # requeue(..., failure_class="external") gives it the spool's own persisted
+            # exponential backoff instead (starts at 2s), so tick 2 is reachable through
+            # the spool alone. This narrows the two-observation separation from a
+            # reconcile interval (minutes) to a spool backoff (seconds) -- still orders of
+            # magnitude past the millisecond truncate-then-rewrite window the gate exists
+            # to defend against, so the guarantee is worth more than the shorter gap.
+            self.spool.requeue(job, failure_class="external")
+            return
         self.spool.complete(job)
 
     def _idle_with_unsafe_tail(self, path: Path, rel: str, boundary: int | None = None) -> bool:
@@ -1387,8 +1591,14 @@ class SessionHandler(FileSystemEventHandler):
                     continue  # catch-up disabled -> skip never-seen files
                 if cutoff > 0 and st.st_mtime < cutoff:
                     continue
-            elif (entry.get("end_offset") or 0) >= st.st_size:
-                continue  # fully consumed -> skip cheaply
+            elif (entry.get("end_offset") or 0) >= st.st_size and not entry.get(
+                "shrink_pending"
+            ):
+                # Fully consumed -> skip cheaply. EXCEPT a shrink_pending entry (task 4):
+                # between tick 1 and tick 2 the durable cursor is still above EOF -- skipping
+                # here would drop the file from the sweep and tick 2 would never arrive,
+                # stranding the marker itself.
+                continue
             # else: seen with cursor behind EOF -> pending/failed tail (or a grown file).
             candidates.append((st.st_mtime, jsonl_file, st.st_size))
         # Oldest-first: the longest-waiting transcript is enqueued before newer ones, so a
@@ -1518,6 +1728,7 @@ def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
         # serving after a caught rollback (main.lifespan), so re-arm any cancelled adapter.
         _stop_and_drain(watches, rearm=True)
         raise
+
     return watches
 
 

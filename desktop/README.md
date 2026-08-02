@@ -12,6 +12,8 @@ product:
    count, with a dropdown for stats and actions.
 4. **In-app graph** — the existing web UI loads inside the window.
 5. **Auto-update** — Tauri updater (appcast).
+6. **Trusted recovery handoff** — fixed native commands save or open the
+   canonical recovery kit without exposing its bytes or location to React.
 
 ## Architecture
 
@@ -28,6 +30,16 @@ binaries/uv-<triple>        ← bundled uv binary (downloaded at CI build time)
        ↓ serves
 http://127.0.0.1:8787        ← existing FastAPI app + web UI
 ```
+
+The product webview receives only the purpose-built `desktop-product-bridge`
+commands. Recovery-kit Save uses `tauri-plugin-dialog` only inside Rust; the
+remote graph capability is not granted generic dialog, filesystem, or shell
+access. Rust bounded-reads the fixed canonical kit, writes the selected file
+with owner-only permissions on Unix, reopens it without following symlinks,
+and sends only its SHA-256 digest to a fixed capability-authenticated local
+endpoint. Python independently validates the canonical store and full active
+identity set before recording readiness under the store lock. The direct
+`sha2` and `libc` dependencies provide digesting and Unix `O_NOFOLLOW` support.
 
 ## Build & run (dev)
 
@@ -89,12 +101,16 @@ Also set `plugins.updater.pubkey` in `tauri.conf.json` and
 
 ## Known follow-ups
 
-- **Model downloads on first run** — embedding weights (~100 MB) are downloaded
-  by fastembed at runtime to `~/.cache/fastembed`. The onboarding flow waits for
-  the server, which covers this window.
-- **App updates** — after updating the app, users re-click "Connect" to upgrade
-  ormah via `uv tool install ormah==<new-version>`. Automatic upgrade on launch
-  is a TODO.
+- **Model downloads on first run** — embedding and whisper-reranker weights are
+  downloaded by FastEmbed during server startup into Ormah's shared model cache at
+  `~/.local/share/ormah/models`. Server readiness waits for each download attempt, so
+  provisioning does not depend on whether desktop onboarding runs. If the reranker
+  download fails, Ormah remains available with conservative embedding-only whisper and
+  retries provisioning on the next server start.
+- **Python runtime updates** — each desktop build pins an Ormah package version. On
+  launch the app installs a missing/older version with `uv tool install`, then restarts
+  the daemon so the new Python code and migrations are active. It never downgrades a
+  newer installed runtime.
 - **Updater appcast** — the CI `publish` job attaches artifacts but the
   `latest.json` regeneration/upload is a TODO.
 

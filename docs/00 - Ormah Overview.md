@@ -200,6 +200,7 @@ Use this as a contributor map, not a replacement for the deeper subsystem docs.
 | Maintenance and graph health | [05 - Background Jobs](<./05 - Background Jobs.md>), [09 - Affinity and Feedback](<./09 - Affinity and Feedback.md>) |
 | Integration surfaces | [07 - MCP and Adapters](<./07 - MCP and Adapters.md>), [08 - API Surface](<./08 - API Surface.md>) |
 | Ingestion | [10 - Hippocampus and Session Watcher](<./10 - Hippocampus and Session Watcher.md>) |
+| Encrypted cloud backup and recovery | [15 - Cloud Backup, Verification, and Restore](<./15 - Cloud Backup, Verification, and Restore.md>) |
 
 ## Related Docs
 
@@ -210,3 +211,4 @@ Use this as a contributor map, not a replacement for the deeper subsystem docs.
 - [05 - Background Jobs](<./05 - Background Jobs.md>)
 - [07 - MCP and Adapters](<./07 - MCP and Adapters.md>)
 - [08 - API Surface](<./08 - API Surface.md>)
+- [15 - Cloud Backup, Verification, and Restore](<./15 - Cloud Backup, Verification, and Restore.md>)

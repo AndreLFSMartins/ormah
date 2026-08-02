@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from ormah.config import Settings
+from ormah.config import Settings, validate_llm_runtime_config
 
 
 def _settings(**overrides) -> Settings:
@@ -396,3 +396,39 @@ def test_relevance_gate_enforce_env_on(monkeypatch):
     monkeypatch.setenv("ORMAH_INGEST_RELEVANCE_GATE_ENFORCE", "true")
     from ormah.config import Settings
     assert Settings().ingest_relevance_gate_enforce is True
+
+
+# --- Server-startup guard: ollama + Anthropic-looking llm_model (#154 task 3) ---
+
+def test_validate_llm_runtime_config_rejects_ollama_with_anthropic_default():
+    """provider=ollama with the (Anthropic) default llm_model must fail at SERVER
+    startup, not 404 on every maintenance call at runtime."""
+    settings = Settings(llm_provider="ollama")
+    with pytest.raises(ValueError, match="llm_model"):
+        validate_llm_runtime_config(settings)
+
+
+def test_validate_llm_runtime_config_accepts_explicit_ollama_model():
+    settings = Settings(llm_provider="ollama", llm_model="gemma3:12b-it-qat")
+    validate_llm_runtime_config(settings)   # must not raise
+
+
+def test_validate_llm_runtime_config_rejects_empty_ollama_model():
+    """council C3: ORMAH_LLM_MODEL= (empty string) overrides the default and must be
+    rejected too — Ollama 404s an empty model exactly like a claude-* id."""
+    settings = Settings(llm_provider="ollama", llm_model="")
+    with pytest.raises(ValueError, match="llm_model"):
+        validate_llm_runtime_config(settings)
+
+
+def test_validate_llm_runtime_config_keeps_claude_cli_default():
+    """The Anthropic default is only wrong for ollama — claude_cli keeps working."""
+    settings = Settings(llm_provider="claude_cli")
+    validate_llm_runtime_config(settings)   # must not raise
+
+
+def test_settings_construction_with_bad_pair_still_succeeds():
+    """council C2: constructing Settings must NEVER raise for this pair — `ormah setup`
+    imports the eager singleton and is the user's only repair path."""
+    settings = Settings(llm_provider="ollama")   # inherits the Claude default
+    assert settings.llm_model.startswith("claude-")

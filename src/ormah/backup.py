@@ -9,10 +9,12 @@ import logging
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import threading
 
 from ormah.index.builder import IndexBuilder
 from ormah.index.db import Database
+from ormah.models.node import MemoryNode
 from ormah.store.markdown import parse_node
 from ormah.store.file_store import FileStore
 
@@ -24,6 +26,7 @@ BACKUP_NAME_RE = re.compile(
     r"^memory_(?P<timestamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:_(?P<suffix>\d{2}))?$"
 )
 MANIFEST_NAME = "backup.json"
+BACKUP_FORMAT_VERSION = 2
 SOURCE_DIRS = ("nodes", "deleted")
 _BACKUP_CREATE_LOCK = threading.RLock()
 
@@ -123,6 +126,135 @@ def _parse_backup_created_at(path: Path) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
+def _read_index_user_node_id(memory_dir: Path) -> tuple[bool, str | None]:
+    """Read the active Self pointer without creating or modifying the index."""
+    db_path = Path(memory_dir) / "index.db"
+    if not db_path.is_file():
+        return False, None
+
+    connection = None
+    try:
+        connection = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        row = connection.execute(
+            "SELECT value FROM meta WHERE key = 'user_node_id'"
+        ).fetchone()
+    except sqlite3.Error:
+        return False, None
+    finally:
+        if connection is not None:
+            connection.close()
+
+    if row is None:
+        return False, None
+    value = row[0]
+    if not isinstance(value, str) or not value.strip():
+        raise BackupError("The active Self pointer in index.db is invalid.")
+    return True, value
+
+
+def _parsed_nodes(nodes_dir: Path) -> tuple[list[MemoryNode], list[Path]]:
+    nodes: list[MemoryNode] = []
+    malformed: list[Path] = []
+    if not nodes_dir.is_dir():
+        return nodes, malformed
+    for path in sorted(nodes_dir.glob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            nodes.append(parse_node(path.read_text(encoding="utf-8")))
+        except Exception:
+            malformed.append(path)
+    return nodes, malformed
+
+
+def _validate_user_node_id(nodes_dir: Path, user_node_id: str, *, context: str) -> str:
+    nodes, _malformed = _parsed_nodes(nodes_dir)
+    matches = [node for node in nodes if node.id == user_node_id]
+    if len(matches) != 1 or matches[0].source != "system:self":
+        raise BackupError(
+            f"{context} records active Self node {user_node_id!r}, but that exact "
+            "system:self node is not present in nodes/."
+        )
+    return user_node_id
+
+
+def _infer_user_node_id(nodes_dir: Path, *, context: str) -> str | None:
+    nodes, malformed = _parsed_nodes(nodes_dir)
+    if malformed:
+        raise BackupError(
+            f"Cannot determine the active Self node for {context}: "
+            f"{len(malformed)} node file(s) could not be parsed."
+        )
+    self_ids = sorted({node.id for node in nodes if node.source == "system:self"})
+    if not self_ids:
+        return None
+    if len(self_ids) == 1:
+        return self_ids[0]
+    raise BackupError(
+        f"Cannot determine the active Self node for {context}: found {len(self_ids)} "
+        "system:self nodes and no portable active pointer. Create a fresh backup on the "
+        "source machine before restoring."
+    )
+
+
+def resolve_current_user_node_id(memory_dir: Path) -> str | None:
+    """Return the live graph's active Self node, validating it against Markdown."""
+    memory_dir = Path(memory_dir).expanduser()
+    has_pointer, user_node_id = _read_index_user_node_id(memory_dir)
+    if has_pointer:
+        assert user_node_id is not None
+        return _validate_user_node_id(
+            memory_dir / "nodes",
+            user_node_id,
+            context="the live memory graph",
+        )
+    return _infer_user_node_id(memory_dir / "nodes", context="the live memory graph")
+
+
+def resolve_backup_user_node_id(backup_path: Path) -> str | None:
+    """Return and validate the active Self pointer carried by a local backup.
+
+    Version-1 backups predate the portable pointer. They remain restorable only
+    when their Markdown contains zero or exactly one system:self node.
+    """
+    backup_path = Path(backup_path)
+    manifest_path = backup_path / MANIFEST_NAME
+    if not manifest_path.is_file():
+        return _infer_user_node_id(backup_path / "nodes", context="the legacy backup")
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BackupError(f"Backup manifest is unreadable: {manifest_path}") from exc
+    if not isinstance(manifest, dict):
+        raise BackupError("Backup manifest must contain a JSON object.")
+
+    version = manifest.get("version", 1)
+    if not isinstance(version, int) or isinstance(version, bool) or version not in {1, 2}:
+        raise BackupError(f"Unsupported backup manifest version: {version!r}")
+    if version == 1:
+        return _infer_user_node_id(backup_path / "nodes", context="the legacy backup")
+    if "user_node_id" not in manifest:
+        raise BackupError("Backup manifest version 2 is missing user_node_id.")
+
+    user_node_id = manifest["user_node_id"]
+    if user_node_id is None:
+        inferred = _infer_user_node_id(backup_path / "nodes", context="the backup")
+        if inferred is not None:
+            raise BackupError(
+                "Backup manifest records no active Self node, but nodes/ contains a "
+                "system:self node."
+            )
+        return None
+    if not isinstance(user_node_id, str) or not user_node_id.strip():
+        raise BackupError("Backup manifest user_node_id must be a non-empty string or null.")
+    return _validate_user_node_id(
+        backup_path / "nodes",
+        user_node_id,
+        context="the backup",
+    )
+
+
 class BackupService:
     """Creates, lists, prunes, and restores local memory file backups."""
 
@@ -159,6 +291,8 @@ class BackupService:
         if not self.memory_dir.exists():
             raise BackupError(f"Memory directory not found: {self.memory_dir}")
 
+        user_node_id = resolve_current_user_node_id(self.memory_dir)
+
         created_at = now or _utc_now()
         name = self._unique_backup_name(created_at)
         destination = self.backup_dir / name
@@ -178,12 +312,20 @@ class BackupService:
                 else:
                     target.mkdir()
 
+            if user_node_id is not None:
+                _validate_user_node_id(
+                    tmp_destination / "nodes",
+                    user_node_id,
+                    context="the new backup",
+                )
+
             manifest = {
-                "version": 1,
+                "version": BACKUP_FORMAT_VERSION,
                 "created_at": created_at.isoformat(),
                 "reason": reason,
                 "source": "ormah backup",
                 "source_memory_dir": str(self.memory_dir),
+                "user_node_id": user_node_id,
                 "included": list(SOURCE_DIRS),
                 "excluded": [
                     "index.db",
@@ -266,6 +408,7 @@ class BackupService:
         """
         backup_path = self._resolve_backup_ref(backup_ref)
         restored_info = self._info_for(backup_path)
+        user_node_id = resolve_backup_user_node_id(backup_path)
         safety_backup = self.create(reason=f"pre-restore:{restored_info.name}", prune=False)
 
         self.memory_dir.mkdir(parents=True, exist_ok=True)
@@ -292,6 +435,7 @@ class BackupService:
             shutil.rmtree(restore_tmp, ignore_errors=True)
 
         rebuilt_nodes = self.rebuild_index() if rebuild_index else None
+        self._write_user_node_id(user_node_id)
         self.prune()
         logger.info("Restored Ormah memory backup: %s", restored_info.path)
         return RestoreResult(
@@ -307,6 +451,22 @@ class BackupService:
             database.init_schema()
             builder = IndexBuilder(database, FileStore(self.memory_dir / "nodes"))
             return builder.full_rebuild()
+        finally:
+            database.close()
+
+    def _write_user_node_id(self, user_node_id: str | None) -> None:
+        """Replace target-local identity state with the restored graph's pointer."""
+        database = Database(self.memory_dir / "index.db")
+        try:
+            database.init_schema()
+            with database.transaction() as connection:
+                if user_node_id is None:
+                    connection.execute("DELETE FROM meta WHERE key = 'user_node_id'")
+                else:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('user_node_id', ?)",
+                        (user_node_id,),
+                    )
         finally:
             database.close()
 

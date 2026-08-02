@@ -25,11 +25,9 @@ from ormah.config import settings
 from ormah.console import info, ok, play_finale, step, warn
 from ormah.embeddings.cache import get_fastembed_cache_dir, get_model_cache_dirname
 from ormah.server_manager import (
-    _stop_running_server,
     get_ormah_bin_path,
-    install_autostart,
     is_server_running,
-    wait_for_server,
+    restart_with_autostart,
 )
 
 ENV_DIR = Path.home() / ".config" / "ormah"
@@ -1232,6 +1230,14 @@ def _disable_llm(env: dict[str, str]) -> None:
         env.pop(key, None)
 
 
+def _persist_env_delta(before: dict[str, str], after: dict[str, str]) -> None:
+    """Apply this setup action's changes without overwriting concurrent writers."""
+
+    from ormah.cloud.settings import persist_settings_delta
+
+    persist_settings_delta(before, after)
+
+
 def _enable_llm(
     env: dict[str, str],
     provider: str,
@@ -1264,8 +1270,9 @@ def configure_llm() -> None:
         answer = ""
     if answer not in ("y", "yes"):
         env = _read_env_file()
+        before = dict(env)
         _disable_llm(env)
-        _write_env_file(env)
+        _persist_env_delta(before, env)
         print()
         info("Server-side LLM disabled — core memory works without one")
         info("Run 'ormah setup' again to enable later")
@@ -1284,14 +1291,16 @@ def configure_llm() -> None:
     # Handle "None" selection
     if provider == "none":
         env = _read_env_file()
+        before = dict(env)
         _disable_llm(env)
-        _write_env_file(env)
+        _persist_env_delta(before, env)
         print()
         info("No LLM configured \u2014 core memory works without one")
         info("Run 'ormah setup' again to add an LLM later")
         return
 
     env = _read_env_file()
+    before = dict(env)
 
     if api_key_var:
         hint = _cost_hint(default_model)
@@ -1334,7 +1343,7 @@ def configure_llm() -> None:
         ok(f"Using {display_name} with model '{default_model}'")
         info("Make sure Ollama is running: https://ollama.com")
 
-    _write_env_file(env)
+    _persist_env_delta(before, env)
 
 
 _COST_PER_MTOK: dict[str, tuple[float, float]] = {
@@ -1550,8 +1559,9 @@ def configure_agent_maintenance(agents: list[AgentDescriptor]) -> bool:
         answer = ""
     if answer not in ("n", "no"):
         env = _read_env_file()
+        before = dict(env)
         env["ORMAH_CLAUDE_MAINTENANCE_ENABLED"] = "true"
-        _write_env_file(env)
+        _persist_env_delta(before, env)
         if any(agent.id == "codex" for agent in agents):
             _enable_codex_feature("multi_agent")
         ok(f"Automatic maintenance enabled — {agent_label} can run run_maintenance when signalled")
@@ -2400,7 +2410,7 @@ def _hooks_manifest_wires_ormah(hooks_json_path: Path) -> bool:
 
 
 def _mcp_manifest_wires_ormah(mcp_json_path: Path) -> bool:
-    """True when a plugin's .mcp.json is a real manifest declaring an ormah server.
+    """True when a plugin's .mcp.json declares the ormah-mcp wrapper command.
 
     An interrupted plugin update can leave .mcp.json present but empty
     (``{"mcpServers": {}}``); that must not count as "the plugin provides
@@ -2413,7 +2423,21 @@ def _mcp_manifest_wires_ormah(mcp_json_path: Path) -> bool:
     if not isinstance(data, dict):
         return False
     servers = data.get("mcpServers")
-    return isinstance(servers, dict) and "ormah" in servers
+    if not isinstance(servers, dict):
+        return False
+
+    server = servers.get("ormah")
+    if not isinstance(server, dict):
+        return False
+
+    command = server.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return False
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(parts) and Path(parts[0]).name == "ormah-mcp"
 
 
 def _claude_code_detected() -> bool:
@@ -2779,8 +2803,9 @@ def run_setup(
     # 3. Configure LLM — skip if agent-backed maintenance is handling background jobs
     if ci:
         env = _read_env_file()
+        before = dict(env)
         _disable_llm(env)
-        _write_env_file(env)
+        _persist_env_delta(before, env)
         info("CI mode — LLM set to none")
     elif update:
         env = _read_env_file()
@@ -2791,8 +2816,9 @@ def run_setup(
             info("Cloud LLM key inheritance is disabled; run 'ormah setup' to opt in")
     elif agent_maintenance:
         env = _read_env_file()
+        before = dict(env)
         _disable_llm(env)
-        _write_env_file(env)
+        _persist_env_delta(before, env)
     else:
         configure_llm()
 
@@ -2802,34 +2828,20 @@ def run_setup(
     # 4.5 Preload local models into Ormah's shared model cache
     _preload_local_models()
 
-    # 5. Start server + install auto-start. During updates, restart an existing
-    # daemon so newly installed backend routes match the refreshed UI assets.
-    if update and is_server_running():
-        step("Restarting server")
-        stop_result = _stop_running_server()
-        if stop_result.failed:
-            warn("Existing server did not stop cleanly; attempting restart anyway")
-        install_autostart(ormah_bin, wrapper_path=str(wrapper_path))
-        ok("Updated auto-start (launches on login)")
-
-        if wait_for_server(show_progress=True):
-            server_ok = True
-        else:
-            _diagnose_server_failure()
-            server_ok = False
-    elif is_server_running():
-        ok("Server already running")
-        server_ok = True
+    # 5. A healthy port is not enough: setup guarantees the running backend is
+    # owned by launchd/systemd, replacing a manual process when necessary.
+    server_was_running = is_server_running()
+    step("Restarting server" if server_was_running else "Starting server")
+    server_ok = restart_with_autostart(
+        ormah_bin,
+        wrapper_path=str(wrapper_path),
+        show_progress=True,
+    )
+    if server_ok:
+        action = "Updated" if update else "Installed"
+        ok(f"{action} auto-start (launches on login)")
     else:
-        step("Starting server")
-        install_autostart(ormah_bin, wrapper_path=str(wrapper_path))
-        ok("Installed auto-start (launches on login)")
-
-        if wait_for_server(show_progress=True):
-            server_ok = True
-        else:
-            _diagnose_server_failure()
-            server_ok = False
+        _diagnose_server_failure()
 
     if not skip_client_setup:
         for agent in detected_agents:
