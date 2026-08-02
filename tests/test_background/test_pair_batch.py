@@ -205,6 +205,68 @@ def test_partial_verdicts_leave_missing_as_none(tmp_path, monkeypatch):
     assert out[0] is None and out[2] is None and out[3] is None
 
 
+def test_zero_usable_then_partial_probe_single_judges_only_missing(tmp_path, monkeypatch):
+    batch_sizes = []
+    singles = []
+
+    def staged_batch(*args, **kwargs):
+        n = args[1].count("### Pair ")
+        batch_sizes.append(n)
+        if len(batch_sizes) == 1:
+            return json.dumps({"verdicts": [{"v": i} for i in range(n)]})
+        if len(batch_sizes) == 2:
+            return json.dumps({"verdicts": [{"pair_id": 0, "v": 0}]})
+        return json.dumps({"verdicts": [{"pair_id": i, "v": i} for i in range(n)]})
+
+    def judge_single(pair):
+        singles.append(pair["id"])
+        return {"single": pair["id"]}
+
+    monkeypatch.setattr(pair_batch, "llm_generate", staged_batch)
+    out = pair_batch.judge_pairs(
+        _settings(tmp_path, 4), INSTR, PAIRS, RENDER, judge_single,
+    )
+
+    assert batch_sizes == [4, 2, 2]
+    assert singles == [1]
+    assert out == [
+        {"pair_id": 0, "v": 0}, {"single": 1},
+        {"pair_id": 0, "v": 0}, {"pair_id": 1, "v": 1},
+    ]
+
+
+def test_zero_usable_then_duplicate_probe_judges_ambiguous_indices(tmp_path, monkeypatch):
+    batch_sizes = []
+    singles = []
+
+    def staged_batch(*args, **kwargs):
+        n = args[1].count("### Pair ")
+        batch_sizes.append(n)
+        if len(batch_sizes) == 1:
+            return json.dumps({"verdicts": [{"v": i} for i in range(n)]})
+        if len(batch_sizes) == 2:
+            return json.dumps({"verdicts": [
+                {"pair_id": 0, "v": "first"}, {"pair_id": 0, "v": "duplicate"},
+            ]})
+        return json.dumps({"verdicts": [{"pair_id": i, "v": i} for i in range(n)]})
+
+    def judge_single(pair):
+        singles.append(pair["id"])
+        return {"single": pair["id"]}
+
+    monkeypatch.setattr(pair_batch, "llm_generate", staged_batch)
+    out = pair_batch.judge_pairs(
+        _settings(tmp_path, 4), INSTR, PAIRS, RENDER, judge_single,
+    )
+
+    assert batch_sizes == [4, 2, 2]
+    assert singles == [0, 1]
+    assert out == [
+        {"single": 0}, {"single": 1},
+        {"pair_id": 0, "v": 0}, {"pair_id": 1, "v": 1},
+    ]
+
+
 def test_zero_usable_pair_ids_probe_one_level_then_judge_singles(tmp_path, monkeypatch, caplog):
     """Council R2: zero-usable gets ONE half-size probe, never the full tree."""
     batch_sizes = []

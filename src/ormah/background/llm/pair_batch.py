@@ -74,6 +74,7 @@ def parse_batch_verdicts(
     if not isinstance(verdicts, list):
         return None
     out: dict[int, dict] = {}
+    duplicate_ids: set[int] = set()
     received_ids: list[Any] = []
     discarded_ids: list[Any] = []
     for item in verdicts:
@@ -86,7 +87,11 @@ def parse_batch_verdicts(
         is_valid = type(pair_id) is int and pair_id in valid_ids
         received_ids.append(pair_id if is_valid else _diagnostic_pair_id(pair_id))
         if is_valid:
-            out.setdefault(pair_id, item)
+            if pair_id in out:
+                out.pop(pair_id)
+                duplicate_ids.add(pair_id)
+            elif pair_id not in duplicate_ids:
+                out[pair_id] = item
         else:
             discarded_ids.append(pair_id)
 
@@ -101,6 +106,13 @@ def parse_batch_verdicts(
     if discarded_ids:
         logger.warning(
             "batch verdict payload discarded unusable pair_id values; "
+            "expected=%s received=%r",
+            expected,
+            received_ids,
+        )
+    if duplicate_ids:
+        logger.warning(
+            "batch verdict payload discarded ambiguous duplicate pair_id values; "
             "expected=%s received=%r",
             expected,
             received_ids,
@@ -176,6 +188,10 @@ def _judge_chunk(settings, instruction_block, pairs, render_pair, judge_single,
                        judge_single, idx, results, zero_usable_probes)
     for local_id, item in verdicts.items():
         results[idx[local_id]] = item
+    if zero_usable_probes <= 0:
+        missing = [idx[local_id] for local_id in range(len(idx)) if local_id not in verdicts]
+        if missing:
+            return _judge_singles(pairs, judge_single, missing, results)
     return True
 
 
