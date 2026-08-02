@@ -1,6 +1,6 @@
 # Cloud Backup, Verification, and Restore
 
-Verified against the current Ormah client and the hardened C01 cloud protocol on 2026-07-27.
+Verified against the current Ormah client and the hardened C01 cloud protocol on 2026-07-31.
 
 This guide explains what happens when Ormah protects a memory graph in the cloud. It starts with a
 small worked example, then adds the security and failure-handling details one layer at a time.
@@ -73,7 +73,7 @@ blob bytes.
 | Term | Plain meaning |
 | --- | --- |
 | Memory store | One local Ormah graph, identified by a UUIDv4 `store_id` |
-| Local backup | A timestamped copy of `nodes/` and `deleted/` on the same machine |
+| Local backup | A timestamped copy of `nodes/` and `deleted/`, plus the active Self pointer |
 | Bundle | A gzip-compressed tar archive containing the backup and integrity manifest |
 | Ciphertext | The encrypted bytes produced by age; unreadable without an identity |
 | Snapshot | One committed encrypted cloud recovery point, identified by a server ULID |
@@ -140,7 +140,13 @@ Otherwise it creates a new backup such as:
 `-- backup.json
 ```
 
-`backup.json` records when and why the local backup was made. The snapshot deliberately excludes:
+`backup.json` records when and why the local backup was made and the exact `user_node_id` selected as
+the graph's active Self. That small pointer is portable source state even though the rest of SQLite is
+derived. It prevents a fresh installation's temporary Self node from remaining active after a full
+restore. Historical duplicate Self nodes are copied like every other node; backup and restore do not
+merge or repair them.
+
+The snapshot deliberately excludes:
 
 - `index.db`, its WAL, and other derived indexes;
 - account tokens, `.env`, and API keys;
@@ -350,6 +356,26 @@ For this example it records the successful upload time, snapshot ID, and clears 
 error. State is keyed by `store_id`, so two different `ORMAH_MEMORY_DIR` values do not share backup
 health accidentally.
 
+The same file contains a two-phase upload journal:
+
+- `reserved` means the PUT has not crossed the ambiguous commit boundary and can be replaced after
+  interruption;
+- `finalizing` means the service may have committed the object even if the client did not receive
+  the response, so the client retries the same `upload_id` and never creates a second reservation;
+- a finalizing upload is abandoned only when the service returns its structured `upload_expired`
+  response and the locally recorded reservation lease has also expired.
+
+Writers serialize this state with the store lock and replace the JSON atomically. Schema version 3
+is deliberately fail-closed: an older client that encounters a newer state schema asks the user to
+update Ormah instead of rewriting fields it does not understand. Rolling the binary back therefore
+does not imply that protection state can safely be rolled back.
+
+Protection status distinguishes a proven recovery point from a newly uploaded one. A successful
+upload moves the store to `verification_pending` until that exact snapshot passes the restore
+rehearsal. An older verified snapshot still remains downloadable, but the UI must not describe the
+newest snapshot as protected yet. `finalizing` is different: its commit result is unknown, so status
+becomes `attention_required` until the same upload ID is reconciled.
+
 Upload success now proves:
 
 - an encrypted object was committed;
@@ -374,20 +400,33 @@ For the latest committed snapshot, the current verification path:
 
 1. asks the service to list committed snapshots;
 2. rejects an object larger than the client's advertised safe processing limit;
-3. requests a presigned GET URL;
-4. streams the ciphertext into a newly created temporary directory;
-5. decrypts it using all retained local age identities;
-6. accepts only regular allowlisted paths: `nodes/*.md`, `deleted/*.md`, `backup.json`, and
+3. requires the SHA-256 that the service verified during immutable promotion;
+4. requests a presigned GET URL;
+5. streams the ciphertext into a newly created temporary directory;
+6. recomputes the ciphertext SHA-256 and compares it with the committed metadata;
+7. decrypts it using all retained local age identities;
+8. accepts only regular allowlisted paths: `nodes/*.md`, `deleted/*.md`, `backup.json`, and
    `bundle-manifest.json`;
-7. rejects absolute paths, `..`, backslashes, links, duplicates, Unicode/case collisions, excess
+9. rejects absolute paths, `..`, backslashes, links, duplicates, Unicode/case collisions, excess
    members, and excess expanded bytes;
-8. recomputes every file size and SHA-256 and compares them with the encrypted manifest;
-9. parses every active and deleted Markdown node;
-10. creates a throwaway SQLite database and rebuilds its index from the extracted active nodes;
-11. requires the rebuilt active-node count to equal `manifest.node_count`;
-12. runs an FTS search and requires it to return a known restored node;
-13. records `last_verify_ok=true` and the exact snapshot ID;
-14. deletes the temporary directory in `finally`, whether verification succeeds or fails.
+10. recomputes every file size and SHA-256 and compares them with the encrypted manifest;
+11. validates that `backup.json`'s active Self pointer names the exact included `system:self` node;
+12. parses every active and deleted Markdown node;
+13. creates a throwaway SQLite database and rebuilds its index from the extracted active nodes;
+14. requires the rebuilt active-node count to equal `manifest.node_count`;
+15. runs an FTS search and requires it to return a known restored node;
+16. records `last_verify_ok=true` and the exact snapshot ID;
+17. deletes the temporary directory in `finally`, whether verification succeeds or fails.
+
+Those checks are reported as seven stable proof stages: download, ciphertext hash, decryption,
+manifest/file hashes, Markdown parsing, scratch-index rebuild, and search probe. Error messages are
+privacy-safe: they can identify the failed stage but never persist a node filename or malformed
+frontmatter content.
+
+The blob-list wire contract always includes `sha256`: a lowercase 64-character value for a
+service-verified ciphertext, or JSON `null` for an older blob whose checksum was never attested. A
+missing key identifies an older service deployment, not an unverified blob, and verification asks
+for the service to be updated rather than guessing.
 
 For our three-file example, the scratch index must rebuild exactly `2` active nodes. The deleted
 node is parsed and integrity-checked but correctly does not become an active search result.
@@ -459,10 +498,20 @@ The restore command:
 7. delegates to the existing `BackupService.restore()` path;
 8. creates a safety backup of any current Mac memory before replacement;
 9. replaces only the source-of-truth `nodes/` and `deleted/` directories;
-10. rebuilds the Mac's SQLite search index from Markdown.
+10. rebuilds the Mac's SQLite search index from Markdown;
+11. replaces the Mac-local active Self pointer with the source graph's recorded `user_node_id`.
 
 For the example, the result is two active nodes, one deleted node retained as a tombstone, and a
-fresh searchable index containing the two active nodes.
+fresh searchable index containing the two active nodes. If installing Ormah on the Mac created a
+temporary isolated Self node before restore, the pre-restore safety backup preserves it and the full
+restore then removes it with the rest of the target graph. The source graph's selected Self becomes
+active exactly as backed up.
+
+This is intentionally replacement, not merge. Restore does not inspect connections to decide which
+Self node looks most important, transfer target-only nodes, or rewrite historical source duplicates.
+Those are sync or explicit repair concerns. A new backup records the choice exactly. An older backup
+without the pointer is accepted only when it contains zero or one `system:self` node; an ambiguous
+legacy backup fails before touching the target and asks for a fresh backup from the source machine.
 
 Cloud restore remains available when subscription entitlement expires, while the service retains
 the snapshot. Cancellation pauses new uploads; it does not turn recovery into a ransom gate.
@@ -476,9 +525,11 @@ the snapshot. Cancellation pauses new uploads; it does not turn recovery into a 
 | Bundle exceeds safe client limit | Client refuses before upload or download processing |
 | PUT fails or URL expires | Client does not finalize; pending reservation/object is cleaned later |
 | Finalize sees wrong size/checksum | Snapshot is not committed |
-| Process dies during promotion | Durable lease/state lets janitor reconcile safely rather than guessing |
+| Client loses the finalize response | Durable journal retries the same upload ID; no duplicate is reserved |
+| Process dies during promotion | Durable service lease/state lets janitor reconcile safely rather than guessing |
 | Ciphertext is truncated or altered | Age decryption or archive/manifest verification fails |
 | A Markdown file is malformed | Parse stage fails; snapshot is not marked verified |
+| Active Self pointer is missing, invalid, or ambiguous | Verification/restore fails closed before replacing the live graph |
 | Scratch index/search fails | Snapshot remains committed but is not reported as verified restorable |
 | Verification fails | Live graph bytes and mtimes remain untouched; exact error is recorded locally |
 | Restore starts on a populated machine | A safety backup is created before source directories are replaced |
@@ -499,8 +550,17 @@ pairing improves the new-machine experience without giving the service the plain
 | Sync | Converge changes between machines | Eventually, after merge/publication | Yes, using CAS |
 
 This separation is intentional. A scheduled backup must never silently publish itself as the latest
-cross-machine truth. In code, `run_cloud_backup()` calls `finalize_upload()` without
-`advance_head`.
+cross-machine truth. `CloudProtectionService.backup_now()` calls `finalize_upload()` without
+`advance_head`, and the scheduler's `run_cloud_backup()` is now only a guarded adapter over that
+shared service.
+
+`CloudProtectionService` is the reusable Python owner of immediate backup and restore verification;
+`cloud_status_payload()` is the single status derivation used by CLI, local REST, and UI consumers.
+These entry points keep state transitions and failure recording out of presentation adapters. Direct
+`backup_now()` means run now; only the scheduler passes `only_if_due=true`. Manual verification is
+still permitted after protection is stopped because retained downloads are never entitlement- or
+scheduler-gated. A successful verification marks the store protected only when it verifies the
+latest successful backup, never merely because an older recovery point was restorable.
 
 ## Current experience versus the planned product experience
 

@@ -28,12 +28,12 @@ from ormah.setup import (
     CLAUDE_MD_SENTINEL_START,
     PI_AGENTS_MD_SENTINEL_END,
     PI_AGENTS_MD_SENTINEL_START,
-    _get_agent,
     _atomic_write,
     _claude_code_is_wired,
     _claude_code_plugin_provides_hooks,
     _claude_code_wire,
     _discover_transcripts,
+    _get_agent,
     _is_ormah_hook,
     _merge_hooks,
     _merge_json_file,
@@ -566,6 +566,23 @@ class TestClaudeCodePluginProvidesHooks:
         with patch("ormah.setup.Path.home", return_value=tmp_path):
             assert _claude_code_plugin_provides_hooks() is False
 
+    def test_false_when_mcp_manifest_has_empty_ormah_entry(self, tmp_path):
+        """An ormah key without a runnable command must not license stripping CLI MCP."""
+        self._enable(tmp_path)
+        self._install(tmp_path, mcp_content={"mcpServers": {"ormah": {}}})
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_mcp_manifest_uses_non_plugin_command(self, tmp_path):
+        """The replacement MCP must be the plugin wrapper command."""
+        self._enable(tmp_path)
+        self._install(
+            tmp_path,
+            mcp_content={"mcpServers": {"ormah": {"command": "/usr/bin/ormah"}}},
+        )
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
     def test_false_when_hooks_manifest_has_only_third_party_hook(self, tmp_path):
         """Proves the check inspects ormah's own hooks, not just any hook."""
         self._enable(tmp_path)
@@ -1023,8 +1040,9 @@ class TestRunSetup:
             stack.enter_context(patch("ormah.setup.configure_llm"))
             stack.enter_context(patch("ormah.setup._preload_local_models"))
             stack.enter_context(patch("ormah.setup.is_server_running", return_value=False))
-            mock_install = stack.enter_context(patch("ormah.setup.install_autostart"))
-            stack.enter_context(patch("ormah.setup.wait_for_server", return_value=False))
+            mock_restart = stack.enter_context(
+                patch("ormah.setup.restart_with_autostart", return_value=False)
+            )
             mock_diagnose = stack.enter_context(patch("ormah.setup._diagnose_server_failure"))
             mock_backfill = stack.enter_context(patch("ormah.setup.backfill_transcripts"))
             mock_finale = stack.enter_context(patch("ormah.setup.play_finale"))
@@ -1035,7 +1053,11 @@ class TestRunSetup:
                 run_setup(skip_client_setup=True)
 
         assert exc_info.value.code == 1
-        mock_install.assert_called_once_with("/abs/path/ormah", wrapper_path=str(tmp_path / "ormah-server"))
+        mock_restart.assert_called_once_with(
+            "/abs/path/ormah",
+            wrapper_path=str(tmp_path / "ormah-server"),
+            show_progress=True,
+        )
         mock_diagnose.assert_called_once()
         mock_backfill.assert_not_called()
         mock_finale.assert_not_called()
@@ -1063,6 +1085,9 @@ class TestRunSetup:
             )
             stack.enter_context(patch("ormah.setup._preload_local_models"))
             stack.enter_context(patch("ormah.setup.is_server_running", return_value=True))
+            mock_restart = stack.enter_context(
+                patch("ormah.setup.restart_with_autostart", return_value=True)
+            )
             mock_maintenance_prompt = stack.enter_context(patch("ormah.setup.configure_agent_maintenance"))
             mock_configure_llm = stack.enter_context(patch("ormah.setup.configure_llm"))
             mock_claude_hooks = stack.enter_context(patch("ormah.setup.configure_claude_hooks"))
@@ -1099,10 +1124,13 @@ class TestRunSetup:
         mock_pi_extension.assert_not_called()
         mock_pi_md.assert_not_called()
         mock_pi_agents.assert_not_called()
+        mock_restart.assert_called_once_with(
+            "/abs/path/ormah",
+            wrapper_path=str(tmp_path / "ormah-server"),
+            show_progress=True,
+        )
 
     def test_update_restarts_existing_server(self, tmp_path, capsys):
-        from ormah.server_manager import _StopServerResult
-
         wrapper = tmp_path / "ormah-server"
         with ExitStack() as stack:
             stack.enter_context(patch("ormah.setup.get_ormah_bin_path", return_value="/abs/path/ormah"))
@@ -1111,14 +1139,9 @@ class TestRunSetup:
             stack.enter_context(patch("ormah.setup.generate_server_wrapper", return_value=wrapper))
             stack.enter_context(patch("ormah.setup._preload_local_models"))
             stack.enter_context(patch("ormah.setup.is_server_running", return_value=True))
-            mock_stop = stack.enter_context(
-                patch(
-                    "ormah.setup._stop_running_server",
-                    return_value=_StopServerResult(found=True, stopped=True),
-                )
+            mock_restart = stack.enter_context(
+                patch("ormah.setup.restart_with_autostart", return_value=True)
             )
-            mock_install = stack.enter_context(patch("ormah.setup.install_autostart"))
-            mock_wait = stack.enter_context(patch("ormah.setup.wait_for_server", return_value=True))
             stack.enter_context(patch("ormah.setup.backfill_transcripts"))
             stack.enter_context(patch("ormah.setup.play_finale"))
             stack.enter_context(patch("ormah.setup._print_setup_summary"))
@@ -1126,9 +1149,11 @@ class TestRunSetup:
 
             run_setup(update=True, skip_client_setup=True)
 
-        mock_stop.assert_called_once()
-        mock_install.assert_called_once_with("/abs/path/ormah", wrapper_path=str(wrapper))
-        mock_wait.assert_called_once_with(show_progress=True)
+        mock_restart.assert_called_once_with(
+            "/abs/path/ormah",
+            wrapper_path=str(wrapper),
+            show_progress=True,
+        )
 
         out = capsys.readouterr().out
         assert "Restarting server" in out
@@ -1298,13 +1323,17 @@ class TestCliEntryPoint:
             patch("ormah.setup.WRAPPER_PATH", wrapper),
             patch("ormah.setup.generate_server_wrapper", return_value=wrapper),
             patch("ormah.server_manager.get_ormah_bin_path", return_value="/abs/path/ormah"),
-            patch("ormah.server_manager.install_autostart"),
-            patch("ormah.server_manager.wait_for_server", return_value=False),
+            patch("ormah.server_manager.restart_with_autostart", return_value=False) as restart,
             pytest.raises(SystemExit) as exc_info,
         ):
             main()
 
         assert exc_info.value.code == 1
+        restart.assert_called_once_with(
+            "/abs/path/ormah",
+            wrapper_path=str(wrapper),
+            show_progress=True,
+        )
 
     def test_claude_md_install_defaults_to_auto_scope(self):
         from ormah.cli import main
@@ -3051,10 +3080,10 @@ class TestRunUninstall:
 
     def test_recovery_preflight_refreshes_stale_kit_after_rotation(self, tmp_path):
         from ormah.cloud.keys import (
+            _rotate_key_without_recovery_kit,
             get_or_create_store_id,
             init_key,
             load_identity_strings,
-            rotate_key,
             write_recovery_kit,
         )
 
@@ -3065,7 +3094,7 @@ class TestRunUninstall:
         init_key(key_path)
         store_id = get_or_create_store_id(memory_dir)
         write_recovery_kit(store_id, key_path=key_path, kit_path=kit_path)
-        rotate_key(key_path)
+        _rotate_key_without_recovery_kit(key_path)
 
         result = _prepare_cloud_recovery(config_dir, [memory_dir])
 

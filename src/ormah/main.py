@@ -13,9 +13,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from ormah.api.middleware import AgentMiddleware
+from ormah.api.local_auth import load_or_create_local_admin_token
+from ormah.api.routes_account import router as account_router
 from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
 from ormah.api.routes_ingest import router as ingest_router
+from ormah.api.routes_protection import router as protection_router
 from ormah.api.routes_stats import router as stats_router
 from ormah.api.routes_ui import router as ui_router
 from ormah.background.maintenance_manager import MaintenanceManager
@@ -182,6 +185,18 @@ def _bounded_scheduler_shutdown(scheduler) -> bool:
     return False
 
 
+def _initialize_local_admin(app: FastAPI) -> None:
+    """Enable sensitive local routes without making them a core-server dependency."""
+    try:
+        app.state.local_admin_token = load_or_create_local_admin_token()
+    except (OSError, RuntimeError):
+        app.state.local_admin_token = None
+        logger.warning(
+            "Local account and billing routes are disabled because their capability "
+            "could not be secured."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Fail fast (#154 task 3): llm_provider=ollama + an Anthropic-looking (or empty)
@@ -197,10 +212,18 @@ async def lifespan(app: FastAPI):
 
     # Startup
     logger.info("Starting ormah server on port %d...", settings.port)
+    _initialize_local_admin(app)
     logger.info("Initializing memory engine...")
     engine = MemoryEngine(settings)
     engine.startup()
     app.state.engine = engine
+    from ormah.cloud.operations import (
+        ProtectionOperationCoordinator,
+        resume_interrupted_enable,
+    )
+
+    app.state.protection_operations = ProtectionOperationCoordinator()
+    resume_interrupted_enable(engine, app.state.protection_operations)
     logger.info("Memory engine ready.")
 
     # ADR-0004 slice 2: start a clean cancellation era. The llm_cancel epoch is module-level and
@@ -352,6 +375,11 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "scheduler"):
         scheduler_alive = _bounded_scheduler_shutdown(app.state.scheduler)
 
+    # Shutdown — drain the protection-operations executor (upstream 0.14.5). It runs its
+    # own pool, not the scheduler's, so the bounded scheduler join above does not cover it.
+    if hasattr(app.state, "protection_operations"):
+        app.state.protection_operations.shutdown(wait=True)
+
     # Fix C (best-effort limitation): when either worker survives its timeout, the
     # engine is not closed cleanly — the SQLite connection leaks until process exit.
     # Accepted because: (a) no corruption risk, (b) process is terminating (SIGTERM
@@ -387,6 +415,8 @@ app.add_middleware(AgentMiddleware)
 
 app.include_router(agent_router)
 app.include_router(admin_router)
+app.include_router(account_router)
+app.include_router(protection_router)
 app.include_router(stats_router)
 app.include_router(ui_router)
 app.include_router(ingest_router)

@@ -12,6 +12,7 @@ import FilterDrawer from "./components/FilterDrawer";
 import InsightsPanel from "./components/InsightsPanel";
 import AdminPanel from "./components/AdminPanel";
 import AgentsPanel from "./components/AgentsPanel";
+import ProtectionPanel from "./components/ProtectionPanel";
 import ToastContainer from "./components/Toast";
 import type { ToastData } from "./components/Toast";
 import {
@@ -23,6 +24,7 @@ import {
   type GraphTheme,
 } from "./graphAppearance";
 import useKeyboardShortcuts from "./hooks/useKeyboardShortcuts";
+import { isDesktopApp, productBridge, type ProtectionState } from "./productBridge";
 
 export interface Filters {
   tiers: Set<Tier>;
@@ -37,7 +39,7 @@ export interface Filters {
 const ALL_TYPES = ALL_NODE_TYPES;
 const DEFAULT_EDGE_TYPES = new Set<EdgeType>(ALL_EDGE_TYPES);
 
-type PanelId = "settings" | "insights" | "admin" | "agents" | null;
+type PanelId = "protection" | "settings" | "insights" | "admin" | "agents" | null;
 type ThemeTransitionState = {
   theme: GraphTheme;
   id: number;
@@ -67,6 +69,7 @@ export default function App() {
   const spacesSeeded = useRef(false);
   const knownSpaces = useRef<Set<string>>(new Set());
   const [toasts, setToasts] = useState<ToastData[]>([]);
+  const [protectionState, setProtectionState] = useState<ProtectionState | null>(null);
   const [graphAppearance, setGraphAppearance] =
     useState<GraphAppearance>(loadGraphAppearance);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -88,6 +91,13 @@ export default function App() {
   const togglePanel = useCallback((id: PanelId) => {
     setActivePanel((p) => (p === id ? null : id));
   }, []);
+
+  const handleProtectionStatusChange = useCallback(
+    (cloud: { protection_state: ProtectionState }) => {
+      setProtectionState(cloud.protection_state);
+    },
+    [],
+  );
 
   useKeyboardShortcuts({
     onTogglePanel: togglePanel as (id: "settings" | "insights" | "admin" | "agents") => void,
@@ -152,6 +162,13 @@ export default function App() {
   useEffect(() => {
     loadAll();
   }, [loadAll]);
+
+  useEffect(() => {
+    if (!isDesktopApp()) return;
+    productBridge.status()
+      .then((cloud) => setProtectionState(cloud.protection_state))
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     applyGraphAppearance(graphAppearance);
@@ -292,12 +309,13 @@ export default function App() {
     <>
       <TopBar
         nodeCount={filteredNodes.length}
-        activePanel={activePanel as "settings" | "insights" | "admin" | "agents" | null}
-        onTogglePanel={togglePanel as (id: "settings" | "insights" | "admin" | "agents") => void}
+        activePanel={activePanel}
+        onTogglePanel={togglePanel}
         onSearchSelect={handleSearchSelect}
         onSearchHover={(id) => graphViewRef.current?.highlightNode(id)}
         onSearchHoverEnd={() => graphViewRef.current?.clearHighlight()}
         searchInputRef={searchInputRef}
+        protectionState={protectionState}
       />
       <div className="graph-container">
         {graph && (
@@ -357,6 +375,12 @@ export default function App() {
       <AgentsPanel
         open={activePanel === "agents"}
         onClose={() => setActivePanel(null)}
+      />
+      <ProtectionPanel
+        open={activePanel === "protection"}
+        onClose={() => setActivePanel(null)}
+        onToast={addToast}
+        onStatusChange={handleProtectionStatusChange}
       />
       {themeTransition && (
         <div

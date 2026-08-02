@@ -34,7 +34,7 @@ def _api(fn):
     try:
         return fn()
     except httpx.ConnectError:
-        print("Ormah server not running. Start it with: ormah server start", file=sys.stderr)
+        print("Ormah server not running. Start it with: ormah server start -d", file=sys.stderr)
         sys.exit(1)
     except httpx.HTTPStatusError as e:
         print(f"Error: {e.response.status_code} {e.response.text}", file=sys.stderr)
@@ -292,9 +292,27 @@ def cmd_whisper_inject(args):
             r = c.post("/agent/whisper", json=body)
             r.raise_for_status()
             text = r.json().get("text", "")
+    except httpx.ConnectError:
+        warning_key = f"server-down-warning:{session_id or 'unknown'}"
+        cursors = _load_cursors()
+        if not cursors.get(warning_key):
+            cursors[warning_key] = True
+            _save_cursors(cursors)
+            print(json.dumps({
+                "systemMessage": (
+                    "Ormah's backend is unavailable. Automatic memory recall and capture "
+                    "are paused. Run `ormah server start -d` to restore it."
+                )
+            }))
+        sys.exit(0)
     except Exception:
         # Server down, timeout, or any error — exit silently
         sys.exit(0)
+
+    warning_key = f"server-down-warning:{session_id or 'unknown'}"
+    cursors = _load_cursors()
+    if cursors.pop(warning_key, None) is not None:
+        _save_cursors(cursors)
 
     if not text.strip():
         text = ""

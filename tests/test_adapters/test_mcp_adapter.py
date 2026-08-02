@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from mcp.types import CallToolRequest, CallToolRequestParams
 
 from ormah.adapters import mcp_adapter
 
@@ -77,6 +79,22 @@ async def test_dispatch_uses_extended_timeout_for_maintenance(monkeypatch):
 
     assert captured["base_url"] == "http://localhost:8787"
     assert captured["timeout"] == mcp_adapter._MAINTENANCE_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_call_tool_connect_error_recommends_supervised_start(monkeypatch):
+    dispatch = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+    monkeypatch.setattr(mcp_adapter, "_dispatch", dispatch)
+    server = mcp_adapter.create_mcp_server("http://localhost:8787")
+    handler = server.request_handlers[CallToolRequest]
+
+    result = await handler(
+        CallToolRequest(params=CallToolRequestParams(name="recall", arguments={}))
+    )
+
+    message = result.root.content[0].text
+    assert "Ormah server not running" in message
+    assert "ormah server start -d" in message
 
 
 def test_format_timeout_error_for_maintenance_is_explicit():
