@@ -590,3 +590,42 @@ def test_auto_merge_survivor_requeues_into_delta(engine):
         "SELECT seq FROM nodes WHERE id = ?", (survivors[0],)).fetchone()["seq"]
     wm = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
     assert surv_seq > wm  # survivor sits ABOVE the cursor: re-selected next run
+
+
+def test_zero_usable_batch_recovered_by_singles_advances_watermark(engine):
+    """#189: a batch with no usable pair_id must not park the dedup cursor
+    once the single-pair fallback succeeds."""
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+    engine.settings.auto_merge_threshold = 999.0   # proposal path, not auto-merge
+    _make_fact(engine, "Backup time", "Backups run every night at 2am.")
+    _make_fact(engine, "Backup schedule", "The backup runs nightly at 2am.")
+    _make_fact(engine, "Nightly backup", "Every night, backups run at 2am.")
+    max_seq = engine.db.conn.execute("SELECT MAX(seq) m FROM nodes").fetchone()["m"]
+
+    engine.settings.llm_provider = "ollama"
+    engine.settings.maintenance_pairs_per_call = 2
+    _reset_adapter()
+
+    batch_sizes = []
+
+    def no_ids(settings, prompt, json_mode=True, **kw):
+        n = prompt.count("### Pair ")
+        batch_sizes.append(n)
+        return json.dumps({"verdicts": [{"v": i} for i in range(n)]})
+
+    single = MagicMock(return_value={
+        "is_duplicate": True, "merged_title": "t", "merged_content": "c",
+        "reason": "same fact",
+    })
+    with patch("ormah.background.llm.pair_batch.llm_generate", no_ids), \
+            patch("ormah.background.duplicate_merger._llm_check_duplicate",
+                  new=single):
+        stats = run_duplicate_detection(engine)
+
+    assert stats["pairs_evaluated"] >= 1        # verdicts arrived via the singles path
+    assert batch_sizes[0] == 2                   # first candidate window used the batch path
+    assert single.call_count >= 2                 # fallback judged the two-pair batch
+    assert single.call_count == stats["pairs_evaluated"]
+    assert get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY) == max_seq

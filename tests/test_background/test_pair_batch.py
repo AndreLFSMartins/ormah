@@ -27,6 +27,8 @@ def _settings(tmp_path, k):
 
 
 PAIRS = [{"id": i} for i in range(4)]
+PAIRS5 = [{"id": i} for i in range(5)]
+PAIRS8 = [{"id": i} for i in range(8)]
 RENDER = lambda p: f"pair-{p['id']}"       # noqa: E731
 INSTR = "JUDGE THE PAIR"
 
@@ -68,6 +70,132 @@ def test_valid_batch_applies_all_verdicts(tmp_path, monkeypatch):
     assert INSTR in prompts[0][0] and "pair-3" in prompts[0][0]
 
 
+def test_batch_prompt_repeats_required_pair_id_next_to_each_pair():
+    prompt = pair_batch.build_batch_prompt("INSTRUCTIONS", ["alpha", "beta"])
+
+    assert (
+        '### Pair 0\nRequired field in this pair\'s verdict object: {"pair_id": 0}\nalpha'
+        in prompt
+    )
+    assert (
+        '### Pair 1\nRequired field in this pair\'s verdict object: {"pair_id": 1}\nbeta'
+        in prompt
+    )
+
+
+def test_zero_usable_pair_ids_are_unusable_and_log_received_ids(caplog):
+    raw = json.dumps({"verdicts": [
+        {"value": "missing"},
+        {"pair_id": 99, "value": "outside"},
+        {"pair_id": [], "value": "wrong-type"},
+    ]})
+
+    with caplog.at_level("WARNING", logger=pair_batch.__name__):
+        out = pair_batch.parse_batch_verdicts(raw, {0, 1})
+
+    # ZERO_USABLE, not None: the payload parsed fine, so bisecting it is bounded.
+    assert out is pair_batch.ZERO_USABLE
+    assert any(
+        "no usable pair_id" in message
+        and "expected=[0, 1]" in message
+        and "received=[None, 99, '<list>']" in message
+        for message in caplog.messages
+    )
+
+
+def test_partial_valid_verdicts_stay_partial_and_log_discarded_ids(caplog):
+    raw = json.dumps({"verdicts": [
+        {"pair_id": 1, "value": "kept"},
+        {"pair_id": 99, "value": "outside"},
+        {"pair_id": True, "value": "bool-alias"},
+        {"pair_id": 1.0, "value": "float-alias"},
+        {"pair_id": {}, "value": "wrong-type"},
+    ]})
+
+    with caplog.at_level("WARNING", logger=pair_batch.__name__):
+        out = pair_batch.parse_batch_verdicts(raw, {0, 1})
+
+    assert out == {1: {"pair_id": 1, "value": "kept"}}
+    assert any(
+        "discarded unusable pair_id" in message
+        and "received=[1, 99, True, 1.0, '<dict>']" in message
+        for message in caplog.messages
+    )
+
+
+def test_diagnostics_do_not_log_textual_or_container_pair_id_contents(caplog):
+    secret = "PAIR_ID_SECRET_1234567890"
+    nested = ["CONTAINER_SECRET", {"still": "secret"}]
+    mapping = {"MAP_SECRET": "sensitive"}
+    raw = json.dumps({"verdicts": [
+        {"pair_id": secret},
+        {"pair_id": nested},
+        {"pair_id": mapping},
+        {"pair_id": None},
+        {"pair_id": 99},
+    ]})
+
+    with caplog.at_level("WARNING", logger=pair_batch.__name__):
+        out = pair_batch.parse_batch_verdicts(raw, {0, 1})
+
+    assert out is pair_batch.ZERO_USABLE
+    messages = "\n".join(caplog.messages)
+    assert secret not in messages
+    assert "CONTAINER_SECRET" not in messages
+    assert "MAP_SECRET" not in messages
+    assert "<str len=25>" in messages
+    assert "<list>" in messages and "<dict>" in messages
+    assert "None" in messages and "99" in messages
+
+
+def test_diagnostics_do_not_log_abnormally_large_invalid_integer_pair_id(caplog):
+    huge_digits = "9" * 4000
+    raw = json.dumps({"verdicts": [{"pair_id": int(huge_digits)}]})
+
+    with caplog.at_level("WARNING", logger=pair_batch.__name__):
+        out = pair_batch.parse_batch_verdicts(raw, {0, 1})
+
+    assert out is pair_batch.ZERO_USABLE
+    messages = "\n".join(caplog.messages)
+    assert huge_digits not in messages
+    assert "<int digits=4000>" in messages
+
+
+def test_numeric_pair_id_beyond_python_limit_is_unparseable():
+    raw = '{"verdicts": [{"pair_id": ' + ("9" * 5000) + "}]}"
+
+    assert pair_batch.parse_batch_verdicts(raw, {0, 1}) is None
+
+
+def test_zero_usable_repr_is_readable():
+    assert repr(pair_batch.ZERO_USABLE) == "ZERO_USABLE"
+
+
+def test_parseable_payload_with_non_list_verdicts_is_unparseable():
+    raw = json.dumps({"verdicts": {"pair_id": 0}})
+
+    assert pair_batch.parse_batch_verdicts(raw, {0}) is None
+
+
+def test_non_dict_verdict_item_logs_only_its_type(caplog):
+    secret = "NON_DICT_VERDICT_SECRET"
+    raw = json.dumps({"verdicts": [secret]})
+
+    with caplog.at_level("WARNING", logger=pair_batch.__name__):
+        out = pair_batch.parse_batch_verdicts(raw, {0})
+
+    assert out is pair_batch.ZERO_USABLE
+    messages = "\n".join(caplog.messages)
+    assert secret not in messages
+    assert "received=['<str>']" in messages
+
+
+def test_empty_verdict_list_respects_expected_ids():
+    raw = json.dumps({"verdicts": []})
+    assert pair_batch.parse_batch_verdicts(raw, {0}) is pair_batch.ZERO_USABLE
+    assert pair_batch.parse_batch_verdicts(raw, set()) == {}
+
+
 def test_partial_verdicts_leave_missing_as_none(tmp_path, monkeypatch):
     monkeypatch.setattr(pair_batch, "llm_generate",
                         lambda *a, **k: json.dumps({"verdicts": [{"pair_id": 1, "v": 1}]}))
@@ -75,6 +203,125 @@ def test_partial_verdicts_leave_missing_as_none(tmp_path, monkeypatch):
                                  judge_single=lambda p: {"single": True})
     assert out[1] == {"pair_id": 1, "v": 1}
     assert out[0] is None and out[2] is None and out[3] is None
+
+
+def test_zero_usable_pair_ids_probe_one_level_then_judge_singles(tmp_path, monkeypatch, caplog):
+    """Council R2: zero-usable gets ONE half-size probe, never the full tree."""
+    batch_sizes = []
+    singles = []
+
+    def no_ids(*args, **kwargs):
+        prompt = args[1]
+        n = prompt.count("### Pair ")
+        batch_sizes.append(n)
+        return json.dumps({"verdicts": [{"v": i} for i in range(n)]})
+
+    def judge_single(pair):
+        singles.append(pair["id"])
+        return {"single": pair["id"]}
+
+    monkeypatch.setattr(pair_batch, "llm_generate", no_ids)
+    with caplog.at_level("WARNING", logger=pair_batch.__name__):
+        out = pair_batch.judge_pairs(
+            _settings(tmp_path, 8), INSTR, PAIRS8, RENDER, judge_single,
+        )
+
+    # K + 3 = 11 LLM calls: 3 batch + 8 singles. The full ladder would be
+    # [8, 4, 2, 2, 4, 2, 2] = 7 batch calls (2K-1 = 15 total).
+    assert batch_sizes == [8, 4, 4]
+    assert singles == [0, 1, 2, 3, 4, 5, 6, 7]
+    assert out == [{"single": i} for i in range(8)]
+    assert any("no usable pair_id" in message for message in caplog.messages)
+    assert any("judging 4 pairs individually" in message for message in caplog.messages)
+
+
+def test_zero_usable_k5_probes_one_level_then_judges_all_singles(tmp_path, monkeypatch):
+    batch_sizes = []
+    singles = []
+
+    def no_ids(*args, **kwargs):
+        n = args[1].count("### Pair ")
+        batch_sizes.append(n)
+        return json.dumps({"verdicts": [{"value": i} for i in range(n)]})
+
+    def judge_single(pair):
+        singles.append(pair["id"])
+        return {"single": pair["id"]}
+
+    monkeypatch.setattr(pair_batch, "llm_generate", no_ids)
+    out = pair_batch.judge_pairs(
+        _settings(tmp_path, 5), INSTR, PAIRS5, RENDER, judge_single,
+    )
+
+    assert batch_sizes == [5, 2, 3]
+    assert singles == [0, 1, 2, 3, 4]
+    assert out == [{"single": i} for i in range(5)]
+
+
+def test_zero_usable_k2_uses_singles_without_batching_singletons(tmp_path, monkeypatch):
+    batch_sizes = []
+    singles = []
+
+    def no_ids(*args, **kwargs):
+        n = args[1].count("### Pair ")
+        batch_sizes.append(n)
+        return json.dumps({"verdicts": [{"value": i} for i in range(n)]})
+
+    def judge_single(pair):
+        singles.append(pair["id"])
+        return {"single": pair["id"]}
+
+    monkeypatch.setattr(pair_batch, "llm_generate", no_ids)
+    out = pair_batch.judge_pairs(
+        _settings(tmp_path, 2), INSTR, PAIRS[:2], RENDER, judge_single,
+    )
+
+    assert batch_sizes == [2]
+    assert singles == [0, 1]
+    assert out == [{"single": 0}, {"single": 1}]
+
+
+def test_zero_usable_single_failure_aborts_remaining_bisect_halves_and_chunks(
+    tmp_path, monkeypatch,
+):
+    batch_sizes = []
+    singles = []
+
+    def no_ids(*args, **kwargs):
+        n = args[1].count("### Pair ")
+        batch_sizes.append(n)
+        return json.dumps({"verdicts": [{"value": i} for i in range(n)]})
+
+    def unavailable_single(pair):
+        singles.append(pair["id"])
+        return None
+
+    monkeypatch.setattr(pair_batch, "llm_generate", no_ids)
+    out = pair_batch.judge_pairs(
+        _settings(tmp_path, 4), INSTR, PAIRS8, RENDER, unavailable_single,
+    )
+
+    assert batch_sizes == [4, 2]
+    assert singles == [0]
+    assert out == [None] * 8
+
+
+def test_unparseable_output_still_bisects_the_full_ladder(tmp_path, monkeypatch):
+    """The bound applies to ZERO_USABLE only — unparseable keeps today's tree."""
+    batch_sizes = []
+
+    def not_json(*args, **kwargs):
+        batch_sizes.append(args[1].count("### Pair "))
+        return "NOT JSON {{{"
+
+    monkeypatch.setattr(pair_batch, "llm_generate", not_json)
+    out = pair_batch.judge_pairs(
+        _settings(tmp_path, 8), INSTR, PAIRS8, RENDER,
+        judge_single=lambda p: {"single": p["id"]},
+    )
+
+    assert batch_sizes == [8, 4, 2, 2, 4, 2, 2]      # K-1 = 7 internal nodes
+    assert out == [{"single": i} for i in range(8)]
 
 
 def test_parse_failure_bisects_to_single(tmp_path, monkeypatch):
