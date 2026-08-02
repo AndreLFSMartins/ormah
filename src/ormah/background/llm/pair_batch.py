@@ -183,6 +183,12 @@ def _judge_chunk(settings, instruction_block, pairs, render_pair, judge_single,
                        judge_single, idx, results, zero_usable_probes - 1)
 
     if verdicts is None:
+        if zero_usable_probes <= 0:
+            logger.warning(
+                "batch of %d pairs returned unparseable output after the "
+                "zero-usable probe budget was exhausted; judging %d pairs individually",
+                len(idx), len(idx))
+            return _judge_singles(pairs, judge_single, idx, results)
         logger.warning("batch of %d pairs returned unparseable output; bisecting", len(idx))
         return _bisect(settings, instruction_block, pairs, render_pair,
                        judge_single, idx, results, zero_usable_probes)

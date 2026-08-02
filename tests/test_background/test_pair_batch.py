@@ -317,6 +317,32 @@ def test_zero_usable_pair_ids_probe_one_level_then_judge_singles(tmp_path, monke
     assert any("judging 4 pairs individually" in message for message in caplog.messages)
 
 
+def test_zero_usable_then_unparseable_children_respect_probe_bound(tmp_path, monkeypatch):
+    batch_sizes = []
+    singles = []
+
+    def staged_batch(*args, **kwargs):
+        n = args[1].count("### Pair ")
+        batch_sizes.append(n)
+        if len(batch_sizes) == 1:
+            return json.dumps({"verdicts": [{"v": i} for i in range(n)]})
+        return "NOT JSON {{{"
+
+    def judge_single(pair):
+        singles.append(pair["id"])
+        return {"single": pair["id"]}
+
+    monkeypatch.setattr(pair_batch, "llm_generate", staged_batch)
+    out = pair_batch.judge_pairs(
+        _settings(tmp_path, 8), INSTR, PAIRS8, RENDER, judge_single,
+    )
+
+    assert batch_sizes == [8, 4, 4]
+    assert singles == list(range(8))
+    assert out == [{"single": i} for i in range(8)]
+    assert len(batch_sizes) + len(singles) == 11
+
+
 def test_zero_usable_k5_probes_one_level_then_judges_all_singles(tmp_path, monkeypatch):
     batch_sizes = []
     singles = []
