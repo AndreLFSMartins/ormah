@@ -294,10 +294,10 @@ def cmd_whisper_inject(args):
             text = r.json().get("text", "")
     except httpx.ConnectError:
         warning_key = f"server-down-warning:{session_id or 'unknown'}"
-        cursors = _load_cursors()
-        if not cursors.get(warning_key):
-            cursors[warning_key] = True
-            _save_cursors(cursors)
+        counters = _load_nudge_counters()
+        if not counters.get(warning_key):
+            counters[warning_key] = True
+            _save_nudge_counters(counters)
             print(json.dumps({
                 "systemMessage": (
                     "Ormah's backend is unavailable. Automatic memory recall and capture "
@@ -310,9 +310,9 @@ def cmd_whisper_inject(args):
         sys.exit(0)
 
     warning_key = f"server-down-warning:{session_id or 'unknown'}"
-    cursors = _load_cursors()
-    if cursors.pop(warning_key, None) is not None:
-        _save_cursors(cursors)
+    counters = _load_nudge_counters()
+    if counters.pop(warning_key, None) is not None:
+        _save_nudge_counters(counters)
 
     if not text.strip():
         text = ""

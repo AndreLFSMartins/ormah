@@ -482,9 +482,9 @@ def test_whisper_inject_malformed_json(monkeypatch):
 
 
 def test_whisper_inject_server_down_warns_once_and_rearms(monkeypatch, tmp_path):
-    cursor_file = tmp_path / "whisper-cursors.json"
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_FILE", cursor_file)
-    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_DIR", tmp_path)
+    counter_file = tmp_path / "whisper-nudge-counters.json"
+    monkeypatch.setattr("ormah.adapters.cli_adapter._NUDGE_COUNTER_FILE", counter_file)
+    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CACHE_DIR", tmp_path)
     monkeypatch.setattr("ormah.config.settings.whisper_nudge_interval", 0)
     monkeypatch.setattr("ormah.config.settings.whisper_out_enabled", False)
 
