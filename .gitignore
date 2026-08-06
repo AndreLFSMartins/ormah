@@ -101,11 +101,17 @@ docs/handoffs/
 # a multi-subfolder `graphify extract`) stay ignored as merge intermediates.
 !/graphify-out/
 /graphify-out/cost.json
-# Regenerable scratch inside graphify-out/ — never worth versioning:
-/graphify-out/cache/                  # AST extraction cache, rebuilt by any `graphify extract`
-/graphify-out/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/  # dated backups written by cluster-only/label before overwrite
-/graphify-out/.graphify_python        # machine-local interpreter path, breaks on another machine/CI
-/graphify-out/.graphify_analysis.json # intermediate; the full pipeline (Step 9) deletes it itself
+# Regenerable scratch inside graphify-out/ — never worth versioning.
+# (gitignore has no inline-comment syntax: a trailing "# ..." is part of the
+# pattern, not a comment — each rule gets its own comment line above it.)
+# AST extraction cache, rebuilt by any `graphify extract`:
+/graphify-out/cache/
+# Dated backups written by cluster-only/label before overwrite:
+/graphify-out/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
+# Machine-local interpreter path, breaks on another machine/CI:
+/graphify-out/.graphify_python
+# Intermediate; the full skill pipeline (Step 9) deletes it itself:
+/graphify-out/.graphify_analysis.json
 # Local-only: codebase-memory-mcp team graph artifact (regenerable by re-indexing)
 .codebase-memory/
 Music/
