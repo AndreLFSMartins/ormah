@@ -81,12 +81,19 @@ class ProtectionOperationPhase(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     PREPARING = "preparing"
+    DISCOVERING = "discovering"
     ENCRYPTING = "encrypting"
     UPLOADING = "uploading"
     FINALIZING = "finalizing"
     DOWNLOADING = "downloading"
+    DECRYPTING = "decrypting"
+    CHECKING = "checking"
     VERIFYING = "verifying"
     REBUILDING = "rebuilding"
+    READY = "ready"
+    SAFETY_BACKUP = "safety_backup"
+    RESTORING = "restoring"
+    RELOADING = "reloading"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELED = "canceled"
@@ -123,6 +130,7 @@ class ProtectionReasonCode(StrEnum):
     INDEX_REBUILD_FAILED = "index_rebuild_failed"
     SEARCH_PROBE_FAILED = "search_probe_failed"
     SELF_POINTER_INVALID = "self_pointer_invalid"
+    STORE_MISMATCH = "store_mismatch"
     PROCESSING_LIMIT_EXCEEDED = "processing_limit_exceeded"
     DISK_SPACE_INSUFFICIENT = "disk_space_insufficient"
     OPERATION_INTERRUPTED = "operation_interrupted"
@@ -136,6 +144,8 @@ class ProtectionReasonCode(StrEnum):
     INTENT_CANCELED = "intent_canceled"
     ACCOUNT_CHANGED = "account_changed"
     UPLOAD_STATUS_UNKNOWN = "upload_status_unknown"
+    NO_RESTORABLE_BACKUP = "no_restorable_backup"
+    RESTORE_FAILED = "restore_failed"
 
 
 @dataclass(frozen=True)
@@ -151,6 +161,10 @@ class ProtectionOperation:
     snapshot_id: str | None = None
     protection_intent_id: str | None = None
     verified_node_count: int | None = None
+    snapshot_created_at: str | None = None
+    skipped_newer_snapshots: int = 0
+    safety_backup_name: str | None = None
+    prepared_backup_name: str | None = field(default=None, repr=False, compare=False)
 
 
 def _as_utc(value: datetime) -> datetime:

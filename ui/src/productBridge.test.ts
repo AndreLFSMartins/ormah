@@ -59,16 +59,22 @@ describe("operationPhaseIsActive", () => {
       "pending",
       "running",
       "preparing",
+      "discovering",
       "encrypting",
       "uploading",
       "finalizing",
       "downloading",
+      "decrypting",
+      "checking",
       "verifying",
       "rebuilding",
+      "safety_backup",
+      "restoring",
+      "reloading",
     ] as const) {
       expect(operationPhaseIsActive(phase)).toBe(true);
     }
-    for (const phase of ["completed", "failed", "canceled", null, undefined] as const) {
+    for (const phase of ["ready", "completed", "failed", "canceled", null, undefined] as const) {
       expect(operationPhaseIsActive(phase)).toBe(false);
     }
   });
@@ -141,7 +147,7 @@ function status(overrides: Partial<ProtectionStatus>): ProtectionStatus {
 
 describe("protectionRepairAction", () => {
   it("routes failures only to operations that can repair them", () => {
-    expect(protectionRepairAction(status({ last_error_code: "decrypt_failed" }))).toBe("verify");
+    expect(protectionRepairAction(status({ last_error_code: "decrypt_failed" }))).toBe("none");
     expect(protectionRepairAction(status({ last_error_code: "upload_failed" }))).toBe("backup");
     expect(protectionRepairAction(status({ last_error_code: "sign_in_required" }))).toBe("signin");
     expect(protectionRepairAction(status({ last_error_code: "entitlement_expired" }))).toBe("subscribe");

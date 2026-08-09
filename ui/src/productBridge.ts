@@ -21,12 +21,19 @@ export type OperationPhase =
   | "pending"
   | "running"
   | "preparing"
+  | "discovering"
   | "encrypting"
   | "uploading"
   | "finalizing"
   | "downloading"
+  | "decrypting"
+  | "checking"
   | "verifying"
   | "rebuilding"
+  | "ready"
+  | "safety_backup"
+  | "restoring"
+  | "reloading"
   | "completed"
   | "failed"
   | "canceled";
@@ -35,12 +42,18 @@ const ACTIVE_OPERATION_PHASES = new Set<OperationPhase>([
   "pending",
   "running",
   "preparing",
+  "discovering",
   "encrypting",
   "uploading",
   "finalizing",
   "downloading",
+  "decrypting",
+  "checking",
   "verifying",
   "rebuilding",
+  "safety_backup",
+  "restoring",
+  "reloading",
 ]);
 
 export function operationPhaseIsActive(phase: OperationPhase | null | undefined): boolean {
@@ -123,6 +136,9 @@ export interface ProtectionOperation {
   snapshot_id: string | null;
   protection_intent_id: string | null;
   verified_node_count?: number | null;
+  snapshot_created_at?: string | null;
+  skipped_newer_snapshots?: number;
+  safety_backup_name?: string | null;
 }
 
 export function protectionCompletionSummary(
@@ -214,6 +230,13 @@ export const productBridge = {
   verifyNow: () => native<ProtectionOperation>("verify_now"),
   operation: (operationId: string) =>
     native<ProtectionOperation>("operation_status", { operationId }),
+  prepareRestore: () => native<ProtectionOperation>("prepare_restore"),
+  confirmRestore: (preparationOperationId: string) =>
+    native<ProtectionOperation>("confirm_restore", { preparationOperationId }),
+  cancelRestore: (preparationOperationId: string) =>
+    native<{ status: "discarded" }>("cancel_restore", { preparationOperationId }),
+  importRecoveryKit: () =>
+    native<{ status: "imported" | "canceled" }>("import_recovery_kit"),
   openCheckout: (intentId: string) =>
     native<BillingHandoff>("open_checkout", { intentId }),
   openPortal: () => native<{ opened: boolean }>("open_billing_portal"),
@@ -243,7 +266,6 @@ const VERIFY_FAILURES = new Set([
   "download_failed",
   "ciphertext_hash_unavailable",
   "ciphertext_hash_mismatch",
-  "decrypt_failed",
   "manifest_verification_failed",
   "node_parse_failed",
   "bundle_corrupt",
