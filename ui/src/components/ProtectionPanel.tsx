@@ -24,6 +24,7 @@ import {
   productBridge,
   protectionCompletionSummary,
   protectionPresentation,
+  protectionReconnectDelay,
   protectionRepairAction,
   recoveryKitSectionVisible,
   type AccountStatus,
@@ -191,6 +192,7 @@ export default function ProtectionPanel({
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checkoutPolling, setCheckoutPolling] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
@@ -201,6 +203,7 @@ export default function ProtectionPanel({
   const checkoutCheckInFlight = useRef(false);
   const offerRequested = useRef(false);
   const preparedRestoreRef = useRef<ProtectionOperation | null>(null);
+  const reconnectAttempt = useRef(0);
   const desktop = isDesktopApp();
 
   const refresh = useCallback(async () => {
@@ -221,6 +224,7 @@ export default function ProtectionPanel({
       const nextStatus = await productBridge.status();
       setAccount(nextAccount);
       setStatus(nextStatus);
+      setRefreshFailed(false);
       onStatusChange?.(nextStatus);
       setError(null);
       if (nextAccount.signed_in && !offerRequested.current) {
@@ -230,6 +234,7 @@ export default function ProtectionPanel({
         });
       }
     } catch (err) {
+      setRefreshFailed(true);
       setError(errorMessage(err, "Protection status is unavailable."));
     } finally {
       setLoading(false);
@@ -241,6 +246,20 @@ export default function ProtectionPanel({
     void refresh();
     requestAnimationFrame(() => headingRef.current?.focus());
   }, [open, refresh]);
+
+  useEffect(() => {
+    if (!open || (!refreshFailed && status?.protection_state !== "offline")) {
+      reconnectAttempt.current = 0;
+      return;
+    }
+    if (loading || operationIsActive(operation)) return;
+    const delay = protectionReconnectDelay(reconnectAttempt.current);
+    const timer = window.setTimeout(() => {
+      reconnectAttempt.current += 1;
+      void refresh();
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [loading, open, operation?.status, refresh, refreshFailed, status?.protection_state]);
 
   useEffect(() => {
     if (!open || !operationIsActive(operation)) return;
@@ -714,6 +733,7 @@ export default function ProtectionPanel({
       await runOperation(repairAction);
       return;
     }
+    reconnectAttempt.current = 0;
     await refresh();
   }, [beginProtection, offer, refresh, repairAction, runOperation, status]);
 
