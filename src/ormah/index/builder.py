@@ -67,10 +67,28 @@ class IndexBuilder:
         indexed_ids = set(indexed.keys())
         disk_ids: set[str] = set()
 
+        # Both FileStore calls take L_mem -- the engine hands FileStore its own lock
+        # (FileStore(nodes_dir, self._memory_operation_lock)). Calling them inside the write txn
+        # would request L_mem while holding L_db, the reverse of the L_mem -> L_db order every
+        # @serialized_memory_job background job takes: a deadlock cycle, and this job runs every
+        # 60s. Hoisting also halves the I/O done under L_db. full_rebuild already hoists
+        # list_paths for the same reason.
+        paths = self.file_store.list_paths()
+        hashes: dict[Path, str] = {}
+        for path in paths:
+            try:
+                hashes[path] = self.file_store.file_hash(path)
+            except Exception as e:
+                # A file removed between listing and hashing. This used to be swallowed by the
+                # per-path try inside the loop; keep it non-fatal rather than killing the job.
+                logger.warning("Failed to hash %s: %s", path, e)
+
         with self.db.transaction():
-            for path in self.file_store.list_paths():
+            for path in paths:
+                if path not in hashes:
+                    continue  # hashing failed above; already logged
                 try:
-                    file_hash = self.file_store.file_hash(path)
+                    file_hash = hashes[path]
                     node = parse_node(path.read_text(encoding="utf-8"))
                     disk_ids.add(node.id)
 
