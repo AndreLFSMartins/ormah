@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 
 from ormah.models.node import CreateNodeRequest, NodeType, Tier
@@ -52,3 +53,44 @@ def test_guard_observes_writes_in_same_transaction(engine):
 def test_guard_never_deletes_user_node(engine):
     res = engine.delete_node_guarded(engine.user_node_id, lambda conn: True)
     assert res is None
+
+
+def test_guarded_delete_does_not_deadlock_against_a_concurrent_writer(engine):
+    """The guarded delete must take L_mem BEFORE L_db, like every other decorated writer.
+
+    Decorating its only production caller (run_forgetting) closes today's exposure; this pins
+    the method itself, so the next direct caller cannot reopen the inversion. The two locks are
+    upstream's restore-exclusion RLock (L_mem, shared with FileStore) and Database._lock (L_db,
+    held across transaction()'s yield).
+    """
+    node_id = _archival(engine)
+    deleter_holds_db = threading.Event()
+    writer_holds_mem = threading.Event()
+    real_soft_delete = engine.file_store.soft_delete
+
+    def instrumented_soft_delete(target_id):
+        # Inside the write txn: this thread holds L_db and is one call away from taking L_mem.
+        deleter_holds_db.set()
+        writer_holds_mem.wait(timeout=1.0)  # times out once the deleter holds L_mem itself
+        return real_soft_delete(target_id)
+
+    engine.file_store.soft_delete = instrumented_soft_delete
+
+    def writer():
+        """What @_serialized_memory_operation + a write txn do on any MCP write: L_mem, L_db."""
+        deleter_holds_db.wait(timeout=5.0)
+        with engine._memory_operation_lock:
+            writer_holds_mem.set()
+            with engine.db.transaction():
+                pass
+
+    deleter_thread = threading.Thread(
+        target=engine.delete_node_guarded, args=(node_id, lambda conn: True), daemon=True)
+    writer_thread = threading.Thread(target=writer, daemon=True)
+    deleter_thread.start()
+    writer_thread.start()
+    deleter_thread.join(timeout=10.0)
+    writer_thread.join(timeout=10.0)
+
+    assert not deleter_thread.is_alive(), "guarded delete held L_db while waiting for L_mem"
+    assert not writer_thread.is_alive(), "writer held L_mem while waiting for L_db"

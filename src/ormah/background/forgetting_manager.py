@@ -11,11 +11,13 @@ import logging
 import math
 from datetime import datetime, timedelta, timezone
 
+from ormah.background.memory_lock import serialized_memory_job
 from ormah.models.node import Tier
 
 logger = logging.getLogger(__name__)
 
 
+@serialized_memory_job
 def run_forgetting(engine) -> None:
     """Soft-delete dead-weight archival nodes, then purge expired tombstones."""
     if not engine.settings.deletion_enabled:

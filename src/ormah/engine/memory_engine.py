@@ -1235,6 +1235,7 @@ class MemoryEngine:
         node_type = full_node.type.value if full_node else node.get("type", "unknown") if node else "unknown"
         return f"Deleted [{node_type}]: {title}\nID: {node_id}"
 
+    @_serialized_memory_operation
     def delete_node_guarded(self, node_id: str, guard) -> str | None:
         """Soft-delete a node only if ``guard(conn)`` still holds inside the write txn.
 
