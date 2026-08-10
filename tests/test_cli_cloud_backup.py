@@ -13,7 +13,12 @@ import pytest
 from ormah.backup import BackupInfo, RestoreResult, service_from_settings
 from ormah.cloud.bundle import build_bundle
 from ormah.cloud.crypto import generate_identity
-from ormah.cloud.restore import CloudRestoreResult, restore_cloud_snapshot
+from ormah.cloud.restore import (
+    CloudRestoreResult,
+    prepare_cloud_restore,
+    restore_cloud_snapshot,
+)
+from ormah.cloud.transfer import sha256_file
 from ormah.config import Settings
 from ormah.models.node import MemoryNode, NodeType
 from ormah.store.file_store import FileStore
@@ -26,16 +31,19 @@ def _save_node(memory_dir: Path, title: str, content: str) -> MemoryNode:
 
 
 class RestoreClient:
-    def __init__(self):
+    def __init__(self, *, size_bytes=100, sha256="0" * 64):
         self.closed = False
+        self.size_bytes = size_bytes
+        self.sha256 = sha256
 
     def list_blobs(self, store_id):
         return {
             "blobs": [
                 {
-                    "snapshot_id": "01RESTORE",
+                    "snapshot_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
                     "created_at": datetime.now(timezone.utc).isoformat(),
-                    "size_bytes": 100,
+                    "size_bytes": self.size_bytes,
+                    "sha256": self.sha256,
                 }
             ]
         }
@@ -80,7 +88,7 @@ def test_restore_cloud_snapshot_verifies_then_uses_backup_service(tmp_path, monk
         backup_dir=tmp_path / "target-backups",
         account_token="test-token",
     )
-    client = RestoreClient()
+    client = RestoreClient(size_bytes=bundle.stat().st_size, sha256=sha256_file(bundle))
     monkeypatch.setattr(restore, "key_file_exists", lambda: True)
     monkeypatch.setattr(restore, "load_identities", lambda: [identity])
     monkeypatch.setattr(restore, "client_from_settings", lambda settings: client)
@@ -88,12 +96,112 @@ def test_restore_cloud_snapshot_verifies_then_uses_backup_service(tmp_path, monk
 
     result = restore_cloud_snapshot(settings)
 
-    assert result.snapshot_id == "01RESTORE"
+    assert result.snapshot_id == "01ARZ3NDEKTSV4RRFFQ69G5FAV"
     assert result.restore.rebuilt_nodes == 1
     assert list((target_memory / "nodes").glob(f"*_{expected.short_id}.md"))
     assert not list((target_memory / "nodes").glob(f"*_{replaced.short_id}.md"))
     assert result.restore.safety_backup is not None
     assert client.closed is True
+
+
+def test_prepare_restore_skips_corrupt_newest_without_touching_live_memory(
+    tmp_path, monkeypatch
+):
+    from ormah.cloud import restore
+
+    store_id = str(uuid.uuid4())
+    source_memory = tmp_path / "source-memory"
+    _save_node(source_memory, "Recovered node", "Recovered cloud content")
+    source_settings = Settings(
+        memory_dir=source_memory,
+        backup_dir=tmp_path / "source-backups",
+    )
+    backup = service_from_settings(source_settings).create(reason="cloud-fixture")
+    identity = generate_identity()
+    valid_bundle = tmp_path / "valid.age"
+    build_bundle(
+        backup.path,
+        valid_bundle,
+        [identity.to_public()],
+        store_id=store_id,
+        reason="cloud-backup",
+    )
+    corrupt_bundle = tmp_path / "corrupt.age"
+    corrupt_bundle.write_bytes(b"not-an-age-bundle")
+
+    newest_id = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    safe_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+    class FallbackClient(RestoreClient):
+        def list_blobs(self, store_id):
+            return {
+                "blobs": [
+                    {
+                        "snapshot_id": newest_id,
+                        "created_at": "2026-08-09T11:00:00+00:00",
+                        "size_bytes": corrupt_bundle.stat().st_size,
+                        "sha256": sha256_file(corrupt_bundle),
+                    },
+                    {
+                        "snapshot_id": safe_id,
+                        "created_at": "2026-08-08T11:00:00+00:00",
+                        "size_bytes": valid_bundle.stat().st_size,
+                        "sha256": sha256_file(valid_bundle),
+                    },
+                ]
+            }
+
+        def presign_download(self, store_id, snapshot_id):
+            return {"get_url": f"https://objects.example/{snapshot_id}"}
+
+    target_memory = tmp_path / "target-memory"
+    target_memory.mkdir()
+    (target_memory / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    live_node = _save_node(target_memory, "Live local node", "Must remain unchanged")
+    live_path = next((target_memory / "nodes").glob(f"*_{live_node.short_id}.md"))
+    before = live_path.read_bytes()
+    before_mtime = live_path.stat().st_mtime_ns
+    settings = Settings(
+        memory_dir=target_memory,
+        backup_dir=tmp_path / "target-backups",
+        account_token="test-token",
+    )
+    client = FallbackClient()
+    monkeypatch.setattr(restore, "key_file_exists", lambda: True)
+    monkeypatch.setattr(restore, "load_identities", lambda: [identity])
+    monkeypatch.setattr(restore, "client_from_settings", lambda settings: client)
+
+    def download(url, path):
+        source = corrupt_bundle if url.endswith(newest_id) else valid_bundle
+        shutil.copyfile(source, path)
+
+    monkeypatch.setattr(restore, "download_file", download)
+
+    prepared = prepare_cloud_restore(settings)
+
+    assert prepared.snapshot_id == safe_id
+    assert prepared.skipped_newer_snapshots == 1
+    assert prepared.verified_node_count == 1
+    assert live_path.read_bytes() == before
+    assert live_path.stat().st_mtime_ns == before_mtime
+    assert prepared.backup_name.startswith(".ormah-cloud-prepared-")
+    assert (settings.backup_dir / prepared.backup_name).is_dir()
+    assert all(item.name != prepared.backup_name for item in service_from_settings(settings).list())
+    assert restore.discard_prepared_cloud_restore(settings, prepared.backup_name) is True
+    assert not (settings.backup_dir / prepared.backup_name).exists()
+
+
+def test_restore_candidates_are_ulid_sorted_and_fallback_is_snapshot_local():
+    from ormah.cloud import restore
+
+    older = {"snapshot_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+    newer = {"snapshot_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW"}
+
+    assert restore._candidate_blobs([older, newer], None) == [newer, older]
+    assert "bundle_corrupt" in restore._FALLBACK_REASON_CODES
+    assert "decrypt_failed" not in restore._FALLBACK_REASON_CODES
+    assert "store_mismatch" not in restore._FALLBACK_REASON_CODES
+    assert "index_environment_unavailable" not in restore._FALLBACK_REASON_CODES
 
 
 def test_cloud_restore_does_not_check_entitlement(tmp_path, monkeypatch):
@@ -151,7 +259,7 @@ def test_cloud_restore_rejects_oversized_snapshot_before_download(tmp_path, monk
     )
 
     with pytest.raises(restore.CloudRestoreError, match="safe processing limit"):
-        restore_cloud_snapshot(settings)
+        restore_cloud_snapshot(settings, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
 
 
 def _local_status_service():
@@ -258,3 +366,98 @@ def test_cli_restore_rejects_missing_source(capsys):
         main()
 
     assert "Provide a local backup name or use --cloud" in capsys.readouterr().err
+
+
+def test_newest_cloud_snapshot_picks_the_lexical_maximum_without_downloading(
+    tmp_path, monkeypatch
+):
+    """Snapshot ids are server-generated ULIDs, so newest is the lexical max.
+
+    Listing order is not guaranteed, and nothing may be downloaded or decrypted
+    just to answer "what does the cloud hold?".
+    """
+
+    from ormah.cloud import restore
+
+    store_id = str(uuid.uuid4())
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    settings = Settings(memory_dir=memory_dir, account_token="test-token")
+
+    listed = {
+        "blobs": [
+            {
+                "snapshot_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "size_bytes": 10,
+                "created_at": "2026-08-01T10:00:00+00:00",
+            },
+            {
+                "snapshot_id": "01KZKQNY89FGP5CTS04GT7Y3JX",
+                "size_bytes": 1238414,
+                "created_at": "2026-08-09T17:03:44+00:00",
+            },
+            {
+                "snapshot_id": "01KZKNPSKVN8CQYRP9K9PHB67K",
+                "size_bytes": 1319221,
+                "created_at": "2026-08-09T16:29:16+00:00",
+            },
+        ]
+    }
+
+    class ListingClient:
+        def __init__(self):
+            self.closed = False
+
+        def list_blobs(self, requested_store_id):
+            assert requested_store_id == store_id
+            return listed
+
+        def close(self):
+            self.closed = True
+
+    client = ListingClient()
+    monkeypatch.setattr(restore, "client_from_settings", lambda settings: client)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("listing must not download a bundle")
+
+    monkeypatch.setattr(restore, "download_file", refuse)
+
+    newest = restore.newest_cloud_snapshot(settings)
+
+    assert newest["snapshot_id"] == "01KZKQNY89FGP5CTS04GT7Y3JX"
+    assert newest["created_at"] == "2026-08-09T17:03:44+00:00"
+    assert newest["size_bytes"] == 1238414
+    assert client.closed is True
+
+
+def test_newest_cloud_snapshot_reports_an_empty_store_as_nothing(tmp_path, monkeypatch):
+    from ormah.cloud import restore
+
+    store_id = str(uuid.uuid4())
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    (memory_dir / ".store_id").write_text(store_id + "\n", encoding="utf-8")
+    settings = Settings(memory_dir=memory_dir, account_token="test-token")
+
+    class EmptyClient:
+        def list_blobs(self, requested_store_id):
+            return {"blobs": []}
+
+    monkeypatch.setattr(restore, "client_from_settings", lambda settings: EmptyClient())
+
+    assert restore.newest_cloud_snapshot(settings) is None
+
+
+def test_newest_cloud_snapshot_requires_sign_in(tmp_path):
+    from ormah.cloud import restore
+
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    settings = Settings(memory_dir=memory_dir, account_token=None)
+
+    with pytest.raises(restore.CloudRestoreError) as excinfo:
+        restore.newest_cloud_snapshot(settings)
+
+    assert excinfo.value.reason_code == "sign_in_required"

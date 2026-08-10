@@ -176,6 +176,7 @@ pub fn run() {
             product_bridge::logout_account,
             product_bridge::billing_offer,
             product_bridge::protection_status,
+            product_bridge::remote_snapshot,
             product_bridge::create_protection_intent,
             product_bridge::bind_protection_intent,
             product_bridge::cancel_protection_intent,
@@ -184,10 +185,17 @@ pub fn run() {
             product_bridge::backup_now,
             product_bridge::verify_now,
             product_bridge::operation_status,
+            product_bridge::prepare_restore,
+            product_bridge::confirm_restore,
+            product_bridge::cancel_restore,
+            product_bridge::import_recovery_kit,
             product_bridge::open_checkout,
             product_bridge::open_billing_portal,
             product_bridge::save_recovery_kit,
             product_bridge::open_printable_recovery_kit,
+            updater::desktop_update_status,
+            updater::check_desktop_update,
+            updater::install_desktop_update,
         ])
         .setup(|app| {
             // Linux: refuse to start a second instance so we never spawn a
@@ -226,10 +234,6 @@ pub fn run() {
             // Always enable autostart — ormah should run at login by default.
             let _ = app.handle().autolaunch().enable();
 
-            // Check for a desktop app update in the background — user is
-            // notified and must explicitly click to install.
-            updater::check(app.handle().clone());
-
             // Main window: shows the install/boot flow, then navigates to the
             // graph. Built in Rust so we can attach the scrollbar-hiding init
             // script that also applies after navigating to the graph.
@@ -256,6 +260,10 @@ pub fn run() {
 
             // Build the tray; it owns the stats poller and server controls.
             tray::build(app)?;
+
+            // Check only after the tray has registered its event listeners.
+            // Discovery is background-only; installation still needs a click.
+            updater::check(app.handle().clone());
 
             Ok(())
         })

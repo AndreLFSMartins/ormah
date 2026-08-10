@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowUpDown,
   Check,
   ChevronRight,
   Circle,
   CloudOff,
+  CloudDownload,
   CreditCard,
   ExternalLink,
   LoaderCircle,
   LockKeyhole,
+  KeyRound,
   LogIn,
   LogOut,
   RefreshCw,
@@ -20,11 +23,16 @@ import {
   effectiveProtectionState,
   operationPhaseIsActive,
   productBridge,
+  protectionActions,
   protectionCompletionSummary,
+  transferState,
   protectionPresentation,
+  protectionReconnectDelay,
   protectionRepairAction,
   recoveryKitSectionVisible,
   type AccountStatus,
+  type ProtectionActionKind,
+  type RemoteSnapshot,
   type BillingOffer,
   type OperationPhase,
   type ProtectionOperation,
@@ -34,13 +42,23 @@ import RecoveryKitSection from "./RecoveryKitSection";
 
 interface Props {
   open: boolean;
+  /** Total memories on this device, for the device-versus-cloud comparison. */
+  nodeCount?: number | null;
   onClose: () => void;
   onToast: (message: string, type?: "success" | "error" | "info") => void;
   onStatusChange?: (status: ProtectionStatus) => void;
+  onRestoreComplete?: () => Promise<void> | void;
 }
 
-type View = "summary" | "email" | "code" | "checkout";
-type LoginPurpose = "account" | "protect";
+type View =
+  | "summary"
+  | "email"
+  | "code"
+  | "checkout"
+  | "restore_key"
+  | "restore_ready"
+  | "restore_complete";
+type LoginPurpose = "account" | "protect" | "restore";
 
 function operationIsActive(operation: ProtectionOperation | null): boolean {
   return Boolean(
@@ -81,28 +99,67 @@ function operationLabel(
   if (operation.status === "queued") return "Queued";
   if (operation.status !== "running") return null;
   const phase = status?.last_operation_phase || operation.phase;
+  if (operation.kind === "restore") {
+    switch (phase) {
+      case "pending": return "Queued";
+      case "running":
+      case "discovering": return "Finding your newest backup";
+      case "downloading": return "Downloading encrypted memory";
+      case "decrypting": return "Decrypting on this device";
+      case "checking": return "Checking every memory file";
+      case "safety_backup": return "Protecting your current memory first";
+      case "restoring": return "Restoring proven memory";
+      case "rebuilding": return "Rebuilding local search";
+      case "reloading": return "Refreshing your memory graph";
+      default: return "Finishing restore";
+    }
+  }
   switch (phase) {
     case "pending": return "Queued";
     case "running":
-    case "preparing": return "Creating a local recovery point";
+    case "preparing": return "Preparing a backup";
     case "encrypting": return "Encrypting on this device";
     case "uploading": return "Uploading encrypted data";
-    case "finalizing": return "Securing the cloud recovery point";
-    case "downloading": return "Downloading a temporary recovery test";
+    case "finalizing": return "Securing the cloud backup";
+    case "downloading": return "Downloading a temporary test copy";
     case "verifying": return "Decrypting and checking every file";
     case "rebuilding": return "Rebuilding memory and testing search";
-    default: return "Finishing protection check";
+    default: return "Finishing the check";
   }
 }
 
+const ACTION_ICONS: Record<ProtectionActionKind, JSX.Element> = {
+  signin: <LogIn size={16} />,
+  protect: <ShieldCheck size={16} />,
+  backup: <RefreshCw size={15} />,
+  restore: <CloudDownload size={15} />,
+  verify: <ShieldCheck size={15} />,
+  repair: <RefreshCw size={15} />,
+  subscribe: <CreditCard size={15} />,
+};
+
 const PROTECTION_STAGES = [
-  { phase: "preparing", label: "Create local recovery point" },
+  { phase: "preparing", label: "Prepare a backup" },
   { phase: "encrypting", label: "Encrypt on this device" },
   { phase: "uploading", label: "Upload encrypted data" },
-  { phase: "finalizing", label: "Secure cloud recovery point" },
+  { phase: "finalizing", label: "Secure the cloud backup" },
   { phase: "downloading", label: "Download a temporary test copy" },
   { phase: "verifying", label: "Decrypt and check every file" },
   { phase: "rebuilding", label: "Rebuild memory and test search" },
+] as const;
+
+const RESTORE_PREPARE_STAGES = [
+  { phase: "discovering", label: "Find the newest backup" },
+  { phase: "downloading", label: "Download encrypted memory" },
+  { phase: "decrypting", label: "Decrypt on this device" },
+  { phase: "checking", label: "Check files, identity, and search" },
+] as const;
+
+const RESTORE_APPLY_STAGES = [
+  { phase: "safety_backup", label: "Save current memory locally" },
+  { phase: "restoring", label: "Replace with the proven backup" },
+  { phase: "rebuilding", label: "Rebuild local search" },
+  { phase: "reloading", label: "Refresh the memory graph" },
 ] as const;
 
 function phaseIndex(phase: OperationPhase | null | undefined): number {
@@ -110,12 +167,21 @@ function phaseIndex(phase: OperationPhase | null | undefined): number {
   return PROTECTION_STAGES.findIndex((stage) => stage.phase === phase);
 }
 
+function restorePhaseIndex(
+  stages: ReadonlyArray<{ phase: string }>,
+  phase: OperationPhase | null | undefined,
+): number {
+  if (phase === "pending" || phase === "running") return 0;
+  return stages.findIndex((stage) => stage.phase === phase);
+}
+
 function operationSuccessMessage(operation: ProtectionOperation): string {
   switch (operation.kind) {
-    case "enable": return "Memory protected and verified.";
-    case "backup": return "Encrypted recovery point uploaded and restore-tested.";
-    case "verify": return "Recovery point verified.";
+    case "enable": return "Memory backed up and proven to restore.";
+    case "backup": return "Encrypted backup uploaded and proven to restore.";
+    case "verify": return "Backup proven to restore.";
     case "disable": return "Future cloud backups stopped.";
+    case "restore": return "Newest backup restored.";
     default: return "Operation completed.";
   }
 }
@@ -126,9 +192,17 @@ function errorMessage(value: unknown, fallback: string): string {
   return fallback;
 }
 
-export default function ProtectionPanel({ open, onClose, onToast, onStatusChange }: Props) {
+export default function ProtectionPanel({
+  open,
+  nodeCount = null,
+  onClose,
+  onToast,
+  onStatusChange,
+  onRestoreComplete,
+}: Props) {
   const [account, setAccount] = useState<AccountStatus | null>(null);
   const [status, setStatus] = useState<ProtectionStatus | null>(null);
+  const [remote, setRemote] = useState<RemoteSnapshot | null>(null);
   const [offer, setOffer] = useState<BillingOffer | null>(null);
   const [operation, setOperation] = useState<ProtectionOperation | null>(null);
   const [view, setView] = useState<View>("summary");
@@ -137,14 +211,18 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checkoutPolling, setCheckoutPolling] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState<"save" | "print" | null>(null);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [bridgeVersion, setBridgeVersion] = useState(0);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const checkoutCheckInFlight = useRef(false);
   const offerRequested = useRef(false);
+  const preparedRestoreRef = useRef<ProtectionOperation | null>(null);
+  const reconnectAttempt = useRef(0);
   const desktop = isDesktopApp();
 
   const refresh = useCallback(async () => {
@@ -154,6 +232,7 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
       try {
         const bridge = await productBridge.info();
         if (bridge.version < 1) throw new Error("unsupported bridge");
+        setBridgeVersion(bridge.version);
       } catch {
         throw new Error("Update Ormah Desktop to use cloud protection.");
       }
@@ -164,8 +243,15 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
       const nextStatus = await productBridge.status();
       setAccount(nextAccount);
       setStatus(nextStatus);
+      setRefreshFailed(false);
       onStatusChange?.(nextStatus);
       setError(null);
+      // One listing call, and only for a store that has something in the
+      // cloud. A failure here costs the device-versus-cloud comparison, never
+      // the panel itself, so it is deliberately not awaited into the catch.
+      if (nextStatus.enabled || nextStatus.store_id) {
+        productBridge.remoteSnapshot().then(setRemote).catch(() => setRemote(null));
+      }
       if (nextAccount.signed_in && !offerRequested.current) {
         offerRequested.current = true;
         productBridge.offer().then(setOffer).catch(() => {
@@ -173,6 +259,7 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
         });
       }
     } catch (err) {
+      setRefreshFailed(true);
       setError(errorMessage(err, "Protection status is unavailable."));
     } finally {
       setLoading(false);
@@ -184,6 +271,20 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
     void refresh();
     requestAnimationFrame(() => headingRef.current?.focus());
   }, [open, refresh]);
+
+  useEffect(() => {
+    if (!open || (!refreshFailed && status?.protection_state !== "offline")) {
+      reconnectAttempt.current = 0;
+      return;
+    }
+    if (loading || operationIsActive(operation)) return;
+    const delay = protectionReconnectDelay(reconnectAttempt.current);
+    const timer = window.setTimeout(() => {
+      reconnectAttempt.current += 1;
+      void refresh();
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [loading, open, operation?.status, refresh, refreshFailed, status?.protection_state]);
 
   useEffect(() => {
     if (!open || !operationIsActive(operation)) return;
@@ -198,10 +299,31 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
         onStatusChange?.(nextStatus);
         if (!operationIsActive(next)) {
           window.clearInterval(timer);
-          await refresh();
-          if (next.phase === "completed") {
+          if (next.kind === "restore" && next.phase === "ready") {
+            preparedRestoreRef.current = next;
+            setView("restore_ready");
+            setError(null);
+          } else if (next.kind === "restore" && next.reason_code === "key_missing") {
+            setView("restore_key");
+            setError(null);
+          } else if (next.phase === "completed") {
+            await refresh();
+            if (next.kind === "restore") {
+              preparedRestoreRef.current = null;
+              await onRestoreComplete?.();
+              setView("restore_complete");
+            }
             onToast(operationSuccessMessage(next), "success");
+          } else if (
+            next.kind === "restore"
+            && next.reason_code === "store_busy"
+            && preparedRestoreRef.current
+          ) {
+            setOperation(preparedRestoreRef.current);
+            setView("restore_ready");
+            setError(next.message || "Memory is busy. Close active work and try restore again.");
           } else {
+            if (next.kind === "restore") preparedRestoreRef.current = null;
             setOperation(null);
             if (next.message) setError(next.message);
           }
@@ -221,7 +343,16 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
       }
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [open, operation?.operation_id, operation?.phase, operation?.status, onStatusChange, onToast, refresh]);
+  }, [
+    open,
+    operation?.operation_id,
+    operation?.phase,
+    operation?.status,
+    onRestoreComplete,
+    onStatusChange,
+    onToast,
+    refresh,
+  ]);
 
   useEffect(() => {
     if (
@@ -289,6 +420,33 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
     }
   }, [account?.signed_in, bindAndContinue]);
 
+  const startRestorePreparation = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setOperation(await productBridge.prepareRestore());
+      setView("summary");
+    } catch (err) {
+      setError(errorMessage(err, "Recovery could not start."));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const beginRestore = useCallback(async () => {
+    setLoginPurpose("restore");
+    setError(null);
+    if (bridgeVersion < 2) {
+      setError("Update Ormah Desktop to restore a cloud recovery point in the app.");
+      return;
+    }
+    if (!account?.signed_in) {
+      setView("email");
+      return;
+    }
+    await startRestorePreparation();
+  }, [account?.signed_in, bridgeVersion, startRestorePreparation]);
+
   const requestCode = useCallback(async () => {
     if (!email.trim()) return;
     setBusy(true);
@@ -317,6 +475,11 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
         onToast("Signed in to Ormah Cloud.", "success");
         return;
       }
+      if (loginPurpose === "restore") {
+        await refresh();
+        await startRestorePreparation();
+        return;
+      }
       const intentId = operation?.protection_intent_id || status?.protection_intent_id;
       if (!intentId) {
         setOperation(null);
@@ -330,7 +493,67 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
     } finally {
       setBusy(false);
     }
-  }, [bindAndContinue, code, email, loginPurpose, onToast, operation?.protection_intent_id, refresh, status?.protection_intent_id]);
+  }, [
+    bindAndContinue,
+    code,
+    email,
+    loginPurpose,
+    onToast,
+    operation?.protection_intent_id,
+    refresh,
+    startRestorePreparation,
+    status?.protection_intent_id,
+  ]);
+
+  const importRecoveryKit = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await productBridge.importRecoveryKit();
+      if (result.status === "canceled") return;
+      onToast("Recovery kit imported on this device.", "success");
+      await startRestorePreparation();
+    } catch (err) {
+      setError(errorMessage(err, "The recovery kit could not be imported."));
+    } finally {
+      setBusy(false);
+    }
+  }, [onToast, startRestorePreparation]);
+
+  const confirmRestore = useCallback(async () => {
+    if (!operation?.operation_id || operation.phase !== "ready") return;
+    setBusy(true);
+    setError(null);
+    try {
+      setOperation(await productBridge.confirmRestore(operation.operation_id));
+      setView("summary");
+    } catch (err) {
+      setError(errorMessage(err, "Memory could not be restored."));
+    } finally {
+      setBusy(false);
+    }
+  }, [operation?.operation_id, operation?.phase]);
+
+  const cancelPreparedRestore = useCallback(async (closeAfter = false) => {
+    const prepared = preparedRestoreRef.current;
+    if (!prepared?.operation_id) {
+      if (closeAfter) onClose();
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await productBridge.cancelRestore(prepared.operation_id);
+      preparedRestoreRef.current = null;
+      setOperation(null);
+      setView("summary");
+      if (closeAfter) onClose();
+    } catch (err) {
+      setError(errorMessage(err, "The temporary recovery copy could not be discarded."));
+    } finally {
+      setBusy(false);
+    }
+  }, [onClose]);
 
   const openCheckout = useCallback(async () => {
     const intentId = operation?.protection_intent_id || status?.protection_intent_id;
@@ -455,7 +678,7 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
 
   const activeOperation = operationIsActive(operation);
   const presentation = useMemo(
-    () => protectionPresentation(effectiveProtectionState(operation, status)),
+    () => protectionPresentation(effectiveProtectionState(operation, status), status),
     [operation, status],
   );
   const price = formatPrice(offer);
@@ -463,12 +686,47 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
   const activePhase = activeOperation
     ? (status?.last_operation_phase || operation?.phase)
     : null;
-  const activeStageIndex = phaseIndex(activePhase);
+  const restoreApplying = operation?.kind === "restore"
+    && ["safety_backup", "restoring", "rebuilding", "reloading"].includes(activePhase || "");
+  const activeStages = operation?.kind === "restore"
+    ? restoreApplying ? RESTORE_APPLY_STAGES : RESTORE_PREPARE_STAGES
+    : PROTECTION_STAGES;
+  const activeStageIndex = operation?.kind === "restore"
+    ? restorePhaseIndex(activeStages, activePhase)
+    : phaseIndex(activePhase);
   const completionSummary = protectionCompletionSummary(operation);
   const completedStages = operation?.kind === "verify"
     ? PROTECTION_STAGES.slice(4)
     : PROTECTION_STAGES;
-  const summaryTone = activeOperation ? "working" : presentation.tone;
+  const summaryTone = activeOperation
+    ? "working"
+    : view === "restore_ready" || view === "restore_complete"
+      ? "success"
+      : view === "restore_key"
+        ? "warning"
+        : presentation.tone;
+  const restoreFlow = operation?.kind === "restore"
+    || view === "restore_key"
+    || view === "restore_ready"
+    || view === "restore_complete";
+  const summaryTitle = activeLabel
+    || (view === "restore_ready" ? "Recovery point ready"
+      : view === "restore_complete" ? "Memory restored"
+        : view === "restore_key" ? "Recovery kit needed"
+          : presentation.title);
+  const summaryDetail = activeOperation && operation?.kind === "restore"
+    ? restoreApplying
+      ? "Your current memory is saved locally before the verified copy replaces it."
+      : "Ormah is checking a temporary copy. Your current memory is unchanged."
+    : view === "restore_ready"
+      ? "This recovery point passed file, identity, index, and search checks on this device."
+      : view === "restore_complete"
+        ? "The graph and local search now use the recovered memory."
+        : view === "restore_key"
+          ? "Choose the recovery kit saved when cloud protection was created."
+          : activeOperation
+            ? "Ormah is creating and restore-testing an encrypted recovery point."
+            : presentation.detail;
   const repairAction = status ? protectionRepairAction(status) : "none";
 
   const runRepairAction = useCallback(async () => {
@@ -500,8 +758,47 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
       await runOperation(repairAction);
       return;
     }
+    reconnectAttempt.current = 0;
     await refresh();
   }, [beginProtection, offer, refresh, repairAction, runOperation, status]);
+
+  const actions = useMemo(
+    () => protectionActions(
+      Boolean(account?.signed_in),
+      effectiveProtectionState(operation, status),
+      status,
+      remote,
+    ),
+    [account?.signed_in, operation, remote, status],
+  );
+
+  const transfer = useMemo(() => transferState(status, remote), [remote, status]);
+
+  const runProtectionAction = useCallback(async (kind: ProtectionActionKind) => {
+    switch (kind) {
+      case "signin":
+        setLoginPurpose("account");
+        setError(null);
+        setView("email");
+        return;
+      case "protect":
+        await beginProtection();
+        return;
+      case "backup":
+      case "verify":
+        await runOperation(kind);
+        return;
+      case "restore":
+        await beginRestore();
+        return;
+      case "repair":
+        await runRepairAction();
+        return;
+      case "subscribe":
+        setView("checkout");
+        if (!offer) productBridge.offer().then(setOffer).catch(() => undefined);
+    }
+  }, [beginProtection, offer, runOperation, runRepairAction]);
 
   return (
     <aside className={`side-panel protection-panel ${open ? "open" : ""}`} aria-hidden={!open}>
@@ -510,7 +807,14 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
           <div className="protection-eyebrow">Ormah Cloud</div>
           <h2 className="review-title" ref={headingRef} tabIndex={-1}>Protection</h2>
         </div>
-        <button className="icon-button" onClick={onClose} aria-label="Close protection">
+        <button
+          className="icon-button"
+          onClick={() => {
+            if (view === "restore_ready") void cancelPreparedRestore(true);
+            else onClose();
+          }}
+          aria-label="Close protection"
+        >
           <X size={16} />
         </button>
       </div>
@@ -534,21 +838,19 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
                       : <LockKeyhole size={22} />}
             </div>
             <div>
-              <h3>{activeLabel || presentation.title}</h3>
-              <p>{activeOperation
-                ? "Ormah is creating and restore-testing an encrypted recovery point."
-                : presentation.detail}</p>
+              <h3>{summaryTitle}</h3>
+              <p>{summaryDetail}</p>
             </div>
           </section>
 
           {activeOperation && activeStageIndex >= 0 && (
-            <section className="protection-progress" aria-label="Protection progress">
+            <section className="protection-progress" aria-label={restoreFlow ? "Recovery progress" : "Protection progress"}>
               <div className="protection-progress-heading">
-                <span>Recovery check</span>
+                <span>{operation?.kind === "restore" ? "Restore memory" : "Recovery check"}</span>
                 <strong>In progress</strong>
               </div>
               <ol>
-                {PROTECTION_STAGES.map((stage, index) => {
+                {activeStages.map((stage, index) => {
                   const stageState = index < activeStageIndex
                     ? "complete"
                     : index === activeStageIndex
@@ -566,7 +868,9 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
                   );
                 })}
               </ol>
-              <p>Verification uses a temporary copy. Your live memory is never replaced.</p>
+              <p>{operation?.kind === "restore" && restoreApplying
+                ? "Ormah creates a local safety backup before replacing anything."
+                : "Verification uses a temporary copy. Your live memory is never replaced."}</p>
             </section>
           )}
 
@@ -595,12 +899,16 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
             </div>
           )}
 
-          <div className="sr-status" aria-live="polite">{activeLabel || presentation.title}</div>
+          <div className="sr-status" aria-live="polite">{summaryTitle}</div>
 
           {view === "email" && (
             <section className="protection-step">
               <button className="step-back" onClick={() => setView("summary")}>Back</button>
-              <h3>{loginPurpose === "protect" ? "Sign in to continue" : "Sign in to Ormah Cloud"}</h3>
+              <h3>{loginPurpose === "protect"
+                ? "Sign in to continue"
+                : loginPurpose === "restore"
+                  ? "Sign in to recover memory"
+                  : "Sign in to Ormah Cloud"}</h3>
               <p>Enter your email. Ormah will send a one-time code; there is no password.</p>
               <label className="protection-field">
                 <span>Email</span>
@@ -640,7 +948,7 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
               </label>
               <button className="protection-primary" disabled={busy || code.length !== 6} onClick={() => void verifyCode()}>
                 {busy ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
-                {loginPurpose === "protect" ? "Verify and continue" : "Sign in"}
+                {loginPurpose === "account" ? "Sign in" : "Verify and continue"}
               </button>
               <button className="protection-secondary" disabled={busy} onClick={() => void requestCode()}>
                 Send another code
@@ -673,59 +981,126 @@ export default function ProtectionPanel({ open, onClose, onToast, onStatusChange
             </section>
           )}
 
-          {view === "summary" && !activeLabel && (
-            <section className="protection-actions">
-              {!account?.signed_in && (
-                <button className="protection-primary" disabled={busy} onClick={() => {
-                  setLoginPurpose("account");
-                  setError(null);
-                  setView("email");
-                }}>
-                  <LogIn size={16} /> Sign in to Ormah Cloud
-                </button>
-              )}
-              {account?.signed_in && ["local_only", "sign_in_required", "stopped"].includes(status?.protection_state || "local_only") && (
-                <button className="protection-primary" disabled={busy} onClick={() => void beginProtection()}>
-                  <ShieldCheck size={16} /> Protect this memory
-                </button>
-              )}
-              {account?.signed_in && ["protected", "changes_pending"].includes(status?.protection_state || "") && (
-                <button className="protection-primary" disabled={busy} onClick={() => void runOperation("backup")}>
-                  <RefreshCw size={15} /> Back up now
-                </button>
-              )}
-              {account?.signed_in && status?.protection_state === "verification_pending" && (
-                <button className="protection-primary" disabled={busy} onClick={() => void runOperation("verify")}>
-                  <ShieldCheck size={15} /> Verify this recovery point
-                </button>
-              )}
-              {["attention_required", "offline"].includes(status?.protection_state || "") && repairAction !== "none" && (
-                <button className="protection-primary" disabled={busy} onClick={() => void runRepairAction()}>
-                  <RefreshCw size={15} />
-                  {repairAction === "verify" ? "Retry recovery check"
-                    : repairAction === "signin" ? "Sign in again"
-                      : repairAction === "subscribe" ? "Reactivate subscription"
-                        : repairAction === "refresh" ? "Check connection"
-                          : repairAction === "resume" ? "Resume protection"
-                            : "Retry encrypted backup"}
-                </button>
-              )}
-              {["subscription_required", "paused"].includes(status?.protection_state || "") && (
-                <button className="protection-primary" disabled={busy} onClick={() => {
-                  setView("checkout");
-                  if (!offer) productBridge.offer().then(setOffer).catch(() => undefined);
-                }}>
-                  <CreditCard size={15} /> Reactivate protection
-                </button>
-              )}
+          {view === "restore_key" && (
+            <section className="protection-step restore-step">
+              <button className="step-back" onClick={() => {
+                setOperation(null);
+                setView("summary");
+              }}>Back</button>
+              <h3>Unlock your encrypted recovery point</h3>
+              <p>
+                The recovery kit contains the encryption identity needed on this device.
+                It stays local and is never sent to Ormah Cloud.
+              </p>
+              <button className="protection-primary" disabled={busy} onClick={() => void importRecoveryKit()}>
+                {busy ? <LoaderCircle className="spin" size={15} /> : <KeyRound size={15} />}
+                Choose recovery kit
+              </button>
+              <button className="protection-secondary" disabled={busy} onClick={() => {
+                setOperation(null);
+                setView("summary");
+              }}>Cancel</button>
             </section>
           )}
 
-          {(status?.last_successful_verify_at || status?.last_successful_upload_at) && (
-            <section className="protection-facts" aria-label="Protection details">
-              <div><span>Last verified restorable</span><strong>{formatDate(status.last_successful_verify_at)}</strong></div>
-              <div><span>Last encrypted upload</span><strong>{formatDate(status.last_successful_upload_at)}</strong></div>
-              <div><span>Cloud can read</span><strong>metadata only</strong></div>
+          {view === "restore_ready" && operation && (
+            <section className="protection-step restore-step restore-confirm">
+              <button
+                className="step-back"
+                disabled={busy}
+                onClick={() => void cancelPreparedRestore()}
+              >Cancel</button>
+              <div className="restore-proof">
+                <ShieldCheck size={18} />
+                <div>
+                  <strong>{new Intl.NumberFormat().format(operation.verified_node_count || 0)} memories checked</strong>
+                  <span>Recovered from {formatDate(operation.snapshot_created_at || null)}</span>
+                </div>
+              </div>
+              {Boolean(operation.skipped_newer_snapshots) && (
+                <div className="restore-fallback" role="status">
+                  <AlertTriangle size={14} />
+                  The newest recovery point did not pass local checks, so Ormah selected the next safe one.
+                </div>
+              )}
+              <h3>Replace this device's memory?</h3>
+              <p>
+                Ormah first saves the current graph as a local safety backup, then restores this verified copy.
+              </p>
+              <button className="protection-primary" disabled={busy} onClick={() => void confirmRestore()}>
+                {busy ? <LoaderCircle className="spin" size={15} /> : <CloudDownload size={15} />}
+                Restore {new Intl.NumberFormat().format(operation.verified_node_count || 0)} memories
+              </button>
+            </section>
+          )}
+
+          {view === "restore_complete" && operation && (
+            <section className="protection-step restore-step restore-complete">
+              <div className="restore-proof">
+                <Check size={18} />
+                <div>
+                  <strong>{new Intl.NumberFormat().format(operation.verified_node_count || 0)} memories restored</strong>
+                  <span>Your graph and search index are ready.</span>
+                </div>
+              </div>
+              {operation.safety_backup_name && (
+                <p>Your previous memory was saved locally as <strong>{operation.safety_backup_name}</strong>.</p>
+              )}
+              <button className="protection-primary" onClick={() => {
+                setOperation(null);
+                setView("summary");
+                onClose();
+              }}>
+                <Check size={15} /> View restored memory
+              </button>
+            </section>
+          )}
+
+          {view === "summary" && !activeLabel && status?.enabled && (
+            <section className="protection-machines" aria-label="This device and the cloud">
+              <div className="protection-machine">
+                <span>This device</span>
+                <strong>{nodeCount === null ? "—" : `${new Intl.NumberFormat().format(nodeCount)} memories`}</strong>
+                <span>backed up {formatDate(status.last_successful_upload_at)}</span>
+              </div>
+              <div className="protection-machine-link" aria-hidden="true"><ArrowUpDown size={15} /></div>
+              <div className="protection-machine">
+                <span>Cloud</span>
+                {/* Not being able to read the listing is not the same as the
+                    cloud being empty, and must never be shown as one. */}
+                <strong>{
+                  !remote || remote.error
+                    ? "unavailable"
+                    : remote.created_at
+                      ? `newest ${formatDate(remote.created_at)}`
+                      : "no backup yet"
+                }</strong>
+                {remote?.snapshot_id && (
+                  <span>{remote.from_this_device ? "from this device" : "from another device"}</span>
+                )}
+                {remote?.restore_tested_here && <span className="protection-proven">proven to restore</span>}
+              </div>
+            </section>
+          )}
+
+          {view === "summary" && !activeLabel && transfer.headline && (
+            <p className={`protection-direction direction-${transfer.direction}`}>{transfer.headline}</p>
+          )}
+
+          {view === "summary" && !activeLabel && (
+            <section className="protection-actions">
+              {actions.map((action) => (
+                <div className="protection-action" key={action.kind}>
+                  <button
+                    className={action.variant === "primary" ? "protection-primary" : "protection-secondary"}
+                    disabled={busy || action.disabled}
+                    onClick={() => void runProtectionAction(action.kind)}
+                  >
+                    {ACTION_ICONS[action.kind]} {action.label}
+                  </button>
+                  {action.reason && <p className="protection-action-reason">{action.reason}</p>}
+                </div>
+              ))}
             </section>
           )}
 

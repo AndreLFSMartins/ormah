@@ -53,6 +53,11 @@ Silence is better than noise. Ormah should whisper, not shout.
 </p>
 
 No Python or terminal required. Download, open, and Ormah sets itself up.
+Desktop checks for signed releases at startup. When one is available, the main
+app shows its version and concise release notes with **Update now** and
+**Later**. Updates are never installed or restarted silently: installation
+starts only after an explicit click, verifies the configured release signature,
+and keeps the current version available if download or installation fails.
 
 ### Terminal
 
@@ -190,6 +195,17 @@ ormah account login
 ormah cloud init --import-key /path/to/ormah-recovery-kit.md
 ormah backup restore --cloud --yes
 ```
+
+Ormah Desktop provides the same recovery path without terminal commands. Open
+**Protection**, choose **Restore latest verified backup**, and sign in if
+needed. On a fresh device, Desktop asks for the recovery kit through the native
+file picker. It downloads candidates newest-first and locally proves the file
+hashes, Self identity, rebuilt index, and search before showing the destructive
+confirmation. If the newest candidate fails those checks, Ormah can offer the
+next safe recovery point and says so explicitly. Confirmation first creates a
+local safety backup of the current graph, then replaces memory through the same
+canonical restore service used by the CLI. Subscription status never gates
+downloads or recovery.
 
 Cloud downloads remain available when a paid entitlement expires. The restore
 command verifies the encrypted bundle manifest and every file hash before it

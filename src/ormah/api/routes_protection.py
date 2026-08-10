@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,10 +14,12 @@ from ormah.cloud.entitlements import load_entitlement_cache, status_from_cache
 from ormah.cloud.operations import ProtectionOperationCoordinator
 from ormah.cloud.protection import CloudProtectionService, safe_product_error_message
 from ormah.cloud.recovery import RecoveryKitError, RecoveryKitService
+from ormah.cloud.restore import CloudRestoreError, newest_cloud_snapshot
 from ormah.cloud.state import (
     CloudStateError,
     ProtectionOperation,
     ProtectionOperationKind,
+    ProtectionReasonCode,
     cloud_status_payload,
 )
 from ormah.cloud.store_lock import StoreLockTimeout
@@ -110,6 +113,10 @@ def _operation_payload(operation: ProtectionOperation) -> dict[str, object]:
         "message": operation.message,
         "snapshot_id": operation.snapshot_id,
         "protection_intent_id": operation.protection_intent_id,
+        "verified_node_count": operation.verified_node_count,
+        "snapshot_created_at": operation.snapshot_created_at,
+        "skipped_newer_snapshots": operation.skipped_newer_snapshots,
+        "safety_backup_name": operation.safety_backup_name,
     }
 
 
@@ -163,6 +170,56 @@ def protection_status(request: Request):
         for warning in payload.get("warnings", [])
     ]
     return payload
+
+
+@router.get("/remote")
+def remote_snapshot(request: Request):
+    """Describe the newest cloud backup, including one uploaded by another device.
+
+    Local state records only this device's own uploads and verifications, so a
+    second machine's backup cannot be seen without asking the cloud. Failures
+    degrade to a redacted reason instead of an error status: not knowing what
+    the cloud holds must never take the protection panel down.
+    """
+
+    settings = request.app.state.engine.settings
+    unavailable = {
+        "snapshot_id": None,
+        "created_at": None,
+        "size_bytes": None,
+        "from_this_device": False,
+        "restore_tested_here": False,
+        "error": None,
+    }
+    try:
+        newest = newest_cloud_snapshot(settings)
+    except CloudRestoreError as exc:
+        return {
+            **unavailable,
+            "error": safe_product_error_message(
+                str(exc), getattr(settings, "account_token", None)
+            ),
+        }
+    except Exception as exc:
+        return {
+            **unavailable,
+            "error": safe_product_error_message(
+                f"Could not read cloud backups: {exc}",
+                getattr(settings, "account_token", None),
+            ),
+        }
+    if newest is None:
+        return unavailable
+
+    state = cloud_status_payload(settings, entitlement=_cached_entitlement(settings))
+    snapshot_id = newest["snapshot_id"]
+    return {
+        **newest,
+        "from_this_device": snapshot_id == state.get("last_successful_backup_snapshot_id"),
+        # A device can only vouch for a check it ran itself.
+        "restore_tested_here": snapshot_id == state.get("last_verified_snapshot_id"),
+        "error": None,
+    }
 
 
 @router.post("/intents")
@@ -237,6 +294,106 @@ def verify_now(body: VerifyRequest, request: Request):
         kind=ProtectionOperationKind.VERIFY,
         action=lambda: service.verify_now(body.snapshot_id),
     )
+
+
+@router.post("/restore/prepare", status_code=status.HTTP_202_ACCEPTED)
+def prepare_restore(body: EmptyRequest, request: Request):
+    """Find and fully verify the newest locally restorable recovery point."""
+
+    del body
+    service = _service(request)
+    return _submit(
+        request,
+        operation="restore:prepare",
+        kind=ProtectionOperationKind.RESTORE,
+        action=service.prepare_restore,
+    )
+
+
+@router.post(
+    "/restore/{preparation_operation_id}/confirm",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def confirm_restore(
+    preparation_operation_id: str,
+    body: EmptyRequest,
+    request: Request,
+):
+    """Consume one verified preparation and replace live memory once."""
+
+    del body
+    try:
+        parsed_operation_id = uuid.UUID(preparation_operation_id)
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid restore preparation ID.") from exc
+    if parsed_operation_id.version != 4 or str(parsed_operation_id) != preparation_operation_id:
+        raise HTTPException(status_code=422, detail="Invalid restore preparation ID.")
+    coordinator = _coordinator(request)
+    prepared = coordinator.claim_ready_result(
+        preparation_operation_id,
+        kind=ProtectionOperationKind.RESTORE,
+    )
+    if prepared is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This restore preparation is unavailable. Check the backup again.",
+        )
+    service = _service(request)
+
+    def apply_prepared():
+        result = service.restore_prepared(prepared)
+        if result.reason_code is ProtectionReasonCode.STORE_BUSY:
+            coordinator.release_ready_claim(preparation_operation_id)
+        return result
+
+    try:
+        return _submit(
+            request,
+            operation=f"restore:confirm:{preparation_operation_id}",
+            kind=ProtectionOperationKind.RESTORE,
+            action=apply_prepared,
+        )
+    except Exception:
+        coordinator.release_ready_claim(preparation_operation_id)
+        raise
+
+
+@router.post("/restore/{preparation_operation_id}/cancel")
+def cancel_restore(
+    preparation_operation_id: str,
+    body: EmptyRequest,
+    request: Request,
+):
+    """Consume and delete one unneeded verified preparation."""
+
+    del body
+    try:
+        parsed_operation_id = uuid.UUID(preparation_operation_id)
+    except (ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid restore preparation ID.") from exc
+    if parsed_operation_id.version != 4 or str(parsed_operation_id) != preparation_operation_id:
+        raise HTTPException(status_code=422, detail="Invalid restore preparation ID.")
+    coordinator = _coordinator(request)
+    prepared = coordinator.claim_ready_result(
+        preparation_operation_id,
+        kind=ProtectionOperationKind.RESTORE,
+    )
+    if prepared is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This restore preparation is no longer available.",
+        )
+    try:
+        discarded = _service(request).discard_prepared_restore(prepared)
+    except Exception:
+        coordinator.release_ready_claim(preparation_operation_id)
+        raise
+    if not discarded:
+        raise HTTPException(
+            status_code=409,
+            detail="This restore preparation is no longer available.",
+        )
+    return {"status": "discarded"}
 
 
 @router.post(

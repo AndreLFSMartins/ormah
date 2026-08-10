@@ -7,6 +7,8 @@ import json
 import logging
 import time
 
+from ormah.background.memory_lock import serialized_memory_job
+
 logger = logging.getLogger(__name__)
 
 _VALID_NODE_TYPES = ("fact", "decision", "preference", "event", "person",
@@ -202,6 +204,7 @@ def _apply_consolidation(
     return new_id
 
 
+@serialized_memory_job
 def run_consolidation(engine) -> dict | None:
     """Find clusters of similar working memories and consolidate via LLM."""
     t0 = time.monotonic()
