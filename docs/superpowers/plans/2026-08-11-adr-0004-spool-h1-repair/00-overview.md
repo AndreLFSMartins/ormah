@@ -29,6 +29,8 @@ permanent strand, and fixing it also removes the 60 s re-admission loop with no 
 - **Do not touch the re-admission loop** (`session_watcher.py:1419-1420` → `recover` → `pending/`). It is a third-order consequence that disappears with task 01; the ADR explicitly rejects adding machinery for it.
 - **Do not modify `requeue`.** It already dead-letters every `failure_class` other than `"external"`.
 - **`EIO`/`EACCES` must keep retrying forever.** Only `FileNotFoundError` becomes deterministic.
+- **Accepted risk (spec decision D3, council finding 4):** on an acceptance-only root (`discover=False`) the `reconcile` sweep never runs (`session_watcher.py:1571-1572`), so a *false* `ENOENT` there has no self-healing net — the dead-letter is final. This is a conscious trade-off, not an oversight: do not add per-root branching to "fix" it. Codex flagged it `high`; it was weighed and declined.
+- **Every piped verification command must preserve pytest's exit status** (`set -o pipefail`). `pytest ... | tail` returns `tail`'s status — this exact mistake reported a green suite during the council Pre-Flight while 7 tests were failing.
 - **Do not "fix" markdown lint warnings** (MD032/MD040/MD060) — pre-existing project style, out of scope.
 - Do not push this branch to `fork` — it carries `local-main`'s private docs and `.git/hooks/pre-push` is fail-closed against that.
 

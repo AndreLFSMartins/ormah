@@ -5,8 +5,11 @@ Read `00-overview.md` first: it carries the global constraints and the shell pre
 without its clamp, the behaviour this task changes still ends in an `OverflowError`.
 
 **Files:**
-- Modify: `src/ormah/background/session_watcher.py:44-49` (enum), `:876-885` (classification), `:1458` (drain branch)
+- Modify: `src/ormah/background/session_watcher.py:44-49` (enum), `:876-885` (pre-parse classification), `:1045` (parse-block classification), `:1458` (drain branch)
 - Test: `tests/test_background/test_session_watcher.py`
+
+There are **three** classification sites, not two. Steps 3-4 cover the pre-parse ones; steps
+5-7 cover the parser's own `open()`, which the council found and which loses data silently.
 
 **Interfaces:**
 - Consumes: `IngestResult` (existing enum), `SessionHandler._run_job`, `IngestSpool.requeue` — all unchanged signatures.
@@ -130,24 +133,109 @@ Then add the drain branch in `_run_job`, immediately **before** the `TRANSIENT` 
             return
 ```
 
-- [ ] **Step 5: Run the new test and the surrounding suite**
+- [ ] **Step 5: Write the failing TOCTOU test (council finding 1 — the silent-loss path)**
 
-```bash
-PYTHONPATH=$WT/src $PY -m pytest tests/test_background/test_session_watcher.py -v 2>&1 | tail -15
+Steps 3-4 only cover a transcript already gone when the job is claimed. The parser **reopens**
+the file (`parser.py:173`, `:320`), so a transcript deleted *between* the hash and that `open()`
+takes a different route: the `try` at `session_watcher.py:982` has exactly one handler — the
+generic `except Exception` at `:1045` — which returns `NO_PROGRESS`. The drain then finds
+`_idle_with_unsafe_tail` false (its `stat` fails, `:1512`) and falls through to
+`complete(job)` (`:1499`). The job is **erased with no `failed/` record at all** — a silent
+loss, worse than the retry-forever it replaces, and exactly what `NO_PROGRESS` was rejected for.
+
+Append to `tests/test_background/test_session_watcher.py` (`Path` is imported at `:10`,
+`pytest` at `:13`, so the `monkeypatch` fixture is available):
+
+```python
+def test_transcript_deleted_mid_drain_is_dead_lettered_not_completed(engine, tmp_path, monkeypatch):
+    """TOCTOU: _file_hash and stat both succeed, then the parser reopens the file and finds it
+    gone. That FileNotFoundError lands in the generic `except Exception` -> NO_PROGRESS ->
+    complete(job): the job is erased with NO dead-letter record. Silent loss is the one thing
+    H1 forbids outright."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "vanishes.jsonl"
+    jsonl.write_text('{"type":"user"}\n', encoding="utf-8")
+
+    import ormah.background.session_watcher as sw
+    real_parse = sw.parse_transcript
+
+    def _delete_then_parse(path, *args, **kwargs):
+        Path(path).unlink(missing_ok=True)     # gone between the stat and the parser's open()
+        return real_parse(path, *args, **kwargs)
+
+    monkeypatch.setattr(sw, "parse_transcript", _delete_then_parse)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    handler.spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+
+    _drain_all(handler)
+
+    failed = list((handler.spool.root / "failed").glob("*.json"))
+    assert len(failed) == 1, (
+        "a transcript deleted mid-drain must leave a dead-letter record, never be completed"
+    )
+    assert handler.spool.pending_count() == 0
+    errs = list((handler.spool.root / "failed").glob("*.error"))
+    assert errs and "transcript_deleted" in errs[0].read_text()
 ```
 
-Expected: all pass. `test_idle_file_with_no_safe_boundary_is_dead_lettered` and
-`test_unexpected_exception_requeues_instead_of_stranding_in_running` must both stay green —
-they pin the neighbouring drain paths. Quote the summary line in your report.
+- [ ] **Step 6: Run it and confirm it fails for the right reason**
 
-- [ ] **Step 6: Commit**
+```bash
+set -o pipefail
+PYTHONPATH=$WT/src $PY -m pytest \
+  tests/test_background/test_session_watcher.py::test_transcript_deleted_mid_drain_is_dead_lettered_not_completed -v
+```
+
+Expected: FAIL on `len(failed) == 1` — `failed/` is empty because the job was silently
+completed. If it instead fails because the job is in `pending/`, the deletion happened earlier
+than intended; fix the test before touching `src/`.
+
+- [ ] **Step 7: Classify `FileNotFoundError` in the parse block**
+
+In `_ingest_session`, add a clause **before** the generic handler at `:1045` (it must come
+first — `FileNotFoundError` is a subclass of `Exception`):
+
+```python
+    except FileNotFoundError:
+        # The parser reopens the file, so it can vanish after the hash/stat above. Without
+        # this clause the generic handler below returns NO_PROGRESS, and the drain COMPLETES
+        # the job -- erasing it with no dead-letter record at all.
+        logger.info("Transcript vanished mid-parse, dead-lettering: %s", path)
+        return IngestResult.GONE
+    except Exception as e:  # noqa: BLE001 - transcript parsers can raise provider-specific errors
+        logger.warning("Session transcript parse error for %s: %s", path, e)
+        return IngestResult.NO_PROGRESS
+```
+
+No change is needed at the drain: the `GONE` branch added in Step 4 already routes it.
+
+- [ ] **Step 8: Run the new tests and the surrounding suite**
+
+```bash
+set -o pipefail
+PYTHONPATH=$WT/src $PY -m pytest tests/test_background/test_session_watcher.py -v; echo "pytest rc=$?"
+```
+
+Expected: all pass, `pytest rc=0`. `test_idle_file_with_no_safe_boundary_is_dead_lettered` and
+`test_unexpected_exception_requeues_instead_of_stranding_in_running` must both stay green —
+they pin the neighbouring drain paths. Quote the summary line **and the rc** in your report;
+piping to `tail` without `pipefail` hides a red suite behind a green exit code.
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add src/ormah/background/session_watcher.py tests/test_background/test_session_watcher.py
-git commit -m "fix(watcher): dead-letter a deleted transcript instead of retrying it forever
+git commit -m "fix(watcher): dead-letter a deleted transcript instead of losing it
 
-FileNotFoundError is an OSError, so a permanently deleted transcript was
-indistinguishable from EIO/EACCES and became TRANSIENT -> failure_class
-\"external\" -> retried forever, contradicting requeue's own documented
-contract. EIO/EACCES keep retrying; only ENOENT becomes deterministic."
+Two routes, both against requeue's documented contract. Before the parse,
+FileNotFoundError is an OSError, so a deleted transcript was indistinguishable
+from EIO/EACCES and became TRANSIENT -> \"external\" -> retried forever. After
+it, the parser reopens the file, so a transcript deleted mid-drain raised into
+the generic except -> NO_PROGRESS -> complete(job), erasing the job with no
+dead-letter record at all -- a silent loss, which H1 forbids outright.
+
+EIO/EACCES keep retrying; only ENOENT becomes deterministic."
 ```

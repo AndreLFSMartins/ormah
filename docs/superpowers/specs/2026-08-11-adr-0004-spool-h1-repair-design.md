@@ -136,6 +136,12 @@ if result is IngestResult.GONE:
 `requeue` already dead-letters every `failure_class` other than `"external"`, so **`requeue` itself
 is not modified**. `EIO`/`EACCES` remain `TRANSIENT` and keep retrying forever, as H1 requires.
 
+**Amended 2026-08-11 (council):** a third classification site is required, in the parse block —
+`except FileNotFoundError: return IngestResult.GONE` before the generic `except Exception` at
+`:1045`. The two sites above cover only a transcript already gone when the job is claimed; the
+parser reopens the file, so one deleted mid-drain took the `NO_PROGRESS` → `complete` route and
+vanished without a record. See the Risks section.
+
 ## Tests
 
 TDD: each test must fail first, and fail for the stated reason — a green test imported from another
@@ -156,10 +162,17 @@ they pin the two contracts this change sits between.
 
 ## Risks
 
-- **Assumed, to be verified during implementation:** that `_file_hash` and `path.stat()` are the only
-  places a deleted transcript surfaces as `FileNotFoundError` on the drain path. If the parser below
-  also raises it, that path lands in a different `except` and stays misclassified. This is checked in
-  implementation, not treated as settled.
+- ~~**Assumed:** that `_file_hash` and `path.stat()` are the only places a deleted transcript surfaces
+  as `FileNotFoundError` on the drain path.~~ **REFUTED 2026-08-11 by council review (Cursor + Codex,
+  convergent), then verified directly.** The parser *does* reopen the file (`parser.py:173`, `:320`),
+  and the `try` at `session_watcher.py:982` has exactly one handler — the generic `except Exception`
+  at `:1045`, which returns `NO_PROGRESS`. The drain then finds `_idle_with_unsafe_tail` false (its
+  `stat` fails, `:1512`) and falls through to `complete(job)` (`:1499`). A transcript deleted between
+  the hash and the parser's `open()` is therefore **erased with no dead-letter record at all** — a
+  silent loss, strictly worse than the retry-forever it was meant to replace, and the one outcome H1
+  forbids outright. The design now has **three** classification sites, not two; the third is the parse
+  block. See `docs/superpowers/plans/2026-08-11-adr-0004-spool-h1-repair/02-enoent-misclass.md`
+  steps 5-7 and the council result for the full chain.
 - **Verified:** acceptance-only roots have no `reconcile` net (see D3).
 - **Verified:** the branch carries `local-main`'s private docs, so `.git/hooks/pre-push` (fail-closed,
   shared by all worktrees) will reject pushing it to `fork`. The work stays local; the upstream PR for
