@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0004 Spool H1 Repair — Plan</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">ADR-0004 Spool H1 Repair — Plan</div>
+  <a href="#overview">Overview</a>
+  <a href="#tasks-table" class="lvl-3">Tasks</a>
+  <a href="#global-constraints" class="lvl-3">Global Constraints</a>
+  <a href="#shell-prefix" class="lvl-3">Shell prefix used by every command in every task</a>
+  <a href="#task-0" class="lvl-3">Task 0: Confirm the harness runs against the worktree (do this first, always)</a>
+  <a href="#after-the-plan" class="lvl-3">After the plan</a>
+  <a href="#task-01">Task 01 — The backoff saturates instead of overflowing</a>
+  <a href="#task-01-why" class="lvl-3">Why</a>
+  <a href="#task-02">Task 02 — A deleted transcript is dead-lettered, not retried forever</a>
+  <a href="#task-02-why" class="lvl-3">Why</a>
+  <a href="#task-03">Task 03 — Close the spec's open assumption, then verify everything</a>
+</nav>
+<main>
+<div class="phase p-o"><span class="pn">Plan</span> ADR-0004 Spool H1 Repair</div>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="big">4</div>
+    <div class="label">Tasks</div>
+  </div>
+  <div class="metric">
+    <div class="big">19</div>
+    <div class="label">Checkboxes</div>
+  </div>
+</div>
+
+<div class="progress">
+  <div class="fill" style="width: 0%"></div>
+</div>
+
+<div class="schip todo">0 of 19 done</div>
+
+<h2 id="overview">Overview</h2>
+
+<p class="statement">Make the ingest spool honour H1 — an outage must never discard real data — by removing the backoff overflow that strands jobs and the ENOENT misclassification that feeds them to it.</p>
+
+<p><strong>Architecture:</strong> Two independent, small changes inside the existing directory spool. The backoff clamps its exponent before the multiplication, leaving <code>min()</code> as the sole authority over the delay. A deleted transcript gets a dedicated <code>IngestResult</code> member so the drain can hand it to <code>requeue</code> under a deterministic <code>failure_class</code>, which the existing dead-letter path already handles. No new machinery, no change to <code>requeue</code> itself.</p>
+
+<p><strong>Tech Stack:</strong> Python 3.11, pytest (<code>asyncio_mode = auto</code>), ruff.</p>
+
+<p class="eyebrow">Specification</p>
+<p><code>docs/superpowers/specs/2026-08-11-adr-0004-spool-h1-repair-design.md</code> (commit <code>fae5344</code>)</p>
+
+<h3 id="tasks-table">Tasks</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>File</th>
+      <th>Deliverable</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>01-backoff-overflow.md</code></td>
+      <td>the backoff saturates instead of raising <code>OverflowError</code></td>
+    </tr>
+    <tr>
+      <td><code>02-enoent-misclass.md</code></td>
+      <td>a deleted transcript is dead-lettered, not retried forever</td>
+    </tr>
+    <tr>
+      <td><code>03-verify-and-close.md</code></td>
+      <td>close the spec's open assumption; full suite + lint</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Order matters: 01 before 02. The overflow is what turns the misclassification into a permanent strand, and fixing it also removes the 60 s re-admission loop with no extra code.</p>
+
+<h3 id="global-constraints">Global Constraints</h3>
+
+<ul>
+  <li><strong>Worktree:</strong> <code>/Users/andre/Documents/GitHub/Tools/ormah-wt-adr4-h1</code>, branch <code>fix/adr4-spool-h1</code>. Never <code>git checkout</code> inside <code>Tools/ormah</code> — that working tree is what the running Beta serves (<code>FORK-WORKFLOW.md</code> Golden rule 1).</li>
+  <li><strong>The worktree has no <code>.venv</code>,</strong> and the main repo's venv has <code>ormah</code> installed editable against <code>/Tools/ormah/src</code>. Every command sets <code>PYTHONPATH</code> to the worktree's <code>src/</code> — verified to take precedence over the editable install. Running without it silently tests the <em>other</em> checkout, and every result would describe the wrong code.</li>
+  <li><strong>English</strong> for code, comments and commits (CLAUDE.md).</li>
+  <li><strong>Do not touch the re-admission loop</strong> (<code>session_watcher.py:1419-1420</code> → <code>recover</code> → <code>pending/</code>). It is a third-order consequence that disappears with task 01; the ADR explicitly rejects adding machinery for it.</li>
+  <li><strong>Do not modify <code>requeue</code>.</strong> It already dead-letters every <code>failure_class</code> other than <code>"external"</code>.</li>
+  <li><strong><code>EIO</code>/<code>EACCES</code> must keep retrying forever.</strong> Only <code>FileNotFoundError</code> becomes deterministic.</li>
+  <li><strong>Do not "fix" markdown lint warnings</strong> (MD032/MD040/MD060) — pre-existing project style, out of scope.</li>
+  <li>Do not push this branch to <code>fork</code> — it carries <code>local-main</code>'s private docs and <code>.git/hooks/pre-push</code> is fail-closed against that.</li>
+</ul>
+
+<h3 id="shell-prefix">Shell prefix used by every command in every task</h3>
+
+<pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-adr4-h1
+export WT=/Users/andre/Documents/GitHub/Tools/ormah-wt-adr4-h1
+export PY=/Users/andre/Documents/GitHub/Tools/ormah/.venv/bin/python</code></pre>
+
+<h3 id="task-0">Task 0: Confirm the harness runs against the worktree (do this first, always)</h3>
+
+<p><strong>Files:</strong> none (verification only)</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 1: Prove which <code>ormah</code> the interpreter will import</strong></li>
+</ul>
+
+<pre><code class="language-bash">PYTHONPATH=$WT/src $PY -c "import ormah; print(ormah.__file__)"</code></pre>
+
+<p><strong>Expected:</strong> <code>/Users/andre/Documents/GitHub/Tools/ormah-wt-adr4-h1/src/ormah/__init__.py</code></p>
+
+<p>If it prints the <code>Tools/ormah</code> path instead, <strong>stop</strong> — every test result after this point would describe the wrong checkout.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 2: Confirm the two contracts this change sits between are green before touching anything</strong></li>
+</ul>
+
+<pre><code class="language-bash">PYTHONPATH=$WT/src $PY -m pytest \
+  tests/test_background/test_ingest_spool.py::test_requeue_external_retries_forever_with_persisted_growing_backoff \
+  tests/test_background/test_ingest_spool.py::test_requeue_deterministic_failure_dead_letters_with_original_bytes -v</code></pre>
+
+<p><strong>Expected:</strong> <code>2 passed</code>. These two pin the contracts on either side of the change; they must stay green throughout.</p>
+
+<h3 id="after-the-plan">After the plan</h3>
+
+<p>Integration is <strong>not</strong> part of this plan. Merging <code>fix/adr4-spool-h1</code> into <code>local-main</code> swaps the code the running Beta serves, so it needs explicit sign-off (<code>FORK-WORKFLOW.md</code> Recipe B). The upstream PR for task 02 needs its own branch cut from <code>upstream/main</code>, where there is no spool — a different shape, out of scope here.</p>
+
+<h2 id="task-01">Task 01 — The backoff saturates instead of overflowing</h2>
+
+<p>Read <a href="#overview">Overview</a> first: it carries the global constraints and the shell prefix (<code>$WT</code>, <code>$PY</code>) every command here assumes, plus Task 0, which must pass before you start.</p>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>src/ormah/background/ingest_spool.py:36-37</code> (new constant), <code>:247</code> (the clamp)</li>
+  <li>Test: <code>tests/test_background/test_ingest_spool.py</code></li>
+</ul>
+
+<p><strong>Interfaces:</strong></p>
+<ul>
+  <li>Consumes: <code>IngestSpool.enqueue</code>, <code>.claim_next</code>, <code>.requeue</code>, <code>.root</code>, <code>.pending_count</code> — all existing, unchanged.</li>
+  <li>Produces: <code>_BACKOFF_MAX_SHIFT</code> (module-level <code>int</code>), read only inside <code>requeue</code>.</li>
+</ul>
+
+<h3 id="task-01-why">Why</h3>
+
+<p><code>delay = min(_BACKOFF_BASE_SECONDS * (2 ** (attempts - 1)), _BACKOFF_MAX_SECONDS)</code> caps the <em>product</em>. <code>2 ** (attempts - 1)</code> is an arbitrary-precision <code>int</code>, so past attempt 1024 the float multiplication raises <em>before</em> <code>min()</code> can cap anything — and before <code>self._write_job(...)</code> (<code>:272</code>) persists the retry. The job is left with neither progress nor a dead-letter record. At the 300 s ceiling that point arrives after ~3.5 days of continuous retry, so any outage of that length hits it.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 1: Write the failing test</strong></li>
+</ul>
+
+<p>Append to <code>tests/test_background/test_ingest_spool.py</code>. <code>json</code>, <code>time</code>, <code>Path</code> and <code>IngestSpool</code> are already imported at the top of that file:</p>
+
+<pre><code class="language-python">def test_requeue_external_backoff_saturates_instead_of_overflowing(tmp_path):
+    """H1: a long outage must keep retrying. The cap was applied to the PRODUCT, not the
+    exponent, so attempt 1025 raised OverflowError before _write_job persisted the retry --
+    stranding the job with neither progress nor a dead-letter record."""
+    spool = IngestSpool(tmp_path / "queue")
+    spool.enqueue(Path("/x/s.jsonl"), boundary=1, reason="nudge")
+    job = spool.claim_next()
+    assert job is not None
+    spool.requeue(job, failure_class="external")
+
+    # Fast-forward the PERSISTED state to attempt 1024 -- the last one whose backoff still
+    # computed -- instead of sleeping through 3.5 days of real retries.
+    pending_file = next((spool.root / "pending").glob("*.json"))
+    data = json.loads(pending_file.read_text())
+    data["attempts"] = 1024
+    data["not_before"] = 0.0
+    pending_file.write_text(json.dumps(data))
+
+    job2 = spool.claim_next()
+    assert job2 is not None and job2.attempts == 1024
+
+    before = time.time()
+    spool.requeue(job2, failure_class="external")   # attempt 1025 -- this used to raise
+
+    pending_files = list((spool.root / "pending").glob("*.json"))
+    assert len(pending_files) == 1, "the retry must be persisted, not lost to an exception"
+    data2 = json.loads(pending_files[0].read_text())
+    assert data2["attempts"] == 1025, "attempts must keep counting past the old break"
+    # not_before is stamped with a time.time() taken AFTER `before`, so the observed gap is
+    # 300.0 + epsilon -- never <= 300.0. Same tolerance shape as the ~2s assertion above.
+    assert 299.5 < data2["not_before"] - before <= 301.0, "delay saturates at the 300s cap"
+    assert list((spool.root / "failed").glob("*.json")) == [], (
+        "an external failure must never be dead-lettered, no matter how many attempts (H1)"
+    )
+    assert list((spool.root / "running").iterdir()) == []</code></pre>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 2: Run it and confirm it fails for the right reason</strong></li>
+</ul>
+
+<pre><code class="language-bash">PYTHONPATH=$WT/src $PY -m pytest \
+  tests/test_background/test_ingest_spool.py::test_requeue_external_backoff_saturates_instead_of_overflowing -v</code></pre>
+
+<p><strong>Expected:</strong> FAIL with <code>OverflowError: int too large to convert to float</code>.</p>
+
+<p>A failure with any other message means the test is not reaching the defect. Fix the test before touching <code>src/</code> — a red test that is red for the wrong reason proves nothing.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 3: Add the constant</strong></li>
+</ul>
+
+<p>In <code>src/ormah/background/ingest_spool.py</code>, immediately after <code>_BACKOFF_MAX_SECONDS = 300.0</code> (<code>:37</code>):</p>
+
+<pre><code class="language-python"># Clamp the SHIFT, not just the product: `2 ** (attempts - 1)` is an arbitrary-precision
+# int, so a long enough outage overflows the float multiplication before min() can cap it.
+# The delay already saturates at shift 8 (2.0 * 2**8 = 512 > 300), so any clamp at or above
+# that returns an identical delay for every attempt count that used to compute -- while
+# keeping the product far below the float ceiling. min() stays the authority on the value.
+_BACKOFF_MAX_SHIFT = 62</code></pre>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 4: Apply the clamp</strong></li>
+</ul>
+
+<p>In the <code>failure_class == "external"</code> branch of <code>requeue</code>, replace line 247:</p>
+
+<pre><code class="language-python">            delay = min(_BACKOFF_BASE_SECONDS * (2 ** (attempts - 1)), _BACKOFF_MAX_SECONDS)</code></pre>
+
+<p>with:</p>
+
+<pre><code class="language-python">            shift = min(attempts - 1, _BACKOFF_MAX_SHIFT)
+            delay = min(_BACKOFF_BASE_SECONDS * (2 ** shift), _BACKOFF_MAX_SECONDS)</code></pre>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 5: Run the whole spool suite</strong></li>
+</ul>
+
+<pre><code class="language-bash">PYTHONPATH=$WT/src $PY -m pytest tests/test_background/test_ingest_spool.py -v</code></pre>
+
+<p><strong>Expected:</strong> all pass. <code>test_requeue_external_retries_forever_with_persisted_growing_backoff</code> (the growing-backoff contract) and <code>test_requeue_deterministic_failure_dead_letters_with_original_bytes</code> must both still be green — quote the summary line in your report.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 6: Commit</strong></li>
+</ul>
+
+<pre><code class="language-bash">git add src/ormah/background/ingest_spool.py tests/test_background/test_ingest_spool.py
+git commit -m "fix(spool): clamp the backoff exponent so a long outage cannot strand a job
+
+The cap was applied to the product, so 2 ** (attempts - 1) overflowed the float
+multiplication at attempt 1025 -- and it raised BEFORE _write_job persisted the
+retry, leaving the job with neither progress nor a dead-letter record. That is
+the H1 failure the spool exists to prevent, reachable by any ~3.5 day outage."</code></pre>
+
+<h2 id="task-02">Task 02 — A deleted transcript is dead-lettered, not retried forever</h2>
+
+<p>Read <a href="#overview">Overview</a> first: it carries the global constraints and the shell prefix (<code>$WT</code>, <code>$PY</code>) every command here assumes. <strong><a href="#task-01">Task 01</a> must be committed before this one</strong> — without its clamp, the behaviour this task changes still ends in an <code>OverflowError</code>.</p>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>src/ormah/background/session_watcher.py:44-49</code> (enum), <code>:876-885</code> (classification), <code>:1458</code> (drain branch)</li>
+  <li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
+</ul>
+
+<p><strong>Interfaces:</strong></p>
+<ul>
+  <li>Consumes: <code>IngestResult</code> (existing enum), <code>SessionHandler._run_job</code>, <code>IngestSpool.requeue</code> — all unchanged signatures.</li>
+  <li>Produces: <code>IngestResult.GONE</code> (value <code>"gone"</code>), returned by <code>_ingest_session</code> and consumed only at the drain branch added in Step 4.</li>
+</ul>
+
+<h3 id="task-02-why">Why</h3>
+
+<p><code>FileNotFoundError</code> is an <code>OSError</code>, so a permanently deleted transcript is indistinguishable from <code>EIO</code>/<code>EACCES</code> and becomes <code>TRANSIENT</code> → <code>requeue(job, failure_class="external")</code> → retried forever. <code>requeue</code>'s own docstring says the opposite in as many words: <em>"deterministic (malformed job, <strong>transcript deleted</strong>, path no longer under any watch root): a retry cannot change the outcome, so the job is dead-lettered immediately"</em> (<code>ingest_spool.py:241-242</code>). This is what fed 8 jobs to the overflow on 2026-08-11.</p>
+
+<p><code>NO_PROGRESS</code> is <strong>not</strong> a usable substitute: its drain path falls through to <code>self.spool.complete(job)</code> (<code>:1499</code>), so the job would vanish with no record at all.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 1: Write the failing test</strong></li>
+</ul>
+
+<p>Append to <code>tests/test_background/test_session_watcher.py</code>. The helpers <code>_handler_with_spool</code> (<code>:206</code>) and <code>_drain_all</code> (<code>:195</code>) and the <code>engine</code> fixture already exist in that file:</p>
+
+<pre><code class="language-python">def test_deleted_transcript_is_dead_lettered_not_retried_forever(engine, tmp_path):
+    """requeue's contract names this case: "transcript deleted ... a retry cannot change
+    the outcome, so the job is dead-lettered immediately". FileNotFoundError is an OSError,
+    so it fell into the generic handler, was classed "external", and retried forever --
+    which is what fed 8 jobs to the backoff overflow on 2026-08-11."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "gone.jsonl"
+    jsonl.write_text('{"type":"user"}\n', encoding="utf-8")
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    handler.spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+    jsonl.unlink()                       # the transcript is gone before the drain claims it
+
+    _drain_all(handler)
+
+    failed = list((handler.spool.root / "failed").glob("*.json"))
+    assert len(failed) == 1, "a deleted transcript must be dead-lettered, not retried"
+    assert handler.spool.pending_count() == 0, (
+        "it must not go back to pending as an external failure"
+    )
+    assert list((handler.spool.root / "running").iterdir()) == []
+    errs = list((handler.spool.root / "failed").glob("*.error"))
+    assert errs and "transcript_deleted" in errs[0].read_text()</code></pre>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 2: Run it and confirm it fails for the right reason</strong></li>
+</ul>
+
+<pre><code class="language-bash">PYTHONPATH=$WT/src $PY -m pytest \
+  tests/test_background/test_session_watcher.py::test_deleted_transcript_is_dead_lettered_not_retried_forever -v</code></pre>
+
+<p><strong>Expected:</strong> FAIL on <code>len(failed) == 1</code> — <code>failed/</code> is empty because the job went back to <code>pending/</code> classed <code>external</code>.</p>
+
+<p>If it fails on a different assertion, <strong>read the output before proceeding</strong>: the job took a path this plan did not predict, and that changes the fix.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 3: Add the enum member</strong></li>
+</ul>
+
+<p>In <code>src/ormah/background/session_watcher.py</code>, after the <code>TRANSIENT</code> line (<code>:49</code>):</p>
+
+<pre><code class="language-python">    GONE = "gone"                # the transcript no longer exists -> deterministic, dead-letter</code></pre>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 4: Classify <code>FileNotFoundError</code> and route it</strong></li>
+</ul>
+
+<p>In <code>_ingest_session</code>, replace lines 876-885:</p>
+
+<pre><code class="language-python">    try:
+        h = _file_hash(path)
+    except OSError as e:
+        logger.warning("Cannot read %s: %s", path, e)
+        return IngestResult.TRANSIENT
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        logger.warning("Cannot stat %s: %s", path, e)
+        return IngestResult.TRANSIENT</code></pre>
+
+<p>with this — the <code>FileNotFoundError</code> clause <strong>must come first</strong>, since it is a subclass of <code>OSError</code> and the generic clause would otherwise swallow it:</p>
+
+<pre><code class="language-python">    try:
+        h = _file_hash(path)
+    except FileNotFoundError:
+        # Deterministic, not external: no retry can bring a deleted transcript back, and
+        # classing it "external" is what retried 8 jobs into the backoff overflow.
+        logger.info("Transcript no longer exists, dead-lettering: %s", path)
+        return IngestResult.GONE
+    except OSError as e:
+        logger.warning("Cannot read %s: %s", path, e)
+        return IngestResult.TRANSIENT
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        logger.info("Transcript no longer exists, dead-lettering: %s", path)
+        return IngestResult.GONE
+    except OSError as e:
+        logger.warning("Cannot stat %s: %s", path, e)
+        return IngestResult.TRANSIENT</code></pre>
+
+<p>Then add the drain branch in <code>_run_job</code>, immediately <strong>before</strong> the <code>TRANSIENT</code> check at <code>:1458</code> (<code>if result is IngestResult.TRANSIENT:</code>):</p>
+
+<pre><code class="language-python">        if result is IngestResult.GONE:
+            # Deterministic failure class -> requeue dead-letters it at once, keeping the
+            # job payload in failed/ as a record. Never retried: the file is gone.
+            self.spool.requeue(job, failure_class="transcript_deleted")
+            return</code></pre>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 5: Run the new test and the surrounding suite</strong></li>
+</ul>
+
+<pre><code class="language-bash">PYTHONPATH=$WT/src $PY -m pytest tests/test_background/test_session_watcher.py -v 2>&1 | tail -15</code></pre>
+
+<p><strong>Expected:</strong> all pass. <code>test_idle_file_with_no_safe_boundary_is_dead_lettered</code> and <code>test_unexpected_exception_requeues_instead_of_stranding_in_running</code> must both stay green — they pin the neighbouring drain paths. Quote the summary line in your report.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 6: Commit</strong></li>
+</ul>
+
+<pre><code class="language-bash">git add src/ormah/background/session_watcher.py tests/test_background/test_session_watcher.py
+git commit -m "fix(watcher): dead-letter a deleted transcript instead of retrying it forever
+
+FileNotFoundError is an OSError, so a permanently deleted transcript was
+indistinguishable from EIO/EACCES and became TRANSIENT -> failure_class
+\"external\" -> retried forever, contradicting requeue's own documented
+contract. EIO/EACCES keep retrying; only ENOENT becomes deterministic."</code></pre>
+
+<h2 id="task-03">Task 03 — Close the spec's open assumption, then verify everything</h2>
+
+<p>Read <a href="#overview">Overview</a> first: it carries the global constraints and the shell prefix (<code>$WT</code>, <code>$PY</code>) every command here assumes. <a href="#task-01">Tasks 01</a> and <a href="#task-02">02</a> must be committed first.</p>
+
+<p><strong>Files:</strong> none, unless Step 1 finds something — then <code>src/ormah/background/session_watcher.py</code>.</p>
+
+<p><strong>Interfaces:</strong></p>
+<ul>
+  <li>Consumes: everything <a href="#task-01">tasks 01</a> and <a href="#task-02">02</a> produced (<code>_BACKOFF_MAX_SHIFT</code>, <code>IngestResult.GONE</code>).</li>
+  <li>Produces: nothing new. This task is evidence, not code.</li>
+</ul>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 1: Check whether any other handler on the drain path swallows <code>FileNotFoundError</code></strong></li>
+</ul>
+
+<p>The spec records this as <strong>assumed</strong>, not verified: that <code>_file_hash</code> and <code>path.stat()</code> are the only places a deleted transcript surfaces as <code>FileNotFoundError</code> on the drain path. <a href="#task-02">Task 02</a>'s test cannot prove it — the file is already gone when <code>_file_hash</code> runs, so the parser below is never reached. A transcript deleted <em>mid-drain</em> would take a different route.</p>
+
+<pre><code class="language-bash">PYTHONPATH=$WT/src $PY - <<'PY'
+import inspect, re
+from ormah.background import session_watcher as sw
+src, start = inspect.getsourcelines(sw._ingest_session)
+for i, line in enumerate(src, start):
+    if re.search(r'except .*(OSError|Exception|IOError)', line):
+        print(f"{i}: {line.rstrip()}")
+PY</code></pre>
+
+<p>Read every hit. Any <code>except OSError</code> / <code>except Exception</code> that wraps a file read <strong>after</strong> the hash/stat can still misclassify a transcript deleted mid-drain as <code>external</code>.</p>
+
+<p>If one exists: <strong>report it and stop.</strong> Widening the fix is a scope decision for André, not an automatic edit. Record the exact line numbers in your report.</p>
+
+<p>If none exists: say so explicitly, citing the command output — that promotes the spec's <em>assumed</em> to <em>verified</em>.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 2: Run the full fast suite</strong></li>
+</ul>
+
+<pre><code class="language-bash">PYTHONPATH=$WT/src $PY -m pytest tests/ 2>&1 | tail -15</code></pre>
+
+<p><strong>Expected:</strong> no new failures relative to the baseline. Record the exact pass/fail counts. If anything fails, quote the failure output verbatim rather than summarising it — a summarised failure has hidden a real regression in this project before.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 3: Lint</strong></li>
+</ul>
+
+<pre><code class="language-bash">cd $WT && /Users/andre/Documents/GitHub/Tools/ormah/.venv/bin/ruff check src/ tests/</code></pre>
+
+<p><strong>Expected:</strong> clean, or only pre-existing warnings unrelated to <code>ingest_spool.py</code> and <code>session_watcher.py</code>. Do not "fix" unrelated pre-existing warnings.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 4: Confirm the working tree holds exactly the intended change</strong></li>
+</ul>
+
+<pre><code class="language-bash">git -C $WT status --short
+git -C $WT log --oneline -3
+git -C $WT diff --stat HEAD~2..HEAD -- src/ tests/</code></pre>
+
+<p><strong>Expected:</strong> two commits (01 and 02); <code>src/</code> touched in exactly two files; <code>graphify-out/</code> may be dirty (background rebuild noise) and must not be committed.</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 5: Report</strong></li>
+</ul>
+
+<p>State, with the command output as evidence:</p>
+
+<ol>
+  <li>Whether Step 1 found any additional <code>FileNotFoundError</code> sink (and which lines).</li>
+  <li>The full-suite pass/fail counts from Step 2.</li>
+  <li>Confirmation that both regression guards stayed green: <code>test_requeue_external_retries_forever_with_persisted_growing_backoff</code> and <code>test_requeue_deterministic_failure_dead_letters_with_original_bytes</code>.</li>
+</ol>
+
+<p>No commit in this task unless Step 1 produced a fix that André approved.</p>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:f60d7dd4d6c8b01f23b10924e68678c4207e108a72d46e0a086d749bf73a43f3 -->
