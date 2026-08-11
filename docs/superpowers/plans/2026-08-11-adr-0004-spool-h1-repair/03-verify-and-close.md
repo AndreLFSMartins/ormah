@@ -26,33 +26,59 @@ The criterion is inverted from the original: **any** handler that can catch a
 `FileNotFoundError` for the transcript and return something other than `IngestResult.GONE` is
 a blocker — whatever it returns.
 
+Walk the AST for the first `return` in each `except` body. **Do not slice a fixed number of
+lines** — the handlers task 02 adds carry a 3-line comment before their `return
+IngestResult.GONE`, so a 3-line window shows the comment and hides the return, and the audit
+would go blind on exactly the code being audited. (That was the shape of this step before the
+council caught it.)
+
 ```bash
 set -o pipefail
 PYTHONPATH=$WT/src $PY - <<'PY'
-import inspect, re
+import ast, inspect, textwrap
 from ormah.background import session_watcher as sw
 
 for fn in (sw._ingest_session, sw.SessionHandler._run_job, sw.SessionHandler._idle_with_unsafe_tail):
     src, start = inspect.getsourcelines(fn)
-    print(f"=== {fn.__qualname__} (from line {start}) ===")
-    for i, line in enumerate(src, start):
-        if re.search(r'except\s', line):
-            # show the handler and the next 3 lines, which carry the return
-            body = "".join(src[i - start + 1: i - start + 4]).rstrip()
-            print(f"{i}: {line.rstrip()}\n{body}\n")
+    tree = ast.parse(textwrap.dedent("".join(src)))
+    print(f"=== {fn.__qualname__} (file line {start}) ===")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        caught = ast.unparse(node.type) if node.type else "bare except"
+        returns = [ast.unparse(n.value) if n.value else "None"
+                   for n in ast.walk(node) if isinstance(n, ast.Return)]
+        line = start + node.lineno - 1
+        print(f"  line {line}: except {caught} -> returns {returns or ['<falls through>']}")
 PY
 ```
 
-For each handler printed, answer explicitly in your report: *can a missing transcript reach
-it, and what does it return?* Expected after task 02: every reachable one either returns
-`IngestResult.GONE` or cannot see a `FileNotFoundError` for the transcript.
+**Baseline, measured on the pre-change tree — this is what the script prints today:**
 
-`_idle_with_unsafe_tail` returning `False` on `except OSError` (`:1512`) is **fine and must not
-be changed** — it is a predicate, not a classifier; the `GONE` decision has already been made
-upstream by the time it runs.
+| line | handler | returns | verdict |
+|---|---|---|---|
+| `:878` | `except OSError` (hash) | `TRANSIENT` | task 02 step 4 splits `FileNotFoundError` off |
+| `:883` | `except OSError` (stat) | `TRANSIENT` | task 02 step 4 splits `FileNotFoundError` off |
+| `:1045` | `except Exception` (parse) | `NO_PROGRESS` | task 02 step 7 splits `FileNotFoundError` off |
+| `:1093` | `except OSError` (mtime/age) | *falls through* | **benign** — only picks `is_idle`; sets `age = idle_threshold + 1`. If the file were gone the parse above already failed |
+| `:1206` | `except sqlite3.OperationalError` | `TRANSIENT` | **out of reach** — wraps `engine.ingest_conversation`; the transcript is not touched, the payload is already in memory |
+| `:1215` | `except OSError` | `TRANSIENT` | **out of reach** — same block; this is DB/engine I/O, not the transcript |
+| `:1219` | `except Exception` | `TRANSIENT` | **out of reach** — same block |
+| `_idle_with_unsafe_tail:1511` | `except OSError` (stat) | `False` | covered by the drain guard (task 02 step 9), not by changing the predicate |
+| `_idle_with_unsafe_tail:1520` | `except Exception` (parse) | `False` | covered by the drain guard (task 02 step 9) |
 
-If any other sink can swallow a transcript `ENOENT`: **report it and stop.** Widening the fix
-further is a scope decision for André, not an automatic edit.
+`SessionHandler._run_job` has **no** handlers of its own.
+
+Your job is to confirm this table still holds after tasks 01-02, with `:878`, `:883` and `:1045`
+now showing a `FileNotFoundError` handler returning `IngestResult.GONE` ahead of the generic one.
+
+`_idle_with_unsafe_tail` returning `False` is **fine and must not be changed** — it is a
+predicate, not a classifier. The drain guard added in task 02 step 9 is what stops those two
+paths from completing a vanished transcript.
+
+If the script prints **any handler not in this table**, or one whose `returns` column differs:
+**report it and stop.** Widening the fix further is a scope decision for André, not an automatic
+edit.
 
 - [ ] **Step 2: Run the full fast suite, preserving pytest's exit status**
 
