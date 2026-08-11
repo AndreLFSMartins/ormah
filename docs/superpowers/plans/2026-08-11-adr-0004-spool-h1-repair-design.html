@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0004: Repairing the two defects that break H1 in the ingest spool</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">ADR-0004: Repairing the two defects that break H1 in the ingest spool</div>
+  <a href="#problem">The problem</a>
+  <a href="#defect-1" class="lvl-3">Defect 1: the backoff cap guards the product, not the arithmetic</a>
+  <a href="#defect-2" class="lvl-3">Defect 2: a deleted transcript is classed as an external failure</a>
+  <a href="#not-in-scope" class="lvl-3">Not in scope</a>
+  <a href="#constraints">Constraints discovered before designing</a>
+  <a href="#decisions">Decisions</a>
+  <a href="#the-change">The change</a>
+  <a href="#change-ingest-spool" class="lvl-3">src/ormah/background/ingest_spool.py</a>
+  <a href="#change-session-watcher" class="lvl-3">src/ormah/background/session_watcher.py</a>
+  <a href="#tests">Tests</a>
+  <a href="#risks">Risks</a>
+</nav>
+<main>
+<div class="eyebrow">ADR-0004 · 2026-08-11</div>
+
+<h1>Repairing the two defects that break H1 in the ingest spool</h1>
+
+<p class="statement">Two bugs in the spool's failure classification prevent retries and dead-lettering, leaving 1040+ ingest jobs stranded. This spec fixes the arithmetic overflow and the deleted-transcript misclassification.</p>
+
+<div class="meta">
+  <span><strong>Branch:</strong> <code>fix/adr4-spool-h1</code> (worktree <code>Tools/ormah-wt-adr4-h1</code>, cut from <code>local-main</code>)</span>
+  <br><span><strong>Diagnosis:</strong> <code>docs/adr/0004-async-ingest-nudge-server-cursor.md</code>, Amendment 2026-08-11 (commit <code>b02592f</code>)</span>
+</div>
+
+<h2 id="problem">The problem</h2>
+
+<p>H1 — <em>an outage must never discard real data</em> — is the rule the spool's failure classing exists to serve. Both halves of that classing are wrong in the code as shipped, and they compose into a queue that neither retries nor records. Production impact, 2026-08-11: 1040 occurrences of <code>Ingest drain run error: int too large to convert to float</code> across 8 jobs, ended only by manual deletion of the queue.</p>
+
+<p>This spec repairs the two defects. It does not revisit the diagnosis — that work is closed in the ADR amendment and must not be re-derived.</p>
+
+<h3 id="defect-1">Defect 1: the backoff cap guards the product, not the arithmetic</h3>
+
+<p>The backoff calculation in <code>ingest_spool.py:247</code>:</p>
+
+<pre><code class="language-python">delay = min(_BACKOFF_BASE_SECONDS * (2 ** (attempts - 1)), _BACKOFF_MAX_SECONDS)</code></pre>
+
+<p><code>2 ** (attempts - 1)</code> is an arbitrary-precision <code>int</code>; <code>min(…, 300.0)</code> only ever sees the product. Past attempt 1024, the float multiplication raises <em>before any capping happens</em>, and it raises <strong>before</strong> <code>self._write_job(name, payload, _PENDING)</code> (line 272) — so <strong>no retry is ever persisted</strong>. This is not a cap that dead-letters; it is a break that strands.</p>
+
+<p>At the 300&nbsp;s ceiling, attempt 1025 arrives after roughly 3.5 days of continuous retry, so any genuine provider outage of that length hits the same wall.</p>
+
+<p><strong>Reproduced:</strong> <code>attempts=1024</code> → <code>300.0</code> (works); <code>attempts=1025</code> → <code>OverflowError: int too large to convert to float</code>.</p>
+
+<h3 id="defect-2">Defect 2: a deleted transcript is classed as an external failure</h3>
+
+<p>The exception handler in <code>session_watcher.py:879–880</code>:</p>
+
+<pre><code class="language-python">except OSError as e:
+    logger.warning("Cannot read %s: %s", path, e)
+    return IngestResult.TRANSIENT</code></pre>
+
+<p><code>FileNotFoundError</code> is an <code>OSError</code>, so a permanently deleted transcript is indistinguishable from <code>EIO</code>/<code>EACCES</code> and becomes <code>TRANSIENT</code> → <code>requeue(job, failure_class="external")</code> → retried forever. But <code>requeue</code>'s own docstring contradicts this (<code>ingest_spool.py:241–242</code>):</p>
+
+<blockquote><em>Deterministic (malformed job, transcript deleted, path no longer under any watch root): a retry cannot change the outcome, so the job is dead-lettered immediately.</em></blockquote>
+
+<p>This misclassification fed the 8 jobs to attempt 1025.</p>
+
+<h3 id="not-in-scope">Not in scope</h3>
+
+<p>The re-admission loop (<code>session_watcher.py:1419–1420</code> → <code>recover</code> → <code>pending/</code>) is a third-order consequence, not a separate defect: it disappears once the arithmetic stops raising. Adding machinery there would treat the symptom. <strong>No change is made for it.</strong></p>
+
+<h2 id="constraints">Constraints discovered before designing</h2>
+
+<p>Each was verified against the tree at <code>b4f6ac0</code>, not assumed:</p>
+
+<ol>
+  <li><strong><code>ingest_spool.py</code> does not exist in <code>upstream/main</code>.</strong> The whole spool is <code>local-main</code>-only code. Defect 1 therefore has no upstream contribution path today, and FORK-WORKFLOW Recipe A (branch cut from <code>upstream/main</code>) is impossible for it. The branch is cut from <code>local-main</code>.</li>
+
+  <li><strong>Defect 2's <code>try/except</code> block is byte-identical at <code>upstream/main:755–764</code>.</strong> It is contributable — but upstream has no spool, no <code>failure_class</code>, and no dead-letter, so the fix has a different shape there. That PR is a separate piece of work, deliberately not attempted here.</li>
+
+  <li><strong><code>IngestResult</code> is identical local and upstream</strong> (<code>OK</code> / <code>NO_PROGRESS</code> / <code>TRANSIENT</code>). There is no deterministic member to reuse.</li>
+
+  <li><strong><code>_ingest_session</code> has exactly one call site</strong> (<code>session_watcher.py:1452</code>) and <code>IngestResult</code> is confined to <code>session_watcher.py</code> within <code>src/</code>. A new enum member costs one branch in one place.</li>
+
+  <li><strong><code>NO_PROGRESS</code> is not a usable substitute.</strong> Its drain path falls through to <code>self.spool.complete(job)</code> (line 1499) unless <code>_idle_with_unsafe_tail</code> or <code>shrink_pending</code holds — i.e. the job would vanish with no dead-letter record, which is the opposite of the contract.</li>
+
+  <li><strong>A false-positive <code>ENOENT</code> is self-healing on discovering roots.</strong> <code>reconcile()</code> does a disk-truth <code>rglob("*.jsonl")</code> and re-enqueues any transcript whose cursor sits behind EOF (lines 1594–1611), with <code>enqueue</code> idempotent per <code>(path, boundary)</code>. A transcript that briefly disappears and returns is picked up again.</li>
+</ol>
+
+<h2 id="decisions">Decisions</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width: 8%">ID</th>
+      <th>Decision</th>
+      <th>Rationale</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>D1</strong></td>
+      <td>Fix both defects, overflow first</td>
+      <td>Fixing only the classing leaves the 3.5-day wall armed for the exact scenario ADR-0004 exists to protect</td>
+    </tr>
+    <tr>
+      <td><strong>D2</strong></td>
+      <td>Work in a worktree cut from <code>local-main</code></td>
+      <td>The only base where defect 1 compiles; Golden rule 1 forbids <code>checkout</code> in <code>Tools/ormah</code>, which the running Beta serves</td>
+    </tr>
+    <tr>
+      <td><strong>D3</strong></td>
+      <td>Dead-letter a deleted transcript immediately</td>
+      <td>It is the contract <code>requeue</code> already declares; the ADR rejects extra machinery; the dead-letter <em>preserves</em> the payload in <code>failed/</code> with an <code>.error</code> sidecar, so it is a record, not a destruction</td>
+    </tr>
+    <tr>
+      <td><strong>D4</strong></td>
+      <td>Clamp the exponent; leave <code>min()</code> as the authority</td>
+      <td>Smallest change that removes the raise, and behaviour-preserving for every attempt count that previously computed</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="callout"><strong>Caveat (D3):</strong> On an acceptance-only root (<code>discover=False</code>) the <code>reconcile</code> sweep never runs (lines 1571–1572), so there is no safety net for a false-positive <code>ENOENT</code> there. Branching policy per root type is outside ADR-0004's scope and was declined.</p>
+
+<h2 id="the-change">The change</h2>
+
+<h3 id="change-ingest-spool">src/ormah/background/ingest_spool.py</h3>
+
+<p>A new constant beside the existing backoff constants (lines 36–37), and the clamp at line 247:</p>
+
+<pre><code class="language-python">shift = min(attempts - 1, _BACKOFF_MAX_SHIFT)
+delay = min(_BACKOFF_BASE_SECONDS * (2 ** shift), _BACKOFF_MAX_SECONDS)</code></pre>
+
+<p><code>_BACKOFF_MAX_SHIFT = 62</code>. With base <code>2.0</code> and ceiling <code>300.0</code> the delay saturates at shift 8 (<code>2.0 × 2**8 = 512 > 300</code>), so <strong>any clamp at or above 8 returns exactly the same <code>min(…)</code> for every attempt count that used to compute</strong> — the clamp is behaviour-preserving by construction, not by measurement. 62 keeps the product (~9.2 × 10¹⁸) far below the float maximum while leaving the outer <code>min()</code> as the single authority over the value, so the clamp does not silently become wrong if the constants are retuned.</p>
+
+<p>The only behaviour that changes is where it was already broken: attempts ≥ 1025 now yields 300.0 instead of raising.</p>
+
+<h3 id="change-session-watcher">src/ormah/background/session_watcher.py</h3>
+
+<p>A new enum member:</p>
+
+<pre><code class="language-python">GONE = "gone"   # the transcript no longer exists -> deterministic, dead-letter, never retry</code></pre>
+
+<p>A more specific handler placed <strong>before</strong> the existing <code>except OSError</code> (lines 876–880), and the same treatment for the <code>path.stat()</code> immediately below (lines 881–885), which loses the same race:</p>
+
+<pre><code class="language-python">except FileNotFoundError:
+    return IngestResult.GONE
+except OSError as e:
+    logger.warning("Cannot read %s: %s", path, e)
+    return IngestResult.TRANSIENT</code></pre>
+
+<p>And one branch at the single call site, before the <code>TRANSIENT</code> check (line 1458):</p>
+
+<pre><code class="language-python">if result is IngestResult.GONE:
+    self.spool.requeue(job, failure_class="transcript_deleted")
+    return</code></pre>
+
+<p><code>requeue</code> already dead-letters every <code>failure_class</code> other than <code>"external"</code>, so <strong><code>requeue</code> itself is not modified</strong>. <code>EIO</code>/<code>EACCES</code> remain <code>TRANSIENT</code> and keep retrying forever, as H1 requires.</p>
+
+<h2 id="tests">Tests</h2>
+
+<p class="callout"><strong>TDD:</strong> Each test must fail first, and fail for the stated reason — a green test imported from another base has already hidden a defect once in this project's history.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Test</th>
+      <th>File</th>
+      <th>Must first fail with</th>
+      <th>Passes when</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>test_requeue_external_backoff_saturates_instead_of_overflowing</code></td>
+      <td><code>tests/test_background/test_ingest_spool.py</code></td>
+      <td><code>OverflowError: int too large to convert to float</code></td>
+      <td><code>attempts</code> 1025 persisted, <code>not_before ≈ now + 300</code>, <code>pending_count() == 1</code>, <code>failed/</code> empty</td>
+    </tr>
+    <tr>
+      <td><code>test_deleted_transcript_is_dead_lettered_not_retried_forever</code></td>
+      <td><code>tests/test_background/test_session_watcher.py</code></td>
+      <td>Job returns to <code>pending/</code> as <code>external</code></td>
+      <td>One job in <code>failed/</code> with <code>transcript_deleted</code> in the <code>.error</code> sidecar, <code>pending/</code> empty</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The first follows the existing pattern of rewriting <code>not_before</code>/<code>attempts</code> in the on-disk payload to advance the state without sleeping (see <code>test_ingest_spool.py:195–199</code>). The second uses the <code>_handler_with_spool</code> harness already present at <code>test_session_watcher.py:206</code>.</p>
+
+<p><strong>Regression guards:</strong></p>
+<ul>
+  <li><code>test_requeue_external_retries_forever_with_persisted_growing_backoff</code> (line 167) — must stay green</li>
+  <li><code>test_requeue_deterministic_failure_dead_letters_with_original_bytes</code> (line 303) — must stay green</li>
+</ul>
+
+<p>These two tests pin the contracts this change sits between.</p>
+
+<h2 id="risks">Risks</h2>
+
+<ul>
+  <li><strong>Assumed, to be verified during implementation:</strong> That <code>_file_hash</code> and <code>path.stat()</code> are the only places a deleted transcript surfaces as <code>FileNotFoundError</code> on the drain path. If the parser below also raises it, that path lands in a different <code>except</code> and stays misclassified. This is checked in implementation, not treated as settled.</li>
+
+  <li><strong>Verified:</strong> Acceptance-only roots have no <code>reconcile</code> net (see <a href="#decisions">D3</a>).</li>
+
+  <li><strong>Verified:</strong> The branch carries <code>local-main</code>'s private docs, so <code>.git/hooks/pre-push</code> (fail-closed, shared by all worktrees) will reject pushing it to <code>fork</code>. The work stays local; the upstream PR for defect 2 needs its own branch from <code>upstream/main</code>.</li>
+</ul>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:f024f96ac30ad07fd35fc655846541b2dbeeb396b7a02404903408578df9653e -->
