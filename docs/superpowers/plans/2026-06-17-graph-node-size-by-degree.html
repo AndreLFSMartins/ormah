@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Graph Node Size by Degree — Implementation Plan</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Plan</div>
+  <div class="doc-title">Graph Node Size by <em>Degree</em></div>
+  <a href="#branch-setup">Branch setup</a>
+  <a href="#task-1" class="lvl-3">Task 1: nodeSize</a>
+  <a href="#task-2" class="lvl-3">Task 2: graphModel</a>
+  <a href="#task-3" class="lvl-3">Task 3: verification</a>
+  <a href="#merge">Merge into Beta</a>
+  <a href="#notes">Notes</a>
+</nav>
+
+<main>
+
+<div class="eyebrow">Implementation Plan</div>
+
+<div class="statement">Size each graph node by its connection count (degree) instead of <code>access_count</code>, so the WebGL graph gains Obsidian-like visual hierarchy.</div>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="big">3</div>
+    <div class="label">Tasks</div>
+  </div>
+  <div class="metric">
+    <div class="big">20</div>
+    <div class="label">Steps</div>
+  </div>
+</div>
+
+<div class="progress">
+  <div class="bar"><div class="fill" style="width:0%"></div></div>
+  <div class="label">0% complete (0 of 20 steps done)</div>
+</div>
+
+<p class="meta">Branch: <code>feat/graph-webgl-sigma</code> | Stack: TypeScript, graphology, vitest, sigma.js v3 | Spec: <a href="2026-06-17-graph-node-size-by-degree-design.md">design spec</a></p>
+
+<h2>Architecture</h2>
+
+<p>The size is computed in <code>ui/src/graph/visual.ts</code> (<code>nodeSize</code>/<code>displayNodeSize</code>) and applied in <code>ui/src/graph/graphModel.ts</code>. Because degree is only known after edges are added, <code>buildGraph</code> moves the <code>size</code> assignment into a second pass that runs after the edge loop; <code>applyAppearance</code> reads degree directly from the already-built graph.</p>
+
+<p><strong>Key insight:</strong> The graph is a directed <em>multigraph</em> with parallel edges (19.8% of node pairs carry multiple edge types). Use <code>graph.neighbors(id).length</code> (unique adjacent nodes) everywhere, never <code>graph.degree()</code> which would over-count parallel edges.</p>
+
+<h2 id="branch-setup">Branch setup</h2>
+
+<p>Do once before Task 1.</p>
+
+<h3>Step 0: Switch to the feature branch</h3>
+
+<p>The implementation belongs on the UI feature branch, not <code>local-main</code>.</p>
+
+<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git checkout feat/graph-webgl-sigma
+git branch --show-current</code></pre>
+
+<p><strong>Expected:</strong> <code>feat/graph-webgl-sigma</code></p>
+
+<span class="schip todo">todo</span>
+
+<hr style="border:none;border-top:1px solid var(--hairline);margin:40px 0;">
+
+<h2 id="task-1">Task 1: Change <em>nodeSize</em>/<em>displayNodeSize</em> to take degree</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>ui/src/graph/visual.ts</code> (current <code>nodeSize</code> lines 36–39, <code>displayNodeSize</code> lines 41–44)</li>
+  <li>Test: <code>ui/src/graph/visual.test.ts</code> (existing self-floor test at lines 34–36; existing range test added by the size fix)</li>
+</ul>
+
+<p><strong>Current code (for reference — this is what you are replacing):</strong></p>
+
+<pre><code>function nodeSize(accessCount: number): number {
+  return Math.min(5, Math.max(2, 2 + Math.log2(accessCount + 1) * 0.5));
+}
+
+export function displayNodeSize(accessCount: number, selfRole: SelfRole): number {
+  const size = nodeSize(accessCount);
+  return selfRole === "self" ? Math.max(3.5, size) : size;
+}</code></pre>
+
+<h3>Step 1: Update the tests to express the degree contract</h3>
+
+<span class="schip todo">todo</span>
+
+<p>Replace the existing range test block in <code>ui/src/graph/visual.test.ts</code>. Find this block (added by the prior node-size fix):</p>
+
+<pre><code>  it("keeps node sizes within the position-unit range (Ø below FA2 neighbour gap)", () => {
+    expect(displayNodeSize(0, "")).toBe(2); // floor
+    expect(displayNodeSize(1_000_000, "")).toBeLessThanOrEqual(5); // ceiling
+    expect(displayNodeSize(8, "")).toBeGreaterThan(displayNodeSize(0, "")); // grows with access
+  });</code></pre>
+
+<p>Replace it with (degree-based, cap 10). The first assertion is the one that fails under the old <code>access_count</code> formula (old cap is 5, so a high input saturates at 5 — strictly less than the new curve's value at degree 31):</p>
+
+<pre><code>  it("sizes nodes by degree: floor at 2, grows past old cap, capped at 10", () => {
+    expect(displayNodeSize(31, "")).toBeGreaterThan(5);          // FAILS on old formula (old cap = 5)
+    expect(displayNodeSize(0, "")).toBe(2);                       // isolated -> floor
+    expect(displayNodeSize(2, "")).toBeGreaterThan(displayNodeSize(0, "")); // grows
+    expect(displayNodeSize(10, "")).toBeGreaterThan(displayNodeSize(2, "")); // keeps growing
+    expect(displayNodeSize(214, "")).toBeLessThanOrEqual(10);    // hub capped
+    expect(displayNodeSize(10_000, "")).toBeLessThanOrEqual(10); // cap holds
+  });</code></pre>
+
+<p>The existing self-floor test (lines 34–36) stays as-is and still passes:</p>
+
+<pre><code>  it("sizes self nodes at least the self floor", () => {
+    expect(displayNodeSize(0, "self")).toBeGreaterThanOrEqual(3.5);
+  });</code></pre>
+
+<h3>Step 2: Run the tests to verify they fail</h3>
+
+<span class="schip todo">todo</span>
+
+<pre><code>cd ui && npx vitest run src/graph/visual.test.ts</code></pre>
+
+<p><strong>Expected:</strong> FAIL — deterministically. The first assertion, <code>expect(displayNodeSize(31, "")).toBeGreaterThan(5)</code>, fails under the old <code>access_count</code> formula because its cap is 5: <code>displayNodeSize(31,"")</code> = <code>min(5, 2+log2(32)*0.5)</code> = <code>min(5, 5)</code> = 5, which is NOT &gt; 5. This is the required red gate (council: Cursor). <strong>Do not proceed to Step 3 unless this assertion actually fails</strong> — if the suite is green here, the old formula was not in place and the premise is wrong; stop and re-check the working tree.</p>
+
+<h3>Step 3: Replace the formula with the degree curve</h3>
+
+<span class="schip todo">todo</span>
+
+<p>In <code>ui/src/graph/visual.ts</code>, replace the <code>nodeSize</code> and <code>displayNodeSize</code> functions (and update the comment above them) with:</p>
+
+<pre><code>// Sizes are in LAYOUT-POSITION units (sigma uses itemSizesReference: "positions"
+// + zoomToSizeRatioFunction: ratio => ratio), so radius scales 1:1 with zoom.
+// Node size reflects DEGREE (connection count), like Obsidian's graph: isolated
+// nodes stay small (Ø floor), hubs grow but are capped so they don't dominate.
+// Validated on the live graph: deg 0 -> 2, deg 2 (median) -> 4.06, deg 214 (hub) -> 10.
+function nodeSize(degree: number): number {
+  return Math.min(10, 2 + Math.log2(degree + 1) * 1.3);
+}
+
+export function displayNodeSize(degree: number, selfRole: SelfRole): number {
+  const size = nodeSize(degree);
+  return selfRole === "self" ? Math.max(3.5, size) : size;
+}</code></pre>
+
+<h3>Step 4: Run the tests to verify they pass</h3>
+
+<span class="schip todo">todo</span>
+
+<pre><code>cd ui && npx vitest run src/graph/visual.test.ts</code></pre>
+
+<p><strong>Expected:</strong> PASS — <code>displayNodeSize(0,"")</code> = 2, <code>displayNodeSize(2,"")</code> ≈ 4.06, <code>displayNodeSize(10,"")</code> ≈ 6.50, <code>displayNodeSize(214,"")</code> = 10 (capped), self-floor 3.5 holds.</p>
+
+<h3>Step 5: Commit</h3>
+
+<span class="schip todo">todo</span>
+
+<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git add ui/src/graph/visual.ts ui/src/graph/visual.test.ts
+git commit -m "feat(graph): size nodes by degree, not access_count
+
+access_count is 0 on 94.6% of nodes, so node size never varied. Switch
+nodeSize/displayNodeSize to take degree (connection count) with a log curve
+capped at 10, matching Obsidian's degree-based sizing. Self floor (3.5) kept.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"</code></pre>
+
+<hr style="border:none;border-top:1px solid var(--hairline);margin:40px 0;">
+
+<h2 id="task-2">Task 2: Feed degree (not access_count) into the graph</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>ui/src/graph/graphModel.ts</code> (<code>buildGraph</code> lines 20–54, <code>applyAppearance</code> lines 59–70)</li>
+  <li>Test: <code>ui/src/graph/graphModel.test.ts</code></li>
+</ul>
+
+<p><strong>Current code (for reference):</strong></p>
+
+<p><code>buildGraph</code> sets size inside the node loop (before edges exist):</p>
+
+<pre><code>  data.nodes.forEach((n, i) => {
+    const role = roles.get(n.id) ?? "";
+    const { x, y } = seedPosition(i, data.nodes.length);
+    graph.addNode(n.id, {
+      x,
+      y,
+      size: displayNodeSize(n.access_count, role),
+      color: tierColor(n.tier, role, appearance),
+      label: nodeLabel(n),
+      space: n.space || "",
+      tier: n.tier,
+      nodeType: n.type,
+      selfRole: role,
+    });
+  });</code></pre>
+
+<p><code>applyAppearance</code> re-sets size from access_count:</p>
+
+<pre><code>    graph.setNodeAttribute(n.id, "size", displayNodeSize(n.access_count, role));</code></pre>
+
+<h3>Step 1: Write the failing test in graphModel.test.ts</h3>
+
+<span class="schip todo">todo</span>
+
+<p>Add this test inside the <code>describe("buildGraph", ...)</code> block in <code>ui/src/graph/graphModel.test.ts</code>:</p>
+
+<pre><code>  it("sizes nodes by unique-neighbour count: connected > isolated, isolated at floor", () => {
+    const nodes = [node({ id: "hub" }), node({ id: "a" }), node({ id: "b" }), node({ id: "lonely" })];
+    const edges: Edge[] = [
+      { source_id: "hub", target_id: "a", edge_type: "related_to", weight: 1, created: "" },
+      { source_id: "hub", target_id: "b", edge_type: "related_to", weight: 1, created: "" },
+    ];
+    const g = buildGraph(data({ nodes, edges }), DEFAULT_GRAPH_APPEARANCE);
+    const hubSize = g.getNodeAttribute("hub", "size") as number;
+    const lonelySize = g.getNodeAttribute("lonely", "size") as number;
+    expect(hubSize).toBeGreaterThan(lonelySize); // 2 unique neighbours > 0
+    expect(lonelySize).toBe(2);                  // isolated -> floor
+  });
+
+  it("counts UNIQUE neighbours, not parallel edges (multigraph)", () => {
+    // x↔y connected by THREE parallel edges (different edge_types). The node has
+    // ONE unique neighbour, so its size must equal a single-neighbour node's size,
+    // NOT a degree-3 node's size. This fails if the code uses graph.degree().
+    const nodes = [node({ id: "x" }), node({ id: "y" }), node({ id: "p" }), node({ id: "q" })];
+    const edges: Edge[] = [
+      { source_id: "x", target_id: "y", edge_type: "supports", weight: 1, created: "" },
+      { source_id: "x", target_id: "y", edge_type: "defines", weight: 1, created: "" },
+      { source_id: "x", target_id: "y", edge_type: "related_to", weight: 1, created: "" },
+      { source_id: "p", target_id: "q", edge_type: "related_to", weight: 1, created: "" },
+    ];
+    const g = buildGraph(data({ nodes, edges }), DEFAULT_GRAPH_APPEARANCE);
+    // x has 1 unique neighbour (y) via 3 edges; p has 1 unique neighbour (q) via 1 edge.
+    expect(g.getNodeAttribute("x", "size")).toBe(g.getNodeAttribute("p", "size"));
+  });</code></pre>
+
+<h3>Step 2: Run the test to verify it fails</h3>
+
+<span class="schip todo">todo</span>
+
+<pre><code>cd ui && npx vitest run src/graph/graphModel.test.ts</code></pre>
+
+<p><strong>Expected:</strong> FAIL — under the current code, every node's size comes from <code>access_count</code> (all 0 here), so <code>hub</code> and <code>lonely</code> are both size 2; <code>expect(hubSize).toBeGreaterThan(lonelySize)</code> fails (2 is not &gt; 2).</p>
+
+<h3>Step 3: Move size to a post-edge pass in buildGraph</h3>
+
+<span class="schip todo">todo</span>
+
+<p>In <code>ui/src/graph/graphModel.ts</code>, edit <code>buildGraph</code>. Remove <code>size</code> from the <code>addNode</code> call:</p>
+
+<pre><code>  data.nodes.forEach((n, i) => {
+    const role = roles.get(n.id) ?? "";
+    const { x, y } = seedPosition(i, data.nodes.length);
+    graph.addNode(n.id, {
+      x,
+      y,
+      color: tierColor(n.tier, role, appearance),
+      label: nodeLabel(n),
+      space: n.space || "",
+      tier: n.tier,
+      // NOTE: store the domain node type under `nodeType`, NOT `type` — sigma
+      // reserves the node `type` attribute to pick the render program (e.g.
+      // "circle"); a domain value like "concept" makes sigma throw
+      // "could not find a suitable program for node type". See FilterDrawer type filter.
+      nodeType: n.type,
+      selfRole: role,
+    });
+  });</code></pre>
+
+<p>Then, AFTER the existing <code>for (const e of data.edges) { ... graph.addEdge(...) }</code> loop and BEFORE <code>return graph;</code>, add the size pass:</p>
+
+<pre><code>  // Size by UNIQUE NEIGHBOUR count (not edge degree — the graph is a multigraph
+  // with parallel edges, council R2). Known only after edges are added.
+  // Single deterministic pass over every node — the source of truth for size.
+  graph.forEachNode((id) => {
+    graph.setNodeAttribute(id, "size", displayNodeSize(graph.neighbors(id).length, roles.get(id) ?? ""));
+  });</code></pre>
+
+<h3>Step 4: Update applyAppearance to read unique-neighbour count</h3>
+
+<span class="schip todo">todo</span>
+
+<p>In <code>ui/src/graph/graphModel.ts</code>, in <code>applyAppearance</code>, replace the size line. Find:</p>
+
+<pre><code>    graph.setNodeAttribute(n.id, "size", displayNodeSize(n.access_count, role));</code></pre>
+
+<p>Replace with:</p>
+
+<pre><code>    graph.setNodeAttribute(n.id, "size", displayNodeSize(graph.neighbors(n.id).length, role));</code></pre>
+
+<h3>Step 5: Run the graphModel tests to verify they pass</h3>
+
+<span class="schip todo">todo</span>
+
+<pre><code>cd ui && npx vitest run src/graph/graphModel.test.ts</code></pre>
+
+<p><strong>Expected:</strong> PASS — <code>hub</code> (degree 2) ≈ 4.06, <code>lonely</code> (degree 0) = 2, so <code>hubSize &gt; lonelySize</code> and <code>lonelySize === 2</code>. The existing tests still pass: the <code>size &gt; 0</code> test (node "a", isolated, degree 0 → size 2 &gt; 0) holds; <code>applyAppearance</code> recolor test unaffected (it doesn't assert size).</p>
+
+<h3>Step 6: Add the applyAppearance size-regression test</h3>
+
+<span class="schip todo">todo</span>
+
+<p>Both peers flagged that <code>applyAppearance</code> switches to degree sizing but no test guards it — reverting only that line keeps tests green. Add this test inside the <code>describe("applyAppearance", ...)</code> block in <code>ui/src/graph/graphModel.test.ts</code>. The node payloads carry a misleading high <code>access_count</code> so the test fails if the code ever falls back to access-count sizing:</p>
+
+<pre><code>  it("keeps degree-based size after appearance changes (hub > isolated)", () => {
+    const nodes = [
+      node({ id: "hub", access_count: 0 }),
+      node({ id: "a", access_count: 0 }),
+      node({ id: "lonely", access_count: 999 }), // misleading: high access, zero degree
+    ];
+    const edges: Edge[] = [
+      { source_id: "hub", target_id: "a", edge_type: "related_to", weight: 1, created: "" },
+    ];
+    const d = data({ nodes, edges });
+    const g = buildGraph(d, DEFAULT_GRAPH_APPEARANCE);
+    applyAppearance(g, d, { ...DEFAULT_GRAPH_APPEARANCE,
+      colors: { core: "#111111", working: "#222222", archival: "#333333" } });
+    const hubSize = g.getNodeAttribute("hub", "size") as number;       // degree 1
+    const lonelySize = g.getNodeAttribute("lonely", "size") as number; // degree 0, access 999
+    expect(hubSize).toBeGreaterThan(lonelySize); // degree wins, not access_count
+    expect(lonelySize).toBe(2);                  // isolated -> floor (NOT inflated by access 999)
+  });</code></pre>
+
+<h3>Step 7: Run graphModel tests to verify the new test passes</h3>
+
+<span class="schip todo">todo</span>
+
+<pre><code>cd ui && npx vitest run src/graph/graphModel.test.ts</code></pre>
+
+<p><strong>Expected:</strong> PASS — after <code>applyAppearance</code>, <code>hub</code> (degree 1) ≈ 3.30 &gt; <code>lonely</code> (degree 0, access 999) = 2. If the code regressed to access_count, <code>lonely</code> would be ≈ <code>min(10, 2+log2(1000)*1.3)</code> ≈ 10.96→cap, failing both assertions.</p>
+
+<h3>Step 8: Commit</h3>
+
+<span class="schip todo">todo</span>
+
+<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git add ui/src/graph/graphModel.ts ui/src/graph/graphModel.test.ts
+git commit -m "feat(graph): size by unique-neighbour count after edges are built
+
+buildGraph now sets node size in a post-edge pass (connection count is unknown
+before edges exist); both buildGraph and applyAppearance use
+graph.neighbors(id).length (UNIQUE neighbours), not graph.degree(), because the
+multigraph has parallel edges that would over-count connections. access_count is
+no longer used for sizing. Adds an applyAppearance size-regression test and a
+parallel-edge test so a revert to access_count or degree cannot pass silently
+(council: Cursor + Codex).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"</code></pre>
+
+<hr style="border:none;border-top:1px solid var(--hairline);margin:40px 0;">
+
+<h2 id="task-3">Task 3: Full UI test suite + empirical verification on the live graph</h2>
+
+<p><strong>Files:</strong> No code changes — verification only.</p>
+
+<h3>Step 1: Run the full graph test suite</h3>
+
+<span class="schip todo">todo</span>
+
+<pre><code>cd ui && npx vitest run src/graph/</code></pre>
+
+<p><strong>Expected:</strong> PASS — all graph tests (visual, graphModel, sigmaReducers, forceLayout) green.</p>
+
+<h3>Step 2: Rebuild the production UI bundle</h3>
+
+<span class="schip todo">todo</span>
+
+<pre><code>cd ui && npm run build</code></pre>
+
+<p><strong>Expected:</strong> <code>tsc && vite build</code> succeeds with no type errors (confirms no dangling <code>access_count</code> size reference), emits a new <code>../src/ormah/ui_dist/assets/index-*.js</code>.</p>
+
+<h3>Step 3: Verify node-size variation on the live graph</h3>
+
+<span class="schip todo">todo</span>
+
+<p>The dev server (Vite 5173) exposes <code>window.__ormahGraph</code> in DEV. Confirm the dev server is up (<code>curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/</code> → 200) and the backend on 8787 is serving the graph. Then create <code>ui/verify_degree_size.py</code>:</p>
+
+<pre><code>"""Verify node sizes now vary by degree on the live graph."""
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    b = p.chromium.launch(headless=True)
+    pg = b.new_page(viewport={"width": 1440, "height": 900})
+    pg.goto("http://localhost:5173", wait_until="domcontentloaded")
+    pg.wait_for_function("() => window.__ormahGraph && window.__ormahSigma", timeout=30000)
+    pg.wait_for_timeout(7000)
+    res = pg.evaluate("""() => {
+        const g = window.__ormahGraph; const rows = [];
+        // size is RADIUS in position units; unique-neighbour count drives it.
+        g.forEachNode((id, a) => rows.push({ id, nbr: g.neighbors(id).length, r: a.size, x: a.x, y: a.y }));
+        const sizes = rows.map(n => n.r);
+        rows.sort((p, q) => p.nbr - q.nbr);
+
+        // Council R2 (Cursor + Codex): overlap must be measured over the WHOLE
+        // graph, not just the top-degree hubs — mid-degree nodes (r 4-8.5) can
+        // overlap user-visibly. Count every pair whose centre distance is less
+        // than the sum of radii (true overlap). O(n^2) ~ 1800^2 = 3.2M, fine here.
+        let overlappingPairs = 0, minGap = Infinity;
+        for (let i = 0; i < rows.length; i++) {
+            for (let j = i + 1; j < rows.length; j++) {
+                const a = rows[i], b = rows[j];
+                const gap = Math.hypot(a.x - b.x, a.y - b.y) - (a.r + b.r); // edge-to-edge
+                if (gap < 0) overlappingPairs++;
+                if (gap < minGap) minGap = gap;
+            }
+        }
+        const isolated = rows.find(n => n.nbr === 0);
+        return {
+            order: g.order,
+            sizeMin: Math.min(...sizes), sizeMax: Math.max(...sizes),
+            distinctSizes: new Set(sizes.map(s => s.toFixed(2))).size,
+            isolatedSize: isolated ? isolated.r : null,
+            maxNbr: rows[rows.length - 1].nbr, hubSize: rows[rows.length - 1].r,
+            overlappingPairs,                       // global count — must be ~0 / small
+            minGapEdgeToEdge: +minGap.toFixed(2),   // most-negative = worst overlap depth
+        };
+    }""")
+    import json
+    print(json.dumps(res, indent=2))
+    b.close()</code></pre>
+
+<p>Run:</p>
+
+<pre><code>cd ui && uv run --with playwright python verify_degree_size.py</code></pre>
+
+<p><strong>Expected:</strong> <code>sizeMin</code> = 2 (isolated nodes), <code>sizeMax</code> ≈ 10 (hub capped), <code>distinctSizes</code> well above 1 (variation exists — was effectively 1 before), <code>isolatedSize</code> = 2, <code>hubSize</code> ≈ 10. The overlap gate is <strong>global</strong> (council R2): <code>overlappingPairs</code> should be small relative to the ~1800 nodes (a handful is tolerable since FA2's <code>adjustSizes: true</code> already spaces by size; a large count means the cap-10 curve packs mid-degree nodes too tightly). Record the baseline number; if <code>overlappingPairs</code> is large or <code>minGapEdgeToEdge</code> is strongly negative, lower the cap or the curve multiplier in <a href="#task-1">Task 1</a> and re-verify. Delete the scratch script afterward (<code>rm ui/verify_degree_size.py</code>) — it is not part of the repo. (Promoting this to a permanent integration test is a documented follow-up — <code>ui/</code> has no Playwright in CI today.)</p>
+
+<h3>Step 4: Final commit</h3>
+
+<span class="schip todo">todo</span>
+
+<p>No commit expected for this task unless Step 1–3 surfaced a regression requiring a fix. If a fix was needed, commit it with a message describing the regression and the fix.</p>
+
+<hr style="border:none;border-top:1px solid var(--hairline);margin:40px 0;">
+
+<h2 id="merge">Merge into the Beta</h2>
+
+<p>After all tasks are green.</p>
+
+<h3>Step 1: Merge feat → local-main and rebuild the served bundle</h3>
+
+<span class="schip todo">todo</span>
+
+<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git checkout local-main
+git merge feat/graph-webgl-sigma --no-edit
+cd ui && npm run build</code></pre>
+
+<p><strong>Expected:</strong> clean merge; <code>ui_dist</code> rebuilt so the launchd server (<code>com.ormah.server.dev</code>) serves the degree-sized graph. (Do NOT start a server manually — the launchd job owns the dev server; a hard-refresh on http://localhost:8787 picks up the new bundle.)</p>
+
+<hr style="border:none;border-top:1px solid var(--hairline);margin:40px 0;">
+
+<h2 id="notes">Notes for the implementer</h2>
+
+<ul>
+  <li><strong>Run all tests from <code>ui/</code>,</strong> not the repo root: <code>cd ui && npx vitest run &lt;path&gt;</code>.</li>
+  <li><strong>Connection count = UNIQUE NEIGHBOURS, not edge degree (council R2, Codex — verified).</strong> The graph is a directed <em>multigraph</em> (<code>new Graph({ multi: true })</code>) and the backend PK is <code>(source_id, target_id, edge_type)</code>, so a single pair of nodes can have <strong>parallel edges</strong> (e.g. <code>supports</code> + <code>defines</code>). Measured on the live graph: <strong>19.8% of pairs carry &gt;1 edge</strong> (up to 3), so <code>graph.degree(id)</code> over-counts connections by up to +7 vs distinct neighbours. Use <strong><code>graph.neighbors(id).length</code></strong> (graphology returns the set of unique adjacent nodes, in+out, deduped) everywhere size is computed — NOT <code>graph.degree()</code>, <code>inDegree</code>, or <code>outDegree</code>. The "connection count" the feature name refers to is <em>how many distinct memories this one links to</em>, which is exactly unique neighbours.</li>
+  <li><strong><code>access_count</code> stays on the node payload</strong> (<code>MemoryNode.access_count</code>); we only stop using it for <em>size</em>. Do not remove the field.</li>
+  <li><strong>Self floor:</strong> the <code>self</code> node must never be smaller than 3.5, even at degree 0. This is in <code>displayNodeSize</code>, already covered by the existing test.</li>
+</ul>
+
+<div class="spectrum">
+  <span class="s1"></span>
+  <span class="s2"></span>
+  <span class="s3"></span>
+</div>
+
+<div class="signature">
+  <div class="name">Ormah</div>
+  <div class="role">Graph Node Size</div>
+</div>
+
+</main>
+
+<!-- rich-doc-src-sha256:6e0255ac63bd06fd4b94ac5ae42420d88b6d2a1681514e8346dcb81437b31b7c -->
+</body>
+</html>

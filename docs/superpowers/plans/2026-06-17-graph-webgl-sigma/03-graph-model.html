@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Task 3: Graph model (payload → graphology)</title>
+  <style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;--orange:#d97757; --blue:#6a9bcc; --green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55; --lh-title:1.12; --maxw:1140px;}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:8px}
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;color:var(--stone)}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <div class="eyebrow">Task 3</div>
+    <h1 class="doc-title">Graph <em>model</em></h1>
+    <a href="00-overview.html">← Overview</a>
+  </nav>
+  <main>
+    <a href="00-overview.html" class="backlink">← Overview</a>
+    <div class="eyebrow">Task 3</div>
+    <h2>Graph <em>model</em> (payload → graphology)</h2>
+
+    <p>Pure function turning the <code>/ui/graph</code> payload into a graphology <code>Graph</code> with sigma-ready attributes. Seeds random initial positions (FA2 requires <code>x</code>/<code>y</code> before running). Filters edges whose endpoints are missing (matches current behavior, <code>GraphView.tsx:545-546</code>).</p>
+
+    <h3>Files</h3>
+    <ul>
+      <li>Create: <code>ui/src/graph/graphModel.ts</code></li>
+      <li>Test: <code>ui/src/graph/graphModel.test.ts</code></li>
+    </ul>
+
+    <h3>Step 1: Write the failing test</h3>
+    <p>Create <code>ui/src/graph/graphModel.test.ts</code> with tests for:
+    <ul>
+      <li>Building a graph with sigma attributes (label, color, size, x/y positions)</li>
+      <li>Handling missing space/tier gracefully</li>
+      <li>Empty payload → empty graph</li>
+      <li>Isolated nodes with no edges</li>
+      <li>Edge filtering for missing endpoints</li>
+    </ul></p>
+
+    <h3>Step 2: Run test to verify it fails</h3>
+    <p>Run: <code>( cd ui && npx vitest run src/graph/graphModel.test.ts )</code><br>
+    Expected: FAIL — cannot find module <code>./graphModel</code>.</p>
+
+    <h3>Step 3: Write the implementation</h3>
+    <p>Create <code>ui/src/graph/graphModel.ts</code> with:
+    <ul>
+      <li><code>seedPosition</code> helper — deterministic small ring seed for FA2</li>
+      <li><code>buildGraph</code> function — converts payload to graphology with sigma attributes</li>
+      <li><code>applyAppearance</code> function — re-styles existing graph in-place (Council M4) when theme/appearance changes, without remounting</li>
+    </ul></p>
+
+    <h3>Step 4: Add an applyAppearance test (Council M4)</h3>
+    <p>Test that recoloring an existing graph preserves node count and updates colors correctly when theme flips.</p>
+
+    <h3>Step 5: Run tests to verify they pass</h3>
+    <p>Run: <code>( cd ui && npx vitest run src/graph/graphModel.test.ts )</code><br>
+    Expected: PASS — 6 passed (5 buildGraph + 1 applyAppearance).</p>
+
+    <h3>Step 6: Commit</h3>
+    <pre><code>git add ui/src/graph/graphModel.ts ui/src/graph/graphModel.test.ts
+git commit -m "feat(ui): buildGraph + applyAppearance (in-place restyle) for graphology"</code></pre>
+
+    <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+    <div class="signature">
+      <div class="name">Task 3</div>
+      <div class="role">Graph WebGL Sigma Implementation</div>
+    </div>
+  </main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:092cab0958893a0d03f0a9494b2a1ddebecdd2b670d685e75f6872fa2941ea20 -->

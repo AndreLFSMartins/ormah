@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Task 4 — Sigma reducers</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+.state-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:20px 0}
+.state-card{border:1px solid var(--hairline);border-top:2px solid var(--blue);padding:14px 16px}
+.state-card .fn{font:600 13px/1 var(--font-mono);color:var(--blue);margin-bottom:6px}
+.state-card .desc{font:400 13px/1.4 var(--font-body);color:var(--stone)}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Task 4 of 8</div>
+  <p class="doc-title">Sigma reducers</p>
+  <a href="#overview">What this task does</a>
+  <a href="#viewstate">ViewState shape</a>
+  <a href="#parity">Cytoscape parity</a>
+  <a href="#files">Files</a>
+  <a href="#steps">Steps</a>
+  <a href="#step-1" class="lvl-3">1 — write failing test</a>
+  <a href="#step-2" class="lvl-3">2 — run (expect fail)</a>
+  <a href="#step-3" class="lvl-3">3 — write implementation</a>
+  <a href="#step-4" class="lvl-3">4 — run (expect pass)</a>
+  <a href="#step-5" class="lvl-3">5 — commit</a>
+  <hr style="border:none;border-top:1px solid var(--hairline);margin:18px 0">
+  <a href="03-graph-model.html">← Task 3</a>
+  <a href="05-force-layout.html">Next: force layout →</a>
+  <a href="00-overview.html">↑ Overview</a>
+</nav>
+
+<main>
+  <div class="eyebrow">Task 4 · Sigma reducers</div>
+  <h2 style="margin-top:16px"><em>Pure</em> hover / dim / focus factories</h2>
+
+  <div class="progress">
+    <div class="bar"><div class="fill" style="width:0%"></div></div>
+    <div class="label">0 / 5 steps · <span class="schip todo">todo</span></div>
+  </div>
+
+  <p class="statement">Factories that build sigma's nodeReducer/edgeReducer from the current view state — no sigma import needed.</p>
+
+  <h2 id="overview"><em>What</em> this task does</h2>
+  <p>Parity replacement for cytoscape's <code>glow</code>/<code>glow-neighbor</code> classes (current <code>GraphView.tsx:460-467</code>) and the legend dim/focus. The factories take and return plain attribute objects — no sigma import in this module, so it is fully unit-testable in jsdom.</p>
+
+  <h2 id="viewstate"><em>ViewState</em> shape</h2>
+  <div class="state-grid">
+    <div class="state-card">
+      <div class="fn">hoveredNode</div>
+      <div class="desc"><code>string | null</code> — the node under the cursor</div>
+    </div>
+    <div class="state-card">
+      <div class="fn">neighbors</div>
+      <div class="desc"><code>Set&lt;string&gt;</code> — the hovered node's neighbors; stay vivid</div>
+    </div>
+    <div class="state-card">
+      <div class="fn">dimmedSpaces</div>
+      <div class="desc"><code>Set&lt;string&gt;</code> — spaces toggled off in the legend</div>
+    </div>
+    <div class="state-card">
+      <div class="fn">spaceById</div>
+      <div class="desc"><code>Map&lt;string,string&gt;</code> — node id → space name</div>
+    </div>
+    <div class="state-card">
+      <div class="fn">dimColor</div>
+      <div class="desc"><code>string</code> — dark: <code>#2a2a2a</code>, light: <code>#cfd6de</code></div>
+    </div>
+  </div>
+
+  <h2 id="parity"><em>Parity</em> — cytoscape → sigma</h2>
+  <table>
+    <thead><tr><th>Cytoscape behavior</th><th>Sigma equivalent</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>.glow</code> class on hovered node (lines 460–461)</td>
+        <td><code>highlighted: true</code> in node attrs</td>
+      </tr>
+      <tr>
+        <td><code>.glow-neighbor</code> on neighbors (lines 462–467)</td>
+        <td>neighbors keep original color (not dimmed)</td>
+      </tr>
+      <tr>
+        <td>Non-neighbors set to dim color</td>
+        <td><code>color: dimColor</code>, <code>label: undefined</code></td>
+      </tr>
+      <tr>
+        <td>Legend focus dims other spaces</td>
+        <td><code>dimmedSpaces</code> set in <code>ViewState</code> via <a href="06-graphview-rewrite.html">Task 6.4</a></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="files"><em>Files</em></h2>
+  <table>
+    <thead><tr><th>File</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><code>ui/src/graph/sigmaReducers.ts</code></td><td>Create</td></tr>
+      <tr><td><code>ui/src/graph/sigmaReducers.test.ts</code></td><td>Create</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="steps"><em>Steps</em> (TDD)</h2>
+
+  <h3 id="step-1">Step 1 — Write the failing test</h3>
+  <p>Create <code>ui/src/graph/sigmaReducers.test.ts</code>. Three assertions:</p>
+  <ul>
+    <li>Passthrough when nothing is active — attrs unchanged</li>
+    <li>Hover: hovered node gets <code>highlighted: true</code>; neighbor keeps original color; others get <code>dimColor</code> and no label</li>
+    <li>dimmedSpaces: nodes in "work" space dim when "work" is in the set; others stay vivid</li>
+  </ul>
+  <details>
+    <summary>Show test file</summary>
+    <pre><code>import { describe, it, expect } from "vitest";
+import { makeNodeReducer, type ViewState } from "./sigmaReducers";
+
+const DIM = "#2a2a2a";
+
+function state(over: Partial&lt;ViewState&gt;): ViewState {
+  return {
+    hoveredNode: null, neighbors: new Set&lt;string&gt;(),
+    dimmedSpaces: new Set&lt;string&gt;(), spaceById: new Map&lt;string, string&gt;(),
+    dimColor: DIM, ...over,
+  };
+}
+
+describe("makeNodeReducer", () => {
+  it("passes attributes through when nothing is active", () => {
+    const r = makeNodeReducer(state({}));
+    const out = r("a", { color: "#abc", label: "A" });
+    expect(out.color).toBe("#abc");
+    expect(out.label).toBe("A");
+  });
+
+  it("dims non-hovered, non-neighbor nodes and highlights the hovered one", () => {
+    const r = makeNodeReducer(state({ hoveredNode: "a", neighbors: new Set(["b"]) }));
+    expect(r("a", { color: "#abc" }).highlighted).toBe(true);
+    expect(r("b", { color: "#abc" }).color).toBe("#abc");
+    const other = r("c", { color: "#abc" });
+    expect(other.color).toBe(DIM);
+    expect(other.label).toBeUndefined();
+  });
+
+  it("dims nodes whose space is toggled off", () => {
+    const r = makeNodeReducer(state({
+      dimmedSpaces: new Set(["work"]),
+      spaceById: new Map([["a", "work"], ["b", "home"]]),
+    }));
+    expect(r("a", { color: "#abc" }).color).toBe(DIM);
+    expect(r("b", { color: "#abc" }).color).toBe("#abc");
+  });
+});</code></pre>
+  </details>
+
+  <h3 id="step-2">Step 2 — Run test to verify it fails</h3>
+  <pre><code>( cd ui && npx vitest run src/graph/sigmaReducers.test.ts )</code></pre>
+  <p><strong>Expected:</strong> FAIL — cannot find module <code>./sigmaReducers</code>.</p>
+
+  <h3 id="step-3">Step 3 — Write the implementation</h3>
+  <p>Create <code>ui/src/graph/sigmaReducers.ts</code>. Exports: <code>NodeAttrs</code>, <code>EdgeAttrs</code>, <code>ViewState</code>, <code>makeNodeReducer</code>, <code>makeEdgeReducer</code>. <code>makeEdgeReducer</code> takes a <code>sourceTarget</code> resolver so it can work without importing sigma's graph API.</p>
+  <details>
+    <summary>Show implementation</summary>
+    <pre><code>export interface ViewState {
+  hoveredNode: string | null;
+  neighbors: Set&lt;string&gt;;
+  dimmedSpaces: Set&lt;string&gt;;
+  spaceById: Map&lt;string, string&gt;;
+  dimColor: string;
+}
+
+export function makeNodeReducer(state: ViewState) {
+  const { hoveredNode, neighbors, dimmedSpaces, spaceById, dimColor } = state;
+  return (node: string, data: NodeAttrs): NodeAttrs => {
+    const out: NodeAttrs = { ...data };
+    if (dimmedSpaces.size > 0 && dimmedSpaces.has(spaceById.get(node) ?? "")) {
+      out.color = dimColor; out.label = undefined; return out;
+    }
+    if (hoveredNode) {
+      if (node === hoveredNode) { out.highlighted = true; }
+      else if (!neighbors.has(node)) { out.color = dimColor; out.label = undefined; }
+    }
+    return out;
+  };
+}
+
+export function makeEdgeReducer(state: ViewState, sourceTarget: (edge: string) => [string, string]) {
+  const { hoveredNode, neighbors, dimColor } = state;
+  return (edge: string, data: EdgeAttrs): EdgeAttrs => {
+    const out: EdgeAttrs = { ...data };
+    if (hoveredNode) {
+      const [s, t] = sourceTarget(edge);
+      const touches = s === hoveredNode || t === hoveredNode || (neighbors.has(s) && neighbors.has(t));
+      if (!touches) out.color = dimColor;
+    }
+    return out;
+  };
+}</code></pre>
+  </details>
+
+  <h3 id="step-4">Step 4 — Run test to verify it passes</h3>
+  <pre><code>( cd ui && npx vitest run src/graph/sigmaReducers.test.ts )</code></pre>
+  <p><strong>Expected:</strong> PASS — 3 passed.</p>
+
+  <h3 id="step-5">Step 5 — Commit</h3>
+  <pre><code>git add ui/src/graph/sigmaReducers.ts ui/src/graph/sigmaReducers.test.ts
+git commit -m "feat(ui): pure sigma node/edge reducers for hover + legend dim"</code></pre>
+
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <span class="name">Task 4 — Sigma reducers</span>
+    <span class="role">Graph view WebGL sigma · 2026-06-17 · ormah</span>
+  </div>
+</main>
+
+</body>
+</html>
+<!-- rich-doc-src-sha256:68632d5f99a72e430c74e8be3e842e13b6f52332a2b73b5d07ac239e29b364e4 -->

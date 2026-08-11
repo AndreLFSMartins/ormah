@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>index_updater lock-order inversion — implementation plan</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">index_updater lock-order inversion — implementation plan</div>
+  <a href="#overview">index_updater lock-order inversion — implementation plan</a>
+  <a href="#the-defect" class="lvl-3">The defect in one picture</a>
+  <a href="#architecture" class="lvl-3">Architecture</a>
+  <a href="#constraints" class="lvl-3">Global constraints</a>
+  <a href="#task-sequencing" class="lvl-3">Task sequencing</a>
+  <a href="#task-1-reproduce">Task 1: reproduce the deadlock with a failing test</a>
+  <a href="#task-1-step-1" class="lvl-3">Step 1: Write the failing test</a>
+  <a href="#task-1-step-2" class="lvl-3">Step 2: Run the test to verify it fails by hanging</a>
+  <a href="#task-1-step-3" class="lvl-3">Step 3: Commit the red test</a>
+  <a href="#task-2-hoist">Task 2: hoist the FileStore calls out of the transaction</a>
+  <a href="#task-2-step-1" class="lvl-3">Step 1: Replace the method body</a>
+  <a href="#task-2-step-2" class="lvl-3">Step 2: Run the deadlock test — expect PASS</a>
+  <a href="#task-2-step-3" class="lvl-3">Step 3: Run the whole index suite</a>
+  <a href="#task-2-step-4" class="lvl-3">Step 4: Commit the fix</a>
+  <a href="#task-3-verify">Task 3: verify no regression against the baseline</a>
+  <a href="#task-3-step-1" class="lvl-3">Step 1: Run the full suite</a>
+  <a href="#task-3-step-2" class="lvl-3">Step 2: Run ruff</a>
+  <a href="#task-3-step-3" class="lvl-3">Step 3: Confirm the 7 failures are genuinely pre-existing</a>
+  <a href="#task-3-step-4" class="lvl-3">Step 4: Confirm the fix under repetition</a>
+  <a href="#task-4-ship">Task 4: ship to the fork and run it in the Beta</a>
+  <a href="#task-4-step-1" class="lvl-3">Step 1: Push the branch to the fork</a>
+  <a href="#task-4-step-2" class="lvl-3">Step 2: Merge into local-main so the Beta runs it</a>
+  <a href="#task-4-step-3" class="lvl-3">Step 3: Restart the server via launchd</a>
+  <a href="#task-4-step-4" class="lvl-3">Step 4: Prove writes survive past the old failure window</a>
+  <a href="#task-4-step-5" class="lvl-3">Step 5: Confirm the endpoints that were dead</a>
+  <a href="#task-4-step-6" class="lvl-3">Step 6: Confirm the background jobs now complete</a>
+  <a href="#task-4-step-7" class="lvl-3">Step 7: Clean up the worktree</a>
+  <a href="#standing-warnings">Standing warnings</a>
+</nav>
+<main>
+<p class="eyebrow">Lock-order inversion fix</p>
+
+<h2 id="overview"><em>index_updater</em> lock-order inversion — implementation plan</h2>
+
+<p class="statement">Remove the <code>L_db → L_mem</code> lock-order inversion that deadlocks every background memory job within ~2 minutes of server start.</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="big">18</div>
+    <div class="label">Implementation steps</div>
+  </div>
+  <div class="metric">
+    <div class="big">4</div>
+    <div class="label">Sequential tasks</div>
+  </div>
+  <div class="metric">
+    <div class="big">0</div>
+    <div class="label">New dependencies</div>
+  </div>
+</div>
+
+<div class="progress">
+  <div class="fill" style="width: 0%"></div>
+  <span class="label">0 of 18 steps complete</span>
+</div>
+
+<h3 id="the-defect">The defect in one picture</h3>
+
+<p>Two background jobs hold locks in opposite orders, creating a cycle:</p>
+
+<pre><code>auto_linker    : L_mem (acquired) → waits for L_db   [auto_linker.py:312]
+index_updater  : L_db  (acquired) → waits for L_mem  [builder.py:119]</code></pre>
+
+<p><code>L_mem</code> is <code>MemoryEngine._memory_operation_lock</code>, a <code>threading.RLock</code> with no timeout. The engine hands the <em>same object</em> to <code>FileStore</code> (<code>FileStore(nodes_dir, self._memory_operation_lock)</code>), so any decorated <code>FileStore</code> call made inside a write transaction requests <code>L_mem</code> while holding <code>L_db</code>.</p>
+
+<p><code>index_updater</code> runs every 60 s, which is why the deadlock returns ~2 minutes after each restart.</p>
+
+<h3 id="architecture">Architecture</h3>
+
+<p>Hoist the two <code>FileStore</code> calls (<code>list_paths</code>, <code>file_hash</code>) above the write transaction so no <code>L_mem</code> request is ever made while holding <code>L_db</code>. This mirrors <code>full_rebuild</code>, which already hoists <code>list_paths</code>. No new lock is retained.</p>
+
+<h3 id="constraints">Global constraints</h3>
+
+<p>Every task's requirements implicitly include this section.</p>
+
+<ul>
+<li>Work happens in a <strong>worktree cut from <code>upstream/main</code></strong>, never a <code>git checkout</code> inside <code>Tools/ormah</code> — that tree is what the running Beta serves (FORK-WORKFLOW.md Golden rule 1):
+<pre><code>git fetch upstream
+git worktree add -b fix/index-updater-lock-order ../ormah-wt-index-lock upstream/main
+cd ../ormah-wt-index-lock</code></pre>
+</li>
+<li>Push branches to <code>fork</code>, never to <code>upstream</code> (Golden rule 3).</li>
+<li>ruff: <code>target-version = py311</code>, <code>line-length = 100</code>.</li>
+<li>Default pytest run excludes <code>integration</code>-marked tests.</li>
+<li>Known-good baseline: <strong>7 pre-existing failures</strong> (<code>test_cloud_settings</code> 1, <code>test_setup</code> 6). The fix must add zero new failures.</li>
+<li><code>incremental_update</code>'s behaviour must not change: same <code>(added, updated)</code> return, same tolerance for a file that disappears or fails to hash mid-run.</li>
+</ul>
+
+<h3 id="task-sequencing">Task sequencing</h3>
+
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>File</th>
+<th>Deliverable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>01-red-test.md</code></td>
+<td>A test that hangs on the deadlock today</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>02-fix.md</code></td>
+<td>The hoist, turning the test green</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>03-verify.md</code></td>
+<td>Full suite + ruff against the baseline</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>04-ship.md</code></td>
+<td>Branch on <code>fork</code>, Beta running the fix, verified live</td>
+</tr>
+</tbody>
+</table>
+
+<p class="callout"><strong>Task 1 is a gate:</strong> if it fails fast instead of hanging, the test proves nothing and Task 2 must not start.</p>
+
+<h2 id="task-1-reproduce"><em>Task 1:</em> reproduce the deadlock with a failing test</h2>
+
+<p class="meta">Files: modify <code>tests/test_index/test_builder.py</code> (append at end of file)</p>
+
+<p>Write a test that drives the exact interleaving: the builder holds <code>L_db</code> inside its write txn and reaches for <code>L_mem</code> via <code>file_store.list_paths</code>, while a memory job holds <code>L_mem</code> and reaches for <code>L_db</code>.</p>
+
+<h3 id="task-1-step-1">Step 1: Write the failing test</h3>
+
+<p>Append to <code>tests/test_index/test_builder.py</code>. Check the file's existing imports first; add whichever of these are missing:</p>
+
+<pre><code>import threading
+
+from ormah.models.node import CreateNodeRequest, NodeType</code></pre>
+
+<p>Then append the test code (see full source in task definition). The test:</p>
+
+<ul>
+<li>Creates a node so the file store has content to scan.</li>
+<li>Instruments <code>file_store.list_paths</code> to signal when the builder reaches it.</li>
+<li>Spawns a concurrent memory job that acquires <code>L_mem</code> and attempts a write transaction (acquiring <code>L_db</code>).</li>
+<li>If the builder already holds <code>L_db</code> when <code>list_paths</code> is called, a deadlock occurs.</li>
+</ul>
+
+<div class="progress" style="margin-top: 1rem;">
+  <div class="fill" style="width: 0%"></div>
+  <span class="label">0 of 3 steps complete</span>
+</div>
+
+- [ ] Step 1: Write the failing test
+- [ ] Step 2: Run the test to verify it fails — and fails by HANGING
+- [ ] Step 3: Commit the red test
+
+<h3 id="task-1-step-2">Step 2: Run the test to verify it fails by hanging</h3>
+
+<pre><code>python -m pytest tests/test_index/test_builder.py::test_incremental_update_does_not_deadlock_against_a_memory_job -v</code></pre>
+
+<p><strong>Expected:</strong> FAIL on <code>incremental_update held L_db while waiting for L_mem</code>, after the run visibly stalls ~10 s at the <code>join</code>.</p>
+
+<p class="callout warn"><strong>This is a gate.</strong> Confirm both: (1) wall-clock ≥10 s — the <code>join</code> timeout actually elapsed; (2) the failure is the <code>assert not builder_thread.is_alive()</code> — not an import or fixture error. An instant failure means the interleaving was never reached; the test would then pass after Task 2 for the wrong reason and prove nothing.</p>
+
+<h3 id="task-1-step-3">Step 3: Commit the red test</h3>
+
+<pre><code>git add tests/test_index/test_builder.py
+git commit -m "test(index): reproduce the incremental_update lock-order deadlock
+
+Drives the exact interleaving: the builder holds L_db inside its write txn and
+reaches for L_mem via file_store.list_paths, while a memory job holds L_mem and
+reaches for L_db. Hangs past a 10s join today."</code></pre>
+
+<h2 id="task-2-hoist"><em>Task 2:</em> hoist the FileStore calls out of the transaction</h2>
+
+<p class="meta">Files: modify <code>src/ormah/index/builder.py:57-91</code> (<code>incremental_update</code>) — upstream/main form</p>
+
+<p>Replace the method body so both <code>FileStore</code> calls happen <em>before</em> the write transaction opens. Pre-compute the file hashes in a bare dict loop, preserving the existing error tolerance: if a file is deleted between listing and hashing, log it and skip it without killing the whole job.</p>
+
+<div class="progress" style="margin-top: 1rem;">
+  <div class="fill" style="width: 0%"></div>
+  <span class="label">0 of 4 steps complete</span>
+</div>
+
+- [ ] Step 1: Replace the method body
+- [ ] Step 2: Run the deadlock test — expect PASS
+- [ ] Step 3: Run the whole index suite
+- [ ] Step 4: Commit the fix
+
+<h3 id="task-2-step-1">Step 1: Replace the method body</h3>
+
+<p>The new method:</p>
+
+<ul>
+<li>Loads the indexed file hashes <em>outside</em> any transaction.</li>
+<li>Calls <code>file_store.list_paths()</code> and <code>file_store.file_hash(path)</code> <em>before</em> opening the write transaction — no <code>L_mem</code> requests while holding <code>L_db</code>.</li>
+<li>Handles files deleted between listing and hashing by skipping them (not fatal).</li>
+<li>Opens the transaction only to update the database, leaving all I/O outside.</li>
+</ul>
+
+<p class="callout"><strong>Why the <code>if path not in hashes: continue</code> matters:</strong> Today <code>file_hash</code> runs inside the loop's <code>try</code>, so a file deleted mid-run is logged and skipped. Pre-computing the hashes in a bare dict comprehension would let that same <code>OSError</code> escape and kill the whole job — a regression. The explicit loop plus the skip preserves the current tolerance exactly.</p>
+
+<h3 id="task-2-step-2">Step 2: Run the deadlock test — expect PASS</h3>
+
+<pre><code>python -m pytest tests/test_index/test_builder.py::test_incremental_update_does_not_deadlock_against_a_memory_job -v</code></pre>
+
+<p><strong>Expected:</strong> PASS, and fast — well under the 10 s join.</p>
+
+<h3 id="task-2-step-3">Step 3: Run the whole index suite</h3>
+
+<pre><code>python -m pytest tests/test_index/ -v</code></pre>
+
+<p><strong>Expected:</strong> all pass. <code>test_db_concurrency.py</code> lives here and exercises the same locks — it must stay green.</p>
+
+<h3 id="task-2-step-4">Step 4: Commit the fix</h3>
+
+<p>The commit message documents:</p>
+
+<ul>
+<li>The original lock order inversion and how it manifests live (auto-linker frozen on L_mem waiting for L_db; index_updater frozen on L_db waiting for L_mem).</li>
+<li>Verification via py-spy showing both jobs at identical t0 with opposite lock holds.</li>
+<li>Why <code>@serialized_memory_job</code> on the job was rejected: it would hold <code>L_mem</code> across the whole 36k-file loop every 60s, trading the deadlock for write starvation.</li>
+<li>That <code>full_rebuild</code> already hoists <code>list_paths</code> — this aligns <code>incremental_update</code> with the pattern in its own file.</li>
+<li>The earlier commit f7ac305 fixed the forgetting sweep but missed IndexBuilder, a third class that opens transactions and calls FileStore.</li>
+</ul>
+
+<h2 id="task-3-verify"><em>Task 3:</em> verify no regression against the baseline</h2>
+
+<p class="meta">Files: none modified — verification only</p>
+
+<p>Run the full test suite and static checks to confirm the fix adds zero new failures.</p>
+
+<div class="progress" style="margin-top: 1rem;">
+  <div class="fill" style="width: 0%"></div>
+  <span class="label">0 of 4 steps complete</span>
+</div>
+
+- [ ] Step 1: Run the full suite
+- [ ] Step 2: Run ruff
+- [ ] Step 3: Confirm the 7 failures are genuinely pre-existing
+- [ ] Step 4: Confirm the fix under repetition
+
+<h3 id="task-3-step-1">Step 1: Run the full suite</h3>
+
+<pre><code>python -m pytest tests/ -q 2>&1 | tail -20</code></pre>
+
+<p><strong>Expected:</strong> exactly 7 failures (the known baseline: <code>test_cloud_settings</code> 1, <code>test_setup</code> 6), with the new deadlock test passing. Any 8th failure blocks this task — investigate before proceeding.</p>
+
+<p class="callout">Record the actual tail output. A claim of "tests pass" without the output pasted is not verification.</p>
+
+<h3 id="task-3-step-2">Step 2: Run ruff</h3>
+
+<pre><code>ruff check src/ tests/</code></pre>
+
+<p><strong>Expected:</strong> the finding set is identical to <code>local-main</code>'s over tracked files. Any new finding in <code>builder.py</code> or <code>test_builder.py</code> must be fixed before committing further.</p>
+
+<h3 id="task-3-step-3">Step 3: Confirm the 7 failures are genuinely pre-existing</h3>
+
+<p>On a tree where only <code>builder.py</code> and <code>test_builder.py</code> changed:</p>
+
+<pre><code>python -m pytest tests/test_cloud_settings.py tests/test_setup.py -q 2>&1 | tail -5</code></pre>
+
+<p><strong>Expected:</strong> the same 7 failures, all in cloud-settings and setup. If any failure here touches indexing, locking, or the file store, it is <strong>not</strong> pre-existing — stop and investigate.</p>
+
+<h3 id="task-3-step-4">Step 4: Confirm the fix under repetition</h3>
+
+<p>A deadlock is a race; one green run is weak evidence. Run the new test 20 times:</p>
+
+<pre><code>python -m pytest tests/test_index/test_builder.py::test_incremental_update_does_not_deadlock_against_a_memory_job \
+  --count=20 -q 2>&1 | tail -5</code></pre>
+
+<p>If <code>pytest-repeat</code> is not installed, use the shell loop instead (see task file for details).</p>
+
+<p><strong>Expected:</strong> 20 passes. A single hang means the inversion is not fully closed — return to diagnosis rather than re-running until it goes green.</p>
+
+<h2 id="task-4-ship"><em>Task 4:</em> ship to the fork and run it in the Beta</h2>
+
+<p class="meta">Files: none modified — delivery only</p>
+
+<p>Push the branch to <code>fork</code>, merge into <code>local-main</code> to activate the fix in the running Beta, and verify write operations survive past the old failure window (4 minutes).</p>
+
+<div class="progress" style="margin-top: 1rem;">
+  <div class="fill" style="width: 0%"></div>
+  <span class="label">0 of 7 steps complete</span>
+</div>
+
+- [ ] Step 1: Push the branch to the fork
+- [ ] Step 2: Merge into local-main so the Beta runs it
+- [ ] Step 3: Restart the server via launchd
+- [ ] Step 4: Prove writes survive past the old failure window
+- [ ] Step 5: Confirm the endpoints that were dead
+- [ ] Step 6: Confirm the background jobs now complete
+- [ ] Step 7: Clean up the worktree
+
+<h3 id="task-4-step-1">Step 1: Push the branch to the fork</h3>
+
+<p>From the worktree:</p>
+
+<pre><code>git push fork fix/index-updater-lock-order</code></pre>
+
+<p class="callout warn">Never push to <code>upstream</code> (FORK-WORKFLOW.md Golden rule 3). The PR itself is a separate decision — <code>/council-pr</code> opens it (base <code>r-spade:main</code>, head <code>fork:fix/index-updater-lock-order</code>). Do not open it without asking; the defect is upstream's, so the PR is worth proposing, but it is André's call.</p>
+
+<h3 id="task-4-step-2">Step 2: Merge into local-main so the Beta runs it</h3>
+
+<p>Run from the main working tree, <strong>not</strong> the worktree:</p>
+
+<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git merge fix/index-updater-lock-order</code></pre>
+
+<p><code>local-main</code> is already the checked-out branch there, so no branch swap of the live tree occurs — Golden rule 1 is respected. Do <strong>not</strong> <code>git checkout</code> anything in this directory.</p>
+
+<h3 id="task-4-step-3">Step 3: Restart the server via launchd</h3>
+
+<p>The server is run by the launch agent <code>com.ormah.server.dev</code>, which was booted out during diagnosis. Bring it back:</p>
+
+<pre><code>launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.ormah.server.dev.plist
+sleep 15
+launchctl list | grep com.ormah.server.dev
+lsof -nP -iTCP:8787 -sTCP:LISTEN | tail -2</code></pre>
+
+<p><strong>Expected:</strong> the agent listed with a live PID, and one listener on 127.0.0.1:8787.</p>
+
+<p class="callout warn"><strong>Do not</strong> start it with <code>nohup .venv/bin/ormah server start &</code>. That yields a process the agent does not own, and re-bootstrapping later would leave two servers on one database. Known defect: <code>ormah server stop</code> prints <code>No launchd agent installed</code> even though the agent is installed and loaded.</p>
+
+<h3 id="task-4-step-4">Step 4: Prove writes survive past the old failure window</h3>
+
+<p>The deadlock used to appear ~2 minutes in, so probe for twice that (4 minutes):</p>
+
+<pre><code>python3 -c "
+import sqlite3, time
+p='/Users/andre/.local/share/ormah/memory/index.db'
+start=time.time()
+while time.time()-start < 240:
+    c=sqlite3.connect(p,timeout=5); t=time.time()
+    try:
+        c.execute('BEGIN IMMEDIATE'); print(f'[{time.time()-start:5.0f}s] write OK'); c.execute('ROLLBACK')
+    except Exception as e:
+        print(f'[{time.time()-start:5.0f}s] BLOCKED: {e}'); c.close(); raise SystemExit(1)
+    c.close(); time.sleep(20)
+print('4 minutes with no write block')
+"</code></pre>
+
+<p><strong>Expected:</strong> <code>write OK</code> on every probe, ending with <code>4 minutes with no write block</code>. A single <code>BLOCKED</code> means the fix is incomplete — return to diagnosis, do not paper over it.</p>
+
+<h3 id="task-4-step-5">Step 5: Confirm the endpoints that were dead</h3>
+
+<pre><code>curl -s -m 30 -X POST http://localhost:8787/agent/whisper -H 'Content-Type: application/json' \
+  -d '{"prompt":"test after lock-order fix","space":"ormah","agent_id":"verify"}' \
+  -w "\n[http %{http_code} in %{time_total}s]\n" | tail -3
+
+curl -s -m 30 -X POST http://localhost:8787/agent/recall -H 'Content-Type: application/json' \
+  -d '{"query":"ormah server","space":"ormah","limit":2}' \
+  -w "\n[http %{http_code} in %{time_total}s]\n" | tail -3</code></pre>
+
+<p><strong>Expected:</strong> HTTP 200 on both. Latency around ~1 s for whisper is expected and is <strong>not</strong> a failure of this fix — that is the separate structural issue left out of scope (the parse loop still runs inside the transaction).</p>
+
+<h3 id="task-4-step-6">Step 6: Confirm the background jobs now complete</h3>
+
+<pre><code>grep -E "Index updater|Auto-linker" ~/.local/share/ormah/logs/ormah.log | tail -12</code></pre>
+
+<p><strong>Expected:</strong> each <code>Running job "Index updater"</code> is followed by <code>executed successfully</code>. Recurring <code>maximum number of running instances reached (1)</code> means a job is still hanging — the fix did not take.</p>
+
+<h3 id="task-4-step-7">Step 7: Clean up the worktree</h3>
+
+<p>Only after the Beta is verified healthy, and only if no PR review is pending on it:</p>
+
+<pre><code>git worktree remove ../ormah-wt-index-lock</code></pre>
+
+<p>Keep the branch itself — pruning rules are in FORK-WORKFLOW.md Recipe D, and a branch whose PR is open must not be deleted on <code>fork</code>.</p>
+
+<h2 id="standing-warnings">Standing warnings</h2>
+
+<div class="callout warn">
+<p><strong>Do not add <code>@serialized_memory_job</code> to <code>index_updater</code>.</strong> It looks like the consistent move and is what f7ac305 did for a different caller, but here it converts a deadlock into sustained write starvation: the job would hold <code>L_mem</code> across the whole 36k-file loop, every 60 s. See the spec for detailed reasoning.</p>
+</div>
+
+<ul>
+<li>The defect is present unchanged in <code>upstream/main</code> at 0.14.8 — an upstream bug, not a Beta regression.</li>
+<li><strong>Out of scope:</strong> the ~1 s whisper latency (the parse loop still runs inside the txn), the two coexisting installs, and a systematic re-audit of every transaction-opening class.</li>
+</ul>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:9d6d61396324337307dd291ad3e9c1840de8e314677ff0b154381aaf4c1b0836 -->

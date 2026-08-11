@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0004 Async Ingest — Implementation Plan</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">ADR-0004 Async Ingest — Implementation Plan</div>
+  <a href="#overview-delivery">Overview & Delivery Model</a>
+  <a href="#constraints" class="lvl-3">Global Constraints</a>
+  <a href="#council-amendments" class="lvl-3">Council Amendments (R1–R5)</a>
+  <a href="#task-map" class="lvl-3">Task Map</a>
+  <a href="#task-1">Task 1: LlmTimeoutError — Distinct timeout signal at the adapter boundary</a>
+  <a href="#task-1-files" class="lvl-3">Files</a>
+  <a href="#task-1-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-1-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-2">Task 2: EXTRACT_ERR_TIMEOUT — Timeout counts toward the per-slice cap</a>
+  <a href="#task-2-files" class="lvl-3">Files</a>
+  <a href="#task-2-semantics" class="lvl-3">Semantics</a>
+  <a href="#task-2-implementation" class="lvl-3">Implementation Overview</a>
+  <a href="#task-2-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-3">Task 3: Always-on Ingest worker — Observer/reconcile become optional producers</a>
+  <a href="#task-3-files" class="lvl-3">Files</a>
+  <a href="#task-3-invariants" class="lvl-3">Key Invariants</a>
+  <a href="#task-3-implementation" class="lvl-3">Implementation Overview</a>
+  <a href="#task-3-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-4">Task 4: POST /ingest/nudge — 202, feeds the worker</a>
+  <a href="#task-4-files" class="lvl-3">Files</a>
+  <a href="#task-4-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-4-semantics" class="lvl-3">Semantics</a>
+  <a href="#task-4-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-5">Task 5: Hook becomes a pure nudge — client cursor machinery deleted</a>
+  <a href="#task-5-files" class="lvl-3">Files</a>
+  <a href="#task-5-outbox" class="lvl-3">Nudge Outbox (council R6)</a>
+  <a href="#task-5-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-7">Task 7: Bounded shutdown — cancel live claude -p extractions on stop</a>
+  <a href="#task-7-files" class="lvl-3">Files</a>
+  <a href="#task-7-semantics" class="lvl-3">Semantics</a>
+  <a href="#task-7-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-6">Task 6: Verification, provenance split, branch/PR handoff</a>
+  <a href="#task-6-files" class="lvl-3">Files</a>
+  <a href="#task-6-steps" class="lvl-3">Verification Steps</a>
+  <a href="#task-6-rollout" class="lvl-3">Beta Rollout (after merge)</a>
+  <a href="#key-anchors-heading">Key Code Anchors</a>
+</nav>
+<main>
+<article class="doc">
+<header>
+  <h1><em>ADR-0004 Async Ingest</em> Implementation Plan</h1>
+  <p class="eyebrow">Nudge + Server Cursor • Beta-first delivery on local-main</p>
+  <p class="meta">Execution order: 1 → 2 → 3 → 4 → 5 → 7 → 6</p>
+</header>
+
+<section id="overview">
+  <h2 id="overview-delivery">Overview & Delivery Model</h2>
+  <p>
+    <strong>Goal:</strong> Implement ADR-0004: the hook becomes a <em>pure nudge</em> (<code>POST /ingest/nudge</code> → 202),
+    the server owns the single ingest cursor (the watcher's <code>.session_watcher_state</code>) and advances it on job completion,
+    the watcher's handler becomes an <em>always-on Ingest worker</em>, and an extraction timeout stops re-burning quota
+    without ever quarantining data a provider outage merely delayed.
+  </p>
+
+  <div class="callout">
+    <strong>Beta-first delivery (council R5, decisive):</strong> Two independently verified facts kill the "branch from
+    <code>upstream/main</code> and cherry-pick" recipe: (1) No ingest-provider seam upstream —
+    <code>llm_client.py</code> there exposes only <code>llm_generate</code> and <code>memory_engine</code> calls it
+    directly; (2) The watcher upstream is ~222 lines behind (1203 vs 1425 local) with none of the primitives
+    Tasks 3/7 build on. Every task targets the Beta (<code>local-main</code>) in a worktree.
+  </div>
+
+  <h3 id="constraints">Global Constraints</h3>
+  <ul>
+    <li><strong>Never checkout a branch in <code>Tools/ormah</code></strong> — it is the live Beta (whisper hooks break). All work in a git worktree.</li>
+    <li><strong>Sequencing:</strong> PR #153 edits <code>cmd_whisper_store</code>, which Task 5 largely deletes. Merged at 66405d9; later upstream sync may conflict there.</li>
+    <li><strong>Out of scope:</strong> worker concurrency (issue #150), durable job table, any whisper-inject behavior.</li>
+    <li><strong>⚠️ Test env caveat:</strong> <code>tests/test_setup*.py</code> can touch the real <code>~/.claude</code> — verify survival by parsing JSON, never <code>grep -i ormah</code>.</li>
+    <li><strong>⚠️ Throwaway server:</strong> MUST set <code>ORMAH_MEMORY_DIR</code> — a wrong key is silently dropped and the process opens the live store.</li>
+    <li><strong>Timeout knob:</strong> extraction budget is the existing <code>claude_cli_timeout_seconds</code> (config.py:66, .env-overridable).</li>
+  </ul>
+
+  <h3 id="council-amendments">Council Amendments (R1–R5)</h3>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 6%">(a)</th>
+        <th>Error seam</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td colspan="2"><code>src/ormah/background/llm_errors.py</code> holds <code>LlmTimeoutError</code> and <code>LlmCancelledError</code>; its only raiser is the fork-only <code>claude_cli</code> adapter.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 6%">(b)</th>
+        <th>Timeout never quarantines on lateness alone</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td colspan="2">A timeout counts toward the per-slice cap only when both hold: provider-health evidence (another slice succeeded since this slice's previous timeout) AND the slice has already been shrunk to the floor. A big-but-valid slice gets smaller until it fits instead of being dropped; an outage never consumes the cap.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 6%">(c)</th>
+        <th>Cancellation is not a timeout</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td colspan="2">Shutdown cancel raises <code>LlmCancelledError</code> → <code>EXTRACT_ERR_CALL_FAILED</code> → uncapped TRANSIENT, so restarts can never quarantine a healthy slice. The engine catches it BEFORE any broad handler.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 6%">(d)</th>
+        <th>Reconcile scope depends on the enabled flag</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td colspan="2">Periodic reconcile runs for EVERY install, but its SCOPE depends on the flag. Flag ON → discovers never-seen files within the lookback AND resumes any cursor not at EOF. Flag OFF → recovery-only: processes ONLY transcripts that already have a state entry (a cursor behind EOF, or a <code>boundary_pending</code> nudge the user's own hook sent).</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 6%">(e)</th>
+        <th>Configured-but-absent watch dirs still yield a handler</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td colspan="2">Session_watcher_dir points at a path that does not exist yet. Start_session_watcher must still return one SessionWatch (root created, handler live) so a later nudge for a transcript under it is accepted. The hook keeps its legacy cursor until it sees a 202.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 6%">(g)</th>
+        <th>A nudge carries session-boundary semantics</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td colspan="2">The endpoint persists a pending marker BEFORE answering 202 (so a crash is recoverable) and forces a flush past the idle/min-turn gates.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 id="task-map">Task Map</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>File</th>
+        <th>Delivers</th>
+        <th>Depends on</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>1</strong></td>
+        <td><code>01-timeout-signal.md</code></td>
+        <td><code>LlmTimeoutError</code> / <code>LlmCancelledError</code> seam; claude_cli raises on timeout</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><strong>2</strong></td>
+        <td><code>02-timeout-classification.md</code></td>
+        <td><code>EXTRACT_ERR_TIMEOUT</code>; shrink-then-cap with health gate</td>
+        <td>1</td>
+      </tr>
+      <tr>
+        <td><strong>3</strong></td>
+        <td><code>03-always-on-worker.md</code></td>
+        <td>Handler + startup drain always on; Observer optional; one <code>app.state</code> attribute</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><strong>4</strong></td>
+        <td><code>04-nudge-endpoint.md</code></td>
+        <td><code>POST /ingest/nudge {path}</code> → 202 with durable pending marker + boundary flush</td>
+        <td>3</td>
+      </tr>
+      <tr>
+        <td><strong>5</strong></td>
+        <td><code>05-hook-pure-nudge.md</code></td>
+        <td><code>cmd_whisper_store</code> = nudge only; client cursor retired safely</td>
+        <td>4</td>
+      </tr>
+      <tr style="background: #f9f6f2;">
+        <td><strong>7</strong></td>
+        <td><code>07-shutdown-cancellation.md</code></td>
+        <td>Bounded shutdown: cancel live extractions before every join</td>
+        <td>1, 3</td>
+      </tr>
+      <tr>
+        <td><strong>6</strong></td>
+        <td><code>06-verification-and-integration.md</code></td>
+        <td>Suite green, isolated smoke, Beta merge, upstream gap list</td>
+        <td>all</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="meta"><em>Execution order differs from numbering: Task 7 runs BEFORE Task 6.</em></p>
+</section>
+
+<section id="task-1-timeout-signal">
+  <h2 id="task-1">Task 1: LlmTimeoutError — Distinct timeout signal at the adapter boundary</h2>
+
+  <p class="statement">
+    Create a shared error module that raises a distinct timeout signal when <code>claude -p</code> exceeds its budget,
+    separate from provider-wide call failures.
+  </p>
+
+  <h3 id="task-1-files">Files</h3>
+  <ul>
+    <li><strong>Create:</strong> <code>src/ormah/background/llm_errors.py</code></li>
+    <li><strong>Modify:</strong> <code>src/ormah/background/llm/claude_cli_adapter.py:141-143</code></li>
+    <li><strong>Modify:</strong> <code>src/ormah/background/llm_client.py:119-140</code></li>
+    <li><strong>Test:</strong> <code>tests/test_background/test_claude_cli_adapter.py</code></li>
+  </ul>
+
+  <h3 id="task-1-interfaces">Interfaces</h3>
+  <dl>
+    <dt>Produces:</dt>
+    <dd>
+      <code>ormah.background.llm_errors.LlmTimeoutError(Exception)</code> — raised by <code>ClaudeCliAdapter.generate()</code>
+      on <code>subprocess.TimeoutExpired</code>.
+    </dd>
+    <dd>
+      <code>LlmCancelledError(Exception)</code> — raised only by Task 7's shutdown cancellation; defined here so the seam
+      ships complete in one upstream file.
+    </dd>
+    <dd>
+      <code>ingest_llm_generate()</code> PROPAGATES it (Task 2 catches it in the engine); <code>llm_generate()</code>
+      (maintenance path) swallows it and returns <code>None</code> (unchanged behavior for the 5 maintenance consumers).
+    </dd>
+  </dl>
+
+  <h3 id="task-1-steps">Implementation Steps</h3>
+  <ol>
+    <li>Write the failing tests (test_raises_llm_timeout_error_on_timeout + test_llm_generate_swallows_timeout)</li>
+    <li>Run tests to verify they fail (expect ModuleNotFoundError)</li>
+    <li>Create <code>llm_errors.py</code> with <code>LlmTimeoutError</code> and <code>LlmCancelledError</code> exception classes</li>
+    <li>Update <code>claude_cli_adapter.py</code> to raise <code>LlmTimeoutError</code> on subprocess.TimeoutExpired</li>
+    <li>Wrap adapter call in <code>llm_generate</code> with try/except to swallow timeout (maintenance path only)</li>
+    <li>Run tests to verify they pass</li>
+    <li>Lint and commit</li>
+  </ol>
+</section>
+
+<section id="task-2-timeout-classification">
+  <h2 id="task-2">Task 2: EXTRACT_ERR_TIMEOUT — Timeout counts toward the per-slice cap</h2>
+
+  <p class="statement">
+    Implement health-gated timeout classification with shrink-before-quarantine logic. A timeout counts toward
+    <code>MAX_EXTRACT_FAILURES</code> ONLY when provider-health evidence exists (another slice succeeded since this
+    slice's previous timeout). Before quarantine, halve the slice size until reaching the floor.
+  </p>
+
+  <h3 id="task-2-files">Files</h3>
+  <ul>
+    <li><strong>Modify:</strong> <code>src/ormah/engine/memory_engine.py</code> (constants ~L54-61; <code>_extract_memories_llm</code> L2842-2886)</li>
+    <li><strong>Modify:</strong> <code>src/ormah/background/session_watcher.py:942-954</code> (classification)</li>
+    <li><strong>Test:</strong> <code>tests/test_background/test_session_watcher.py</code></li>
+  </ul>
+
+  <h3 id="task-2-semantics">Semantics</h3>
+  <p>
+    <strong>Health gate (council R1):</strong> A timeout MAY be evidence about the slice — but provider congestion
+    times out every slice. A timeout counts toward <code>MAX_EXTRACT_FAILURES</code> ONLY with provider-health evidence:
+    <em>some slice extracted successfully since THIS slice's previous timeout</em> (proves the provider was healthy while
+    this slice kept failing). Without that evidence → uncapped TRANSIENT.
+  </p>
+
+  <p>
+    <strong>Shrink before quarantine (council R4):</strong> Health evidence proves the provider works; it does NOT prove
+    the slice is corrupt. A big-but-valid slice can time out while smaller ones succeed. A bracketed timeout first HALVES
+    the slice before counting toward the cap. Deriving the floor with <code>min(MIN_SLICE_BYTES, flush_bytes)</code> matters:
+    a configured <code>flush_bytes=1000</code> must never be RAISED to a 4000 constant.
+  </p>
+
+  <h3 id="task-2-implementation">Implementation Overview</h3>
+  <ul>
+    <li>Module-level monotonic success marker <code>_LAST_EXTRACT_OK: float</code>, set at the end of every successful <code>_ingest_session</code></li>
+    <li>Per-slice state field <code>extract_fail_at</code> (monotonic timestamp), persisted next to <code>extract_fail_offset</code></li>
+    <li>Atomicity (council R2): decision AND state write happen in ONE locked mutation</li>
+    <li>Add constant <code>EXTRACT_ERR_TIMEOUT</code> in <code>memory_engine.py</code></li>
+    <li>New helper <code>_mark_slice_timeout()</code> to merge <code>extract_fail_at</code> + optional <code>extract_shrink_level</code></li>
+    <li>Parse call uses <code>max_bytes = max(floor, flush_bytes >> shrink_level)</code></li>
+    <li>On success, clear <code>extract_fail_at</code>, <code>extract_shrink_level</code>, and counters</li>
+  </ul>
+
+  <h3 id="task-2-steps">Implementation Steps</h3>
+  <ol>
+    <li>Write 6 comprehensive test cases covering outage scenario, cancellation, big-slice shrink, floor quarantine, one-success atomicity, and regression guard</li>
+    <li>Run tests to verify they fail</li>
+    <li>Add <code>EXTRACT_ERR_TIMEOUT</code> constant to engine</li>
+    <li>Wrap <code>ingest_llm_generate</code> call to catch <code>LlmTimeoutError</code> and return <code>EXTRACT_ERR_TIMEOUT</code></li>
+    <li>Implement timeout classification in watcher with health gate, shrink levels, and floor detection</li>
+    <li>Add module-level and per-slice tracking fields</li>
+    <li>Run tests to verify they pass</li>
+    <li>Lint and commit</li>
+  </ol>
+</section>
+
+<section id="task-3-always-on-worker">
+  <h2 id="task-3">Task 3: Always-on Ingest worker — Observer/reconcile become optional producers</h2>
+
+  <p class="statement">
+    Make the ingest handler always-on regardless of the <code>session_watcher_enabled</code> flag. The Observer and
+    periodic reconciliation become optional producers. The handler and startup drain run for every install — enabling
+    the flag only adds filesystem watching and durable recovery sweeps.
+  </p>
+
+  <h3 id="task-3-files">Files</h3>
+  <ul>
+    <li><strong>Modify:</strong> <code>src/ormah/background/session_watcher.py:1279-1425</code> (SessionWatch, start/stop, reconcile)</li>
+    <li><strong>Modify:</strong> <code>src/ormah/main.py:244-253</code> (lifespan wiring) AND <code>main.py:282-283</code> (shutdown)</li>
+    <li><strong>Test:</strong> <code>tests/test_background/test_session_watcher.py</code>, <code>tests/test_main_lifespan_shutdown.py</code></li>
+  </ul>
+
+  <h3 id="task-3-invariants">Key Invariants</h3>
+  <ul>
+    <li><strong>One cursor:</strong> <code>&lt;watch_dir&gt;/.session_watcher_state</code> regardless of the enabled flag</li>
+    <li><strong>One in-flight guard:</strong> <code>SessionHandler._ingesting</code></li>
+    <li><strong>Startup drain:</strong> runs for EVERY install — it is the ADR's crash-recovery path</li>
+    <li><strong>Periodic reconcile scope:</strong> wired on ALL THREE call sites with the enabled flag (council R8 — a bare <code>discover=True</code> default silently re-opens the consent hole)</li>
+  </ul>
+
+  <h3 id="task-3-implementation">Implementation Overview</h3>
+  <ul>
+    <li><code>SessionWatch.observer: Observer | None</code> (was always an Observer)</li>
+    <li>Add helper <code>_configured_watch_roots(settings)</code> that returns configured roots WITHOUT the exists() filter</li>
+    <li>Always build handler + startup thread; wrap ONLY the Observer part in the enabled check</li>
+    <li>Create missing watch directories with <code>mkdir(parents=True, exist_ok=True)</code></li>
+    <li><code>SessionHandler</code> takes a <code>discover</code> parameter (passed from enabled flag)</li>
+    <li>Guard every observer touch in stop path with <code>if w.observer is not None</code></li>
+    <li>Lifespan stores result in <code>app.state.session_watches</code> (not session_watcher_observers)</li>
+    <li>Shutdown reads <code>app.state.session_watches</code> (migrate all references)</li>
+  </ul>
+
+  <h3 id="task-3-steps">Implementation Steps</h3>
+  <ol>
+    <li>Write 5 failing tests covering disabled watcher, enabled observer, disabled reconcile scope, absent dir creation, and observer skip in reconcile</li>
+    <li>Write lifespan shutdown test to ensure start/stop attribute names match</li>
+    <li>Run tests to verify they fail</li>
+    <li>Update SessionWatch dataclass with optional observer</li>
+    <li>Add <code>_configured_watch_roots()</code> helper and call it in <code>start_session_watcher</code></li>
+    <li>Build handler/startup unconditionally; wrap Observer in enabled check</li>
+    <li>Create watch directories and log warnings</li>
+    <li>Guard observer operations in stop path with None checks</li>
+    <li>Update lifespan to use <code>app.state.session_watches</code></li>
+    <li>Grep and migrate all references to session_watcher_observers</li>
+    <li>Run tests to verify they pass</li>
+    <li>Lint and commit</li>
+  </ol>
+</section>
+
+<section id="task-4-nudge-endpoint">
+  <h2 id="task-4">Task 4: POST /ingest/nudge — 202, feeds the worker</h2>
+
+  <p class="statement">
+    Add a fire-and-forget endpoint that enqueues a transcript for immediate ingest with session-boundary semantics.
+    The endpoint persists a durable pending marker and bypasses idle/min-turn gates, but respects the safe-boundary
+    parse and all cap/quarantine rules.
+  </p>
+
+  <h3 id="task-4-files">Files</h3>
+  <ul>
+    <li><strong>Modify:</strong> <code>src/ormah/api/routes_ingest.py</code></li>
+    <li><strong>Modify:</strong> <code>src/ormah/background/session_watcher.py</code> (SessionHandler.nudge)</li>
+    <li><strong>Test:</strong> <code>tests/test_api/test_routes_ingest.py</code></li>
+  </ul>
+
+  <h3 id="task-4-interfaces">Interfaces</h3>
+  <dl>
+    <dt>Consumes:</dt>
+    <dd><code>app.state.session_watches</code> and <code>SessionWatch</code>/<code>SessionHandler</code> from Task 3</dd>
+    <dt>Produces:</dt>
+    <dd>
+      <code>SessionHandler.nudge(path: Path)</code> — thread-safe enqueue with <strong>boundary semantics</strong>,
+      all DURABLE (council R5/R6): merges <code>{"boundary_pending": True}</code> into the transcript's state entry,
+      schedules ingest with <strong>zero debounce</strong>.
+    </dd>
+    <dd>
+      <code>POST /ingest/nudge</code> body <code>{"path": str, "session_id": str|null}</code> →
+      <code>202 {"status": "accepted"}</code>; <code>404</code> file missing; <code>422</code> path outside watch dirs.
+    </dd>
+  </dl>
+
+  <h3 id="task-4-semantics">Semantics</h3>
+  <p>
+    <strong>Durability (council R5/R6):</strong> The pending marker lives in the state file, so a crash, timeout, or
+    provider failure cannot lose the boundary intent. Every later attempt (retry, reconcile, startup drain) re-derives
+    <code>force_flush</code> from it.
+  </p>
+
+  <p>
+    <strong>Zero debounce (council R6):</strong> A SessionEnd nudge must not wait out the 60s debounce.
+    <code>nudge()</code> schedules immediately while keeping the in-flight guard so a concurrent Observer event still coalesces.
+  </p>
+
+  <p>
+    <strong>Safe-boundary parsing:</strong> <code>_ingest_session</code> reads <code>boundary_pending</code> from the
+    already-loaded entry and treats it as <code>force_flush</code>. It bypasses ONLY the idle-threshold and
+    <code>min_turns</code> gates. The safe-boundary rule (closed content only) and every cap/quarantine rule stay untouched.
+  </p>
+
+  <h3 id="task-4-steps">Implementation Steps</h3>
+  <ol>
+    <li>Write 4 API tests covering acceptance, path validation, 404 on missing file, and durability of pending marker with cursor preservation</li>
+    <li>Write 2 session_watcher tests for force_flush behavior and zero-debounce scheduling</li>
+    <li>Run tests to verify they fail</li>
+    <li>Implement <code>SessionHandler.nudge()</code> with atomic state merge and immediate scheduling</li>
+    <li>Add <code>force_flush</code> derivation in <code>_ingest_session</code></li>
+    <li>Apply force_flush to idle/min_turns gates and clear flag on success/no-progress</li>
+    <li>Implement <code>POST /ingest/nudge</code> endpoint with path validation and 202 response</li>
+    <li>Run tests to verify they pass</li>
+    <li>Lint and commit</li>
+  </ol>
+</section>
+
+<section id="task-5-hook-pure-nudge">
+  <h2 id="task-5">Task 5: Hook becomes a pure nudge — client cursor machinery deleted</h2>
+
+  <p class="statement">
+    Rewrite the hook to post to <code>/ingest/nudge</code> instead of parsing, checking min-turns, or managing cursors.
+    The server owns the cursor and does the extraction. On failure, queue the nudge in an outbox for later retry.
+  </p>
+
+  <h3 id="task-5-files">Files</h3>
+  <ul>
+    <li><strong>Modify:</strong> <code>src/ormah/adapters/cli_adapter.py</code> — rewrite <code>cmd_whisper_store</code></li>
+    <li><strong>Modify:</strong> <code>integrations/claude-plugin/hooks/hooks.json</code> — timeout 300 → 30</li>
+    <li><strong>Modify:</strong> <code>src/ormah/setup.py</code> — timeout change in <code>configure_claude_hooks</code></li>
+    <li><strong>Test:</strong> <code>tests/test_whisper/test_whisper_out.py</code>, <code>tests/test_setup.py</code></li>
+  </ul>
+
+  <h3 id="task-5-outbox">Nudge Outbox (council R6)</h3>
+  <p>
+    If the POST fails (server down, non-202), the hook appends the transcript path to <code>whisper-nudge-outbox.jsonl</code>
+    in the cache dir and exits 0. Every subsequent hook fire first drains that outbox (best-effort, oldest first, dropping
+    paths whose file no longer exists) before sending its own nudge.
+  </p>
+
+  <p>
+    <strong>Concurrency (council R7):</strong> PreCompact is an <code>async</code> hook and several sessions can fire at once.
+    Use append-only JSONL with <code>fcntl.flock</code> around every open: an append needs no read, and the drain takes an
+    exclusive lock, rewrites survivors to a temp file, and <code>os.replace</code>s it atomically.
+  </p>
+
+  <p>
+    <strong>Cap by age (council R7):</strong> Drop entries older than ~30 days or whose transcript no longer exists. This
+    keeps the hook dumb — no polling, no blocking, no timers — while making the boundary event survive an outage longer
+    than <code>session_watcher_lookback_hours</code>.
+  </p>
+
+  <h3 id="task-5-steps">Implementation Steps</h3>
+  <ol>
+    <li>Write 6 failing tests covering nudge post, server-down exit, outbox drain, missing transcript exit, and cursor retirement only on 202</li>
+    <li>Delete obsolete client-cursor tests (parse/min-turns/space inside hook covered server-side now)</li>
+    <li>Run tests to verify</li>
+    <li>Move nudge counters to own file; rename cursor loading/saving helpers</li>
+    <li>Rewrite <code>cmd_whisper_store</code> as pure nudge with outbox support</li>
+    <li>Implement <code>_queue_nudge()</code> and <code>_drain_nudge_outbox()</code> with fcntl locking</li>
+    <li>Delete old timeout and client functions; update inject-path call sites</li>
+    <li>Update hook manifests: PreCompact/SessionEnd timeout 300 → 30</li>
+    <li>Update setup.py and test assertions</li>
+    <li>Run tests to verify they pass</li>
+    <li>Lint and commit</li>
+  </ol>
+</section>
+
+<section id="task-7-shutdown-cancellation">
+  <h2 id="task-7">Task 7: Bounded shutdown — cancel live claude -p extractions on stop</h2>
+
+  <p class="statement">
+    With the worker always-on and a ~2400s extraction budget, every install could hang a restart for up to ~40 min
+    waiting on one <code>subprocess.run</code> that cannot see the stop event. Keep the drain uncapped, but make the
+    in-flight call FINISH FAST — cancel the live child process.
+  </p>
+
+  <h3 id="task-7-files">Files</h3>
+  <ul>
+    <li><strong>Modify:</strong> <code>src/ormah/background/llm/claude_cli_adapter.py</code> (fork-only: subprocess tracking + cancel)</li>
+    <li><strong>Modify:</strong> <code>src/ormah/background/llm_client.py</code> (upstream: generic cancel dispatcher)</li>
+    <li><strong>Modify:</strong> <code>src/ormah/background/session_watcher.py:1374-1395</code></li>
+    <li><strong>Test:</strong> <code>tests/test_background/test_claude_cli_adapter.py</code>, <code>tests/test_background/test_session_watcher.py</code></li>
+  </ul>
+
+  <h3 id="task-7-semantics">Semantics</h3>
+  <p>
+    <strong>Cancellation vs. timeout (council R2):</strong> A killed extraction returns a failure, the cursor does NOT
+    advance, and the startup drain re-ingests the slice on next boot. Cancellation raises <code>LlmCancelledError</code>
+    (NEVER <code>LlmTimeoutError</code>): a cancel says nothing about the slice; the engine maps it to
+    <code>EXTRACT_ERR_CALL_FAILED</code> → uncapped TRANSIENT, so restarts can never quarantine a healthy slice.
+  </p>
+
+  <p>
+    <strong>Instance-scoped state (council R6):</strong> The cancel event must be instance-scoped, not module-global.
+    The same process can run a second FastAPI lifespan; a stale cancel event would poison every later call. With instance
+    scoping, a rebuilt adapter starts clean and a surviving one is re-armed by <code>resume()</code>.
+  </p>
+
+  <p>
+    <strong>Shutdown order (council R4):</strong> Cancelling only just before the drain would still hang for the full
+    budget. Required order: set stop events → cancel pending timers → <strong>cancel active calls</strong> →
+    observer stop → join startup thread → drain handlers.
+  </p>
+
+  <h3 id="task-7-steps">Implementation Steps</h3>
+  <ol>
+    <li>Write 7 comprehensive tests covering termination, idle noop, semaphore abort, fast-fail handling, adapter re-arm, and shutdown ordering</li>
+    <li>Run tests to verify they fail</li>
+    <li>Migrate <code>subprocess.run</code> to <code>Popen</code> with tracking in claude_cli_adapter</li>
+    <li>Implement <code>cancel_active()</code> on adapter with SIGTERM → wait 5s → SIGKILL sequence</li>
+    <li>Make cancel event and process set instance-scoped</li>
+    <li>Add event checks before spawn and after semaphore acquire</li>
+    <li>Implement <code>resume()</code> to clear the cancel event for post-rollback re-use</li>
+    <li>Implement dispatcher <code>cancel_active_llm_calls()</code> and <code>resume_llm_adapters()</code> in llm_client</li>
+    <li>Call cancellation in correct shutdown order in session_watcher</li>
+    <li>Extract shutdown sequence into reusable helper for startup rollback path too</li>
+    <li>Migrate all <code>subprocess.run</code> patch sites to fake-Popen in tests</li>
+    <li>Run tests to verify they pass</li>
+    <li>Lint and commit</li>
+  </ol>
+</section>
+
+<section id="task-6-verification-integration">
+  <h2 id="task-6">Task 6: Verification, provenance split, branch/PR handoff</h2>
+
+  <p class="statement">
+    Run the full test suite and end-to-end smoke test with proper isolation. Merge into Beta
+    (<code>local-main</code>). Document the upstream gap list for a future separate contribution effort.
+  </p>
+
+  <h3 id="task-6-files">Files</h3>
+  <ul>
+    <li><strong>No new source files.</strong> Runs gates and routes commits per provenance.</li>
+  </ul>
+
+  <h3 id="task-6-steps">Verification Steps</h3>
+  <ol>
+    <li><strong>Full suite + lint:</strong> Run pytest and ruff; cite output tail in report</li>
+    <li><strong>End-to-end smoke:</strong> Isolate temp directories with ORMAH_MEMORY_DIR gate; start server; test 422 on invalid path, 202 on nudge; verify cursor advance in state file</li>
+    <li><strong>Merge to Beta:</strong> git merge worktree-branch into local-main; verify live Beta health with curl</li>
+    <li><strong>Record upstream gap list:</strong> Verify absence of <code>flush_bytes</code>, <code>stop_event</code>, <code>startup_thread</code>, <code>cancel_pending_timers</code>, <code>_drain_handlers</code>, <code>ingest_llm_generate</code>, <code>_cached_ingest_adapter</code> upstream</li>
+    <li><strong>Review:</strong> Run <code>/council-pr</code> on worktree before merging</li>
+    <li><strong>Close the loop:</strong> Update ADR status to "implemented"; record council amendments to the ADR text</li>
+  </ol>
+
+  <h3 id="task-6-rollout">Beta Rollout (after merge)</h3>
+  <ol>
+    <li>Size <code>ORMAH_CLAUDE_CLI_TIMEOUT_SECONDS</code> in <code>~/.config/ormah/.env</code> to ~2400s; restart server</li>
+    <li>Run <code>ormah setup</code> to rewrite hook manifests</li>
+    <li>First run after upgrade: server cursor may sit behind retired client cursor → one delta re-ingests once; dedup heals</li>
+  </ol>
+</section>
+
+<section id="key-anchors">
+  <h2 id="key-anchors-heading">Key Code Anchors</h2>
+  <p class="meta">Verified 2026-07-21 on local-main @ 66405d9</p>
+  <ul>
+    <li><strong>Hook handler:</strong> <code>src/ormah/adapters/cli_adapter.py</code> — <code>cmd_whisper_store</code> L423-519, cursor machinery L404-420</li>
+    <li><strong>Endpoint:</strong> <code>src/ormah/api/routes_ingest.py</code> (only <code>/conversation</code> L19, <code>/file</code> L52 exist)</li>
+    <li><strong>Worker:</strong> <code>src/ormah/background/session_watcher.py</code> — <code>_ingest_session</code> L728-995, classification L942-954, <code>SessionHandler</code> L1051, <code>start_session_watcher</code> L1299, <code>stop_session_watcher</code> L1374</li>
+    <li><strong>Adapter (fork-only):</strong> <code>src/ormah/background/llm/claude_cli_adapter.py</code> L104-172</li>
+    <li><strong>LLM boundary (Beta):</strong> <code>llm_client.py</code> — <code>ingest_llm_generate</code> L101, <code>llm_generate</code> L119</li>
+    <li><strong>Lifespan:</strong> <code>src/ormah/main.py</code> L186; watcher start L244-246, shutdown L282-283</li>
+    <li><strong>Config:</strong> <code>src/ormah/config.py</code> L66 (<code>claude_cli_timeout_seconds</code>), L92-103 (session_watcher_*)</li>
+  </ul>
+</section>
+
+</article>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:aa44dc0d89bb92bd436d99c3a909b728ec5cba20945707f9896803bc078a5abb -->

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Task 1 — Tooling and dependencies</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+.step-list{list-style:none;padding:0;margin:0}
+.step-list li{display:flex;align-items:baseline;gap:14px;padding:10px 0;border-bottom:1px solid var(--hairline)}
+.step-list li:last-child{border-bottom:none}
+.step-num{font:600 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.08em;color:var(--accent);flex-shrink:0;width:56px}
+.step-body{flex:1}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Task 1 of 8</div>
+  <p class="doc-title">Tooling and deps</p>
+  <a href="#files">Files changed</a>
+  <a href="#note">Keep cytoscape</a>
+  <a href="#steps">Steps</a>
+  <a href="#step-1" class="lvl-3">1 — install deps</a>
+  <a href="#step-2" class="lvl-3">2 — add test script</a>
+  <a href="#step-3" class="lvl-3">3 — vitest config</a>
+  <a href="#step-4" class="lvl-3">4 — sanity test</a>
+  <a href="#step-5" class="lvl-3">5 — delete sanity test</a>
+  <a href="#step-6" class="lvl-3">6 — verify build</a>
+  <a href="#step-7" class="lvl-3">7 — commit</a>
+  <hr style="border:none;border-top:1px solid var(--hairline);margin:18px 0">
+  <a href="00-overview.html">← Overview</a>
+  <a href="02-visual-helpers.html">Next: visual helpers →</a>
+</nav>
+
+<main>
+  <div class="eyebrow">Task 1 · Tooling &amp; dependencies</div>
+  <h2 style="margin-top:16px"><em>Add</em> sigma/graphology + vitest</h2>
+
+  <div class="progress">
+    <div class="bar"><div class="fill" style="width:0%"></div></div>
+    <div class="label">0 / 7 steps · <span class="schip todo">todo</span></div>
+  </div>
+
+  <h2 id="files"><em>Files</em> changed</h2>
+  <table>
+    <thead><tr><th>File</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><code>ui/package.json</code></td><td>Modify — add deps + test script</td></tr>
+      <tr><td><code>ui/vitest.config.ts</code></td><td>Create</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="note"><em>Note</em> — keep cytoscape for now</h2>
+  <div class="callout">
+    <span class="label">Important</span>
+    Keep <code>cytoscape*</code> installed for now — <code>GraphView.tsx</code> still imports it until <a href="06-graphview-rewrite.html">Task 6</a>. They are removed in <a href="08-cleanup-and-verify.html">Task 8</a>.
+  </div>
+
+  <h2 id="steps"><em>Steps</em></h2>
+
+  <h3 id="step-1">Step 1 — Install runtime + test dependencies</h3>
+  <p>Run from repo root:</p>
+  <pre><code>( cd ui && npm install sigma graphology graphology-layout graphology-layout-forceatlas2 )
+( cd ui && npm install -D vitest jsdom )</code></pre>
+  <p><strong>Expected:</strong> <code>package.json</code> gains <code>sigma</code>, <code>graphology</code>, <code>graphology-layout</code>, <code>graphology-layout-forceatlas2</code> under dependencies and <code>vitest</code>, <code>jsdom</code> under devDependencies.</p>
+
+  <h3 id="step-2">Step 2 — Add the test script</h3>
+  <p>Edit <code>ui/package.json</code> <code>"scripts"</code> to add a <code>test</code> entry (keep existing scripts):</p>
+  <pre><code>"scripts": {
+  "dev": "vite",
+  "build": "tsc && vite build",
+  "preview": "vite preview",
+  "test": "vitest run"
+},</code></pre>
+
+  <h3 id="step-3">Step 3 — Create the vitest config</h3>
+  <p>Create <code>ui/vitest.config.ts</code>:</p>
+  <pre><code>import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "jsdom",
+    include: ["src/**/*.test.ts"],
+  },
+});</code></pre>
+
+  <h3 id="step-4">Step 4 — Add a throwaway sanity test and verify the runner works</h3>
+  <p>Create <code>ui/src/graph/_sanity.test.ts</code>:</p>
+  <pre><code>import { describe, it, expect } from "vitest";
+
+describe("vitest", () => {
+  it("runs", () => {
+    expect(1 + 1).toBe(2);
+  });
+});</code></pre>
+  <p>Run: <code>( cd ui &amp;&amp; npm run test )</code><br>
+  <strong>Expected:</strong> PASS — 1 passed.</p>
+
+  <h3 id="step-5">Step 5 — Delete the sanity test</h3>
+  <pre><code>rm ui/src/graph/_sanity.test.ts</code></pre>
+
+  <h3 id="step-6">Step 6 — Verify the existing build still works</h3>
+  <p>Run: <code>( cd ui &amp;&amp; npm run build )</code><br>
+  <strong>Expected:</strong> build succeeds (cytoscape <code>GraphView</code> still compiles).</p>
+
+  <h3 id="step-7">Step 7 — Commit</h3>
+  <pre><code>git add ui/package.json ui/package-lock.json ui/vitest.config.ts
+git commit -m "build(ui): add sigma/graphology deps + vitest test runner"</code></pre>
+
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <span class="name">Task 1 — Tooling and dependencies</span>
+    <span class="role">Graph view WebGL sigma · 2026-06-17 · ormah</span>
+  </div>
+</main>
+
+</body>
+</html>
+<!-- rich-doc-src-sha256:400997be5a382d45bf950f07b9b299ba14faa5bcf53f8df2d8c6ba10000ae19d -->

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Task 7: Playwright visual test</title>
+  <style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;--orange:#d97757; --blue:#6a9bcc; --green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55; --lh-title:1.12; --maxw:1140px;}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:8px}
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;color:var(--stone)}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <div class="eyebrow">Task 7</div>
+    <h1 class="doc-title">Playwright <em>visual test</em></h1>
+    <a href="00-overview.html">← Overview</a>
+  </nav>
+  <main>
+    <a href="00-overview.html" class="backlink">← Overview</a>
+    <div class="eyebrow">Task 7</div>
+    <h2>Playwright <em>visual test</em> (Python)</h2>
+
+    <p>Proves the core spec claim: after the FA2 settle, the graph is an <strong>organic, non-grid topological layout</strong> in WebGL. Uses <strong>Python Playwright</strong> via the uv tool (per machine policy — never Node Playwright). Reads laid-out positions from a DEV-only debug handle on <code>window</code>.</p>
+
+    <div class="callout">
+      <span class="label">Council H2</span>
+      <p>The layout is <strong>pure organic FA2 (option A)</strong> — it separates by <em>topology</em> (edges), NOT by <code>space</code>. So the test must NOT assert per-space cluster separation (that would fail on a correct topological layout). It asserts: layout ran + spread, and the result is <strong>not a regular grid</strong> (the original losango defect). Per-space galaxies are deferred (option B); there is no space-separation success criterion.</p>
+    </div>
+
+    <h3>Files</h3>
+    <ul>
+      <li>Modify: <code>ui/src/components/GraphView.tsx</code> (add the DEV-only debug handle)</li>
+      <li>Create: <code>ui/playwright/test_graph_layout.py</code></li>
+      <li>Create: <code>ui/playwright/test_graph_drag.py</code></li>
+    </ul>
+
+    <h3>Step 1: Expose a read-only debug handle (DEV only)</h3>
+    <p>In the sigma mount effect (Task 6.1), right after <code>graphRef.current = graph;</code>, add a DEV-gated handle and remove it in the effect cleanup (Council L1 — never leak it into production):</p>
+    <pre><code>if (import.meta.env.DEV) {
+  (window as unknown as { __ormahGraph?: Graph }).__ormahGraph = graph;
+}
+// In cleanup:
+if (import.meta.env.DEV) {
+  delete (window as unknown as { __ormahGraph?: Graph }).__ormahGraph;
+}</code></pre>
+    <p>Also expose <code>__ormahSigma</code> (the renderer instance) for the drag test.</p>
+
+    <div class="callout">
+      <span class="label">Council A5</span>
+      <p>The visual tests read the DEV-only <code>window.__ormahGraph</code> handle, so they MUST run against the <strong>Vite dev server</strong> (<code>npm run dev</code>, port 5173), NOT the production build on :8787.</p>
+    </div>
+
+    <h3>Step 2: Write the visual test (organic, non-grid)</h3>
+    <p>Create <code>ui/playwright/test_graph_layout.py</code> that:
+    <ul>
+      <li>Launches Chromium and navigates to the dev server</li>
+      <li>Waits for canvas + 6 seconds for FA2 to settle</li>
+      <li>Reads node positions via <code>window.__ormahGraph</code> (x/y coordinates)</li>
+      <li>Computes nearest-neighbor distances for each point</li>
+      <li>Asserts: span is not degenerate, and nearest-neighbor coefficient of variation ≥ 0.25 (NOT a regular grid)</li>
+      <li>Takes a screenshot for visual inspection</li>
+      <li>Returns 0 (PASS) or 1 (FAIL)</li>
+    </ul></p>
+
+    <h3>Step 3: Write the drag test (Council M5)</h3>
+    <p>Create <code>ui/playwright/test_graph_drag.py</code> that:
+    <ul>
+      <li>Gets the first node's screen position and graph position</li>
+      <li>Drags it 180px right + 120px down</li>
+      <li>Checks it moved (delta &gt; 1.0)</li>
+      <li>Waits for reheat settle window</li>
+      <li>Asserts the position kept changing after release (reheat fired), not stuck</li>
+      <li>Returns 0 (PASS) or 1 (FAIL)</li>
+    </ul></p>
+
+    <h3>Step 4: Run the app (dev), then both tests</h3>
+    <pre><code>make dev   # backend :8787 + vite dev :5173
+uv run --with playwright python ui/playwright/test_graph_layout.py
+uv run --with playwright python ui/playwright/test_graph_drag.py</code></pre>
+    <p>Expected: layout test prints <code>PASS: organic layout …</code> with <code>nn_cov ≥ 0.25</code> (or INFO skip for tiny stores); drag test prints <code>PASS: node dragged and layout responded</code>. Inspect <code>/tmp/ormah_sigma_layout.png</code> — organic, no grid.</p>
+
+    <h3>Step 5: Commit</h3>
+    <pre><code>git add ui/src/components/GraphView.tsx ui/playwright/test_graph_layout.py ui/playwright/test_graph_drag.py
+git commit -m "test(ui): Playwright organic-layout (non-grid) + node-drag tests"</code></pre>
+
+    <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+    <div class="signature">
+      <div class="name">Task 7</div>
+      <div class="role">Graph WebGL Sigma Implementation</div>
+    </div>
+  </main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:c858f8c45cdf2b7cfa7cebd541c1c919115855f7cd8ac0ac4e31796c2f98f9f7 -->

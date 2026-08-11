@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cursor rewind loop fix — ormah #154</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">Cursor rewind loop fix — ormah #154</div>
+  <a href="#arquitetura">A arquitetura do fix</a>
+  <a href="#camada-1" class="lvl-3">Camada 1 — abandono explícito no _ingest_session</a>
+  <a href="#camada-2" class="lvl-3">Camada 2 — invariante monotônica no _commit_state</a>
+  <a href="#invariante" class="lvl-3">A invariante que torna o trade barato</a>
+  <a href="#constraints">Constraints globais</a>
+  <a href="#tasks">As três tasks</a>
+  <a href="#verificacao">Verificação final</a>
+  <a href="#rollout">Rollout corrigido</a>
+  <a href="#deferred">O que ficou de fora</a>
+  <a href="#revisao">Log de revisão</a>
+</nav>
+<main>
+<p class="eyebrow">ormah · issue #154 · plano v7</p>
+
+<h1>Cursor rewind loop <em>fix</em></h1>
+
+<p class="meta">Plano fatiado · overview + 3 tasks · 2026-07-30 · 6 rounds de council no plano, 2 rounds no PR</p>
+
+<p class="statement">Um cursor que andava para trás re-ingeriu o mesmo transcript <strong>5.342 vezes</strong> — cerca de 98% de todo o custo de LLM da ingestão.</p>
+
+<div class="metrics">
+  <div class="metric"><div class="big">5.342</div><div class="label">re-ingestões de um arquivo</div></div>
+  <div class="metric"><div class="big">2</div><div class="label">camadas independentes de fix</div></div>
+  <div class="metric"><div class="big">28</div><div class="label">steps TDD nas 3 tasks</div></div>
+  <div class="metric"><div class="big">0</div><div class="label">críticos no council-pr</div></div>
+</div>
+
+<div class="callout">
+  <p><strong>Status desta versão:</strong> o plano foi <strong>integralmente implementado</strong> no worktree
+  <code>ormah-wt-154</code>, branch <code>fix/154-cursor-rewind-loop</code>, 8 commits a partir de <code>fa5d044</code>.
+  Suíte completa verificada de forma independente: <strong>6 failed / 2054 passed</strong>, as 6 sendo a baseline
+  conhecida de <code>tests/test_setup.py</code>. Os checkboxes <code>- [ ]</code> dos arquivos de task permanecem
+  desmarcados porque os subagents trabalharam sobre briefs extraídos — não leia isso como trabalho pendente.</p>
+</div>
+
+<h2 id="arquitetura">A <em>arquitetura</em> do fix</h2>
+
+<p>Duas camadas independentes. Elas falham separadamente, de propósito: a primeira mata o gatilho, a
+segunda é um backstop estrutural para a classe inteira do bug.</p>
+
+<h3 id="camada-1">Camada 1 — abandono explícito no <code>_ingest_session</code></h3>
+
+<p><code>should_rewind</code> dispara quando um parse a partir do cursor guardado vê um órfão inicial
+<em>e</em> não faz progresso. A recuperação re-parseia do zero: uma <strong>probe sem cap</strong> decide se há algo
+recuperável, mas o <strong>drain com cap</strong> (<code>max_bytes=flush_bytes</code>) é o que era commitado. Quando o
+arquivo é maior que <code>flush_bytes</code>, o <code>safe_end_offset</code> do drain cai <em>abaixo</em> do cursor original —
+o commit move o cursor para trás, ticks posteriores sobem de volta, o órfão dispara de novo. Loop permanente.</p>
+
+<p>O gate de progresso só permite a recuperação quando a fatia do drain ultrapassa o cursor original.
+Caso contrário a cauda é <strong>abandonada explicitamente</strong>: o cursor avança, a faixa de bytes vai
+duravelmente para <code>skipped_slices</code> com <code>reason=orphan_above_cap</code>, e o job completa —
+zero chamadas de LLM.</p>
+
+<div class="callout warn">
+  <p><strong>Por que não um <code>NO_PROGRESS</code> simples.</strong> Council R1, ambos os peers, verificado em código:
+  <code>_run_job</code> converteria um <code>NO_PROGRESS</code> com cauda idle insegura num bump de cursor até o EOF
+  via <code>_idle_with_unsafe_tail</code>/<code>_mark_frozen_prefix_consumed</code> — o cursor avançaria por
+  <em>efeito colateral</em>, sem nenhum registro de perda. O abandono explícito troca um efeito colateral
+  invisível por uma decisão auditável.</p>
+</div>
+
+<h3 id="camada-2">Camada 2 — invariante monotônica no <code>_commit_state</code></h3>
+
+<p><code>end_offset</code> nunca pode decrescer, salvo quando o chamador passa <code>allow_rewind=True</code>.
+Três propriedades são carga estrutural, cada uma vinda de um round de council:</p>
+
+<table>
+  <thead><tr><th>Propriedade</th><th>Origem</th><th>O que quebraria sem ela</th></tr></thead>
+  <tbody>
+    <tr><td>compare-and-clamp <strong>dentro</strong> do <code>state_lock</code></td><td>R1, Codex</td><td>uma leitura stale fora do lock deixa dois writers intercalarem 200-depois-150 e persistirem a retração</td></tr>
+    <tr><td>clampa <strong>só</strong> o campo <code>end_offset</code>, nunca a entry</td><td>council-pr I1</td><td>descartar a entry perderia <code>extract_fail_count</code> e a trilha de quarentena</td></tr>
+    <tr><td>persist-then-publish</td><td>R2, Codex</td><td>um <code>_save_state</code> que falha deixaria o dict em memória reivindicando um cursor que o disco nunca recebeu</td></tr>
+  </tbody>
+</table>
+
+<p>O caminho de shrink (<code>prev_offset &gt; size</code>) é a <strong>única</strong> retração legítima — sem essa
+escotilha, o clamp congelaria o cursor acima do EOF e o <code>run_session_reconcile</code> tiraria o arquivo
+da varredura para sempre.</p>
+
+<h3 id="invariante">A invariante que torna o trade barato</h3>
+
+<p>Estabelecida na revisão final do branch, rastreando o <code>parser.py</code>:
+<code>_would_overshoot</code> exige um prefixo seguro não-vazio, então o cap de bytes <strong>nunca</strong> pode
+suprimir o <em>primeiro</em> fechamento. Logo, se existisse qualquer turno de usuário seguido de um assistant
+terminal acima do cursor, o parse já teria fechado ali e o <code>should_rewind</code> não poderia ter disparado.</p>
+
+<p class="statement">A faixa abandonada nunca pode conter um par user↔assistant completo — é exatamente a cauda da única resposta aberta. Por isso a perda real é ~1&nbsp;KB por looper, não uma conversa inteira.</p>
+
+<h2 id="constraints">Constraints <em>globais</em></h2>
+
+<table>
+  <thead><tr><th>Eixo</th><th>Regra</th></tr></thead>
+  <tbody>
+    <tr><td>Branch</td><td><code>fix/154-cursor-rewind-loop</code> cortado de <code>local-main</code>, <strong>não</strong> de <code>upstream/main</code> — o bloco probe/drain é Beta-only, pós-ADR-0003. Push para <code>fork</code>, nunca <code>upstream</code>.</td></tr>
+    <tr><td>Worktree</td><td><code>Tools/ormah</code> é o Beta VIVO — nunca <code>git checkout</code> lá. Todo o trabalho em <code>../ormah-wt-154</code>.</td></tr>
+    <tr><td>Testes</td><td><code>PYTHONPATH</code> fixado no <code>src</code> do worktree; sem isso o install editable resolve <code>ormah</code> para o clone principal e você testa a árvore errada.</td></tr>
+    <tr><td>Baseline</td><td>6 falhas pré-existentes em <code>tests/test_setup.py</code> — não perseguir. Nunca rodar contra o <code>~/.claude</code> real.</td></tr>
+    <tr><td>Estilo</td><td>ruff, line-length 100, <code>target-version=py311</code>. Comentários e commits em inglês.</td></tr>
+    <tr><td>Escopo</td><td>tocar só os arquivos listados em cada task. Sem mexer em <code>parser.py</code>, na lane de spool/drain, ou em <code>.env</code>/serviços.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="tasks">As três <em>tasks</em></h2>
+
+<div class="phase p-o"><span class="pn">1</span> Abandono explícito da recuperação above-cap</div>
+
+<p><strong>Arquivos:</strong> <code>src/ormah/background/session_watcher.py</code> (bloco de orphan-recovery dentro de
+<code>_ingest_session</code>) · <code>tests/test_background/test_session_watcher.py</code> (classe nova
+<code>TestAboveCapOrphanRecovery</code> + um helper de fixture no nível do módulo).</p>
+
+<p><strong>Produz:</strong> o helper <code>_write_orphan_tail_jsonl(path, pairs, pad)</code>, reusado verbatim pelos testes
+da <a href="#task-2">Task 2</a>, e a chave de estado <code>skipped_slices[].reason == "orphan_above_cap"</code> — a
+trilha durável que o backfill diferido vai consumir.</p>
+
+<p>Onze steps, TDD: helper de fixture → teste de loop que nasce vermelho (a monotonicidade quebra num
+ciclo de período 7) → teste-guarda de arquivo pequeno (o one-shot documentado do #154 precisa sobreviver)
+→ implementação → teste no nível do worker, pelo caminho real spool → <code>_run_job</code> → teste de
+composição com cauda unclosed → módulo inteiro → commit.</p>
+
+<details>
+  <summary>Três constraints estruturais da implementação (council R2/R3)</summary>
+  <ul>
+    <li>O alvo do abandono é o <code>safe_end_offset</code> da probe — fronteira de turno FECHADO, alinhada a
+    linha, respeitando o teto do <code>stop_offset</code>. Nem <code>min(size, boundary)</code> cru (pode bissectar um
+    record escrito em voo) nem o <code>end_offset</code> da probe (o <code>f.tell()</code> pode ultrapassar o teto num
+    record que atravessa a fronteira, e avança sobre JSON malformado no fim).</li>
+    <li>O <strong>commit</strong> tem de viver FORA do <code>try</code> largo de parse: o <code>except Exception</code> dele
+    retorna <code>NO_PROGRESS</code>, então um <code>OSError</code> do <code>_save_state</code> se disfarçaria de falha de parse e
+    rotearia um transcript válido para o tratamento de frozen-prefix/dead-letter. Dentro do <code>try</code>, só DECIDE.</li>
+    <li>Bytes acima do <code>safe_end_offset</code> ficam não-consumidos de propósito — são a classe
+    in-flight-forever que o ADR-0003 já se recusa a ingerir.</li>
+  </ul>
+</details>
+
+<div class="phase p-b"><span class="pn">2</span> Backstop monotônico no <code>_commit_state</code></div>
+
+<p id="task-2"><strong>Arquivos:</strong> <code>session_watcher.py</code> (<code>_commit_state</code>, flag de shrink, keying da
+falha, três call-sites) · <code>test_session_watcher.py</code> (estende a classe da Task 1 + uma classe
+unitária <code>TestCommitStateMonotonic</code>).</p>
+
+<p><strong>Produz:</strong> <code>_commit_state(..., *, allow_rewind: bool = False)</code> — o keyword é o seam que o
+backfill do ADR-0004 vai usar.</p>
+
+<p>A auditoria de 2026-07-30 encontrou que <strong>3 dos 4</strong> call-sites do <code>_commit_state</code> podiam
+escrever um <code>end_offset</code> menor que o guardado: o caminho de rewind zera o <code>prev_offset</code>, então o
+caminho de falha de extração literalmente commitava <code>end_offset=0</code>, e os caminhos de quarentena e
+happy path comparavam contra 0 em vez de contra o cursor guardado. A Task 1 remove o gatilho do loop;
+esta task faz a camada de estado <strong>rejeitar a classe inteira</strong>.</p>
+
+<details>
+  <summary>Duas revisões do council R1 incorporadas</summary>
+  <ul>
+    <li><em>(Codex)</em> O compare-and-clamp tem de viver DENTRO da seção crítica do <code>state_lock</code>. Writers
+    cross-<strong>processo</strong> continuam desprotegidos — <code>threading.Lock</code> não atravessa processos. É a
+    limitação #150-class pré-existente, documentada na docstring, fora de escopo aqui.</li>
+    <li><em>(Cursor)</em> O contador de falhas tem de ser chaveado no cursor durável pré-rewind, não no
+    <code>prev_offset</code> zerado transitório — senão uma entry clampada carrega <code>end_offset=orphan_start</code>
+    com <code>extract_fail_offset=0</code>, um par inconsistente. Um local <code>fail_key_offset</code> conserta o check
+    e a escrita.</li>
+  </ul>
+</details>
+
+<div class="phase p-g"><span class="pn">3</span> Guard de startup do servidor</div>
+
+<p><strong>Arquivos:</strong> <code>src/ormah/config.py</code> (função nova <code>validate_llm_runtime_config</code>) ·
+<code>src/ormah/main.py</code> (chamada no startup) · <code>tests/test_config.py</code>.</p>
+
+<p><code>ORMAH_LLM_PROVIDER=ollama</code> sem <code>ORMAH_LLM_MODEL</code> manda silenciosamente o id de modelo
+default da Anthropic para o Ollama. Todo job de manutenção — auto_linker, duplicate_merger,
+conflict_detector, consolidator, juiz de feedback — leva um 404 por chamada, para sempre, com apenas um
+WARNING por chamada. Essa combinação exata manteve o pipeline de manutenção inteiro morto
+(143 × 404 só em 2026-07-30).</p>
+
+<div class="callout warn">
+  <p><strong>Deliberadamente NÃO é um <code>model_validator</code> do pydantic</strong> (council C2, codex — supersede a
+  abordagem dos rounds R3/C1). O <code>config.py</code> constrói um singleton global <code>Settings()</code> ansioso no
+  import, e o <code>ormah setup</code> importa através dele — um model validator lançaria <code>ValidationError</code>
+  justamente para os usuários que carregam o par legado ruim, <strong>bloqueando o próprio caminho de reparo
+  deles</strong> (o <code>ormah setup --update</code> roda sob o <code>set -e</code> do instalador, então upgrades também
+  abortariam). Um guard de startup do servidor dá o mesmo fail-fast onde importa.</p>
+</div>
+
+<p>Council C3 (cursor) achou o seam errado no v6: o Beta sobe via <code>ormah server start</code> →
+<code>uvicorn.run("ormah.main:app")</code> e <strong>nunca</strong> executa o bloco <code>__main__</code> do
+<code>main.py</code> — um guard ali passaria no smoke e não protegeria nada. A chamada vive no caminho de
+import do app, no <code>lifespan()</code>.</p>
+
+<h2 id="verificacao">Verificação <em>final</em></h2>
+
+<ol>
+  <li>Suíte completa a partir do worktree, com o <code>PYTHONPATH</code> fixado — verde exceto as 6 falhas
+  conhecidas de <code>test_setup.py</code>.</li>
+  <li>O gate de regressão autoritativo é o teste pytest <code>TestAboveCapOrphanRecovery</code>, que dirige o
+  <code>_ingest_session</code> REAL. Council R3: o <code>repro_rewind_loop.py</code> do scratchpad replica o fluxo de
+  controle PRÉ-fix e vai continuar reportando retrações independentemente do fix — serve só como
+  diagnóstico pré-fix, nunca como gate de verificação.</li>
+  <li><code>ruff check src/ tests/</code>. <strong>Nota pós-implementação:</strong> este critério é inatingível como
+  escrito — 4 erros já existiam no clone principal intocado no ponto de corte. O gate real é
+  "nenhum erro NOVO".</li>
+</ol>
+
+<h2 id="rollout">Rollout <em>corrigido</em></h2>
+
+<div class="callout warn">
+  <p>Os números de aceitação originais estavam <strong>errados</strong> e foram corrigidos pós-implementação.
+  O plano previa cursor no EOF (175919); o alvo do abandono é o <code>safe_end_offset</code> da probe, medido
+  em <strong>175795</strong> na investigação. Quem verificasse o rollout contra o texto antigo concluiria que falhou.</p>
+</div>
+
+<p>Precisa de autorização na hora — toca o Beta vivo.</p>
+
+<ol>
+  <li>Merge em <code>local-main</code> via <code>/council-pr</code>, sem squash (convenção do repo).</li>
+  <li>Subir o serviço — ele está <strong>BOOTED OUT</strong> (council C2: <code>kickstart</code> não inicia um serviço
+  ausente); usar o guard bootstrap-if-absent. Health por <code>GET /admin/health</code>, nunca <code>/health</code>.</li>
+  <li>Comportamento esperado: o cursor do F2 (congelado em 86732) sobe até 174707, então a recuperação
+  ABANDONA explicitamente — entry <code>[174707, 175795)</code> = <strong>1088 bytes</strong>, cursor em
+  <strong>175795</strong>, uma linha de ERROR. Os <strong>124 bytes</strong> residuais seguem o caminho padrão
+  pré-existente e geram <strong>um dead-letter <code>no_safe_boundary</code> novo</strong> — esperado, não falha.</li>
+  <li>Verificar pelo <strong>state file</strong>, não só pelo log: o <code>grep -c 'recovering legacy'</code> platear é
+  necessário mas não suficiente. Ler o <code>.session_watcher_state</code> e o diretório <code>failed/</code> do spool.</li>
+  <li>Se o servidor entrar em crash-loop com <code>Application startup failed</code> + <code>ValueError</code> sobre
+  <code>llm_model</code>: é o guard da Task 3 funcionando, não o branch quebrando o servidor.</li>
+</ol>
+
+<h2 id="deferred">O que ficou de <em>fora</em></h2>
+
+<table>
+  <thead><tr><th>Item</th><th>Por quê</th></tr></thead>
+  <tbody>
+    <tr><td>Bypass de <code>min_turns</code> em idle (99,5% de fatias de um turno)</td><td>o sintoma era em boa parte causado pelo loop — re-medir depois deste fix antes de desenhar qualquer coisa</td></tr>
+    <tr><td>Recuperação das caudas abandonadas</td><td>pertence ao item de backfill da trilha ADR-0004 slice 3 — lê os registros <code>skipped_slices</code> que este plano escreve e usa <code>allow_rewind=True</code> como seam de commit</td></tr>
+    <tr><td><code>OLLAMA_NUM_PARALLEL</code> no plist</td><td>mata a fila do <code>-np 1</code>; é mudança de ops, não de código</td></tr>
+    <tr><td>Atualizar a caracterização da issue #154 upstream</td><td>"não é um loop" só vale abaixo do <code>flush_bytes</code>; comentário rascunhado na investigação</td></tr>
+    <tr><td>Coluna de proveniência nó→transcript</td><td>teria tornado seguro o cleanup dos 489 nós; candidata a issue upstream</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <p><strong>Contrato que o backfill precisa honrar</strong> (revisão final): o bloco abandonado é, por definição,
+  não-parseável a partir do próprio <code>start</code> — é a cauda de uma resposta ainda aberta. Então o backfill
+  tem de re-parsear <strong>a partir do offset 0</strong> para reemparelhá-lo com seu prompt, e tem de verificar o
+  <code>source_hash</code> do registro contra o arquivo atual antes de replicar qualquer coisa. Um reset de shrink
+  pode deixar <code>skipped_slices</code> descrevendo um arquivo que não existe mais; o hash por registro é o
+  discriminador de carga, não decoração.</p>
+</div>
+
+<h2 id="revisao">Log de <em>revisão</em></h2>
+
+<p>Seis rounds de peer council adversarial sobre o plano, antes de uma linha de código. Várias decisões
+que parecem estranhas isoladamente são consequência de uma alternativa rejeitada.</p>
+
+<table>
+  <thead><tr><th>Round</th><th>Veredito</th><th>O que mudou</th></tr></thead>
+  <tbody>
+    <tr><td><strong>C3</strong> (final)</td><td>ambos <code>needs-attention</code>, 3 achados aceitos → v7</td><td>o seam do guard não passava por produção (o bloco <code>__main__</code> nunca roda) → movido para o caminho de import do app; um <code>llm_model</code> VAZIO escapava do <code>startswith("claude-")</code> → agora rejeita vazio/whitespace; <code>ORMAH_CONFIG_DIR</code> não existe → isolamento por <code>HOME</code> descartável</td></tr>
+    <tr><td><strong>C2</strong></td><td>cursor <code>approve</code>, codex 3× HIGH — 4 aceitos</td><td>o <code>skipped_slices.start</code> da quarentena usava o <code>prev_offset</code> zerado, gravando <code>[0, payload)</code> e fazendo o backfill replicar história já ingerida → chaveado em <code>fail_key_offset</code>; um rewrite encolhido SEM fronteira fechada encalhava o cursor acima do EOF para sempre → reset agora PERSISTIDO na detecção; o validator pydantic brickaria o <code>ormah setup</code> → redesenhado como guard de startup</td></tr>
+    <tr><td><strong>C1</strong></td><td>ambos <code>needs-attention</code></td><td>a lista de linhas da Task 3 sub-enumerava as construções <code>Settings(llm_provider="ollama")</code>; a cauda residual sob <code>probe_safe_end &lt; boundary</code> segue o caminho frozen-prefix pré-existente — agora dito explicitamente e PINADO por um teste de composição</td></tr>
+    <tr><td><strong>R3</strong></td><td>só codex, 5 achados aceitos</td><td>o <code>end_offset</code> da probe podia ultrapassar o <code>stop_offset</code> → alvo passou a ser o <code>safe_end_offset</code>; o commit do abandono estava dentro do <code>try</code> de parse → DECIDE dentro, COMMITA fora; o repro do scratchpad removido como gate de verificação</td></tr>
+    <tr><td><strong>R2</strong></td><td>cursor <code>approve</code>, codex 3× HIGH</td><td>alvo cru <code>min(size, boundary)</code> podia cair DENTRO de um record → alvo alinhado a linha; <code>_commit_state</code> publicava antes de persistir → persist-then-publish; <strong>rebatido:</strong> "stale writer apaga metadata mais novo" exige dois writers concorrentes no mesmo path, que o <code>_ingesting_guard</code> serializa in-process</td></tr>
+    <tr><td><strong>R1</strong></td><td>ambos <code>needs-attention</code></td><td>um <code>NO_PROGRESS</code> "nu" é convertido pelo <code>_run_job</code> em bump até EOF + dead-letter, sem registro de perda → abandono EXPLÍCITO; o compare-and-write monotônico corria fora do <code>state_lock</code> → movido para dentro</td></tr>
+  </tbody>
+</table>
+
+<p class="meta">O v7 não tem aprovação formal de peer no plano (cap de rounds atingido; o Cursor aprovou o v2 e o v5).
+Os três achados finais eram de fiação da Task 3 e foram sinalizados para o <code>/council-pr</code>
+verificar em código real — o que aconteceu: o wiring do <code>lifespan()</code> está agora fixado por teste.</p>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:79c04fee007697684b31261d9155b7d8cb93c202e38f0ef5e8124c7810718ae3 -->

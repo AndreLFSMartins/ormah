@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0004 Slice 2 — Bounded shutdown with in-flight cancellation</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">ADR-0004 Slice 2 — Bounded shutdown with in-flight cancellation</div>
+  <a href="#goal-and-scope">Goal: Bounded shutdown with in-flight cancellation</a>
+  <a href="#prerequisites-and-constraints">Prerequisites and global constraints</a>
+  <a href="#design-decisions">Design decisions (council review findings)</a>
+  <a href="#key-anchors">Key anchors (verified 2026-07-21 on local-main @ 66405d9)</a>
+  <a href="#task-map">Task map</a>
+  <a href="#task-1-error-seam">Task 1: The error seam — LlmCancelledError and LlmTimeoutError</a>
+  <a href="#task-2-bounded-shutdown">Task 2: Bounded shutdown — cancel live claude -p extractions</a>
+  <a href="#task-3-verification">Task 3: Verification and Beta merge</a>
+  <a href="#rollout-note">Rollout verification</a>
+  <a href="#slice-3-note">What comes next</a>
+</nav>
+<main>
+<div class="callout">
+  <strong>Prerequisite:</strong> Slice 1 (<code>../2026-07-21-adr-0004-slice1-nudge-core/</code>) must be merged first. This slice exists because of it. If slice 1 slipped, this one is optional — the unbounded wait then only affects watcher-enabled installs. Slice 3 builds on the error module this slice creates but does not otherwise depend on it.
+</div>
+
+<section>
+  <h2 id="goal-and-scope"><em>Goal:</em> Bounded shutdown with in-flight cancellation</h2>
+  <p>Make server shutdown finish promptly again. Slice 1 made the ingest worker always-on, so <code>stop_session_watcher</code>'s (deliberately uncapped) drain now waits on a running <code>claude -p</code> extraction for every install — up to <code>claude_cli_timeout_seconds</code> (~40 min at the Beta's sizing). Fix the cause, not the symptom: cancel the child process, keep the drain uncapped.</p>
+  <p class="statement"><strong>Why cancelling is safe:</strong> a killed extraction never advances the cursor, so the slice is simply re-ingested by the next startup drain. Durability comes from the cursor, which is exactly what ADR-0004 established — no durable job table needed.</p>
+</section>
+
+<section>
+  <h2 id="prerequisites-and-constraints">Prerequisites and global constraints</h2>
+  <ul>
+    <li><strong>Never checkout a branch in <code>Tools/ormah</code></strong> — it is the live Beta. Work in a worktree cut from <code>local-main</code>; run tests with that worktree's venv.</li>
+    <li><strong>Beta-only.</strong> <code>src/ormah/background/llm/</code> (the <code>claude_cli</code> adapter) does not exist in <code>upstream/main</code> — verified 2026-07-21. Nothing here is cherry-picked upstream.</li>
+    <li><strong>Out of scope:</strong> extraction-failure classification and quarantine (slice 3); worker concurrency (#150).</li>
+    <li><strong>Lint:</strong> <code>ruff check src/ tests/</code> (line-length 100, py311).</li>
+    <li><strong>Tech Stack:</strong> Python 3.11, <code>subprocess.Popen</code>, threading, pytest.</li>
+  </ul>
+</section>
+
+<section>
+  <h2 id="design-decisions">Design decisions (council review findings)</h2>
+  <ul>
+    <li><strong>Cancellation is NOT a timeout.</strong> It raises its own <code>LlmCancelledError</code>, which the ingest path treats as a provider-wide transient failure. A cancel says nothing about the slice being processed, so repeated restarts must never be able to burn a per-slice failure budget.</li>
+    <li><strong>Cancellation state is INSTANCE-scoped, never a module global.</strong> <code>main.lifespan</code> catches a watcher startup failure and keeps serving, and nothing calls <code>reset_adapter()</code> on startup, so a module-level "cancelled" flag would survive and poison every later ingest AND maintenance call for the life of the process.</li>
+    <li><strong>Normal shutdown must be undone at the next startup.</strong> The <code>llm_client</code> adapter caches are module-level and outlive an in-process lifespan restart, so this slice ships <code>resume_llm_adapters()</code> AND its lifespan-startup call in the same commit.</li>
+    <li><strong>Order matters more than the cancel itself.</strong> <code>stop_session_watcher</code> currently joins <code>startup_thread</code> before <code>_drain_handlers</code>. Cancelling just before the drain would still hang on that join. Cancellation goes before every join, and the <strong>transactional startup-rollback path must use the same sequence</strong>.</li>
+    <li><strong>A missing binary must stay a fast failure.</strong> Constructing the <code>Popen</code> inside its own <code>try</code> is load-bearing: a <code>FileNotFoundError</code> escaping into the engine's broad handler would be classified as a slice-specific error and (once slice 3 lands) could quarantine real data.</li>
+    <li><strong>Residual, documented:</strong> an adapter built after the cancellation snapshot is not cancelled by that pass; mitigate with a second pass inside the stop helper, and record the remaining race in the ADR.</li>
+  </ul>
+</section>
+
+<section>
+  <h2 id="key-anchors">Key anchors (verified 2026-07-21 on local-main @ 66405d9)</h2>
+  <div style="overflow-x: auto;">
+    <table>
+      <thead>
+        <tr>
+          <th>Component</th>
+          <th>Location</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Adapter</strong></td>
+          <td><code>src/ormah/background/llm/claude_cli_adapter.py</code> — <code>generate()</code> L104-172, <code>subprocess.run</code> L137-140, the two <code>except</code> clauses L141-146, non-zero exit L147-149</td>
+        </tr>
+        <tr>
+          <td><strong>LLM boundary</strong></td>
+          <td><code>src/ormah/background/llm_client.py</code> — <code>_get_or_create_adapter</code> L73, <code>_cached_adapter</code> L57, <code>_cached_ingest_adapter</code> L60, <code>reset_adapter</code> L64, <code>ingest_llm_generate</code> L101, <code>llm_generate</code> L119-140</td>
+        </tr>
+        <tr>
+          <td><strong>Shutdown</strong></td>
+          <td><code>src/ormah/background/session_watcher.py</code> — <code>_drain_handlers</code> L1358-1371 (uncapped by design), <code>stop_session_watcher</code> L1374-1395 (joins <code>startup_thread</code> L1388-1390 before draining L1391), transactional rollback L1339-1354</td>
+        </tr>
+        <tr>
+          <td><strong>Lifespan</strong></td>
+          <td><code>src/ormah/main.py</code> L186 (startup), L282-283 (shutdown)</td>
+        </tr>
+        <tr>
+          <td><strong>Tests</strong></td>
+          <td><code>tests/test_background/test_claude_cli_adapter.py</code> (<code>test_returns_none_on_timeout</code> ~L90, <code>test_generate_respects_timeout_hint</code> ~L98), <code>tests/test_main_lifespan_shutdown.py</code> (double-lifespan pattern ~L292)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2 id="task-map">Task map</h2>
+  <div style="overflow-x: auto;">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>File</th>
+          <th>Delivers</th>
+          <th>Depends on</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td><code>01-cancel-seam.md</code></td>
+          <td><code>llm_errors.py</code> with <code>LlmCancelledError</code>/<code>LlmTimeoutError</code>; <code>llm_generate</code> swallows both</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td><code>02-shutdown-cancellation.md</code></td>
+          <td>Tracked <code>Popen</code> + <code>cancel_active()</code>/<code>resume()</code>; dispatchers; stop ordering; rollback parity</td>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td><code>03-verification.md</code></td>
+          <td>Suite green, restart timing evidence, Beta merge</td>
+          <td>1–2</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2 id="task-1-error-seam"><em>Task 1:</em> The error seam — <code>LlmCancelledError</code> and <code>LlmTimeoutError</code></h2>
+
+  <p class="eyebrow">Files</p>
+  <ul>
+    <li>Create: <code>src/ormah/background/llm_errors.py</code> (outside <code>llm/</code> so the Beta's own layering stays clean)</li>
+    <li>Modify: <code>src/ormah/background/llm_client.py:119-140</code> (<code>llm_generate</code>)</li>
+    <li>Test: <code>tests/test_background/test_claude_cli_adapter.py</code></li>
+  </ul>
+
+  <p class="eyebrow">Interfaces</p>
+  <ul>
+    <li><strong>Produces:</strong>
+      <ul>
+        <li><code>ormah.background.llm_errors.LlmCancelledError(Exception)</code> — the host cancelled the call (shutdown/stop). Says nothing about the payload.</li>
+        <li><code>ormah.background.llm_errors.LlmTimeoutError(Exception)</code> — the provider call exceeded its budget. <strong>Nothing raises it in this slice</strong>; it is defined here so the seam ships complete in one file and slice 3 only has to add the raise site.</li>
+        <li><code>llm_generate()</code> (the maintenance path) swallows BOTH and returns <code>None</code>, keeping the five maintenance consumers behaviourally unchanged.</li>
+        <li><code>ingest_llm_generate()</code> propagates both — its sole caller is <code>memory_engine._extract_memories_llm</code> (L2842), which slice 3 teaches to classify them. Until slice 3 lands, a cancelled ingest call surfaces through the engine's existing broad handler as a generic extraction error.</li>
+      </ul>
+    </li>
+  </ul>
+
+  <p class="eyebrow">Steps</p>
+  <ol>
+    <li><strong>Step 1: Write the failing test</strong>
+      <pre><code>from ormah.background.llm_errors import LlmCancelledError, LlmTimeoutError
+
+def test_llm_generate_swallows_cancel_and_timeout(monkeypatch):
+    """The maintenance path keeps its None-on-failure contract, so consolidator,
+    auto_linker &amp; co. are untouched by the new exception types."""
+    from ormah.background import llm_client
+
+    for exc in (LlmCancelledError("stopped"), LlmTimeoutError("slow")):
+        class _Raising:
+            def generate(self, *a, **k):
+                raise exc
+        monkeypatch.setattr(llm_client, "_get_or_create_adapter", lambda s: _Raising())
+        assert llm_client.llm_generate(object(), "prompt") is None</code></pre>
+    </li>
+    <li><strong>Step 2: Run it to verify it fails</strong>
+      <pre><code>python -m pytest tests/test_background/test_claude_cli_adapter.py -k swallows -v</code></pre>
+      Expected: FAIL — <code>ModuleNotFoundError: ormah.background.llm_errors</code>.
+    </li>
+    <li><strong>Step 3: Implement</strong>
+      <p>Create <code>src/ormah/background/llm_errors.py</code>:</p>
+      <pre><code>"""Shared LLM adapter error types."""
+
+
+class LlmCancelledError(Exception):
+    """The call was cancelled by the host (shutdown/stop), not by the provider.
+
+    Says NOTHING about the payload being processed: callers must treat it like any
+    other transient provider failure and never count it against per-slice budgets.
+    """
+
+
+class LlmTimeoutError(Exception):
+    """The provider call exceeded its time budget.
+
+    Distinct from a fast failure (missing binary, connection refused). Raised by the
+    claude_cli adapter; classification lives with the ingest path (ADR-0004 slice 3).
+    """</code></pre>
+
+      <p>In <code>llm_client.py</code>, import both and wrap the adapter call in <code>llm_generate</code> (L133-140):</p>
+      <pre><code>    try:
+        return adapter.generate(
+            prompt,
+            json_mode=json_mode,
+            response_format=response_format,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout_hint_seconds=timeout_hint_seconds,
+        )
+    except (LlmCancelledError, LlmTimeoutError):
+        return None</code></pre>
+
+      <p><code>ingest_llm_generate</code> (L101-107): <strong>no change</strong> — it propagates by construction.</p>
+    </li>
+    <li><strong>Step 4: Run tests to verify they pass</strong>
+      <pre><code>python -m pytest tests/test_background/test_claude_cli_adapter.py tests/test_background/test_ingest_provider.py -v</code></pre>
+      Expected: PASS, including the untouched neighbours.
+    </li>
+    <li><strong>Step 5: Lint + commit</strong>
+      <pre><code>ruff check src/ tests/
+git add src/ormah/background/llm_errors.py src/ormah/background/llm_client.py \
+        tests/test_background/test_claude_cli_adapter.py
+git commit -m "feat(llm): LlmCancelledError/LlmTimeoutError seam; maintenance path swallows both (ADR-0004)"</code></pre>
+    </li>
+  </ol>
+</section>
+
+<section>
+  <h2 id="task-2-bounded-shutdown"><em>Task 2:</em> Bounded shutdown — cancel live <code>claude -p</code> extractions</h2>
+
+  <p class="eyebrow">Origin</p>
+  <p>Council review of ADR-0004. The shutdown drain is deliberately uncapped (<code>_drain_handlers</code> <code>session_watcher.py:1358</code> — abandoning an in-flight ingest re-opens the DB use-after-close window). With the worker always-on and a ~2400s extraction budget, EVERY install could hang a restart for up to ~40 min waiting on one <code>subprocess.run</code> that cannot see the stop event. Fix: keep the drain uncapped, but make the in-flight call FINISH FAST — cancel the live child process. A killed extraction returns a failure, the cursor does NOT advance, and the startup drain re-ingests the slice on next boot: durability is preserved by the cursor, so cancellation is safe by construction.</p>
+
+  <p class="eyebrow">Files</p>
+  <ul>
+    <li>Modify: <code>src/ormah/background/llm/claude_cli_adapter.py</code> (subprocess tracking + cancel; requires switching <code>subprocess.run</code> L137-140 to <code>Popen</code> + <code>communicate</code>)</li>
+    <li>Modify: <code>src/ormah/background/llm_client.py</code> (<code>cancel_active_llm_calls()</code> / <code>resume_llm_adapters()</code> dispatchers, no-ops for adapters without the methods)</li>
+    <li>Modify: <code>src/ormah/main.py</code> (call <code>resume_llm_adapters()</code> early in lifespan startup)</li>
+    <li>Modify: <code>src/ormah/background/session_watcher.py:1374-1395</code> (<code>stop_session_watcher</code> calls the dispatcher after setting stop events, before draining)</li>
+    <li>Test: <code>tests/test_background/test_claude_cli_adapter.py</code>, <code>tests/test_background/test_session_watcher.py</code></li>
+  </ul>
+
+  <p class="eyebrow">Key interfaces</p>
+  <ul>
+    <li><code>ClaudeCliAdapter.cancel_active() -&gt; int</code> — sets a module-level cancellation event, then terminates every live child process (SIGTERM, then SIGKILL after 5s); returns the count. Each cancelled <code>generate()</code> raises <strong><code>LlmCancelledError</code></strong>. Calls still WAITING on the shared concurrency semaphore check the event after acquiring it and raise <code>LlmCancelledError</code> without spawning.</li>
+    <li><code>llm_client.cancel_active_llm_calls() -&gt; int</code> — calls <code>cancel_active()</code> on the cached maintenance AND ingest adapters when they define it; returns total. Upstream-safe: adapters without the method are skipped.</li>
+    <li><code>llm_client.resume_llm_adapters()</code> — re-arms cancelled adapters. Called at lifespan startup and after a recoverable startup rollback.</li>
+  </ul>
+
+  <p class="eyebrow">Critical implementation notes</p>
+  <div class="callout warn">
+    <p><strong>Cancellation state is INSTANCE-scoped, not module-global.</strong> A module-level event stays set after the shutdown that set it. Put the event and the process set on the adapter instance so a fresh adapter per test is isolated by construction — no global reset.</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>Normal shutdown must ALSO be undone at the next startup.</strong> The <code>llm_client</code> caches are module-level and outlive a lifespan, so "shutdown never resumes" would poison an in-process reload. Ship <code>resume_llm_adapters()</code>, its call early in <code>main.lifespan</code> startup, and the regression tests.</p>
+  </div>
+
+  <div class="callout warn">
+    <p><strong>Order matters.</strong> <code>stop_session_watcher</code> currently joins <code>startup_thread</code> BEFORE <code>_drain_handlers</code>. Cancelling only just before the drain would still hang for the full budget. Required order: stop events → cancel pending timers → <strong>cancel LLM calls</strong> → observer stop → startup thread join → drain handlers.</p>
+  </div>
+
+  <p class="eyebrow">Steps</p>
+  <ol>
+    <li><strong>Step 1: Write the failing tests</strong>
+      <pre><code>def test_cancel_active_terminates_running_generate(monkeypatch):
+    """Start generate() on a long-lived fake child; from another thread call
+    adapter.cancel_active(); generate() must raise **LlmCancelledError** (never
+    LlmTimeoutError — council R4: a cancel must stay uncapped) well under 10s, and
+    cancel_active() must return 1."""
+
+
+def test_cancel_active_noop_when_idle():
+    adapter = _make_adapter()
+    assert adapter.cancel_active() == 0
+
+
+def test_cancel_aborts_semaphore_waiter_without_spawning(monkeypatch):
+    """council R2: max_concurrency=1, one generate() live on a long child, a second
+    blocked on the semaphore. cancel_active() while both pending -&gt; BOTH raise
+    LlmCancelledError promptly and no replacement process is spawned (count Popen calls)."""
+
+
+def test_popen_creation_failure_is_fast_failure(monkeypatch):
+    """council R2 (critical): Popen raising FileNotFoundError/OSError returns None
+    (fast failure -&gt; EXTRACT_ERR_CALL_FAILED -&gt; TRANSIENT), never LlmTimeoutError and
+    never a slice-specific error string. Repeat &gt; MAX_EXTRACT_FAILURES times at the
+    watcher level -&gt; cursor never advances, no skipped_slices."""
+
+
+def test_adapter_generates_again_after_a_rollback_cancellation(monkeypatch):
+    """council R6: a recoverable cancellation (startup rollback) must not poison the
+    surviving cached adapter. cancel_active() then resume() -&gt; generate() works."""
+    adapter = _make_adapter()
+    adapter.cancel_active()
+    adapter.resume()
+    # fake Popen returning a valid envelope
+    assert adapter.generate("prompt") is not None
+
+
+def test_cancel_between_creation_and_registration(monkeypatch):
+    """codex R3 race: a threading.Barrier inside a fake Popen pauses generate() between
+    process creation and its registration in _active_procs while cancel_active() runs to
+    completion (seeing an empty set). generate() must STILL raise LlmCancelledError
+    promptly (post-registration event re-check) and the fake child must be killed."""
+
+
+def test_stop_session_watcher_cancels_llm_calls(monkeypatch):
+    """stop_session_watcher invokes llm_client.cancel_active_llm_calls exactly once,
+    after setting handler stop events and before _drain_handlers (mock all three and
+    assert call order)."""</code></pre>
+    </li>
+    <li><strong>Step 2: Run tests to verify they fail</strong>
+      <pre><code>python -m pytest tests/test_background/test_claude_cli_adapter.py -k cancel -v</code></pre>
+      Expected: FAIL — <code>AttributeError: cancel_active</code>.
+    </li>
+    <li><strong>Step 3: Implement — adapter</strong>
+      <p>In <code>claude_cli_adapter.py</code>, add instance-scoped cancellation state:</p>
+      <pre><code>    # in ClaudeCliAdapter.__init__
+    self._cancel_event = threading.Event()
+    self._active_procs: set = set()
+    self._active_lock = threading.Lock()
+
+    def cancel_active(self) -> int:
+        """Terminate this adapter's in-flight children; new calls abort until resume()."""
+        self._cancel_event.set()
+        return self._cancel_tracked_procs()
+
+    def resume(self) -> None:
+        """Re-arm after a RECOVERABLE cancellation (startup rollback keeps serving)."""
+        self._cancel_event.clear()
+
+    def _cancel_tracked_procs(self) -> int:
+        procs = list(self._active_procs)
+        for p in procs:
+            with contextlib.suppress(Exception):
+                p.terminate()
+        deadline = time.monotonic() + 5.0
+        for p in procs:
+            with contextlib.suppress(Exception):
+                p.wait(timeout=max(0.1, deadline - time.monotonic()))
+        for p in procs:
+            if p.poll() is None:
+                with contextlib.suppress(Exception):
+                    p.kill()
+        return len(procs)</code></pre>
+
+      <p>Replace <code>subprocess.run</code> (L137-140) with <code>Popen</code> + <code>communicate</code>, keeping every downstream branch identical. Key checks: event before spawn, event re-check after registration (closes creation/registration race), timeout handling maps to <code>LlmCancelledError</code> if the event is set.</p>
+    </li>
+    <li><strong>Step 4: Implement — dispatcher + stop hook</strong>
+      <p>In <code>llm_client.py</code>:</p>
+      <pre><code>def cancel_active_llm_calls() -> int:
+    """Best-effort cancellation of in-flight LLM calls at shutdown.
+    Adapters opt in by defining cancel_active(); others are skipped."""
+    total = 0
+    for name in ("_cached_adapter", "_cached_ingest_adapter"):
+        adapter = globals().get(name)          # ingest cache exists only on the Beta
+        cancel = getattr(adapter, "cancel_active", None)
+        if callable(cancel):
+            total += cancel()
+    return total
+
+
+def resume_llm_adapters() -> None:
+    """Re-arm cancelled adapters. Called at lifespan startup and after a recoverable
+    startup rollback — the module-level caches outlive a lifespan (council R7)."""
+    for name in ("_cached_adapter", "_cached_ingest_adapter"):
+        resume = getattr(globals().get(name), "resume", None)
+        if callable(resume):
+            resume()</code></pre>
+
+      <p>In <code>session_watcher.py</code> <code>stop_session_watcher</code> (L1374), update the stop sequence (order is critical):</p>
+      <pre><code>    from ormah.background.llm_client import cancel_active_llm_calls
+    cancelled = cancel_active_llm_calls()
+    if cancelled:
+        logger.info("Cancelled %d in-flight LLM call(s) for shutdown", cancelled)</code></pre>
+
+      <p>Extract the stop sequence into a helper used by both <code>stop_session_watcher</code> and the transactional startup-rollback path (L1339-1354) for parity.</p>
+    </li>
+    <li><strong>Step 4b: Migrate the subprocess.run patch sites</strong>
+      <p>The Popen migration breaks every test that patches <code>subprocess.run</code>. Build ONE fake-Popen helper implementing <code>communicate</code> (honoring <code>timeout=</code>), <code>wait</code>, <code>poll</code>, <code>terminate</code>, <code>kill</code>, and <code>returncode</code>; then migrate EVERY patch site to it (zero remaining hits).</p>
+    </li>
+    <li><strong>Step 5: Run tests</strong>
+      <pre><code>python -m pytest tests/test_background/test_claude_cli_adapter.py tests/test_background/test_session_watcher.py tests/test_main_lifespan_shutdown.py -v</code></pre>
+      Expected: PASS.
+    </li>
+    <li><strong>Step 6: Lint + commit</strong>
+      <pre><code>ruff check src/ tests/
+git add src/ormah/background/llm_client.py src/ormah/background/session_watcher.py \
+        src/ormah/background/llm/claude_cli_adapter.py src/ormah/main.py tests/
+git commit -m "feat(ingest): cancel in-flight LLM extractions before joining on shutdown (ADR-0004)"</code></pre>
+    </li>
+  </ol>
+</section>
+
+<section>
+  <h2 id="task-3-verification"><em>Task 3:</em> Verification and Beta merge</h2>
+
+  <p class="eyebrow">Acceptance criteria</p>
+  <p>Green suite + lint, measured restart timing (the acceptance evidence for this slice), and <code>local-main</code> carrying the change.</p>
+
+  <p class="eyebrow">Steps</p>
+  <ol>
+    <li><strong>Step 1: Full suite + lint</strong>
+      <pre><code>python -m pytest tests/ -v
+ruff check src/ tests/</code></pre>
+      <p>Expected: 0 failures beyond the KNOWN environmental set (global <code>~/.config/ormah/.env</code> leaking into a bare <code>Settings()</code>). Pay attention to <code>tests/test_background/test_claude_cli_adapter.py</code>, whose every <code>subprocess.run</code> patch site migrated to the fake <code>Popen</code> — a test that silently starts invoking the real <code>claude</code> binary looks like a pass while costing quota and minutes.</p>
+    </li>
+    <li><strong>Step 2: Measure the actual win (this is the acceptance criterion)</strong>
+      <p>A green suite does not prove the restart got faster. Measure it on an isolated server:</p>
+      <pre><code>SMOKE=$(mktemp -d)
+export ORMAH_MEMORY_DIR="$SMOKE/memory" ORMAH_PORT=8788 ORMAH_BACKUP_ENABLED=false
+python -c "import os; from ormah.config import Settings; s=Settings(); assert str(s.memory_dir)==os.environ['ORMAH_MEMORY_DIR']; print('isolation OK')"</code></pre>
+
+      <p>Start it, drive one long extraction (a fat transcript, or a stub provider that sleeps well past the drain), then stop the process and time it:</p>
+      <pre><code>time kill -TERM $SMOKE_PID   # or: time (launchctl kickstart -k gui/501/com.ormah.server.dev)</code></pre>
+
+      <p><strong>Expected: shutdown completes in seconds, not up to <code>claude_cli_timeout_seconds</code>.</strong> Record the before/after numbers in the task report — if you cannot show the delta, this slice is not verified, regardless of the suite.</p>
+
+      <p>Also confirm the two failure modes the review flagged:</p>
+      <ul>
+        <li><strong>The rollback path is bounded too.</strong> Force a second watch root whose Observer fails while the first root is mid-extraction; the transactional rollback must not wait out the budget (regression: <code>test_startup_rollback_cancels_active_extraction</code>).</li>
+        <li><strong>A second lifespan still works.</strong> Consecutive <code>async with main.lifespan(app)</code> blocks — generation must succeed in the second one (regression: <code>test_second_lifespan_can_generate_after_a_cancelled_first</code>). This is the poisoned-cache failure: it looks fine at shutdown and breaks every later ingest.</li>
+      </ul>
+    </li>
+    <li><strong>Step 3: Merge into the Beta</strong>
+      <pre><code>git -C /Users/andre/Documents/GitHub/Tools/ormah status --porcelain
+git -C /Users/andre/Documents/GitHub/Tools/ormah merge &lt;worktree-branch&gt;   # already on local-main; do NOT switch branches
+launchctl kickstart -k gui/501/com.ormah.server.dev
+curl -s http://localhost:8787/admin/health    # NOT /health — SPA catch-all returns HTML 200</code></pre>
+
+      <p>Then restart the live Beta once while an extraction is running and confirm the same seconds-not-minutes behaviour in production conditions.</p>
+    </li>
+    <li><strong>Step 4: Review + close the loop</strong>
+      <ul>
+        <li>Run <code>/council-pr</code> on the worktree branch before merging.</li>
+        <li>Update <code>docs/adr/0004-async-ingest-nudge-server-cursor.md</code>: record that shutdown now cancels in-flight extractions, that cancellation is a distinct signal from a timeout, and the <strong>residual race</strong> — an adapter constructed after the cancellation snapshot is only caught by the second pass inside the stop helper.</li>
+        <li>Report: suite output, the measured restart timing, and the two regression results.</li>
+        <li><strong>Then decide on slice 3</strong> (<code><a href="#slice-3-note">../2026-07-21-adr-0004-slice3-timeout-quarantine/</a></code>) — it needs its own ADR because it is the only part of ADR-0004 that can drop real data.</li>
+      </ul>
+    </li>
+  </ol>
+</section>
+
+<section>
+  <h2 id="rollout-note">Rollout verification</h2>
+  <p>After merge, measure the win: restart the Beta while an extraction is running (<code>launchctl kickstart -k gui/501/com.ormah.server.dev</code>) and confirm the process exits in seconds rather than minutes. That timing IS the acceptance evidence for this slice.</p>
+</section>
+
+<section>
+  <h2 id="slice-3-note">What comes next</h2>
+  <p>Slice 3 (<code>../2026-07-21-adr-0004-slice3-timeout-quarantine/</code>) builds on the error module this slice creates, but does not otherwise depend on it. It needs its own ADR because it is the only part of ADR-0004 that can drop real data.</p>
+</section>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:da0cbe9614475f55e3ef3fe822ecdb624379b6918b8b8c43c27e04eefde45a7d -->

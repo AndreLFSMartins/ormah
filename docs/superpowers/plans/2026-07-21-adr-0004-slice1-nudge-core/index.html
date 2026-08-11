@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0004 Slice 1 — Nudge core: the client stops waiting, the server owns the queue</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">ADR-0004 Slice 1 — Nudge core: the client stops waiting, the server owns the queue</div>
+  <a href="#overview">Overview</a>
+  <a href="#slicing-and-dependencies" class="lvl-3">Slicing and dependencies</a>
+  <a href="#global-constraints" class="lvl-3">Global constraints</a>
+  <a href="#measurement-backed-rules" class="lvl-3">The rules that carry measurements</a>
+  <a href="#task-map" class="lvl-3">Task map</a>
+  <a href="#council-findings" class="lvl-3">Council round on the rewrite (2026-07-22, R12)</a>
+  <a href="#task-1-the-ingest-spool">Task 1: The ingest spool — a durable queue made of files</a>
+  <a href="#spool-retry-policy" class="lvl-3">Retry policy: keys on failure class, not attempt count</a>
+  <a href="#spool-five-rules" class="lvl-3">The five rules, each with a measurement behind it</a>
+  <a href="#task-2-always-on-ingest-worker">Task 2: Always-on Ingest worker — drains the spool; Observer becomes optional</a>
+  <a href="#task-2-architecture" class="lvl-3">Core architecture change</a>
+  <a href="#task-2-disposition" class="lvl-3">Test disposition — corrected 2026-07-23</a>
+  <a href="#task-2-new-tests" class="lvl-3">New tests this task must add</a>
+  <a href="#task-3-nudge-endpoint">Task 3: POST /ingest/nudge — enqueue to the spool, answer 202</a>
+  <a href="#task-3-boundary-ceiling" class="lvl-3">The boundary is a hard ceiling</a>
+  <a href="#task-4-hook-pure-nudge">Task 4: Hook becomes a pure nudge — client cursor machinery deleted</a>
+  <a href="#task-4-outbox" class="lvl-3">Outbox — a server outage must not lose the only SessionEnd nudge</a>
+  <a href="#task-5-verification">Task 5: Verification, Beta merge, upstream gap list</a>
+  <a href="#task-5-gates" class="lvl-3">Verification gates</a>
+  <a href="#beta-rollout" class="lvl-3">Beta rollout (operator steps, after merge to local-main)</a>
+  <a href="#key-anchors">Key anchors (verified 2026-07-21 on local-main @ 66405d9)</a>
+</nav>
+<main>
+<div class="spec-intro">
+  <p class="statement">The hook becomes a pure nudge. The server owns ingestion and advances the cursor on job completion. This kills the freeze-and-re-post engine and the two-cursor overlap, without touching extraction-failure policy.</p>
+  <p><strong>Architecture:</strong> (1) a <em>durable file spool</em> is the queue; (2) the watcher's handler becomes an <em>always-on Ingest worker</em> draining that spool, with the Observer as an optional producer; (3) the endpoint enqueues and returns; (4) the hook is reduced to a trigger with a client-side outbox.</p>
+</div>
+
+<div class="callout warn">
+  <strong>Rewritten 2026-07-22</strong> — this plan stores boundary + consent + acknowledgement semantics inside a durable file spool, not the Cursor state file. Eight council rounds found a race per field. A prototype measured the alternatives and the ADR was amended: <code>docs/adr/0004-async-ingest-nudge-server-cursor.md → "Amendment 2026-07-22 — the durable queue is a directory spool"</code>. Read it before implementing; it carries the numbers this plan cites.
+</div>
+
+<h2 id="overview">Overview</h2>
+
+<p><strong>Goal:</strong> Deliver what ADR-0004 asks for: the hook becomes a pure nudge (<code>POST /ingest/nudge → 202</code>), the server owns ingestion and advances the cursor on job completion. This kills the freeze-and-re-post engine and the two-cursor overlap, without touching extraction-failure policy.</p>
+
+<p><strong>Tech Stack:</strong> Python 3.11, FastAPI, pytest (<code>asyncio_mode=auto</code>), httpx, watchdog.</p>
+
+<h3 id="slicing-and-dependencies">Slicing and dependencies</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Slice</th>
+      <th>Delivers</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>1 (this plan)</strong></td>
+      <td>Spool, always-on worker, <code>/ingest/nudge</code>, pure-nudge hook</td>
+      <td>ready</td>
+    </tr>
+    <tr>
+      <td>2 — <code>../2026-07-21-adr-0004-slice2-bounded-shutdown/</code></td>
+      <td>Cancel in-flight extractions on shutdown</td>
+      <td>ships right after slice 1</td>
+    </tr>
+    <tr>
+      <td>3 — <code>../2026-07-21-adr-0004-slice3-timeout-quarantine/</code></td>
+      <td>Timeout → health-gated, shrink-first quarantine</td>
+      <td>needs its own ADR first</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>Ordering matters.</strong> Slice 1 makes the ingest worker always-on, which extends an existing risk: shutdown waits (uncapped, by design) for a running extraction. After slice 1 it bites every install. <em>Known risk, accepted for slice 1, closed by slice 2</em> — do not let slice 2 drift.</p>
+
+<h3 id="global-constraints">Global constraints</h3>
+
+<ul>
+  <li><strong>Never checkout a branch in <code>Tools/ormah</code></strong> — it is the live Beta (whisper hooks break). Work in a git worktree cut from <code>local-main</code>; run tests with that worktree's venv.</li>
+  <li><strong>Beta-only.</strong> Session_watcher.py on <code>upstream/main</code> is ~222 lines behind and still calls <code>_scan_sessions</code> synchronously at bind. These diffs cannot be cherry-picked upstream.</li>
+  <li><strong>⚠️ Any throwaway server MUST set <code>ORMAH_MEMORY_DIR</code></strong> — <code>Settings</code> (config.py:20) uses <code>extra: "ignore"</code>, so a wrong key is silently dropped and the process opens the <strong>live</strong> store.</li>
+  <li><strong>The spool lives under <code>memory_dir</code>, never <code>/tmp</code></strong> — <code>os.rename</code> is atomic per filesystem, and the staging dir must share it.</li>
+  <li><strong>Out of scope:</strong> worker concurrency (issue #150), extraction-failure/quarantine policy (slice 3), shutdown cancellation (slice 2), any whisper-inject behavior.</li>
+  <li><strong>Test env caveats:</strong> default pytest run excludes <code>integration</code>. <code>tests/test_setup*.py</code> can touch the real <code>~/.claude</code> — verify survival by parsing JSON, never <code>grep -i ormah</code>. <code>~/.config/ormah/.env</code> leaks into bare <code>Settings()</code> (known, environmental).</li>
+  <li>Lint: <code>ruff check src/ tests/</code> (line-length 100, py311). Commits: <code>feat(scope): ...</code>.</li>
+</ul>
+
+<h3 id="measurement-backed-rules">The rules that carry measurements</h3>
+
+<p>Each was produced by a prototype run and protects against a failure that was actually observed.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Rule</th>
+      <th>Evidence</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Boundary in the spool <strong>filename</strong>, never one file overwritten per path</td>
+      <td>overwrite lost the higher boundary in <strong>135/300 races</strong> (45%)</td>
+    </tr>
+    <tr>
+      <td>Every file write is <code>tmp</code> + <code>os.replace</code> — including <code>_save_state</code></td>
+      <td>direct write: <strong>7081 torn reads</strong> vs 664 clean in 1.5 s; via replace: <strong>0</strong> torn</td>
+    </tr>
+    <tr>
+      <td>The claim is the <code>os.rename</code>; the loser's error is the mechanism</td>
+      <td>40 rounds × 8 <strong>processes</strong>, always exactly 1 winner</td>
+    </tr>
+    <tr>
+      <td>The hook's outbox locks a <strong>stable lock file</strong>, never the outbox inode</td>
+      <td>locking the inode: <strong>1140 mutual-exclusion violations</strong> in 2 s; stable lock file: <strong>0</strong></td>
+    </tr>
+    <tr>
+      <td>Worker stays serial until a path-level claim exists</td>
+      <td>overlapping ingests of one transcript: 0 at 1 worker, <strong>14 at 2</strong>, <strong>21 at 4</strong></td>
+    </tr>
+    <tr>
+      <td><strong>One ingestion path</strong>: Observer and reconcile ENQUEUE, they never ingest</td>
+      <td>same measurement, same failure — two producers on one transcript is the overlap</td>
+    </tr>
+    <tr>
+      <td>No fsync by default; power-loss durability is a named, priced option</td>
+      <td><code>F_FULLFSYNC</code> p50 <strong>6.9 ms</strong> vs 0.13 ms unsynced</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="task-map">Task map</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>File</th>
+      <th>Delivers</th>
+      <th>Depends on</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td><code>01-spool.md</code></td>
+      <td><code>IngestSpool</code>: durable file queue, claim-by-rename, crash recovery</td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><code>02-always-on-worker.md</code></td>
+      <td>Handler + drain loop always on; Observer optional; one <code>app.state</code> attribute</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><code>03-nudge-endpoint.md</code></td>
+      <td><code>POST /ingest/nudge</code> → enqueue + 202; boundary ceiling in <code>_ingest_session</code></td>
+      <td>1, 2</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td><code>04-hook-pure-nudge.md</code></td>
+      <td><code>cmd_whisper_store</code> = trigger only; client cursor retired safely; outbox</td>
+      <td>3</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td><code>05-verification.md</code></td>
+      <td>Suite green, isolated smoke, Beta merge, upstream gap list</td>
+      <td>1–4</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="council-findings">Council round on the rewrite (2026-07-22, R12)</h3>
+
+<p>Cursor and Codex reviewed the spool design independently and converged on one architectural defect plus six policy ones. The three most consequential:</p>
+
+<ul>
+  <li><strong>One ingestion path.</strong> The first draft had the drain calling <code>_ingest_session</code> directly while the Observer kept its own route — two producers on one transcript. Fixed by making Observer and reconcile <strong>producers that enqueue</strong>, with a single serial consumer owning <code>_ingesting</code> and <code>state_lock</code>.</li>
+  <li><strong><code>max_bytes</code> is not a ceiling.</strong> A <code>stop_offset</code> primitive is now required — and it is the only part of this slice that touches the parser.</li>
+  <li><strong>An attempt cap turns an outage into data loss.</strong> Retry policy now keys on failure CLASS, with persisted backoff and no cap for external transients.</li>
+</ul>
+
+<h2 id="task-1-the-ingest-spool">Task 1: The ingest spool — a durable queue made of files</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Create: <code>src/ormah/background/ingest_spool.py</code></li>
+  <li>Create: <code>tests/test_background/test_ingest_spool.py</code></li>
+</ul>
+
+<p><strong>Interfaces:</strong> This module imports no ormah code — it is pure filesystem + stdlib, which makes it exhaustively testable without an engine, server, or provider.</p>
+
+<p>Produces the whole public surface the rest of the slice builds on:</p>
+
+<pre><code class="language-python">class IngestSpool:
+    def __init__(self, root: Path) -> None: ...
+    def enqueue(self, path: Path, boundary: int, reason: str) -> None: ...
+    def claim_next(self) -> SpoolJob | None: ...
+    def complete(self, job: SpoolJob) -> None: ...
+    def requeue(self, job: SpoolJob, failure_class: str) -> None: ...
+    def recover(self) -> int: ...
+    def pending_count(self) -> int: ...
+</code></pre>
+
+<h3 id="spool-retry-policy">Retry policy: keys on failure class, not attempt count</h3>
+
+<p><strong>⚠️ Read this before implementing.</strong> An earlier draft capped every retry at <code>MAX_JOB_ATTEMPTS</code> and dead-lettered the rest, to stop a hot loop. That cap sends a <em>provider outage</em> to the dead-letter queue, which is exactly the H1 rule ADR-0004 protects: <em>an outage must never discard real data</em>.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Class</th>
+      <th>Example</th>
+      <th>Policy</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>External transient</strong></td>
+      <td>provider down, connection refused, timeout, <code>EIO</code></td>
+      <td><strong>Retry indefinitely</strong> with persisted exponential backoff (<code>attempts</code> drives the delay, never a cap). Never dead-lettered.</td>
+    </tr>
+    <tr>
+      <td><strong>Deterministic</strong></td>
+      <td>malformed job JSON, transcript deleted, path no longer under any root</td>
+      <td>Dead-letter to <code>failed/</code> immediately — a retry cannot change the outcome.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The backoff must be <strong>persisted in the job payload</strong> (<code>attempts</code>, <code>not_before</code>), not held in memory: a restart during an outage would otherwise reset every backoff and stampede the provider.</p>
+
+<h3 id="spool-five-rules">The five rules, each with a measurement behind it</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Rule</th>
+      <th>Why — measured</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>The <strong>boundary goes in the filename</strong>: <code>pending/&lt;path-hash&gt;.&lt;boundary:020d&gt;.json</code></td>
+      <td>One file per path with overwrite lost the higher boundary in <strong>135/300 races</strong> (45%). With the boundary in the name: <strong>0/300</strong>.</td>
+    </tr>
+    <tr>
+      <td>Every write is <strong><code>tmp</code> + <code>os.replace</code></strong>, never a direct write</td>
+      <td>Direct <code>write_text</code> of a 400 KB file: <strong>7081 torn reads</strong> vs 664 clean over 1.5 s. Via <code>os.replace</code>: 6210 clean, <strong>0</strong> torn.</td>
+    </tr>
+    <tr>
+      <td>The claim <strong>is</strong> the <code>os.rename</code> — no lock, no flag</td>
+      <td>40 rounds × 8 racing <strong>processes</strong>: always exactly one winner. <code>FileNotFoundError</code> on the loser is the mechanism, not an error.</td>
+    </tr>
+    <tr>
+      <td><code>tmp/</code> lives <strong>inside</strong> the spool root</td>
+      <td><code>os.rename</code> is atomic per filesystem. A staging dir on another mount silently degrades to copy+unlink. Never <code>/tmp</code>.</td>
+    </tr>
+    <tr>
+      <td><strong>No fsync by default</strong></td>
+      <td>Threat model is process restart, not power loss. On APFS <code>os.fsync</code> does not reach media; real durability is <code>fcntl(F_FULLFSYNC)</code> at p50 <strong>6.9 ms</strong> per nudge vs 0.13 ms without. Affordable if wanted; not the default.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>⚠️ Known limitation, deliberately not fixed here.</strong> Claim-by-rename excludes per <em>job</em>, not per <em>transcript</em>. Measured: 0 overlapping ingests with 1 worker, <strong>14 with 2 workers, 21 with 4</strong>. The worker is serial (issue #150), so this is latent.</p>
+
+<h2 id="task-2-always-on-ingest-worker">Task 2: Always-on Ingest worker — drains the spool; Observer becomes optional</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>src/ormah/background/session_watcher.py</code> — <code>SessionHandler</code> gains the spool drain loop</li>
+  <li>Modify: <code>src/ormah/main.py:244-253</code> (lifespan wiring) and <code>main.py:282-283</code> (shutdown — <strong>⚠️ council R1</strong>)</li>
+  <li>Test: <code>tests/test_background/test_session_watcher.py</code>, <code>tests/test_main_lifespan_shutdown.py</code></li>
+</ul>
+
+<h3 id="task-2-architecture">Core architecture change</h3>
+
+<p><strong>⚠️ This is the council's central finding (R12).</strong> An earlier draft had the drain calling <code>_ingest_session</code> directly while the <strong>Observer kept its own path</strong> through <code>_do_ingest</code> — two producers ingesting the same transcript concurrently whenever <code>session_watcher_enabled=True</code>.</p>
+
+<p><strong>The Observer no longer ingests. It enqueues.</strong> On a file event it calls <code>spool.enqueue(path, boundary=&lt;current EOF&gt;, reason="observer")</code> and returns. So does the reconcile sweep (<code>reason="reconcile"</code>). Three producers, one queue, one serial consumer that owns <code>_ingesting</code>, <code>state_lock</code>, pending reruns and shutdown accounting.</p>
+
+<h3 id="task-2-disposition">Test disposition — corrected 2026-07-23</h3>
+
+<p>Deleting <code>_do_ingest</code> and making Observer/reconcile enqueue-only structurally breaks <strong>26 existing tests</strong> in <code>test_session_watcher.py</code>.</p>
+
+<div class="callout">
+  <strong>Totals: 17 REWRITE, 9 DELETE</strong> (26 rows). Every DELETE names where its behavior went or that it is intentionally dropped. Each DELETE must carry a one-line rationale in the commit message (council R5).
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Test (line)</th>
+      <th>Disposition</th>
+      <th>Rationale / where coverage moves</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td><code>test_retry_fires_and_ingests_after_idle</code> L1573</td>
+      <td>REWRITE</td>
+      <td>idle-refire now ENQUEUES; assert ingest via the drain path</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><code>test_concurrent_ingest_skipped</code> L1631</td>
+      <td>DELETE</td>
+      <td>dedup is structural now → spool test + serial drain</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><code>test_inflight_skip_reschedules</code> L1887</td>
+      <td>DELETE</td>
+      <td>→ spool test for nudge during in-flight job</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td><code>test_do_ingest_returns_ok_when_it_ingests</code> L1969</td>
+      <td>DELETE</td>
+      <td><code>_do_ingest</code> gone; OK/NO_PROGRESS covered by <code>test_ingest_session_basic</code></td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td><code>test_do_ingest_rejected_after_stop_event</code> L2507</td>
+      <td>REWRITE</td>
+      <td>use-after-close guard moves to drain claim step</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td><code>test_stop_session_watcher_drains_inflight_ingest</code> L2528</td>
+      <td>REWRITE</td>
+      <td>same guarantee, proven against the drain thread</td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td><code>test_start_session_watcher_runs_catchup_off_bind</code> L2576</td>
+      <td>REWRITE</td>
+      <td>reconcile-enqueue + drain, not <code>startup_thread</code></td>
+    </tr>
+    <tr>
+      <td>8</td>
+      <td><code>test_reconcile_ingests_file_the_live_path_missed</code> L1984</td>
+      <td>REWRITE</td>
+      <td>assert <code>reconcile()</code> ENQUEUES; post-drain assert <code>_state</code> advanced</td>
+    </tr>
+    <tr>
+      <td>9</td>
+      <td><code>test_reconcile_skips_fully_consumed_file_on_second_pass</code> L2005</td>
+      <td>REWRITE</td>
+      <td>assert second sweep does not enqueue duplicate once drained</td>
+    </tr>
+    <tr>
+      <td>10</td>
+      <td><code>test_reconcile_does_not_reingest_what_live_path_already_took</code> L2020</td>
+      <td>REWRITE</td>
+      <td>drive via enqueue+drain, then assert reconcile does not re-enqueue</td>
+    </tr>
+    <tr>
+      <td>11</td>
+      <td><code>test_reconcile_retries_seen_file_when_first_do_ingest_fails</code> L2058</td>
+      <td>DELETE</td>
+      <td>tick-cadence retry → backoff-cadence: covered by spool backoff test</td>
+    </tr>
+    <tr>
+      <td>12</td>
+      <td><code>test_reconcile_recovers_partial_tail_without_mtime_change</code> L2087</td>
+      <td>REWRITE</td>
+      <td>offset≠size detection gates enqueue; assert despite unchanged mtime</td>
+    </tr>
+    <tr>
+      <td>13</td>
+      <td><code>test_reconcile_while_live_ingesting_defers_then_retries</code> L2107</td>
+      <td>REWRITE</td>
+      <td>reconcile does not touch <code>_ingesting</code>; assert no double-enqueue</td>
+    </tr>
+    <tr>
+      <td>14</td>
+      <td><code>test_reconcile_skips_never_seen_when_lookback_negative</code> L2472</td>
+      <td>REWRITE</td>
+      <td>same policy; assert reconcile does not enqueue never-seen file</td>
+    </tr>
+    <tr>
+      <td>15</td>
+      <td><code>test_reconcile_never_parks_transient_failures</code> L2232</td>
+      <td>DELETE</td>
+      <td><code>_reconcile_attempts</code> gone; "external retries forever" → spool test</td>
+    </tr>
+    <tr>
+      <td>16</td>
+      <td><code>test_reconcile_unparks_after_same_size_content_change</code> L2266</td>
+      <td>DELETE</td>
+      <td>same-size fast-path optimization lost; correctness preserved by re-enqueue</td>
+    </tr>
+    <tr>
+      <td>17</td>
+      <td><code>test_reconcile_deprioritizes_persistent_transient_behind_valid</code> L2315</td>
+      <td>DELETE</td>
+      <td>in-memory deprioritization → <code>not_before</code> gating; replaced by T-N1</td>
+    </tr>
+    <tr>
+      <td>18</td>
+      <td><code>test_reconcile_deprioritized_transients_retried_oldest_first</code> L2381</td>
+      <td>DELETE</td>
+      <td>strict FIFO among backed-off jobs dropped; serial drain handles all</td>
+    </tr>
+    <tr>
+      <td>19</td>
+      <td><code>test_reconcile_respects_per_tick_time_budget</code> L2428</td>
+      <td>REWRITE</td>
+      <td>budget survives as producer-side enqueue cap; assert ≤ cap per sweep</td>
+    </tr>
+    <tr>
+      <td>20</td>
+      <td><code>test_reconcile_does_not_starve_valid_file_behind_stuck_never_seen_files</code> L2202</td>
+      <td>REWRITE</td>
+      <td>enqueue cap + oldest-first still lets valid file through</td>
+    </tr>
+    <tr>
+      <td>21</td>
+      <td><code>test_disabled_returns_empty</code> L1147</td>
+      <td>REWRITE</td>
+      <td>→ <code>test_disabled_yields_worker_without_observer</code></td>
+    </tr>
+    <tr>
+      <td>22</td>
+      <td><code>test_nonexistent_watch_dir</code> L1181</td>
+      <td>REWRITE</td>
+      <td>→ <code>test_absent_watch_dir_is_created</code></td>
+    </tr>
+    <tr>
+      <td>A</td>
+      <td><code>test_reconcile_logs_recovery_heartbeat</code> L2040</td>
+      <td>REWRITE</td>
+      <td>heartbeat counts "enqueued" now, not "ingested"; adjust log assertion</td>
+    </tr>
+    <tr>
+      <td>B</td>
+      <td><code>test_reconcile_bounds_retries_for_abandoned_inflight_tail</code> L2128</td>
+      <td>DELETE</td>
+      <td>INVERTED by design: ADR-0004 H1 retries external forever; "must cap" is now false</td>
+    </tr>
+    <tr>
+      <td>C</td>
+      <td><code>test_run_session_reconcile_recreates_dead_observer</code> L2158</td>
+      <td>REWRITE (verify-only)</td>
+      <td>observer-recreation is architecture-agnostic; return-count contract may shift</td>
+    </tr>
+    <tr>
+      <td>D</td>
+      <td><code>test_run_session_reconcile_runs_reconcile_even_when_recreate_fails</code> L2182</td>
+      <td>REWRITE (verify-only)</td>
+      <td><code>handler.reconcile</code> is mocked; likely a sanity check only</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="task-2-new-tests">New tests this task must add</h3>
+
+<ul>
+  <li><strong>T-N1</strong> <code>test_a_due_job_is_claimed_ahead_of_a_backed_off_one</code> — replaces deprioritization FIFO coverage (#17/#18)</li>
+  <li><strong>T-N2</strong> <code>test_reconcile_enqueues_at_most_the_per_tick_cap</code> — preserves #19/#20</li>
+  <li><strong>T-N3</strong> <code>test_idle_file_with_no_safe_boundary_is_dead_lettered</code> — no safe boundary case needs a test</li>
+</ul>
+
+<h2 id="task-3-nudge-endpoint">Task 3: <code>POST /ingest/nudge</code> — enqueue to the spool, answer 202</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>src/ormah/api/routes_ingest.py</code> (add model + route)</li>
+  <li>Modify: <code>src/ormah/background/session_watcher.py</code> — <code>_ingest_session</code> gains a <code>boundary: int | None</code> parameter</li>
+  <li>Modify: <code>src/ormah/transcript/parser.py</code> — <code>parse_transcript</code> gains an absolute <code>stop_offset</code> (⚠️ own commit, own regression suite)</li>
+  <li>Test: create <code>tests/test_api/test_routes_ingest.py</code></li>
+</ul>
+
+<p><strong>The endpoint enqueues and returns.</strong> It computes the boundary (<code>stat().st_size</code> at acceptance), writes one spool file, and answers. It never touches the Cursor, never schedules a timer, never waits on extraction.</p>
+
+<h3 id="task-3-boundary-ceiling">The boundary is a hard ceiling</h3>
+
+<p><strong>⚠️ <code>max_bytes</code> IS NOT A CEILING — this needs a parser change.</strong> <code>parse_transcript</code>'s own docstring says it plainly:</p>
+
+<blockquote>
+  <p><em>A single turn larger than max_bytes is committed anyway (there is no smaller slice to make progress with).</em></p>
+</blockquote>
+
+<p>So a session that grew after the nudge — PreCompact nudges a <strong>live</strong> session — can have one oversized turn committed straight past the accepted boundary. That is the consent violation the boundary exists to prevent.</p>
+
+<p><strong>Required:</strong> an absolute <code>stop_offset</code> parameter on <code>parse_transcript</code>, honoured as a hard limit: no turn is committed whose end exceeds it, and <code>safe_end_offset</code> is never returned beyond it.</p>
+
+<div class="callout warn">
+  <strong>Risk, flagged deliberately.</strong> This is the only part of slice 1 that modifies <code>transcript/parser.py</code>, which stabilised only at merge 66405d9 (ADR-0003). Treat it as its own commit with its own regression suite, and if it starts touching the safe-boundary logic, <strong>stop and split it into its own slice</strong>.
+</div>
+
+<h2 id="task-4-hook-pure-nudge">Task 4: Hook becomes a pure nudge — client cursor machinery deleted</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>src/ormah/adapters/cli_adapter.py</code> — rewrite <code>cmd_whisper_store</code></li>
+  <li>Modify: <code>integrations/claude-plugin/hooks/hooks.json</code> — timeout 300 → 30</li>
+  <li>Modify: <code>src/ormah/setup.py</code> — same timeout change</li>
+  <li>Test: <code>tests/test_whisper/test_whisper_out.py</code> (major rewrite), <code>tests/test_setup.py</code></li>
+</ul>
+
+<p><strong>The hook becomes a trigger only:</strong> reads the hook JSON, resolves <code>transcript_path</code>, POSTs <code>{"path": ..., "session_id": ...}</code> to <code>/ingest/nudge</code> with a SHORT client (30s), and always exits 0. No parse, no min-turns, no space-detect, no cursor. Space + min-turns + safe-boundary logic already live server-side in <code>_ingest_session</code>.</p>
+
+<h3 id="task-4-outbox">Outbox — a server outage must not lose the only SessionEnd nudge</h3>
+
+<p>Server-side reconcile cannot recover a boundary event it never heard about, so the hook keeps a durable client-side queue. Four rules, each from a specific failure the review found:</p>
+
+<ol>
+  <li><strong>Queue FIRST, then send</strong> (council R9). Never do network work before the current event is durable.</li>
+  <li><strong>Never hold the lock across the network</strong> (council R10). The drain is three phases: (a) take lock, read, release; (b) requests with NO lock; (c) re-take lock, re-read, rewrite only present records.</li>
+  <li><strong>Budget the drain</strong> (council R9/R10). The manifest allows 30s. Bounded by both wall clock and request count. Current event first, always.</li>
+  <li><strong>Acknowledge by record id, not by path</strong> (council R10). Each queued record carries a unique <code>id</code>; removal is by that id.</li>
+  <li><strong>Lock a separate, stable file</strong> (council R9 — <strong>now measured</strong>). <code>flock</code> locks an INODE: if the drain rewrites via <code>os.replace</code>, an appender holding the OLD inode believes it owns the lock, and mutual exclusion evaporates. Prototype, three appenders + one rotating drain over 2 s: locking the outbox inode produced <strong>1140 violations</strong>; a dedicated <code>whisper-nudge-outbox.lock</code> produced <strong>0</strong>.</li>
+</ol>
+
+<p>Storage is append-only JSONL. <strong>Cap by age, not by count</strong> — truncating to the last N would silently drop exactly the old SessionEnd events the outbox exists to keep; drop entries older than ~30 days or whose transcript no longer exists.</p>
+
+<div class="callout">
+  <strong>Declared limitation (council R9):</strong> <code>fcntl.flock</code> is POSIX-only. On Windows the hook falls back to no locking, so two hooks firing concurrently can interleave appends. Guard the import and no-op the locking rather than crashing — a lost duplicate nudge is recoverable, a crashed SessionEnd hook is not.
+</div>
+
+<h2 id="task-5-verification">Task 5: Verification, Beta merge, upstream gap list</h2>
+
+<p><strong>Files:</strong> none — runs the gates and integrates.</p>
+
+<h3 id="task-5-gates">Verification gates</h3>
+
+<ol>
+  <li><strong>Full suite + lint:</strong> 0 failures beyond the known environmental set. Cite the output.</li>
+  <li><strong>End-to-end smoke — ISOLATION FIRST.</strong> Prove isolation before starting the server. Verify the spool file appears with the boundary in its filename, the cursor advances, and crash recovery works.</li>
+  <li><strong>Merge into the Beta (<code>local-main</code>).</strong> This slice is Beta-only. No upstream branch, no cherry-picks.</li>
+  <li><strong>Record the upstream gap list.</strong> Do not open an upstream PR. Append the verified reasons to the ADR so the future contributor starts from facts.</li>
+  <li><strong>Review + close the loop.</strong> Run <code>/council-pr</code> on the worktree branch. Update the ADR with slice status, amendments, and the gap list.</li>
+</ol>
+
+<h3 id="beta-rollout">Beta rollout (operator steps, after merge to local-main)</h3>
+
+<ol>
+  <li><code>ormah setup</code> (or plugin update) to rewrite the hook manifests (timeout 300 → 30).</li>
+  <li><code>launchctl kickstart -k gui/501/com.ormah.server.dev</code>; health is <code>GET /admin/health</code> (NOT <code>/health</code>).</li>
+  <li>First run after upgrade: the server cursor may sit behind the retired client cursor → one delta re-ingests once; dedup heals it (ADR consequence, expected).</li>
+  <li><code>ls ~/.local/share/ormah/memory/ingest_queue/pending/</code> is now a real operational view — a growing pending count means the worker is stuck, not that nudges are lost.</li>
+</ol>
+
+<h2 id="key-anchors">Key anchors (verified 2026-07-21 on local-main @ 66405d9)</h2>
+
+<ul>
+  <li><strong>Worker:</strong> <code>src/ormah/background/session_watcher.py</code> — <code>_ingest_session</code> L728-995, <code>_session_watch_dirs</code> L669-681, <code>_save_state</code> L700-703, <code>SessionHandler</code> L1051, <code>reconcile</code> L1161, <code>start_session_watcher</code> L1299, <code>stop_session_watcher</code> L1374.</li>
+  <li><strong>Endpoint:</strong> <code>src/ormah/api/routes_ingest.py</code> (only <code>/conversation</code> L19, <code>/file</code> L52 exist).</li>
+  <li><strong>Hook:</strong> <code>src/ormah/adapters/cli_adapter.py</code> — <code>cmd_whisper_store</code> L423-519, cursor machinery L404-420, store client/timeout L387-401.</li>
+  <li><strong>Lifespan:</strong> <code>src/ormah/main.py</code> L186; watcher start L244-246, reconcile job L248-253, shutdown L282-283.</li>
+  <li><strong>Config:</strong> <code>src/ormah/config.py</code> L20 (<code>extra: "ignore"</code>), L29 (<code>memory_dir</code>), L92-103 (watcher settings).</li>
+  <li><strong>Store DB:</strong> <code>src/ormah/index/db.py</code> L37-40 — WAL, <code>synchronous=NORMAL</code>, <code>busy_timeout=5000</code>.</li>
+  <li><strong>Tests:</strong> <code>tests/test_background/test_session_watcher.py</code> — fixtures <code>_make_jsonl</code> L51, <code>_mark_idle</code> L68.</li>
+</ul>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:52a5130765aee5b624d310cad5cc7ddc0b293f32665d62dd2dbf6371696fef36 -->

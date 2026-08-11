@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Task 2 — Extract pure visual helpers</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+.exports-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:20px 0}
+.export-card{border:1px solid var(--hairline);border-top:2px solid var(--accent);padding:14px 16px}
+.export-card .fn{font:600 14px/1 var(--font-mono);color:var(--accent);margin-bottom:6px}
+.export-card .desc{font:400 13px/1.4 var(--font-body);color:var(--stone)}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Task 2 of 8</div>
+  <p class="doc-title">Visual helpers</p>
+  <a href="#overview">What this task does</a>
+  <a href="#exports">Exported functions</a>
+  <a href="#files">Files</a>
+  <a href="#steps">Steps</a>
+  <a href="#step-1" class="lvl-3">1 — write failing test</a>
+  <a href="#step-2" class="lvl-3">2 — run (expect fail)</a>
+  <a href="#step-3" class="lvl-3">3 — write implementation</a>
+  <a href="#step-4" class="lvl-3">4 — run (expect pass)</a>
+  <a href="#step-5" class="lvl-3">5 — commit</a>
+  <hr style="border:none;border-top:1px solid var(--hairline);margin:18px 0">
+  <a href="01-tooling-and-deps.html">← Task 1</a>
+  <a href="03-graph-model.html">Next: graph model →</a>
+  <a href="00-overview.html">↑ Overview</a>
+</nav>
+
+<main>
+  <div class="eyebrow">Task 2 · Pure visual helpers</div>
+  <h2 style="margin-top:16px"><em>Extract</em> visual.ts from GraphView</h2>
+
+  <div class="progress">
+    <div class="bar"><div class="fill" style="width:0%"></div></div>
+    <div class="label">0 / 5 steps · <span class="schip todo">todo</span></div>
+  </div>
+
+  <p class="statement">Move the visual mapping out of GraphView.tsx into a pure, sigma-agnostic, fully-testable module.</p>
+
+  <h2 id="overview"><em>What</em> this task does</h2>
+  <p>Values are ported <strong>verbatim</strong> from the current <code>GraphView.tsx</code> (lines cited). Adds <code>computeSelfRoles</code>, which replaces the inline <code>selfRole</code>/<code>identityNodeIds</code> logic (current lines 432–441, 510–514).</p>
+
+  <div class="callout">
+    <span class="label">Source location</span>
+    <code>GRAPH_THEME_TOKENS</code> is currently defined inside <code>GraphView.tsx</code> (lines 33–69). Move the whole constant here unchanged.
+  </div>
+
+  <h2 id="exports"><em>Exported</em> functions</h2>
+  <div class="exports-grid">
+    <div class="export-card">
+      <div class="fn">tierColor()</div>
+      <div class="desc">Maps tier + selfRole + appearance → node fill color. Self = <code>#74b3a5</code>, identity = <code>#4d8a7e</code>.</div>
+    </div>
+    <div class="export-card">
+      <div class="fn">edgeColor()</div>
+      <div class="desc">Maps edge type + theme → color token from <code>GRAPH_THEME_TOKENS</code>.</div>
+    </div>
+    <div class="export-card">
+      <div class="fn">displayNodeSize()</div>
+      <div class="desc">Access-count log-scale + self-node floor.</div>
+    </div>
+    <div class="export-card">
+      <div class="fn">nodeLabel()</div>
+      <div class="desc">Prefers title, then 40-char content slice, then id prefix.</div>
+    </div>
+    <div class="export-card">
+      <div class="fn">computeSelfRoles()</div>
+      <div class="desc">Walks <code>defines</code> edges from userNodeId to compute self / identity / "" roles.</div>
+    </div>
+    <div class="export-card">
+      <div class="fn">GRAPH_THEME_TOKENS</div>
+      <div class="desc">Dark + light theme palette. Used by <a href="03-graph-model.html">graphModel</a> and <a href="06-graphview-rewrite.html">GraphView</a>.</div>
+    </div>
+  </div>
+
+  <h2 id="files"><em>Files</em></h2>
+  <table>
+    <thead><tr><th>File</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><code>ui/src/graph/visual.ts</code></td><td>Create</td></tr>
+      <tr><td><code>ui/src/graph/visual.test.ts</code></td><td>Create</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="steps"><em>Steps</em> (TDD)</h2>
+
+  <h3 id="step-1">Step 1 — Write the failing test</h3>
+  <p>Create <code>ui/src/graph/visual.test.ts</code>. The test covers five assertions:</p>
+  <ul>
+    <li>Self and identity roles map to their distinct teal colors</li>
+    <li>Edge types map to correct theme tokens (supports → <code>#4a7a4a</code>, related_to → <code>#333</code>)</li>
+    <li>Self nodes meet the access-count floor for size</li>
+    <li>Label resolution prefers title → content slice → id prefix</li>
+    <li><code>computeSelfRoles</code> marks userNode as "self", defines-targets as "identity", others as ""</li>
+  </ul>
+  <details>
+    <summary>Show full test file</summary>
+    <pre><code>import { describe, it, expect } from "vitest";
+import {
+  tierColor, edgeColor, displayNodeSize, nodeLabel, computeSelfRoles,
+} from "./visual";
+import { DEFAULT_GRAPH_APPEARANCE } from "../graphAppearance";
+import type { Edge, MemoryNode } from "../types";
+
+const A = DEFAULT_GRAPH_APPEARANCE;
+
+function node(over: Partial&lt;MemoryNode&gt;): MemoryNode {
+  return {
+    id: "n", type: "fact", tier: "working", source: "x", space: null,
+    title: null, content: "", created: "", updated: "", last_accessed: "",
+    access_count: 0, file_path: "", file_hash: "", ...over,
+  };
+}
+
+describe("visual", () => {
+  it("colors self and identity roles distinctly", () => {
+    expect(tierColor("working", "self", A)).toBe("#74b3a5");
+    expect(tierColor("working", "identity", A)).toBe("#4d8a7e");
+    expect(tierColor("core", "", A)).toBe(A.colors.core);
+  });
+
+  it("maps edge types to theme colors", () => {
+    expect(edgeColor("supports", "dark")).toBe("#4a7a4a");
+    expect(edgeColor("related_to", "dark")).toBe("#333");
+  });
+
+  it("sizes self nodes at least the self floor", () => {
+    expect(displayNodeSize(0, "self")).toBeGreaterThanOrEqual(Math.round(36 * 1.2));
+  });
+
+  it("labels prefer title, then content slice, then id prefix", () => {
+    expect(nodeLabel(node({ title: "T" }))).toBe("T");
+    expect(nodeLabel(node({ title: null, content: "abc" }))).toBe("abc");
+    expect(nodeLabel(node({ id: "abc-123", title: null, content: "" }))).toBe("abc");
+  });
+
+  it("computes self/identity roles from defines edges", () => {
+    const nodes = [node({ id: "u" }), node({ id: "p" }), node({ id: "q" })];
+    const edges: Edge[] = [
+      { source_id: "u", target_id: "p", edge_type: "defines", weight: 1, created: "" },
+    ];
+    const roles = computeSelfRoles(nodes, edges, "u");
+    expect(roles.get("u")).toBe("self");
+    expect(roles.get("p")).toBe("identity");
+    expect(roles.get("q") ?? "").toBe("");
+  });
+});</code></pre>
+  </details>
+
+  <h3 id="step-2">Step 2 — Run test to verify it fails</h3>
+  <pre><code>( cd ui && npx vitest run src/graph/visual.test.ts )</code></pre>
+  <p><strong>Expected:</strong> FAIL — cannot find module <code>./visual</code>.</p>
+
+  <h3 id="step-3">Step 3 — Write the implementation</h3>
+  <p>Create <code>ui/src/graph/visual.ts</code>. Key points:</p>
+  <ul>
+    <li><code>GRAPH_THEME_TOKENS</code> moves verbatim from <code>GraphView.tsx</code> lines 33–69</li>
+    <li><code>tierBorderColor</code> is <strong>not</strong> ported — sigma's default node program has no border; dashed borders are deferred per spec</li>
+    <li><code>nodeSize()</code> is private; <code>displayNodeSize()</code> is the export with the self-floor</li>
+    <li>No DOM or sigma imports — this module is pure TypeScript</li>
+  </ul>
+  <details>
+    <summary>Show full implementation</summary>
+    <pre><code>import {
+  GRAPH_DISPLAY_SCALE, type GraphAppearance, type GraphTheme,
+} from "../graphAppearance";
+import type { Edge, MemoryNode, Tier } from "../types";
+
+export type SelfRole = "self" | "identity" | "";
+
+export const GRAPH_THEME_TOKENS: Record&lt;GraphTheme, { ... }&gt; = {
+  dark: {
+    background: "#0a0a0a", label: "#d8dee6", labelGlow: "#f3f4f6", accent: "#d4a574",
+    edgeDefault: "#333", edgeSupports: "#4a7a4a", edgeContradicts: "#7a4a4a",
+    edgeDefines: "#5a9e8f", edgeEvolved: "#6a5acd", glowDefault: "#d4a574",
+  },
+  light: {
+    background: "#f6f8fb", label: "#24303c", ...
+  },
+};
+
+export function tierColor(tier: string, selfRole: SelfRole, appearance: GraphAppearance): string { ... }
+export function displayNodeSize(accessCount: number, selfRole: SelfRole): number { ... }
+export function edgeColor(edgeType: string, theme: GraphTheme): string { ... }
+export function nodeLabel(n: MemoryNode): string { ... }
+export function computeSelfRoles(nodes: MemoryNode[], edges: Edge[], userNodeId: string | null): Map&lt;string, SelfRole&gt; { ... }</code></pre>
+  </details>
+
+  <h3 id="step-4">Step 4 — Run test to verify it passes</h3>
+  <pre><code>( cd ui && npx vitest run src/graph/visual.test.ts )</code></pre>
+  <p><strong>Expected:</strong> PASS — 5 passed.</p>
+
+  <h3 id="step-5">Step 5 — Commit</h3>
+  <pre><code>git add ui/src/graph/visual.ts ui/src/graph/visual.test.ts
+git commit -m "refactor(ui): extract pure graph visual helpers + self-role map"</code></pre>
+
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <span class="name">Task 2 — Extract pure visual helpers</span>
+    <span class="role">Graph view WebGL sigma · 2026-06-17 · ormah</span>
+  </div>
+</main>
+
+</body>
+</html>
+<!-- rich-doc-src-sha256:5098145fd6036ed1c550810eb4d79d6175514a80f19883317b1e25f863f4963c -->

@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0004 Slice 3: Extraction timeout — health-gated, shrink-first quarantine</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">ADR-0004 Slice 3: Extraction timeout — health-gated, shrink-first quarantine</div>
+  <a href="#blocked-decisions">Three decisions the ADR must ratify</a>
+  <a href="#context">Context and prerequisites</a>
+  <a href="#design">Design — survivor of council rounds R1-R8</a>
+  <a href="#constraints">Global constraints</a>
+  <a href="#anchors">Key anchors (verified 2026-07-21 on local-main @ 66405d9)</a>
+  <a href="#task-1">Task 1: raise LlmTimeoutError on a real provider timeout</a>
+  <a href="#task-2">Task 2: EXTRACT_ERR_TIMEOUT — health-gated, shrink-first classification</a>
+  <a href="#task-3">Task 3: Verification, quarantine audit, Beta merge</a>
+</nav>
+<main>
+<div class="callout warn">
+  <p><strong>⛔ BLOCKED: this slice needs its own ADR first</strong></p>
+  <p>Do not implement this plan until an ADR is written and accepted. This is the only part of ADR-0004 that can <strong>permanently drop real user conversation</strong>, and the council review kept finding failure modes in it — the design here is the survivor of eight rounds, but the decision it encodes was never ratified in an ADR of its own.</p>
+</div>
+
+<h2 id="blocked-decisions"><em>Three</em> decisions the ADR must ratify</h2>
+
+<ol>
+  <li><strong>Is dropping data ever acceptable to unstick a lane?</strong> The alternative is parking the slice forever (data preserved, that transcript's ingestion permanently stalled, quota no longer burned because of the backoff). This plan chooses bounded dropping with a replayable record; that is a product call, not an implementation detail.</li>
+  <li><strong>What "toxic" means.</strong> Lateness is not toxicity. A large-but-valid slice times out while smaller ones succeed. This plan therefore requires BOTH provider-health evidence AND an exhausted shrink budget before a single failure counts — see below.</li>
+  <li><strong>The single-oversized-turn hole.</strong> The parser deliberately commits a first turn that exceeds <code>max_bytes</code> (no safe conversational boundary exists inside it), so shrinking cannot rescue a huge paste in one turn. Under this design such a turn is still eventually quarantined. The ADR must accept that explicitly or specify another route (e.g. hand the oversized turn to a summarisation path, or park it and alert).</li>
+</ol>
+
+<p class="statement">These decisions were never ratified by council; the design here survived eight rounds of review, but only because it was always positioned as a survivor within this plan, not as a standalone ADR.</p>
+
+<h2 id="context"><em>Context</em> and prerequisites</h2>
+
+<p>This is <strong>slice 3 of 3 of ADR-0004</strong> (async ingest nudge). <code>docs/adr/0004-async-ingest-nudge-server-cursor.md</code> already states that a timeout "counts toward the per-slice cap and quarantines after N". The review showed that rule, as written, loses data during a provider outage.</p>
+
+<p><strong>Prerequisites:</strong></p>
+<ul>
+  <li><strong>Slice 1</strong> (<code>../2026-07-21-adr-0004-slice1-nudge-core/</code>) merged.</li>
+  <li><strong>Slice 2</strong> (<code>../2026-07-21-adr-0004-slice2-bounded-shutdown/</code>) merged: it creates <code>src/ormah/background/llm_errors.py</code> (with <code>LlmTimeoutError</code> already defined but never raised) and converts the adapter to a tracked <code>Popen</code>. Task 1 here only adds the raise site. If slice 2 was skipped, Task 1 must create the module and do the <code>Popen</code> migration itself — check before starting.</li>
+</ul>
+
+<h2 id="design"><em>Design</em> — survivor of council rounds R1-R8</h2>
+
+<p class="statement">All council findings were accepted. The mechanism below brackets failure as slice-specific only with evidence that the provider recovered, and quarantines only after the slice has been shrunk to the minimum floor.</p>
+
+<ul>
+  <li><strong>Health gate.</strong> A timeout counts toward <code>MAX_EXTRACT_FAILURES</code> only when another slice extracted successfully since THIS slice's previous timeout. That brackets the failure as slice-specific. Without the bracket it is indistinguishable from an outage → uncapped <code>TRANSIENT</code>. Mechanism: a monotonic module marker <code>_LAST_EXTRACT_OK</code> plus a persisted per-slice <code>extract_fail_at</code>.</li>
+  <li><strong>Atomicity.</strong> The bracket decision and the state write happen in ONE locked mutation, so a single success can authorise at most ONE counted timeout. Two commits would let a stale snapshot restore the old timestamp and turn one success into unlimited counts.</li>
+  <li><strong>Shrink before cap.</strong> A bracketed timeout first HALVES the slice (<code>max_bytes = max(floor, flush_bytes >> level)</code>, <code>floor = min(MIN_SLICE_BYTES, flush_bytes)</code> — never RAISE a configured <code>flush_bytes</code>). Only at the floor does a further bracketed timeout count. If a shrink level fails to move <code>payload_offset</code>, shrinking is a no-op (single oversized turn) — stop burning levels and say so in the log.</li>
+  <li><strong>Cancellation is not a timeout.</strong> <code>LlmCancelledError</code> (slice 2) maps to <code>EXTRACT_ERR_CALL_FAILED</code> → uncapped <code>TRANSIENT</code>, caught BEFORE any broad handler, so restarts can never spend a healthy slice's budget.</li>
+  <li><strong>Quarantine stays observable.</strong> <code>_record_extract_failure</code> already writes a replayable <code>skipped_slices</code> entry (start/end/source_hash/reason, L871-877) and logs <code>observable data loss</code> at ERROR. That record is what makes bounded dropping defensible — do not weaken it.</li>
+  <li><strong>Declared limitation.</strong> Only the <code>claude_cli</code> adapter raises the signal; ollama/litellm keep <code>None</code> → <code>EXTRACT_ERR_CALL_FAILED</code> → TRANSIENT (today's behaviour).</li>
+</ul>
+
+<h2 id="constraints"><em>Global</em> constraints</h2>
+
+<ul>
+  <li><strong>Never checkout a branch in <code>Tools/ormah</code></strong> — it is the live Beta. Work in a worktree cut from <code>local-main</code>; run tests with that worktree's venv.</li>
+  <li><strong>Beta-only.</strong> <code>upstream/main</code> has no ingest-provider seam (its <code>llm_client.py</code> exposes only <code>llm_generate</code>; <code>memory_engine</code> calls it directly at upstream L2316-2320) and no <code>claude_cli</code> adapter — this classification would ship as inert code upstream.</li>
+  <li><strong>Out of scope:</strong> nudge/worker (slice 1), shutdown cancellation (slice 2), worker concurrency (#150).</li>
+  <li>Lint: <code>ruff check src/ tests/</code> (line-length 100, py311).</li>
+</ul>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>File</th>
+      <th>Delivers</th>
+      <th>Depends on</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td><code>01-timeout-signal.md</code></td>
+      <td><code>claude_cli</code> raises <code>LlmTimeoutError</code> on <code>TimeoutExpired</code></td>
+      <td>slice 2</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><code>02-timeout-classification.md</code></td>
+      <td><code>EXTRACT_ERR_TIMEOUT</code>; health gate + shrink-then-cap</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><code>03-verification.md</code></td>
+      <td>Suite green, quarantine audit, Beta merge</td>
+      <td>1–2</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="anchors"><em>Key</em> anchors (verified 2026-07-21 on local-main @ 66405d9)</h2>
+
+<ul>
+  <li><strong>Adapter:</strong> <code>src/ormah/background/llm/claude_cli_adapter.py</code> — <code>generate()</code> L104-172, <code>except subprocess.TimeoutExpired</code> L141-143 (slice 2 leaves it returning <code>None</code>).</li>
+  <li><strong>Engine:</strong> <code>src/ormah/engine/memory_engine.py</code> — <code>EXTRACT_ERR_*</code> constants L54-61, <code>_extract_memories_llm</code> L2842, <code>ingest_llm_generate</code> call L2861-2867, None-branch L2868-2886.</li>
+  <li><strong>Watcher:</strong> <code>src/ormah/background/session_watcher.py</code> — <code>_ingest_session</code> L728-995 (parse with <code>max_bytes=flush_bytes</code> L776; <code>existing</code> loaded L765), classification L942-954, <code>_record_extract_failure</code> L856-910 (cap L868, quarantine entry L871-877, counter persist L901-910), <code>_commit_state</code> L706-714, success entry rebuild L970-983.</li>
+  <li><strong>Tests:</strong> <code>tests/test_background/test_session_watcher.py</code> — <code>_LLM_PATCH</code> L31, <code>_UNPARSEABLE</code> L36, <code>_LLM_RESPONSE</code> L41, <code>_make_jsonl</code> L51, <code>_mark_idle</code> L68, and the reference cases <code>test_toxic_slice_skipped_after_max_extract_failures</code> L204, <code>test_provider_wide_call_failure_never_skips_slice</code> L408.</li>
+</ul>
+
+<h2 id="task-1"><em>Task</em> 1: raise <code>LlmTimeoutError</code> on a real provider timeout</h2>
+
+<p class="eyebrow">Files to modify</p>
+
+<ul>
+  <li>Modify: <code>src/ormah/background/llm/claude_cli_adapter.py</code> — the <code>TimeoutExpired</code> branch (L141-143 pre-slice-2; after slice 2 it lives inside the <code>communicate()</code> handler and currently <code>return None</code>s)</li>
+  <li>(Only if slice 2 was skipped) Create <code>src/ormah/background/llm_errors.py</code> and adjust <code>llm_client.llm_generate</code> to swallow both error types — otherwise both already exist.</li>
+  <li>Test: <code>tests/test_background/test_claude_cli_adapter.py</code> (existing <code>test_returns_none_on_timeout</code> at ~L90 changes meaning)</li>
+</ul>
+
+<p class="eyebrow">Interfaces</p>
+
+<ul>
+  <li><strong>Consumes:</strong> nothing from other tasks.</li>
+  <li><strong>Produces:</strong> <code>ormah.background.llm_errors.LlmTimeoutError(Exception)</code> — raised by <code>ClaudeCliAdapter.generate()</code> on <code>subprocess.TimeoutExpired</code> — and <code>LlmCancelledError(Exception)</code> (raised by slice 2's shutdown cancellation; already defined and already handled by the maintenance path — this task only adds the timeout raise site). <code>ingest_llm_generate()</code> PROPAGATES it (Task 2 catches it in the engine); <code>llm_generate()</code> (maintenance path) swallows it and returns <code>None</code> (unchanged behavior for the 5 maintenance consumers).</li>
+</ul>
+
+<div class="callout">
+  <p><strong>⚠️ Beta-only.</strong> Verify slice 2 landed first: <code>grep -n "LlmTimeoutError" src/ormah/background/llm_errors.py</code> and confirm the adapter already uses a tracked <code>Popen</code>. If not, do slice 2's Task 1 + the <code>Popen</code> migration before this. <code>upstream/main</code> has no ingest-provider seam (<code>llm_client.py</code> there exposes only <code>llm_generate</code>, and <code>memory_engine</code> calls it directly at upstream L2316-2320) and no <code>claude_cli</code> adapter at all. Sending this seam upstream would ship code no upstream adapter can ever raise.</p>
+</div>
+
+<p class="eyebrow">Steps</p>
+
+<ol>
+  <li><strong>Write the failing tests</strong>
+    <p>In <code>tests/test_background/test_claude_cli_adapter.py</code>, replace the timeout test and add one for the maintenance boundary (mirror the file's existing mocking style — it patches <code>subprocess.run</code>; read the current <code>test_returns_none_on_timeout</code> (~L90) first and reuse its fixture/monkeypatch pattern verbatim). Use the fake-<code>Popen</code> helper slice 2 introduced in this file (it implements <code>communicate</code>, <code>wait</code>, <code>poll</code>, <code>terminate</code>, <code>kill</code>, <code>returncode</code>) — do NOT patch <code>subprocess.run</code>, which this code path no longer uses.</p>
+  </li>
+  <li><strong>Run tests to verify they fail</strong>
+    <p>Run: <code>python -m pytest tests/test_background/test_claude_cli_adapter.py -v -k "timeout or cancel_still or fast_failures"</code></p>
+    <p>Expected: <code>test_raises_llm_timeout_error_on_timeout</code> FAILS (that branch still returns <code>None</code>, so nothing is raised); the other two already pass from slice 2.</p>
+  </li>
+  <li><strong>Implement</strong>
+    <p>In <code>claude_cli_adapter.py</code>, the timeout branch currently ends with <code>return None</code> (slice 2 left it that way deliberately). Turn that into the signal — keeping slice 2's cancel-wins-over-timeout check, which must stay FIRST. Import <code>LlmTimeoutError</code> alongside the <code>LlmCancelledError</code> import slice 2 added. Every OTHER failure path in <code>generate()</code> stays exactly as it is — a non-zero exit, a non-JSON envelope, an <code>is_error</code> envelope and a failed process creation all keep returning <code>None</code> (fast failures must never look slice-specific).</p>
+  </li>
+  <li><strong>Run tests to verify they pass</strong>
+    <p>Run: <code>python -m pytest tests/test_background/test_claude_cli_adapter.py tests/test_background/test_ingest_provider.py -v</code></p>
+    <p>Expected: PASS — the three new cases plus every slice-2 cancellation test still green.</p>
+  </li>
+  <li><strong>Lint + commit</strong>
+    <p>Provenance-PURE commits (codex R3 — never mix upstream and fork-only files in one commit; the publish step cherry-picks whole commits). One commit with files: <code>src/ormah/background/llm/claude_cli_adapter.py</code>, <code>tests/test_background/test_claude_cli_adapter.py</code></p>
+  </li>
+</ol>
+
+<h2 id="task-2"><em>Task</em> 2: <code>EXTRACT_ERR_TIMEOUT</code> — health-gated, shrink-first classification</h2>
+
+<p class="eyebrow">Files to modify</p>
+
+<ul>
+  <li>Modify: <code>src/ormah/engine/memory_engine.py</code> (constants ~L54-61; <code>_extract_memories_llm</code> L2842-2886)</li>
+  <li>Modify: <code>src/ormah/background/session_watcher.py:942-954</code> (classification)</li>
+  <li>Test: <code>tests/test_background/test_session_watcher.py</code> (next to <code>test_provider_wide_call_failure_never_skips_slice</code> ~L408)</li>
+</ul>
+
+<p class="eyebrow">Interfaces</p>
+
+<ul>
+  <li><strong>Consumes:</strong> <code>LlmTimeoutError</code> from Task 1; <code>LlmCancelledError</code> from slice 2.</li>
+  <li><strong>Produces:</strong> module constant <code>EXTRACT_ERR_TIMEOUT</code> in <code>memory_engine.py</code>, exported alongside <code>EXTRACT_ERR_NO_PROVIDER</code> / <code>EXTRACT_ERR_CALL_FAILED</code> (session_watcher already imports those two — extend that import). Returned by <code>engine.ingest_conversation</code> as an error string, like the other two.</li>
+</ul>
+
+<p class="eyebrow">Semantics: health gate + shrink ladder</p>
+
+<p>A timeout MAY be evidence about the slice — but provider congestion times out every slice, and quarantining during an outage is exactly the H1 mass-loss scenario. So a timeout counts toward <code>MAX_EXTRACT_FAILURES</code> ONLY with provider-health evidence: <strong>some slice extracted successfully since THIS slice's previous timeout</strong> (proves the provider was healthy while this slice kept failing).</p>
+
+<ul>
+  <li><strong>Module-level monotonic success marker</strong> <code>_LAST_EXTRACT_OK: float</code> (time.monotonic()), set at the end of every successful <code>_ingest_session</code> extraction</li>
+  <li><strong>Per-slice state field</strong> <code>extract_fail_at</code> (monotonic timestamp of this slice's last counted-or-not timeout), persisted next to <code>extract_fail_offset</code>/<code>extract_fail_count</code></li>
+  <li>On <code>EXTRACT_ERR_TIMEOUT</code>: count iff <code>_LAST_EXTRACT_OK > entry["extract_fail_at"]</code>; always refresh <code>extract_fail_at</code>. First timeout of a slice never counts (no bracket yet).</li>
+  <li><strong>Atomicity:</strong> the decision AND the state write happen in ONE locked mutation — read the entry, decide, then a single <code>_commit_state</code> that writes the new <code>extract_fail_at</code> together with the (possibly incremented) <code>extract_fail_count</code>. Never two commits. Regression: one success authorizes AT MOST one subsequent timeout count; further timeouts without a new success stay TRANSIENT.</li>
+  <li><code>extract_fail_at</code> is <code>time.monotonic()</code> and is NOT comparable across restarts: after a reboot the marker restarts too, so stale entries fail the bracket test and fall back to TRANSIENT — slower quarantine, never lossier (documented fail-safe, council R2).</li>
+  <li><code>LlmCancelledError</code> (slice 2's shutdown path) is caught in the engine right next to <code>LlmTimeoutError</code> and returns <code>EXTRACT_ERR_CALL_FAILED</code> — a cancel says nothing about the slice, so it must stay uncapped TRANSIENT, never <code>EXTRACT_ERR_TIMEOUT</code>.</li>
+  <li><strong>Shrink before quarantine:</strong> Health evidence proves the provider works; it does NOT prove the slice is corrupt — a big-but-valid slice can time out while smaller ones succeed, and quarantining it drops real conversation. So a bracketed timeout first HALVES the slice: persist <code>extract_shrink_level</code> (int) on the entry and parse with <code>max_bytes = max(floor, flush_bytes >> level)</code> where <code>floor = min(MIN_SLICE_BYTES, flush_bytes)</code>. Deriving the floor with <code>min</code> matters: a configured <code>flush_bytes=1000</code> must never be RAISED to a 4000 constant — that would break the <code>flush_bytes <= ingest_max_content_chars</code> invariant and the existing tests that pass 300-byte caps. Only when the level is already at that floor does a further bracketed timeout count toward <code>MAX_EXTRACT_FAILURES</code>. A success at any level clears both the level and the counters.</li>
+</ul>
+
+<p class="statement">Net effect: a slow-but-valid slice shrinks until it fits; only a slice that cannot be extracted even at the floor — while the provider demonstrably works — is ever quarantined, and that quarantine is already recorded replayably in <code>skipped_slices</code> (start/end/hash, L871-877) with an ERROR log.</p>
+
+<p class="eyebrow">Steps</p>
+
+<ol>
+  <li><strong>Write the failing tests</strong>
+    <p>Add six new test cases to <code>tests/test_background/test_session_watcher.py</code>:</p>
+    <ul>
+      <li><code>test_timeout_during_outage_never_quarantines</code> — outage: every call times out and NO success ever lands, so no health evidence exists. The slice must stay TRANSIENT forever — never counted, never quarantined, cursor never advanced (H1 mass-loss guard).</li>
+      <li><code>test_cancelled_extraction_never_mutates_slice_state</code> — a shutdown cancel says nothing about the slice: EXTRACT_ERR_CALL_FAILED → uncapped TRANSIENT, even with health evidence present. Repeated restarts must never quarantine a healthy slice.</li>
+      <li><code>test_big_slice_shrinks_before_any_quarantine</code> — lateness is not toxicity. A bracketed timeout HALVES the slice (extract_shrink_level 0→1) instead of counting toward the cap; a later success clears the level.</li>
+      <li><code>test_quarantine_only_at_shrink_floor</code> — already at the floor (flush_bytes == MIN_SLICE_BYTES) there is nothing left to shrink, so bracketed timeouts DO count and the slice quarantines after MAX_EXTRACT_FAILURES — the toxic-slice path stays reachable.</li>
+      <li><code>test_one_success_authorizes_at_most_one_count</code> — atomicity: the fail-timestamp refresh and the count must land in ONE commit, so a single success can authorize at most ONE counted timeout. Without a new success the next timeout stays uncounted.</li>
+      <li><code>test_call_failed_still_never_counts</code> — regression guard: a provider-wide call failure (None from the adapter) stays uncapped TRANSIENT after the timeout split.</li>
+    </ul>
+  </li>
+  <li><strong>Run tests to verify they fail</strong>
+    <p>Run: <code>python -m pytest tests/test_background/test_session_watcher.py -v -k "timeout_during_outage or cancelled_extraction or big_slice_shrinks or quarantine_only_at_shrink_floor or one_success_authorizes or call_failed_still"</code></p>
+    <p>Expected: FAIL — ImportError on <code>ormah.background.llm_errors</code> / <code>MIN_SLICE_BYTES</code>.</p>
+  </li>
+  <li><strong>Implement — engine</strong>
+    <p>In <code>memory_engine.py</code>, add the new error constant, then wrap the <code>ingest_llm_generate</code> call to catch <code>LlmTimeoutError</code> (and <code>LlmCancelledError</code> for safety) and return the appropriate error string.</p>
+  </li>
+  <li><strong>Implement — watcher classification</strong>
+    <p>In <code>session_watcher.py</code>, extend the error constant import and add the classification logic BEFORE the provider-wide check. Supporting pieces include module global <code>_LAST_EXTRACT_OK</code>, helper <code>_mark_slice_timeout</code>, module constant <code>MIN_SLICE_BYTES = 4000</code>, and updating the parse call to use the shrink level.</p>
+  </li>
+  <li><strong>Run tests to verify they pass</strong>
+    <p>Run: <code>python -m pytest tests/test_background/test_session_watcher.py tests/test_engine/test_ingest.py -v</code></p>
+    <p>Expected: PASS — new tests green, all existing cap/transient tests untouched and green.</p>
+  </li>
+  <li><strong>Lint + commit</strong>
+    <p>One commit with files: <code>src/ormah/engine/memory_engine.py</code>, <code>src/ormah/background/session_watcher.py</code>, <code>tests/test_background/test_session_watcher.py</code></p>
+  </li>
+</ol>
+
+<h2 id="task-3"><em>Task</em> 3: Verification, quarantine audit, Beta merge</h2>
+
+<p class="eyebrow">Files</p>
+<p>None — runs the gates and integrates.</p>
+
+<p class="eyebrow">Interfaces</p>
+
+<ul>
+  <li><strong>Consumes:</strong> Tasks 1–2, committed on the worktree branch.</li>
+  <li><strong>Produces:</strong> green suite + lint, an audit proving no healthy data was quarantined, and <code>local-main</code> carrying the change.</li>
+</ul>
+
+<p class="eyebrow">Steps</p>
+
+<ol>
+  <li><strong>Full suite + lint (cite the output)</strong>
+    <p>Run: <code>python -m pytest tests/ -v</code> and <code>ruff check src/ tests/</code></p>
+    <p>Expected: 0 failures beyond the KNOWN environmental set. Paste the tail (<code>N passed, M failed</code>). The suite must include all six new cases from Task 2. A vacuous pass is the real risk here: if the fixtures produce a slice smaller than <code>MIN_SLICE_BYTES</code>, the floor branch is never exercised and <code>test_quarantine_only_at_shrink_floor</code> passes without testing anything. Confirm <code>result.capped</code> is actually true in that test before trusting it.</p>
+  </li>
+  <li><strong>Audit the live quarantine trail BEFORE and AFTER</strong>
+    <p>This slice's whole risk is dropping real data, so measure it rather than assume. Snapshot the existing quarantine records before merging, then re-run the same command a few days after the Beta merge. Every NEW entry must have <code>reason == "extract_timeout_x3"</code> only where the transcript genuinely could not be extracted at the floor slice size — spot-check at least one by replaying its byte range manually. A rise in quarantines right after the merge means the health gate or the shrink ladder is mis-tuned; roll back rather than let it keep dropping data.</p>
+  </li>
+  <li><strong>Merge into the Beta (<code>local-main</code>)</strong>
+    <p>Already on <code>local-main</code>; do NOT switch branches. Merge the worktree branch, restart the server, verify health.</p>
+  </li>
+  <li><strong>Review + close the loop</strong>
+    <ul>
+      <li>Run <code>/council-pr</code> on the worktree branch before merging.</li>
+      <li>Update the ADR written as this slice's prerequisite: mark it implemented, and record the accepted limitations — (i) a single oversized turn cannot be shrunk and is still eventually quarantined; (ii) only <code>claude_cli</code> raises the signal; (iii) <code>_LAST_EXTRACT_OK</code> is in-memory, so a restart resets the bracket and makes quarantine slower, never lossier.</li>
+      <li>Also amend <code>docs/adr/0004-async-ingest-nudge-server-cursor.md</code> so its original sentence ("a <code>TimeoutExpired</code> … counts toward the per-slice cap and quarantines after N") points at the new ADR — as written it describes behaviour the review showed loses data during an outage.</li>
+      <li>Report: suite output, the quarantine audit delta, and the spot-checked replay.</li>
+    </ul>
+  </li>
+</ol>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:607103bace20dc4bb1d8e954431f72384154b72bbf0c9539e8b73cda9f782e80 -->

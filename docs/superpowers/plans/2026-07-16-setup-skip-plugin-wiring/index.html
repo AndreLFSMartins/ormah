@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Setup: skip the Claude Code wiring — Implementation Plan</title>
+  <style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55;--lh-title:1.12;--maxw:1140px}
+[data-mode="dark"]{--paper:#141413;--ink:#faf9f5;--stone:#8a8780;--hairline:#2a2926}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)}strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+.statement{font:400 italic 26px/1.25 var(--font-body);letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+.callout.council .label::before{content:"Council: "}
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700}td .no{color:var(--ink);font-weight:700}
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);text-transform:uppercase;letter-spacing:.04em}
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+.checkbox-item{display:flex;align-items:flex-start;gap:12px;margin:8px 0;line-height:1.5}
+.checkbox-item input[type="checkbox"]{flex-shrink:0;margin-top:2px;cursor:pointer}
+.checkbox-item label{flex:1;cursor:pointer;user-select:none}
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)}.phase.p-b{border-color:var(--blue)}.phase.p-g{border-color:var(--green)}
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <span class="eyebrow">Setup and installation</span>
+  <h1 class="doc-title">Skip the Claude Code wiring</h1>
+  <a href="#overview">Overview</a>
+  <a href="#task-0">Task 0: Atomic MCP</a>
+  <a href="#task-1">Task 1: Dead branch fix</a>
+  <a href="#task-2">Task 2: Plugin detection</a>
+  <a href="#task-3">Task 3: Plugin-aware wired</a>
+  <a href="#task-4">Task 4: Guard and strip</a>
+</nav>
+
+<main>
+
+<section id="overview">
+<h2>Setup: skip the Claude Code wiring the ormah plugin already provides</h2>
+<p class="statement">Stop <code>ormah setup</code> from re-wiring the hooks and MCP server that the ormah plugin already registers, so a human turn runs the whisper once instead of twice.</p>
+<div class="meta">Implementation plan — REV 2 — 5 tasks — Python 3.11+</div>
+
+<h3>Goal and architecture</h3>
+<p><strong>Goal:</strong> Stop <code>ormah setup</code> from re-wiring the hooks and MCP server that the ormah plugin already registers, so a human turn runs the whisper once instead of twice.</p>
+<p><strong>Architecture:</strong> One guard at the top of <code>_claude_code_wire()</code> — the single funnel all three offending entry points (<code>install.sh</code> plain, <code>install.sh --update</code>, desktop <code>run_setup_json</code>) pass through. The guard fires only for a <strong>user-scoped plugin that is both enabled and installed</strong>, and strips only what duplicates runtime execution: the hooks and the MCP server. <code>_claude_code_is_wired()</code> is corrected in the same PR because the strip would otherwise make the UI report a working install as "not wired".</p>
+
+<h3>References</h3>
+<ul>
+  <li><strong>Spec:</strong> <code>docs/superpowers/specs/2026-07-16-setup-skip-plugin-wiring-design.md</code></li>
+  <li><strong>Issue:</strong> <a href="https://github.com/r-spade/ormah/issues/145">#145</a></li>
+  <li><strong>Council review:</strong> REV 1 rejected — this is REV 2. Three corrections marked <strong>[council]</strong> below.</li>
+</ul>
+
+<h3>Global constraints</h3>
+<ul>
+  <li><strong>Branch:</strong> <code>fix/setup-skip-plugin-wiring</code>, cut from <code>upstream/main</code></li>
+  <li><strong>All code, comments, docstrings and commit messages in English.</strong></li>
+  <li><strong>Lint:</strong> ruff, line-length 100</li>
+  <li><strong>Only <code>src/ormah/setup.py</code> and <code>tests/test_setup.py</code> may be modified.</strong></li>
+  <li><div class="callout council"><span class="label">Council</span> Reuse <code>_plugin_enabled_in_settings</code> — do not write a second <code>enabledPlugins</code> parser.</div></li>
+  <li><div class="callout council"><span class="label">Council</span> Never strip on enabled flag alone. Enabled and installed are two states; require both.</div></li>
+  <li><div class="callout council"><span class="label">Council</span> Strip only hooks and MCP. Agents and commands are namespaced by the plugin — different names, no runtime duplication.</div></li>
+</ul>
+
+<h3>Task order and rationale</h3>
+<table><thead><tr><th>#</th><th>Task</th><th>File</th><th>Rationale</th></tr></thead>
+<tbody>
+<tr><td>0</td><td><code>_remove_mcp_from_json</code> atomic</td><td><a href="#task-0">00-atomic-mcp-write.md</a></td><td><strong>[council]</strong> Task 4 makes this hot; land crash-safety first.</td></tr>
+<tr><td>1</td><td>Fix dead branch</td><td><a href="#task-1">01-is-wired-dead-branch.md</a></td><td>Independent; proves bug before new concepts.</td></tr>
+<tr><td>2</td><td>Plugin detection</td><td><a href="#task-2">02-plugin-provides-hooks.md</a></td><td>Pure detection; tasks 3 and 4 consume it.</td></tr>
+<tr><td>3</td><td>Plugin-aware wired</td><td><a href="#task-3">03-is-wired-plugin-aware.md</a></td><td><strong>Must land before Task 4.</strong> Prevents UI regression.</td></tr>
+<tr><td>4</td><td>Guard and strip</td><td><a href="#task-4">04-wire-guard.md</a></td><td>The actual fix. Depends on 2 and 3.</td></tr>
+</tbody>
+</table>
+
+<h3>Known limitation (deliberate)</h3>
+<p>A <strong>project-</strong> or <strong>local-scoped</strong> plugin does not trigger the guard. Global-active and global-wired is the only safe symmetry. Task 2 carries a test asserting this is deliberate.</p>
+
+<h3>Setup before Task 0</h3>
+<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git fetch upstream
+git checkout upstream/main -b fix/setup-skip-plugin-wiring</code></pre>
+
+<h3>Finishing after Task 4</h3>
+
+<div class="checkbox-item">
+  <input type="checkbox" id="f1">
+  <label for="f1"><strong>Full suite and lint</strong> — <strong>[council]</strong> the whole suite
+    <pre><code>python -m pytest tests/test_setup.py tests/test_setup_json.py -v
+make test && make lint</code></pre>
+  </label>
+</div>
+
+<div class="checkbox-item">
+  <input type="checkbox" id="f2">
+  <label for="f2"><strong>Push and open PR</strong>
+    <pre><code>git push fork fix/setup-skip-plugin-wiring</code></pre>
+    Then <code>/council-pr</code> (base <code>r-spade:main</code>).
+  </label>
+</div>
+
+<div class="checkbox-item">
+  <input type="checkbox" id="f3">
+  <label for="f3"><strong>Run it in Beta</strong>
+    <pre><code>git checkout local-main
+git merge fix/setup-skip-plugin-wiring</code></pre>
+  </label>
+</div>
+
+<div class="checkbox-item">
+  <input type="checkbox" id="f4">
+  <label for="f4"><strong>Live verification</strong> — one prompt should trigger 1 retrieval event, not 2.
+    <pre><code>ormah setup --update</code></pre>
+    Then in a new Claude Code session, send one prompt and check:
+    <pre><code>python3 -c "
+import sqlite3, os
+p = os.path.expanduser('~/.local/share/ormah/memory/index.db')
+c = sqlite3.connect(f'file:{p}?mode=ro', uri=True)
+q = 'select count(*) n from retrieval_events where logged_at > datetime(\"now\",\"-10 minutes\") group by session_id, prompt_hash limit 1'
+print([n for n, in c.execute(q)])
+"</code></pre>
+    Expected: <code>[1]</code> instead of <code>[2]</code>.
+  </label>
+</div>
+
+</section>
+
+<section id="task-0">
+<h2>Task 0: Make <code>_remove_mcp_from_json</code> write <em>atomically</em></h2>
+<div class="meta">Modify setup.py and tests — 5 steps — Crash-safety</div>
+
+<div class="checkbox-item"><input type="checkbox" id="t0s1"><label for="t0s1"><strong>Step 1: Write the failing test</strong><br>Add to <code>tests/test_setup.py</code> class <code>TestRemoveMcpFromJson</code> with 6 test methods including <code>test_write_is_atomic</code>. The test verifies <code>_remove_mcp_from_json</code> uses <code>_atomic_write</code> instead of bare <code>write_text</code>.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t0s2"><label for="t0s2"><strong>Step 2: Run tests to verify atomicity test fails</strong><br>Run: <code>python -m pytest tests/test_setup.py::TestRemoveMcpFromJson::test_write_is_atomic -v</code><br>Expected: <code>AssertionError: Expected '_atomic_write' to have been called once. Called 0 times.</code></label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t0s3"><label for="t0s3"><strong>Step 3: Write the implementation</strong><br>In <code>src/ormah/setup.py</code>, change <code>_remove_mcp_from_json</code> final write from <code>config_path.write_text(...)</code> to <code>_atomic_write(str(config_path), json.dumps(data, indent=2) + "\n")</code>.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t0s4"><label for="t0s4"><strong>Step 4: Run tests to verify they pass</strong><br>Run: <code>python -m pytest tests/test_setup.py::TestRemoveMcpFromJson -v</code><br>Expected: 6 passed.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t0s5"><label for="t0s5"><strong>Step 5: Commit</strong><pre><code>git add src/ormah/setup.py tests/test_setup.py
+git commit -m "fix(setup): write ~/.claude.json atomically when removing ormah MCP
+
+_remove_claude_hooks already writes through _atomic_write; its sibling
+_remove_mcp_from_json ended in a bare write_text. Task 4 makes this path run
+on every setup --update against ~/.claude.json — the file holding the user's
+entire Claude Code config. A crash mid-write truncates it.
+
+Refs #145"</code></pre></label></div>
+
+</section>
+
+<section id="task-1">
+<h2>Task 1: Fix the dead matcher branch in <code>_claude_code_is_wired</code></h2>
+<div class="meta">Modify setup.py and tests — 5 steps — Dead code fix</div>
+
+<div class="checkbox-item"><input type="checkbox" id="t1s1"><label for="t1s1"><strong>Step 1: Write the failing test</strong><br>Add to <code>tests/test_setup.py</code> class <code>TestClaudeCodeIsWired</code> with test <code>test_detects_cli_hooks_when_no_mcp_entry_exists</code>. This test proves the hooks branch never matches because it reads <code>entry.get("command")</code> off a matcher dict instead of <code>matcher["hooks"][*]["command"]</code>.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t1s2"><label for="t1s2"><strong>Step 2: Run tests to verify regression test fails</strong><br>Run: <code>python -m pytest tests/test_setup.py::TestClaudeCodeIsWired::test_detects_cli_hooks_when_no_mcp_entry_exists -v</code><br>Expected: <code>assert False is True</code> — the dead branch is proven.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t1s3"><label for="t1s3"><strong>Step 3: Fix the branch</strong><br>In <code>_claude_code_is_wired</code>, iterate matchers correctly and read the inner hooks list, then reuse <code>_is_ormah_hook</code> which already knows both CLI and plugin-wrapper forms.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t1s4"><label for="t1s4"><strong>Step 4: Run tests to verify they pass</strong><br>Run: <code>python -m pytest tests/test_setup.py::TestClaudeCodeIsWired -v</code><br>Expected: 4 passed.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t1s5"><label for="t1s5"><strong>Step 5: Commit</strong><pre><code>git add src/ormah/setup.py tests/test_setup.py
+git commit -m "fix(setup): _claude_code_is_wired never detected hooks
+
+The hooks branch read entry.get(\"command\") off the matcher dict, but the
+command lives at matcher[\"hooks\"][*][\"command\"]. Dead branch. Inspect the
+inner hooks list and reuse _is_ormah_hook.
+
+Refs #145"</code></pre></label></div>
+
+</section>
+
+<section id="task-2">
+<h2>Task 2: Add <code>_claude_code_plugin_provides_hooks()</code></h2>
+<div class="meta">Modify setup.py and tests — 5 steps — Plugin detection</div>
+
+<h3>The two states this predicate must AND — [council]</h3>
+<table><thead><tr><th>State</th><th>File</th><th>Shape</th></tr></thead>
+<tbody><tr><td>enabled</td><td><code>~/.claude/settings.json</code></td><td><code>{"enabledPlugins": {"ormah@ormah": true}}</code></td></tr>
+<tr><td>installed</td><td><code>~/.claude/plugins/installed_plugins.json</code></td><td><code>{"plugins": {"ormah@ormah": [{"scope": "user", "installPath": "…", "version": "0.13.3"}]}}</code></td></tr></tbody></table>
+
+<p><strong>Why user scope only:</strong> <code>configure_claude_hooks</code> writes to global <code>~/.claude/settings.json</code>, which serves every project. Stripping it for a project-scoped plugin breaks whisper everywhere else. Global-active and global-wired is the only safe symmetry.</p>
+
+<div class="checkbox-item"><input type="checkbox" id="t2s1"><label for="t2s1"><strong>Step 1: Write the failing test</strong><br>Add class <code>TestClaudeCodePluginProvidesHooks</code> to <code>tests/test_setup.py</code> with 10 test methods. All fail initially with <code>ImportError: cannot import name '_claude_code_plugin_provides_hooks'</code>.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t2s2"><label for="t2s2"><strong>Step 2: Run tests to verify they fail</strong><br>Run: <code>python -m pytest tests/test_setup.py::TestClaudeCodePluginProvidesHooks -v</code><br>Expected: collection error — function does not exist yet.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t2s3"><label for="t2s3"><strong>Step 3: Write the implementation</strong><br>Insert <code>_claude_code_plugin_provides_hooks()</code> in <code>setup.py</code> immediately above <code>_claude_code_detected()</code>. It checks: <code>_plugin_enabled_in_settings</code> AND <code>installed_plugins.json</code> has user-scoped ormah AND <code>installPath/hooks/hooks.json</code> exists.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t2s4"><label for="t2s4"><strong>Step 4: Run tests to verify they pass</strong><br>Run: <code>python -m pytest tests/test_setup.py::TestClaudeCodePluginProvidesHooks -v</code><br>Expected: 10 passed.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t2s5"><label for="t2s5"><strong>Step 5: Commit</strong><pre><code>git add src/ormah/setup.py tests/test_setup.py
+git commit -m "feat(setup): detect user-scoped ormah plugin enabled AND installed
+
+Claude Code stores enabled and installed separately. The predicate licenses
+deleting the user's wiring, so requires both plus hooks/hooks.json on disk.
+Reuses _plugin_enabled_in_settings. No callers yet.
+
+Refs #145"</code></pre></label></div>
+
+</section>
+
+<section id="task-3">
+<h2>Task 3: Make <code>_claude_code_is_wired</code> plugin-aware</h2>
+<div class="meta">Modify setup.py and tests — 5 steps — UI consistency</div>
+
+<p><strong>Why before Task 4:</strong> Task 4 strips the MCP entry. Without this, the UI would report a working install as "not wired" — a regression <strong>this change introduces</strong>. Must land before.</p>
+
+<div class="checkbox-item"><input type="checkbox" id="t3s1"><label for="t3s1"><strong>Step 1: Write the failing test</strong><br>Append to <code>TestClaudeCodeIsWired</code> the test <code>test_plugin_providing_hooks_counts_as_wired</code> — plugin with no CLI wiring should return True.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t3s2"><label for="t3s2"><strong>Step 2: Run tests to verify new one fails</strong><br>Run: <code>python -m pytest tests/test_setup.py::TestClaudeCodeIsWired::test_plugin_providing_hooks_counts_as_wired -v</code><br>Expected: <code>assert False is True</code>.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t3s3"><label for="t3s3"><strong>Step 3: Write the implementation</strong><br>Add to the top of <code>_claude_code_is_wired</code>: if <code>_claude_code_plugin_provides_hooks()</code>, return True early.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t3s4"><label for="t3s4"><strong>Step 4: Run tests to verify they pass</strong><br>Run: <code>python -m pytest tests/test_setup.py::TestClaudeCodeIsWired -v</code><br>Expected: 6 passed.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t3s5"><label for="t3s5"><strong>Step 5: Commit</strong><pre><code>git add src/ormah/setup.py tests/test_setup.py
+git commit -m "fix(setup): a working ormah plugin counts as wired
+
+list_agents() renders desktop UI from _claude_code_is_wired. Plugin ships
+hooks and MCP, so install with only plugin is wired — without this it would
+report 'not wired' once redundant CLI wiring is stripped.
+
+Refs #145"</code></pre></label></div>
+
+</section>
+
+<section id="task-4">
+<h2>Task 4: The <code>_claude_code_wire</code> guard — skip and strip</h2>
+<div class="meta">Modify setup.py and tests — 5 steps — Main fix</div>
+
+<p><strong>This is the fix.</strong> All three entry points route through <code>_claude_code_wire()</code>: <code>install.sh</code> plain, <code>install.sh --update</code>, desktop <code>run_setup_json</code>.</p>
+
+<h3>Strip only what duplicates runtime execution — [council]</h3>
+
+<table><thead><tr><th>Surface</th><th>CLI installs</th><th>Plugin provides</th><th>Same?</th><th>Action</th></tr></thead>
+<tbody><tr><td>hooks</td><td><code>ormah whisper inject|store</code></td><td><code>hooks/hooks.json</code></td><td><strong>yes</strong></td><td><strong>strip</strong></td></tr>
+<tr><td>MCP</td><td><code>ormah</code> in <code>.claude.json</code></td><td><code>.mcp.json</code></td><td><strong>yes</strong></td><td><strong>strip</strong></td></tr>
+<tr><td>agent</td><td><code>ormah-maintenance</code></td><td><code>ormah:ormah-maintenance</code></td><td>no</td><td>keep</td></tr>
+<tr><td>slash command</td><td><code>/ormah-maintenance</code></td><td><code>/ormah:maintenance</code></td><td>no</td><td>keep</td></tr>
+<tr><td>CLAUDE.md</td><td>guidance</td><td>—</td><td>no</td><td>keep</td></tr></tbody></table>
+
+<div class="checkbox-item"><input type="checkbox" id="t4s1"><label for="t4s1"><strong>Step 1: Write the failing test</strong><br>Add class <code>TestClaudeCodeWirePluginGuard</code> to <code>tests/test_setup.py</code> with 7 test methods including <code>test_working_plugin_strips_hooks_and_mcp_and_writes_no_wiring</code>.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t4s2"><label for="t4s2"><strong>Step 2: Run tests to verify they fail</strong><br>Run: <code>python -m pytest tests/test_setup.py::TestClaudeCodeWirePluginGuard -v</code><br>Expected: 3 FAILs — today <code>_claude_code_wire</code> calls <code>configure_claude_hooks</code> unconditionally. The 4 "wires normally" tests already pass.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t4s3"><label for="t4s3"><strong>Step 3: Write the implementation</strong><br>Replace <code>_claude_code_wire</code>: if <code>_claude_code_plugin_provides_hooks()</code>, strip hooks and MCP; else wire normally. Always install agents, commands, CLAUDE.md.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t4s4"><label for="t4s4"><strong>Step 4: Run tests to verify they pass</strong><br>Run: <code>python -m pytest tests/test_setup.py::TestClaudeCodeWirePluginGuard -v</code> then <code>python -m pytest tests/test_setup.py tests/test_setup_json.py -v</code><br>Expected: all pass.</label></div>
+
+<div class="checkbox-item"><input type="checkbox" id="t4s5"><label for="t4s5"><strong>Step 5: Commit</strong><pre><code>git add src/ormah/setup.py tests/test_setup.py
+git commit -m "fix(setup): skip Claude Code hooks and MCP the ormah plugin provides
+
+With plugin installed, setup wired the same hooks a second time into
+~/.claude/settings.json. Both fired, so every turn ran whisper twice — two
+encodes, searches, reranks. _install_hooks merges within settings.json, but
+plugin's hooks are in a different file, so no merge dedupes across the two.
+
+Skip redundant work when user-scoped plugin is enabled AND installed, strip
+any CLI wiring previous setup left, so existing installs self-heal. Agent and
+slash command are namespaced (different names), still installed, as is
+CLAUDE.md. When no working plugin, behaviour unchanged.
+
+Closes #145"</code></pre></label></div>
+
+</section>
+
+</main>
+
+<!-- rich-doc-src-sha256:08477be7a02227cad9361b86b87f7c20114c3e34ffb78fb48d7a9269feee8245 -->
+</body>
+</html>

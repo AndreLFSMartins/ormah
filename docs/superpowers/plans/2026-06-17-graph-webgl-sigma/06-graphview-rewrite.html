@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Task 6: Rewrite GraphView as a sigma orchestrator</title>
+  <style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;--orange:#d97757; --blue:#6a9bcc; --green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55; --lh-title:1.12; --maxw:1140px;}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:8px}
+.statement{font:400 italic 26px/1.25 var(--font-body);letter-spacing:-.01em;margin:26px 0;max-width:24em}
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;color:var(--stone)}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <div class="eyebrow">Task 6</div>
+    <h1 class="doc-title">Rewrite <em>GraphView</em></h1>
+    <a href="00-overview.html">← Overview</a>
+  </nav>
+  <main>
+    <a href="00-overview.html" class="backlink">← Overview</a>
+    <div class="eyebrow">Task 6</div>
+    <h2>Rewrite <em>GraphView</em> as a sigma orchestrator</h2>
+
+    <p class="statement">Replace the cytoscape body of <code>ui/src/components/GraphView.tsx</code> with sigma + FA2, preserving the component's external contract so its callers keep working.</p>
+
+    <h3>Files</h3>
+    <ul>
+      <li>Modify (rewrite body): <code>ui/src/components/GraphView.tsx</code></li>
+    </ul>
+
+    <div class="callout">
+      <span class="label">Before you start</span>
+      <p>Read the entire current <code>ui/src/components/GraphView.tsx</code> (~1198 lines). You must preserve the component's full external contract:
+      <ol>
+        <li><strong>Props</strong>: <code>nodes</code>, <code>edges</code>, <code>onNodeSelect</code>, <code>focusNodeId</code>, <code>userNodeId</code>, <code>clusterBySpace</code>, <code>appearance</code>. Keep the same names/types.</li>
+        <li><strong>Imperative ref API</strong>: <code>focusNode(id)</code>, <code>highlightNode(id)</code>, <code>highlightNodes(ids)</code>, <code>clearHighlight()</code>.</li>
+        <li><strong>In-view controls:</strong> zoom slider, reset/overview controls.</li>
+      </ol></p>
+    </div>
+
+    <div class="callout">
+      <span class="label">Council adjustments (2026-06-17, R1)</span>
+      <p>H1 (restore highlight viewport fit), M1 (<code>focusNodeId</code>), M2 (full legend: tier/role/edge), M3 (zoom slider), M4 (update-in-place, no full remount), M6 (ref semantics note). These are marked inline in the detailed steps.</p>
+    </div>
+
+    <h3>Implementation structure</h3>
+    <p>This task is decomposed into 6 verifiable sub-steps, each with its own commit:</p>
+
+    <h4>6.1 — Mount sigma + build graph + run layout</h4>
+    <ul>
+      <li>Replace cytoscape imports with sigma/graphology/reducer imports</li>
+      <li>Mount sigma in a useEffect with stable deps (not affected by filter toggles)</li>
+      <li>Build the graph using <code>buildGraph</code>, create refs for sigma/graph/layout</li>
+      <li>Run the FA2 layout on mount</li>
+      <li>Add an in-place restyle effect that calls <code>applyAppearance</code> on theme changes</li>
+      <li>Verify: nodes render in WebGL, organic clusters form, colors match</li>
+      <li>Commit: <code>feat(ui): mount sigma + FA2 layout in GraphView</code></li>
+    </ul>
+
+    <h4>6.2 — Hover highlight + selection</h4>
+    <ul>
+      <li>Wire <code>enterNode</code>/<code>leaveNode</code>/<code>clickNode</code>/<code>clickStage</code> to update <code>viewStateRef</code></li>
+      <li>Implement <code>neighborsOf</code> and <code>setHover</code> helpers</li>
+      <li>Verify: hover highlights node + neighbors and dims rest; click fires selection</li>
+      <li>Commit: <code>feat(ui): sigma hover highlight + click selection</code></li>
+    </ul>
+
+    <h4>6.3 — Imperative ref API on sigma</h4>
+    <ul>
+      <li>Re-implement <code>focusNode</code>, <code>highlightNode</code>, <code>highlightNodes</code>, <code>clearHighlight</code> using sigma camera</li>
+      <li>Implement <code>fitToNodes</code> helper (Council A3) — mirrors current <code>cy.fit(coll,120)</code> + clamp</li>
+      <li>Set up <code>glowOnly</code> for search-hover (highlights without dimming others, Council A4)</li>
+      <li>Set up <code>highlightSet</code> for multi-node focus (Insights/Review) with viewport fit (Council H1)</li>
+      <li>Verify: Insights/Review panels can highlight and focus works</li>
+      <li>Commit: <code>feat(ui): port GraphView imperative ref API to sigma</code></li>
+    </ul>
+
+    <h4>6.4 — Full legend reuse + FOCUS semantics (Council M2 + A1)</h4>
+    <ul>
+      <li>Port all four legend groups from cytoscape version: space, tier, role, edge</li>
+      <li>Add focus state and <code>focusLegend</code> handler (Council A1)</li>
+      <li>Implement <code>idsMatching</code> helper for focus filtering</li>
+      <li>Wire legend rows to <code>focusLegend</code>, mark active row with accent</li>
+      <li>Update reducer precedence: filter-dim → focus → glowOnly → highlightSet → hover</li>
+      <li>Verify: clicking legend items focuses, dims rest, fits camera; click again clears</li>
+      <li>Commit: <code>feat(ui): legend focus (space/tier/role/edge) + filter-dim via reducer</code></li>
+    </ul>
+
+    <h4>6.5 — Node drag (reheat) + hover tooltip</h4>
+    <ul>
+      <li>Wire <code>downNode</code> to freeze layout during drag</li>
+      <li>Wire mouse captor to move node under cursor and prevent camera pan</li>
+      <li>Wire <code>mouseup</code> to release and reheat layout</li>
+      <li>Add positioned DOM tooltip on <code>enterNode</code>/<code>leaveNode</code> showing label + space</li>
+      <li>Verify: dragging moves node and layout re-settles; tooltip appears on hover</li>
+      <li>Commit: <code>feat(ui): node drag reheat + hover tooltip</code></li>
+    </ul>
+
+    <h4>6.6 — <code>focusNodeId</code> prop + zoom controls (Council M1, M3)</h4>
+    <ul>
+      <li>Add effect that reacts to <code>focusNodeId</code> prop and centers the node (no fit, just animate camera)</li>
+      <li>Port zoom slider/buttons from cytoscape version using sigma camera <code>animatedZoom</code>/<code>animatedUnzoom</code>/<code>animate</code>/<code>animatedReset</code></li>
+      <li>Run full unit suite + typecheck</li>
+      <li>Verify: <code>focusNodeId</code> centers node; zoom buttons work; reset returns to overview</li>
+      <li>Commit: <code>feat(ui): focusNodeId prop + sigma zoom controls</code></li>
+    </ul>
+
+    <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+    <div class="signature">
+      <div class="name">Task 6</div>
+      <div class="role">Graph WebGL Sigma Implementation</div>
+    </div>
+  </main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:ec8054a4cfcef96654f60c89b4857eee1d2ecc87a0cfd037d6ed2cafa62d2a59 -->

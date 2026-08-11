@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Whisper-health metric — design</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <p class="eyebrow">Specification</p>
+  <h1 class="doc-title">Whisper-health metric — <em>design</em></h1>
+  <a href="#problem">Problem</a>
+  <a href="#approach">Approach</a>
+  <a href="#components">Components</a>
+  <a class="lvl-3" href="#compute-whisper-health">compute_whisper_health</a>
+  <a class="lvl-3" href="#engine-stats">engine.stats()</a>
+  <a href="#key-design-decision">Key design decision</a>
+  <a href="#time-windows">Time windows</a>
+  <a href="#testing">Testing</a>
+  <a href="#out-of-scope">Out of scope</a>
+</nav>
+
+<main>
+  <p class="meta">Date: 2026-06-24 · Status: <span class="chip on">approved</span></p>
+
+  <h2 id="problem"><em>Problem</em></h2>
+  <p>The whisper feedback loop's <em>collection</em> side was closed in <a href="#19">#21</a>: every injected memory is logged to <code>whisper_log</code>, and feedback signals land in <code>affinity</code> keyed per-turn by <code>whisper_log_id</code>. But nothing <em>reads back</em> that data. Whisper effectiveness is still unmeasurable — we can't verify the loop moved from the original ~0.7% coverage to anything healthy on a real instance. The loop is closed but blind.</p>
+  <p>This spec adds the read/aggregate side only. No change to collection, the miner, or <code>session_watcher</code>.</p>
+
+  <h2 id="approach"><em>Approach</em></h2>
+  <p class="statement">One pure function plus a single line in <code>engine.stats()</code>.</p>
+  <p>Chosen because <code>stats()</code> already powers <code>GET /stats</code> and <code>ormah stats</code>, so the CLI and the upcoming Ormah App both inherit the metric with zero extra surface.</p>
+
+  <h2 id="components"><em>Components</em></h2>
+
+  <h3 id="compute-whisper-health"><code>compute_whisper_health</code>(conn, now) → dict</h3>
+  <ul>
+    <li><strong>File:</strong> <code>src/ormah/engine/whisper_health.py</code> (new, isolated, unit-testable without the engine).</li>
+    <li><strong>Inputs:</strong> a sqlite connection and an injected <code>now</code> (<code>datetime</code>, tz-aware) — <code>now</code> is a parameter, never <code>datetime.now()</code> inside the query, so tests are deterministic.</li>
+    <li><strong>Output:</strong> a dict with two recuts, <code>all_time</code> and <code>last_7d</code>, each containing:
+      <table>
+        <thead>
+          <tr>
+            <th>Field</th>
+            <th>Type</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>injected</code></td>
+            <td>int</td>
+            <td><code>COUNT(*) FROM whisper_log WHERE was_injected = 1</code></td>
+          </tr>
+          <tr>
+            <td><code>feedback_rows</code></td>
+            <td>int</td>
+            <td><code>COUNT(DISTINCT whisper_log_id) FROM affinity WHERE whisper_log_id IS NOT NULL</code></td>
+          </tr>
+          <tr>
+            <td><code>coverage</code></td>
+            <td>float</td>
+            <td><code>feedback_rows / injected</code> (None when <code>injected = 0</code>)</td>
+          </tr>
+          <tr>
+            <td><code>positive</code></td>
+            <td>int</td>
+            <td><code>COUNT(*) FROM affinity WHERE signal = +1</code></td>
+          </tr>
+          <tr>
+            <td><code>negative</code></td>
+            <td>int</td>
+            <td><code>COUNT(*) FROM affinity WHERE signal = -1</code></td>
+          </tr>
+          <tr>
+            <td><code>precision</code></td>
+            <td>float</td>
+            <td><code>positive / (positive + negative)</code> (None when sum = 0)</td>
+          </tr>
+        </tbody>
+      </table>
+    </li>
+  </ul>
+
+  <div class="callout">
+    <span class="label">Design note</span>
+    <p>Raw counts (<code>injected</code>, <code>feedback_rows</code>, <code>positive</code>, <code>negative</code>) are exposed alongside the ratios so a tiny denominator is never hidden (the "1/1 = 100%" trap). <code>coverage</code> and <code>precision</code> are <code>None</code> — never a fake <code>0.0</code> — when their denominator is zero.</p>
+  </div>
+
+  <h3 id="engine-stats"><code>engine.stats()</code> (edit)</h3>
+  <p>Add one key: <code>"whisper_health": compute_whisper_health(self.db.conn, datetime.now(timezone.utc))</code>. No signature, route, or CLI change.</p>
+
+  <h2 id="key-design-decision"><em>Key design decision</em> — coverage uses <code>DISTINCT whisper_log_id</code></h2>
+  <p>A single injected memory can accumulate several <code>affinity</code> rows across a turn (that was the point of the <a href="#3">#3 fix</a> — keying affinity by <code>whisper_log_id</code> so per-turn signal accumulates instead of being dropped). Coverage answers "how many <em>injections</em> received any feedback", so the numerator counts distinct injections with feedback, not raw affinity rows. Counting raw rows could push coverage above 100%. This is the one subtle point in the whole change.</p>
+
+  <h2 id="time-windows"><em>Time windows</em></h2>
+  <ul>
+    <li><strong>all_time:</strong> no date filter.</li>
+    <li><strong>last_7d:</strong> <code>logged_at >= now - 7d</code> for the <code>whisper_log</code> side (denominator); <code>confirmed_at >= now - 7d</code> for the <code>affinity</code> side (numerator and precision).</li>
+    <li>The 7-day threshold is computed from the injected <code>now</code>, not inside SQL.</li>
+  </ul>
+  <p>Timestamps are ISO-8601 TEXT columns; string comparison on ISO-8601 is chronological, so <code>WHERE logged_at >= ?</code> with an ISO threshold is correct without parsing.</p>
+
+  <h2 id="testing"><em>Testing</em> (TDD)</h2>
+  <p>New suite <code>tests/test_whisper_health.py</code>, fixtures inserting rows directly into <code>whisper_log</code> / <code>affinity</code>:</p>
+  <ol>
+    <li><strong>Empty store</strong> — both ratios <code>None</code>, no ZeroDivisionError.</li>
+    <li><strong>Injection, no feedback</strong> — <code>coverage == 0.0</code>, <code>precision is None</code>.</li>
+    <li><strong>Mixed +1/-1</strong> — <code>precision</code> correct (e.g. 3 pos / 1 neg → 0.75).</li>
+    <li><strong>Multiple affinity rows on one <code>whisper_log_id</code></strong> — <code>coverage <= 1.0</code> (guards the DISTINCT decision).</li>
+    <li><strong>7-day cutoff</strong> — a row older than 7d counts in <code>all_time</code> but is excluded from <code>last_7d</code> (drives the injected-<code>now</code> threshold).</li>
+  </ol>
+
+  <h2 id="out-of-scope"><em>Out of scope</em></h2>
+  <ul>
+    <li>Configurable window (fixed all_time + 7d).</li>
+    <li>Explicit/implicit precision breakdown.</li>
+    <li>Any change to the miner / <code>session_watcher</code> (the <a href="#34">#34 transcript-state concern</a> is about the writer; this is a read-only query).</li>
+    <li>Ormah App UI (r-spade owns that; this just feeds it).</li>
+  </ul>
+
+  <div class="spectrum">
+    <span class="s1"></span>
+    <span class="s2"></span>
+    <span class="s3"></span>
+  </div>
+
+  <div class="signature">
+    <p class="name">Whisper-health metric</p>
+    <p class="role">Design Specification</p>
+  </div>
+
+</main>
+
+<!-- rich-doc-src-sha256:1f5079513cbe43a2db11c9281e84c15dac852bf47e3781deff16848c3f1cb91e -->
+</body>
+</html>

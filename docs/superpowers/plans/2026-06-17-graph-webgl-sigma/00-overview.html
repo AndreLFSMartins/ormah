@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Graph view WebGL live-force migration — Implementation Plan (overview)</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <div class="eyebrow">Plan</div>
+    <h1 class="doc-title">Graph view <em>WebGL live-force migration</em></h1>
+    <a href="#file-structure">File structure</a>
+    <a href="#tasks">Tasks</a>
+    <a href="#conventions">Conventions</a>
+    <a href="#out-of-scope">Out of scope</a>
+  </nav>
+  <main>
+    <div class="eyebrow">Implementation Plan</div>
+    <h2>Overview</h2>
+    <p class="statement">Replace the cytoscape + cola Canvas graph view with sigma.js v3 (WebGL) running a live ForceAtlas2 simulation in a Web Worker, preserving the current visual identity.</p>
+
+    <h3>Goal and architecture</h3>
+    <p><strong>Goal:</strong> Replace the cytoscape + cola Canvas graph view with sigma.js v3 (WebGL) running a live ForceAtlas2 simulation in a Web Worker, preserving the current visual identity.</p>
+    <p><strong>Architecture:</strong> Pure helpers (colors/sizes/edge-color/self-roles) extracted to <code>ui/src/graph/visual.ts</code>. A pure <code>graphModel.ts</code> turns the <code>/ui/graph</code> payload into a graphology <code>Graph</code>. A pure <code>sigmaReducers.ts</code> computes per-frame hover/dim/focus overrides. <code>forceLayout.ts</code> wraps the FA2 worker. <code>GraphView.tsx</code> becomes a thin orchestrator that mounts sigma, runs the layout, and wires events + the (reused) legend to reducer state. Layout is pure organic FA2 (option A) — no component packing, so the grid/losango disappears. No position persistence.</p>
+
+    <h3>Tech stack</h3>
+    <p>React 18 + Vite + TypeScript; sigma v3 (WebGL render); graphology + graphology-layout (<code>random.assign</code>) + graphology-layout-forceatlas2 (<code>FA2Layout</code> worker, <code>inferSettings</code>); vitest + jsdom (unit tests); Playwright (Python, uv tool) for the visual test.</p>
+
+    <h3>References</h3>
+    <ul>
+      <li><strong>Spec:</strong> <code>docs/superpowers/specs/2026-06-17-graph-webgl-sigma-design.md</code></li>
+      <li><strong>Branch:</strong> <code>feat/graph-webgl-sigma</code></li>
+    </ul>
+
+    <h2 id="file-structure">File structure</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Responsibility</th>
+          <th>Task</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>ui/package.json</code>, <code>ui/vitest.config.ts</code></td>
+          <td>deps + JS test runner</td>
+          <td>1</td>
+        </tr>
+        <tr>
+          <td><code>ui/src/graph/visual.ts</code></td>
+          <td>pure: tier/border color, node size, edge color, node label, self-role map, theme tokens</td>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td><code>ui/src/graph/visual.test.ts</code></td>
+          <td>unit tests for the above</td>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td><code>ui/src/graph/graphModel.ts</code></td>
+          <td>pure: <code>buildGraph</code> (payload → graphology) + <code>applyAppearance</code> (in-place restyle, M4)</td>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td><code>ui/src/graph/graphModel.test.ts</code></td>
+          <td>unit tests (happy, missing space/tier, empty, isolated, applyAppearance)</td>
+          <td>3</td>
+        </tr>
+        <tr>
+          <td><code>ui/src/graph/sigmaReducers.ts</code></td>
+          <td>pure: <code>makeNodeReducer</code>/<code>makeEdgeReducer</code> (hover, multi-highlight, 4-dim legend dim)</td>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td><code>ui/src/graph/sigmaReducers.test.ts</code></td>
+          <td>unit tests (hover, highlightSet, space/tier/role/edge dim)</td>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td><code>ui/src/graph/forceLayout.ts</code></td>
+          <td>injectable FA2 worker wrapper: start/stop/kill/reheat + settle + static fallback</td>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td><code>ui/src/graph/forceLayout.test.ts</code></td>
+          <td>unit tests via injected fake worker (settle, reheat, fallback)</td>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td><code>ui/src/components/GraphView.tsx</code></td>
+          <td>orchestrator: mount sigma, run layout, hover/drag/tooltip, ref API+fit, focusNodeId, zoom, full legend</td>
+          <td>6</td>
+        </tr>
+        <tr>
+          <td><code>ui/playwright/test_graph_layout.py</code></td>
+          <td>visual test: settle, canvas present, <strong>organic non-grid</strong> (NN-distance variance)</td>
+          <td>7</td>
+        </tr>
+        <tr>
+          <td><code>ui/playwright/test_graph_drag.py</code></td>
+          <td>drag test: node moves + post-release reheat</td>
+          <td>7</td>
+        </tr>
+        <tr>
+          <td><code>ui/package.json</code> (cleanup)</td>
+          <td>remove cytoscape*, delete dead code</td>
+          <td>8</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="tasks">Tasks (in order)</h2>
+    <ol>
+      <li><a href="01-tooling-and-deps.html">01-tooling-and-deps</a> — add sigma/graphology deps + vitest; keep cytoscape until Task 8.</li>
+      <li><a href="02-visual-helpers.html">02-visual-helpers</a> — extract pure visual helpers + <code>computeSelfRoles</code>, with tests.</li>
+      <li><a href="03-graph-model.html">03-graph-model</a> — <code>buildGraph</code> payload→graphology, with tests.</li>
+      <li><a href="04-sigma-reducers.html">04-sigma-reducers</a> — hover / multi-highlight / 4-dimension legend-dim reducer factories, with tests.</li>
+      <li><a href="05-force-layout.html">05-force-layout</a> — injectable FA2 worker wrapper (settle/reheat/static fallback), with tests.</li>
+      <li><a href="06-graphview-rewrite.html">06-graphview-rewrite</a> — sigma orchestrator: mount, hover/drag/tooltip, ref API + highlight-fit, focusNodeId, zoom, full legend, in-place restyle (the big one).</li>
+      <li><a href="07-playwright-visual.html">07-playwright-visual</a> — Python Playwright: organic non-grid assertion + node-drag test.</li>
+      <li><a href="08-cleanup-and-verify.html">08-cleanup-and-verify</a> — remove cytoscape, lint/build/test green.</li>
+    </ol>
+
+    <div class="callout">
+      <span class="label">Council review (2026-06-17, R1 cursor+codex)</span>
+      <p>Plan adjusted before implementation — H1 (restore highlight viewport fit), H2 (test asserts organic non-grid by topology, NOT per-space separation — option A has no space-cluster criterion), M1 <code>focusNodeId</code>, M2 full legend (tier/role/edge, not just space), M3 zoom controls, M4 in-place restyle (no remount), M5 injectable worker + static fallback + tests, L1 DEV-only debug handle. See <code>.council/council-result.md</code>.</p>
+    </div>
+
+    <h2 id="conventions">Conventions</h2>
+    <ul>
+      <li><strong>TDD:</strong> failing test → run (fail) → minimal impl → run (pass) → commit. One concept per commit.</li>
+      <li><strong>Pure modules</strong> (<code>visual</code>, <code>graphModel</code>, <code>sigmaReducers</code>) carry no DOM/sigma imports — fully unit-testable.</li>
+      <li><strong>Visual parity values</strong> are ported verbatim from the current <code>GraphView.tsx</code> (cited line numbers per task) — do not re-derive colors/sizes.</li>
+      <li><strong>Run UI commands</strong> from <code>ui/</code> in a subshell: <code>( cd ui && npm run &lt;script&gt; )</code>.</li>
+      <li><strong>Manual app verification</strong> (Task 6) uses the dev-run setup; see <code>ormah-dev-run-setup</code> memory.</li>
+    </ul>
+
+    <h2 id="out-of-scope">Out of scope (from spec)</h2>
+    <p>Position persistence; bounded-forgetting (#28); embeddings semantic-map layout; per-space galaxies (option B); glow halo / edge curves / dashed archival border (not perceived today — not parity).</p>
+
+    <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+    <div class="signature">
+      <div class="name">Implementation Plan</div>
+      <div class="role">Ormah • Graph WebGL Sigma</div>
+    </div>
+  </main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:3560ccd6bfe214eedde6bdaaba7321265b16e515daf78ad0fba9e071e3b97225 -->

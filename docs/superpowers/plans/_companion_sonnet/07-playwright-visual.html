@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Task 7 — Playwright visual test</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+.check-row{display:flex;align-items:baseline;gap:12px;padding:8px 0;border-bottom:1px solid var(--hairline)}
+.check-row:last-child{border-bottom:none}
+.check-label{font:500 13px/1 var(--font-head);letter-spacing:.04em;color:var(--stone);flex-shrink:0;width:120px;text-transform:uppercase}
+.check-desc{font:400 14px/1.4 var(--font-body);color:var(--ink)}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Task 7 of 8</div>
+  <p class="doc-title">Playwright visual test</p>
+  <a href="#overview">What this task does</a>
+  <a href="#assertions">Assertions</a>
+  <a href="#debug-handle">Debug handle</a>
+  <a href="#files">Files</a>
+  <a href="#steps">Steps</a>
+  <a href="#step-1" class="lvl-3">1 — expose debug handle</a>
+  <a href="#step-2" class="lvl-3">2 — write visual test</a>
+  <a href="#step-3" class="lvl-3">3 — run</a>
+  <a href="#step-4" class="lvl-3">4 — commit</a>
+  <hr style="border:none;border-top:1px solid var(--hairline);margin:18px 0">
+  <a href="06-graphview-rewrite.html">← Task 6</a>
+  <a href="08-cleanup-and-verify.html">Next: cleanup →</a>
+  <a href="00-overview.html">↑ Overview</a>
+</nav>
+
+<main>
+  <div class="eyebrow">Task 7 · Playwright visual test</div>
+  <h2 style="margin-top:16px"><em>Prove</em> organic FA2 clusters in WebGL</h2>
+
+  <div class="progress">
+    <div class="bar"><div class="fill" style="width:0%"></div></div>
+    <div class="label">0 / 4 steps · <span class="schip todo">todo</span></div>
+  </div>
+
+  <p class="statement">Proves the core spec claim: after the FA2 settle, the graph forms organic clusters — not a grid.</p>
+
+  <h2 id="overview"><em>What</em> this task does</h2>
+  <p>Uses <strong>Python Playwright</strong> via the uv tool (per machine policy — never Node Playwright). Reads laid-out positions from a debug handle on <code>window</code> that was added in <a href="06-graphview-rewrite.html">Task 6</a>. Checks two properties:</p>
+
+  <div class="callout">
+    <span class="label">Machine policy</span>
+    Run with: <code>uv run --with playwright python ui/playwright/test_graph_layout.py</code>. Never <code>npm install playwright</code> or Node Playwright imports.
+  </div>
+
+  <h2 id="assertions"><em>Assertions</em></h2>
+  <div class="check-row">
+    <span class="check-label">Layout ran</span>
+    <span class="check-desc">All node positions are finite, and <code>span_x &gt; 0</code> and <code>span_y &gt; 0</code> — nodes are spread, not stacked at origin.</span>
+  </div>
+  <div class="check-row">
+    <span class="check-label">Cluster separation</span>
+    <span class="check-desc">When there are ≥2 spaces with ≥2 nodes each, <code>separationRatio ≥ 0.8</code> (centroid distance / mean intra-cluster spread). If fewer multi-node spaces, the separation check is skipped with an INFO log.</span>
+  </div>
+  <div class="check-row">
+    <span class="check-label">Canvas present</span>
+    <span class="check-desc">Waits for a <code>&lt;canvas&gt;</code> element + 6000ms for FA2 to settle past its 4000ms window.</span>
+  </div>
+  <div class="check-row">
+    <span class="check-label">Screenshot</span>
+    <span class="check-desc">Saved to <code>/tmp/ormah_sigma_layout.png</code> for manual inspection.</span>
+  </div>
+
+  <h2 id="debug-handle"><em>Debug handle</em> — added in Task 6.1</h2>
+  <p>In the sigma mount effect, right after <code>graphRef.current = graph</code>:</p>
+  <pre><code>// Debug handle for the visual test (read-only reference to the laid-out graph).
+(window as unknown as { __ormahGraph?: Graph }).__ormahGraph = graph;</code></pre>
+  <p>The Playwright test reads positions via <code>page.evaluate()</code> — no DOM manipulation, no screenshot diff.</p>
+
+  <h2 id="files"><em>Files</em></h2>
+  <table>
+    <thead><tr><th>File</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><code>ui/src/components/GraphView.tsx</code></td><td>Modify — add debug handle (one line)</td></tr>
+      <tr><td><code>ui/playwright/test_graph_layout.py</code></td><td>Create</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="steps"><em>Steps</em></h2>
+
+  <h3 id="step-1">Step 1 — Expose the debug handle</h3>
+  <p>In <a href="06-graphview-rewrite.html">Task 6.1</a>'s mount effect, right after <code>graphRef.current = graph;</code>, add the one-liner above. Then rebuild:</p>
+  <pre><code>( cd ui && npm run build )</code></pre>
+
+  <h3 id="step-2">Step 2 — Write the visual test</h3>
+  <p>Create <code>ui/playwright/test_graph_layout.py</code>. The test:</p>
+  <ol>
+    <li>Launches Chromium headless, navigates to <code>http://localhost:8787</code></li>
+    <li>Waits for <code>&lt;canvas&gt;</code> + 6000ms</li>
+    <li>Reads <code>window.__ormahGraph</code> positions via <code>page.evaluate()</code></li>
+    <li>Checks finiteness and span</li>
+    <li>If ≥2 multi-node spaces: checks <code>separationRatio ≥ 0.8</code></li>
+    <li>Saves screenshot to <code>/tmp/ormah_sigma_layout.png</code></li>
+  </ol>
+  <pre><code>"""Visual layout test: after FA2 settles, nodes form organic clusters, not a grid.
+
+Run the app first: make restart (serves built UI on :8787)
+Then: uv run --with playwright python ui/playwright/test_graph_layout.py
+"""
+import math, sys
+from playwright.sync_api import sync_playwright
+
+URL = "http://localhost:8787"
+
+def main() -> int:
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(URL, wait_until="networkidle")
+        page.wait_for_selector("canvas", timeout=30000)
+        page.wait_for_timeout(6000)  # let FA2 settle past its 4000ms window
+        data = page.evaluate("""() => {
+          const g = window.__ormahGraph;
+          if (!g) return { error: 'no graph handle' };
+          const pos = {};
+          g.forEachNode((id, a) => { pos[id] = { x: a.x, y: a.y, space: a.space || '' }; });
+          return { pos, order: g.order };
+        }""")
+        page.screenshot(path="/tmp/ormah_sigma_layout.png")
+        browser.close()
+
+    # ... assertions (finite positions, span > 0, separationRatio >= 0.8)
+    ...
+
+if __name__ == "__main__":
+    sys.exit(main())</code></pre>
+
+  <h3 id="step-3">Step 3 — Run the app, then the test</h3>
+  <pre><code>make restart
+uv run --with playwright python ui/playwright/test_graph_layout.py</code></pre>
+  <p><strong>Expected:</strong> <code>PASS: layout ran ...</code> and a <code>separationRatio</code> ≥ 0.8 line (or the INFO skip for stores with &lt;2 multi-node spaces). Inspect <code>/tmp/ormah_sigma_layout.png</code> — organic clusters, no grid.</p>
+
+  <h3 id="step-4">Step 4 — Commit</h3>
+  <pre><code>git add ui/src/components/GraphView.tsx ui/playwright/test_graph_layout.py
+git commit -m "test(ui): Playwright visual test asserts organic FA2 clusters"</code></pre>
+
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <span class="name">Task 7 — Playwright visual test</span>
+    <span class="role">Graph view WebGL sigma · 2026-06-17 · ormah</span>
+  </div>
+</main>
+
+</body>
+</html>
+<!-- rich-doc-src-sha256:b44d2942a2ee7cf056fccfcc2d65aa0ccc0b3abbe7bcd3c5bfe6cb05e9c1ea6a -->

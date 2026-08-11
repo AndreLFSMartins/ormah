@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Session-watcher live-loss safety net — Implementation Plan</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <div class="eyebrow">Plan</div>
+    <h1 class="doc-title">Session-watcher <em>live-loss</em> safety net</h1>
+    <a href="#overview">Overview</a>
+    <a href="#config">Config</a>
+    <a href="#handler-core">Handler core</a>
+    <a href="#reconcile">Reconcile</a>
+    <a href="#lifecycle">Lifecycle &amp; wiring</a>
+    <a href="#monitor">Monitor</a>
+  </nav>
+  <main>
+
+<section id="overview">
+<h2>Overview <a class="backlink" href="#overview">↳</a></h2>
+
+<p class="eyebrow">Goal</p>
+<p class="statement">Stop the session-watcher's live FSEvents path from silently dropping a fraction of transcripts, by adding a mechanism-agnostic periodic reconcile + Observer supervision + a functional heartbeat, plus a standalone diagnostic monitor.</p>
+
+<h3>Architecture</h3>
+<p>The single FSEvents <code>Observer</code> stays the fast path (~60s). A new <code>SessionHandler.reconcile()</code> scans the watch dir against the handler's own in-memory state and routes candidates through the existing <code>_do_ingest</code>, so it never clobbers state or double-ingests. A scheduler job runs it every 5 min, recreating any dead Observer first. A standalone <code>scripts/diag/fsevents_monitor.py</code> proves <em>why</em> FSEvents misses events, without touching production.</p>
+
+<h3>Tech stack</h3>
+<p>Python 3.11+, watchdog 6 (FSEventsObserver), APScheduler, pytest.</p>
+
+<h3>References</h3>
+<p><strong>Spec:</strong> <code>docs/superpowers/specs/2026-06-25-session-watcher-reconcile-design.md</code> · <strong>Issue:</strong> r-spade/ormah#59</p>
+
+<h3>Branch</h3>
+<pre><code>git checkout main
+git pull
+git checkout -b fix/session-watcher-reconcile</code></pre>
+<p>(Final PR targets <code>r-spade/ormah</code>, closes #59; then merge into <code>local-main</code>.)</p>
+
+<h3>Run tests</h3>
+<p>All <code>pytest</code> steps use the project venv:</p>
+<pre><code>.venv/bin/python -m pytest tests/test_background/test_session_watcher.py -v</code></pre>
+
+<h3>File map</h3>
+<table>
+<tr><th>File</th><th>Change</th></tr>
+<tr><td><code>src/ormah/config.py</code></td><td>+ <code>session_watcher_reconcile_interval_minutes</code> + <code>…_max_per_tick</code> settings + validators</td></tr>
+<tr><td><code>src/ormah/background/session_watcher.py</code></td><td><code>SessionHandler</code> gains <code>lookback_hours</code> + narrow <code>_state_lock</code>; <code>_ingest_session</code> takes <code>state_lock=</code>; <code>_do_ingest</code> returns bool; new state-cursor <code>reconcile()</code>; <code>SessionWatch</code> dataclass; <code>start/stop_session_watcher</code> use it; new <code>run_session_reconcile()</code> (stop/join + recreate)</td></tr>
+<tr><td><code>src/ormah/background/scheduler.py</code></td><td>+ <code>register_session_reconcile_job()</code> (<code>coalesce=True</code>)</td></tr>
+<tr><td><code>src/ormah/main.py</code></td><td>store watches; register the reconcile job after watchers start</td></tr>
+<tr><td><code>scripts/diag/fsevents_monitor.py</code></td><td>new standalone diagnostic monitor</td></tr>
+<tr><td><code>tests/test_background/test_session_watcher.py</code></td><td>+ reconcile / pre-filter / no-dup / recreate / heartbeat tests</td></tr>
+<tr><td><code>tests/test_config.py</code> (or existing)</td><td>+ interval validator test</td></tr>
+</table>
+
+<h3>Tasks (in order)</h3>
+<ol>
+<li><strong><a href="#config">Config</a></strong> — config setting + validator (independent, fast).</li>
+<li><strong><a href="#handler-core">Handler core</a></strong> — <code>SessionHandler</code> new fields + <code>_do_ingest</code> serialize/return-bool.</li>
+<li><strong><a href="#reconcile">Reconcile</a></strong> — <code>SessionHandler.reconcile()</code> + its tests (depends on 02).</li>
+<li><strong><a href="#lifecycle">Lifecycle &amp; wiring</a></strong> — <code>SessionWatch</code>, <code>start/stop_session_watcher</code>, <code>run_session_reconcile</code>, scheduler register, <code>main.py</code> wiring (depends on 02/03).</li>
+<li><strong><a href="#monitor">Monitor</a></strong> — standalone <code>fsevents_monitor.py</code> (independent; Part B).</li>
+</ol>
+
+<h3>Out of scope</h3>
+<ul>
+<li>Instrumenting the production hot path; changing the 72h lookback bound; refactoring <code>_scan_sessions</code> / the startup catch-up; replacing the Observer with pure polling.</li>
+</ul>
+
+<h3>Acceptance (issue #59)</h3>
+<div class="progress">
+  <div class="bar"><div class="fill" style="width: 0%"></div></div>
+  <div class="label">0 of 4 tasks complete</div>
+</div>
+<p>
+<span class="schip todo">todo</span> Every ingestible transcript ingested without a restart (reconcile net).
+</p>
+<p>
+<span class="schip todo">todo</span> A leaking live path recovered without a restart (reconcile + is_alive recreate).
+</p>
+<p>
+<span class="schip todo">todo</span> No pending transcript lost to the 72h bound (5-min reconcile).
+</p>
+<p>
+<span class="schip todo">todo</span> Liveness signal exists (heartbeat log + <code>JobTracker</code>).
+</p>
+
+</section>
+
+<section id="config">
+<h2>Task 1: <em>Config</em> — reconcile interval + per-tick cap <a class="backlink" href="#config">↳</a></h2>
+
+<p class="meta">Files: <code>src/ormah/config.py</code> + <code>tests/test_config.py</code></p>
+
+<h3>Step 1: Write the failing test</h3>
+<p>Add to <code>tests/test_config.py</code> (create the file with this content if it does not exist):</p>
+<pre><code>import pytest
+
+from ormah.config import Settings
+
+
+def test_reconcile_interval_default_is_five():
+    assert Settings().session_watcher_reconcile_interval_minutes == 5
+
+
+def test_reconcile_interval_must_be_positive():
+    with pytest.raises(ValueError):
+        Settings(session_watcher_reconcile_interval_minutes=0)
+
+
+def test_reconcile_cap_default_is_fifty():
+    assert Settings().session_watcher_reconcile_max_per_tick == 50
+
+
+def test_reconcile_cap_must_be_positive():
+    with pytest.raises(ValueError):
+        Settings(session_watcher_reconcile_max_per_tick=0)</code></pre>
+
+<h3>Step 2: Run test to verify it fails</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_config.py -v</code></p>
+<p>Expected: FAIL — <code>AttributeError</code> / no validation error raised.</p>
+
+<h3>Step 3: Add the settings</h3>
+<p>In <code>src/ormah/config.py</code>, after line 79 (<code>session_watcher_idle_threshold: float = 30.0</code>):</p>
+<pre><code>    session_watcher_reconcile_interval_minutes: int = 5
+    session_watcher_reconcile_max_per_tick: int = 50</code></pre>
+
+<h3>Step 4: Add the validators</h3>
+<p>In <code>src/ormah/config.py</code>, after the <code>_session_watcher_debounce_min</code> validator (ends ~line 341):</p>
+<pre><code>    @field_validator("session_watcher_reconcile_interval_minutes")
+    @classmethod
+    def _session_watcher_reconcile_min(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"session_watcher_reconcile_interval_minutes must be >= 1, got {v}"
+            )
+        return v
+
+    @field_validator("session_watcher_reconcile_max_per_tick")
+    @classmethod
+    def _session_watcher_reconcile_cap_min(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"session_watcher_reconcile_max_per_tick must be >= 1, got {v}"
+            )
+        return v</code></pre>
+
+<h3>Step 5: Run test to verify it passes</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_config.py -v</code></p>
+<p>Expected: PASS (all four tests).</p>
+
+<h3>Step 6: Commit</h3>
+<pre><code>git add src/ormah/config.py tests/test_config.py
+git commit -m "feat(session-watcher): add reconcile interval + per-tick cap settings"</code></pre>
+
+<p><strong>Checklist:</strong></p>
+<ul>
+<li><span class="schip todo">todo</span> Step 1</li>
+<li><span class="schip todo">todo</span> Step 2</li>
+<li><span class="schip todo">todo</span> Step 3</li>
+<li><span class="schip todo">todo</span> Step 4</li>
+<li><span class="schip todo">todo</span> Step 5</li>
+<li><span class="schip todo">todo</span> Step 6</li>
+</ul>
+
+</section>
+
+<section id="handler-core">
+<h2>Task 2: <em>SessionHandler core</em> — lookback, narrow state lock, return bool <a class="backlink" href="#handler-core">↳</a></h2>
+
+<p class="meta">Files: <code>src/ormah/background/session_watcher.py</code> + <code>tests/test_background/test_session_watcher.py</code></p>
+
+<p>Adds the field <code>reconcile()</code> (Task 3) needs, and protects the state read-modify-write with a <strong>narrow</strong> lock passed into <code>_ingest_session</code> — only <code>state[rel]=…</code> + <code>_save_state</code> serialize, while the expensive work (parse, LLM extraction, DB writes) stays lock-free (same concurrency as production today). This removes the latent state-file race <strong>without</strong> letting a backlog reconcile starve the live path (council R1, HIGH). <code>_do_ingest</code> now returns whether it ingested.</p>
+
+<h3>Step 1: Write the failing test</h3>
+<p>Append to <code>tests/test_background/test_session_watcher.py</code>:</p>
+<pre><code>def test_do_ingest_returns_true_when_it_ingests(engine, tmp_path):
+    """_do_ingest reports whether it ingested, so reconcile can count recoveries."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler._do_ingest(jsonl) is True
+        assert handler._do_ingest(jsonl) is False  # nothing new the second time</code></pre>
+
+<h3>Step 2: Run test to verify it fails</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_session_watcher.py::test_do_ingest_returns_true_when_it_ingests -v</code></p>
+<p>Expected: FAIL — <code>_do_ingest</code> returns <code>None</code> (and <code>SessionHandler</code> takes no 6th positional arg yet).</p>
+
+<h3>Step 3: Add the <code>state_lock</code> param to <code>_ingest_session</code></h3>
+<p>Change the <code>_ingest_session</code> signature (currently ends at <code>on_defer_active=None,</code>) to add a trailing param:</p>
+<pre><code>def _ingest_session(
+    engine: MemoryEngine,
+    path: Path,
+    state: dict,
+    watch_dir: Path,
+    min_turns: int,
+    idle_threshold: float = 30.0,
+    on_defer_active=None,
+    state_lock=None,
+) -> bool:</code></pre>
+
+<p>Then replace the final state write (currently <code>state[rel] = { … }</code> + <code>_save_state(watch_dir, state)</code>, lines 822–833) with a version that serializes only that block when a lock is provided:</p>
+<pre><code>    entry = {
+        "hash": h,
+        "end_offset": payload_offset,
+        "last_ingested": datetime.now(timezone.utc).isoformat(),
+        "session_id": result.session_id,
+        "source": result.source,
+        "space": space,
+        "user_turns": prev_turns + payload_users,
+        "node_ids": prev_node_ids + new_node_ids,
+        "signals_recorded": signals_recorded,
+    }
+    if state_lock is not None:
+        with state_lock:
+            state[rel] = entry
+            _save_state(watch_dir, state)
+    else:
+        state[rel] = entry
+        _save_state(watch_dir, state)</code></pre>
+
+<h3>Step 4: Replace <code>SessionHandler.__init__</code></h3>
+<p>Replace <code>SessionHandler.__init__</code> (lines 890–907) with this complete version (<code>Lock</code>/<code>Timer</code> already imported: <code>from threading import Lock, Timer</code>). Note: a narrow <code>_state_lock</code> — <strong>no</strong> coarse ingest lock, <strong>no</strong> mtime cache (the new reconcile in Task 3 uses the state cursor, not mtime):</p>
+<pre><code>    def __init__(
+        self,
+        engine: MemoryEngine,
+        watch_dir: Path,
+        debounce_seconds: float,
+        min_turns: int,
+        idle_threshold: float = 30.0,
+        lookback_hours: int = 72,
+    ) -> None:
+        self.engine = engine
+        self.watch_dir = watch_dir
+        self.debounce_seconds = debounce_seconds
+        self.min_turns = min_turns
+        self.idle_threshold = idle_threshold
+        self.lookback_hours = lookback_hours
+        self._state = _load_state(watch_dir)
+        self._timers: dict[str, Timer] = {}
+        self._ingesting: set[str] = set()
+        self._pending: set[str] = set()
+        self._lock = Lock()
+        self._state_lock = Lock()</code></pre>
+
+<h3>Step 5: Rewrite <code>_do_ingest</code> (pass the narrow lock, return bool)</h3>
+<p>Replace the body of <code>_do_ingest</code>. The heavy <code>_ingest_session</code> runs <strong>without</strong> a surrounding lock; only its internal state write serializes via <code>state_lock</code>. The <code>_ingesting</code> guard still prevents two ingests of the <em>same</em> path:</p>
+<pre><code>    def _do_ingest(self, path: Path) -> bool:
+        """Ingest the session (after debounce, retry, or reconcile). Returns True if ingested.
+
+        The heavy work (parse/LLM/DB) runs lock-free; only the state read-modify-write
+        serializes via ``self._state_lock`` (passed into ``_ingest_session``), so a backlog
+        reconcile never blocks the live fast path.
+        """
+        key = str(path)
+        with self._lock:
+            self._timers.pop(key, None)
+            if key in self._ingesting:
+                self._pending.add(key)
+                return False
+            self._ingesting.add(key)
+        ingested = False
+        try:
+            ingested = _ingest_session(
+                self.engine, path, self._state, self.watch_dir, self.min_turns,
+                idle_threshold=self.idle_threshold,
+                on_defer_active=lambda: self._schedule_retry(path),
+                state_lock=self._state_lock,
+            )
+        finally:
+            with self._lock:
+                self._ingesting.discard(key)
+                rerun = key in self._pending
+                self._pending.discard(key)
+        if rerun:
+            self._schedule_ingest(path)
+        return bool(ingested)</code></pre>
+
+<h3>Step 6: Run the test + full watcher suite</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_session_watcher.py -v</code></p>
+<p>Expected: all PASS (existing <code>test_concurrent_ingest_skipped</code> / <code>test_inflight_skip_reschedules</code> still green).</p>
+
+<h3>Step 7: Commit</h3>
+<pre><code>git add src/ormah/background/session_watcher.py tests/test_background/test_session_watcher.py
+git commit -m "refactor(session-watcher): narrow state lock, return ingest result"</code></pre>
+
+<p><strong>Checklist:</strong></p>
+<ul>
+<li><span class="schip todo">todo</span> Step 1</li>
+<li><span class="schip todo">todo</span> Step 2</li>
+<li><span class="schip todo">todo</span> Step 3</li>
+<li><span class="schip todo">todo</span> Step 4</li>
+<li><span class="schip todo">todo</span> Step 5</li>
+<li><span class="schip todo">todo</span> Step 6</li>
+<li><span class="schip todo">todo</span> Step 7</li>
+</ul>
+
+</section>
+
+<section id="reconcile">
+<h2>Task 3: <em>Reconcile</em> — the disk-truth safety net <a class="backlink" href="#reconcile">↳</a></h2>
+
+<p class="meta">Files: <code>src/ormah/background/session_watcher.py</code> + <code>tests/test_background/test_session_watcher.py</code></p>
+
+<p>The mechanism-agnostic recovery. A <strong>stat-only</strong> scan finds files that still need work — never-seen (within lookback) or a state cursor not at EOF (<code>end_offset != size</code>) — then routes up to <code>reconcile_max_per_tick</code> through the existing <code>_do_ingest</code>. There is <strong>no mtime cache</strong>: a file with a pending or failed tail is re-checked every tick until fully consumed, so a transient ingest failure never strands it (council R1, HIGH). Fully-consumed files are skipped via a cheap size compare (no hash, no <code>_do_ingest</code>).</p>
+
+<h3>Step 1: Write the failing tests</h3>
+<p>Append to <code>tests/test_background/test_session_watcher.py</code>:</p>
+<pre><code>def test_reconcile_ingests_file_the_live_path_missed(engine, tmp_path):
+    """A changed, idle transcript whose fsevent never reached the handler is recovered."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    assert rel not in handler._state  # simulate the dropped event: handler never saw it
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        recovered = handler.reconcile()
+
+    assert recovered == 1
+    assert rel in handler._state
+    assert handler._state[rel]["user_turns"] == 6
+
+
+def test_reconcile_skips_fully_consumed_file_on_second_pass(engine, tmp_path):
+    """A second reconcile does not re-ingest a file already consumed to EOF (cheap skip)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1
+        assert handler.reconcile() == 0
+
+
+def test_reconcile_does_not_reingest_what_live_path_already_took(engine, tmp_path):
+    """reconcile shares handler state, so a file ingested live is not re-ingested."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._do_ingest(jsonl)                      # live path ingests it
+        rel = str(jsonl.relative_to(watch_dir))
+        node_count = len(handler._state[rel]["node_ids"])
+        recovered = handler.reconcile()
+
+    assert recovered == 0
+    assert len(handler._state[rel]["node_ids"]) == node_count
+
+
+def test_reconcile_logs_recovery_heartbeat(engine, tmp_path, caplog):
+    """reconcile emits the functional heartbeat when it recovers &gt;0 transcripts."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        with caplog.at_level("INFO", logger="ormah.background.session_watcher"):
+            handler.reconcile()
+    assert any("reconcile recovered" in r.message for r in caplog.records)
+
+
+# --- Adversarial regressions for the two HIGH council findings ---
+
+def test_reconcile_retries_seen_file_when_first_do_ingest_fails(engine, tmp_path):
+    """A transient ingest failure must NOT strand a seen file: the next tick retries it."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    # Seed state as a seen file with a pending tail (cursor behind EOF).
+    rel = str(jsonl.relative_to(watch_dir))
+    handler._state[rel] = {"hash": "stale", "end_offset": 0, "node_ids": [], "user_turns": 0}
+
+    calls = {"n": 0}
+    real = _ingest_session
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False                      # transient failure on the first reconcile
+        return real(*a, **k)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE), \
+            patch("ormah.background.session_watcher._ingest_session", side_effect=flaky):
+        assert handler.reconcile() == 0       # first tick: ingest "fails"
+        assert handler.reconcile() == 1       # second tick retries (not skipped) and recovers
+
+
+def test_reconcile_recovers_partial_tail_without_mtime_change(engine, tmp_path):
+    """A grown tail with an UNCHANGED mtime is still recovered (cursor != size, not mtime)."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1               # consumes the first 6 turns
+        old_mtime = jsonl.stat().st_mtime
+        _make_jsonl(jsonl, user_turns=12)             # append 6 more (size grows)
+        os.utime(jsonl, (old_mtime, old_mtime))       # mtime unchanged on purpose
+        recovered = handler.reconcile()
+
+    assert recovered == 1                             # picked up via end_offset != size
+
+
+def test_reconcile_while_live_ingesting_defers_then_retries(engine, tmp_path):
+    """If the live path owns the path mid-ingest, reconcile defers, then retries next tick."""
+    watch_dir = tmp_path / "projects"
+    project_dir = watch_dir / "-Users-alice-Code-myproject"
+    project_dir.mkdir(parents=True)
+    jsonl = project_dir / "abc123.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    handler._ingesting.add(str(jsonl))                # simulate live path mid-ingest
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 0               # deferred: live path owns it
+
+    handler._ingesting.discard(str(jsonl))            # live path finished without ingesting
+    handler._pending.discard(str(jsonl))
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1               # not poisoned -> retried and recovered</code></pre>
+
+<h3>Step 2: Run to verify they fail</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_session_watcher.py -k reconcile -v</code></p>
+<p>Expected: FAIL — <code>SessionHandler</code> has no <code>reconcile</code>.</p>
+
+<h3>Step 3: Implement <code>reconcile()</code></h3>
+<p>Add to <code>SessionHandler</code>, right after <code>_do_ingest</code>:</p>
+<pre><code>    def reconcile(self) -> int:
+        """Disk-truth safety net: ingest transcripts the live FSEvents path dropped.
+
+        Mechanism-agnostic and cheap: a stat-only scan finds files that still need work —
+        never-seen (within lookback) or a state cursor not at EOF — then routes up to
+        ``session_watcher_reconcile_max_per_tick`` of them through ``self._do_ingest`` (the
+        single state owner, so no clobber / no double-ingest). A file with a pending or failed
+        tail (``end_offset != size``) is re-checked every tick until fully consumed, so a
+        transient ingest failure never strands it. Returns transcripts recovered.
+        """
+        cutoff = time.time() - (self.lookback_hours * 3600) if self.lookback_hours > 0 else 0
+        cap = self.engine.settings.session_watcher_reconcile_max_per_tick
+        candidates: list[Path] = []
+        for jsonl_file in sorted(self.watch_dir.rglob("*.jsonl")):
+            if _is_subagent_transcript(jsonl_file):
+                continue
+            try:
+                st = jsonl_file.stat()
+            except OSError:
+                continue
+            rel = str(jsonl_file.relative_to(self.watch_dir))
+            entry = self._state.get(rel)
+            if entry is None:
+                # Never-seen: lookback cutoff applies (mirrors _scan_sessions).
+                if cutoff > 0 and st.st_mtime < cutoff:
+                    continue
+                candidates.append(jsonl_file)
+            elif entry.get("end_offset", 0) != st.st_size:
+                # Seen but the cursor is not at EOF: pending/failed tail (or a rewrite).
+                candidates.append(jsonl_file)
+            # else: fully consumed -> skip cheaply (no hash, no _do_ingest).
+        recovered = 0
+        for jsonl_file in candidates[:cap]:
+            if self._do_ingest(jsonl_file):
+                recovered += 1
+        if recovered:
+            logger.info(
+                "Session watcher reconcile recovered %d transcript(s) the live path missed",
+                recovered,
+            )
+        return recovered</code></pre>
+
+<h3>Step 4: Run to verify they pass</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_session_watcher.py -k reconcile -v</code></p>
+<p>Expected: all PASS (including the three adversarial regressions).</p>
+
+<h3>Step 5: Commit</h3>
+<pre><code>git add src/ormah/background/session_watcher.py tests/test_background/test_session_watcher.py
+git commit -m "feat(session-watcher): add reconcile() disk-truth safety net (state-cursor based)"</code></pre>
+
+<p><strong>Checklist:</strong></p>
+<ul>
+<li><span class="schip todo">todo</span> Step 1</li>
+<li><span class="schip todo">todo</span> Step 2</li>
+<li><span class="schip todo">todo</span> Step 3</li>
+<li><span class="schip todo">todo</span> Step 4</li>
+<li><span class="schip todo">todo</span> Step 5</li>
+</ul>
+
+</section>
+
+<section id="lifecycle">
+<h2>Task 4: <em>Lifecycle struct + scheduler job + main wiring</em> <a class="backlink" href="#lifecycle">↳</a></h2>
+
+<p class="meta">Files: <code>src/ormah/background/session_watcher.py</code> + <code>src/ormah/background/scheduler.py</code> + <code>src/ormah/main.py</code> + <code>tests/test_background/test_session_watcher.py</code></p>
+
+<p>Expose <code>(watch_dir, handler, observer)</code> per watcher, add <code>run_session_reconcile</code> (recreate dead Observer — stopping/joining the old one first — then reconcile), and register it as a scheduler job after the watchers start. The scheduler starts <em>before</em> the watchers in <code>main.py</code>, so the job is added to the already-running scheduler rather than reordering the bind-sensitive startup. The job uses <code>coalesce=True</code> + a generous misfire grace so a slightly-long tick is never silently dropped (council R1).</p>
+
+<h3>Step 1: Write the failing test</h3>
+<p>Append to <code>tests/test_background/test_session_watcher.py</code>:</p>
+<pre><code>def test_run_session_reconcile_recreates_dead_observer(engine, tmp_path):
+    """A dead Observer is stopped/joined and recreated; reconcile still runs."""
+    from ormah.background.session_watcher import SessionWatch, run_session_reconcile
+
+    watch_dir = tmp_path / "projects"
+    watch_dir.mkdir(parents=True)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+
+    dead = MagicMock()
+    dead.is_alive.return_value = False
+    watch = SessionWatch(watch_dir=watch_dir, handler=handler, observer=dead)
+
+    with patch("ormah.background.session_watcher.Observer") as MockObserver:
+        new_obs = MockObserver.return_value
+        total = run_session_reconcile([watch])
+
+    dead.stop.assert_called_once()        # old observer cleaned up before recreate
+    dead.join.assert_called_once()
+    new_obs.schedule.assert_called_once()
+    new_obs.start.assert_called_once()
+    assert watch.observer is new_obs
+    assert total == 0  # empty dir, nothing to recover</code></pre>
+
+<h3>Step 2: Run to verify it fails</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_session_watcher.py::test_run_session_reconcile_recreates_dead_observer -v</code></p>
+<p>Expected: FAIL — no <code>SessionWatch</code> / <code>run_session_reconcile</code>.</p>
+
+<h3>Step 3: Add <code>SessionWatch</code> + <code>run_session_reconcile</code>; update lifecycle</h3>
+<p>In <code>src/ormah/background/session_watcher.py</code>, add <code>from dataclasses import dataclass</code> to the imports, and place the dataclass just above <code>start_session_watcher</code>:</p>
+<pre><code>@dataclass
+class SessionWatch:
+    """A live watcher: its directory, handler, and (swappable) Observer."""
+    watch_dir: Path
+    handler: SessionHandler
+    observer: Observer</code></pre>
+
+<p>Change <code>start_session_watcher</code> to build the handler with the lookback and return <code>list[SessionWatch]</code>:</p>
+<pre><code>def start_session_watcher(engine: MemoryEngine) -> list[SessionWatch]:
+    s = engine.settings
+    if not s.session_watcher_enabled:
+        return []
+
+    watch_dirs = _session_watch_dirs(s)
+    if not watch_dirs:
+        logger.warning("Session watcher dir does not exist: %s", _expand_watch_dir(s.session_watcher_dir))
+        return []
+
+    watches: list[SessionWatch] = []
+    for watch_dir in watch_dirs:
+        ingested = _scan_sessions(
+            engine, watch_dir, s.session_watcher_min_turns, s.session_watcher_lookback_hours,
+        )
+        if ingested:
+            logger.info("Session watcher catch-up: ingested %d sessions from %s", ingested, watch_dir)
+
+        handler = SessionHandler(
+            engine, watch_dir, s.session_watcher_debounce_seconds, s.session_watcher_min_turns,
+            s.session_watcher_idle_threshold, s.session_watcher_lookback_hours,
+        )
+        observer = Observer()
+        observer.schedule(handler, str(watch_dir), recursive=True)
+        observer.start()
+        watches.append(SessionWatch(watch_dir=watch_dir, handler=handler, observer=observer))
+        logger.info("Session watcher started on %s", watch_dir)
+
+    return watches</code></pre>
+
+<p>Change <code>stop_session_watcher</code> to take watches:</p>
+<pre><code>def stop_session_watcher(watches: list[SessionWatch]) -> None:
+    for w in watches:
+        w.observer.stop()
+    for w in watches:
+        w.observer.join(timeout=5)
+    if watches:
+        logger.info("Session watcher stopped")</code></pre>
+
+<p>Add <code>run_session_reconcile</code> at the end of the module. Note the <code>stop()/join()</code> of the dead Observer before recreating, so a half-dead FSEvents thread/handle is not leaked:</p>
+<pre><code>def run_session_reconcile(watches: list[SessionWatch]) -> int:
+    """Periodic safety net: recreate any dead Observer, then reconcile each watcher.
+
+    Recreating the Observer keeps the fast path alive going forward; the reconcile scan recovers
+    anything the live path dropped (Observer death OR FSEvents coalescing). Returns total recovered.
+    """
+    total = 0
+    for w in watches:
+        try:
+            alive = w.observer.is_alive()
+        except Exception:
+            alive = False
+        if not alive:
+            logger.warning("Session watcher Observer not alive for %s; recreating", w.watch_dir)
+            try:
+                w.observer.stop()
+                w.observer.join(timeout=5)
+            except Exception:
+                pass
+            try:
+                observer = Observer()
+                observer.schedule(w.handler, str(w.watch_dir), recursive=True)
+                observer.start()
+                w.observer = observer
+            except Exception as e:
+                logger.warning("Failed to recreate Observer for %s: %s", w.watch_dir, e)
+        total += w.handler.reconcile()
+    return total</code></pre>
+
+<h3>Step 4: Add the scheduler registrar</h3>
+<p>In <code>src/ormah/background/scheduler.py</code>, add at module level (uses the already-imported <code>tracked</code>):</p>
+<pre><code>def register_session_reconcile_job(scheduler, tracker, watches, interval_minutes: int) -> None:
+    """Register the session-watcher reconcile job on an already-started scheduler.
+
+    Registered after the watchers start (they do not exist when start_scheduler runs), so the job
+    can reach the live handlers/observers. ``coalesce=True`` + a full-interval misfire grace mean a
+    slightly-long tick is never silently dropped; reconcile re-scans disk each run, so a coalesced
+    tick loses no work. No-op when there are no watchers.
+    """
+    if not watches:
+        return
+    from ormah.background.session_watcher import run_session_reconcile
+
+    scheduler.add_job(
+        tracked(tracker, "session_reconcile", run_session_reconcile, watches),
+        "interval",
+        minutes=interval_minutes,
+        id="session_reconcile",
+        name="Session reconcile",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=max(_MISFIRE_GRACE, interval_minutes * 60),
+    )
+    logger.info("Session reconcile job registered (every %d min)", interval_minutes)</code></pre>
+
+<h3>Step 5: Wire it in <code>main.py</code></h3>
+<p>In <code>src/ormah/main.py</code>, replace lines 234–235 (inside the session-watcher <code>try</code>):</p>
+<pre><code>        session_watches = start_session_watcher(engine)
+        app.state.session_watcher_observers = session_watches
+        if hasattr(app.state, "scheduler"):
+            from ormah.background.scheduler import register_session_reconcile_job
+            register_session_reconcile_job(
+                app.state.scheduler, app.state.job_tracker, session_watches,
+                engine.settings.session_watcher_reconcile_interval_minutes,
+            )</code></pre>
+
+<p>(<code>stop_session_watcher(app.state.session_watcher_observers)</code> at line ~254 already receives the watches — no change needed.)</p>
+
+<h3>Step 6: Run the test + full watcher + lifespan suites</h3>
+<p>Run:</p>
+<pre><code>.venv/bin/python -m pytest tests/test_background/test_session_watcher.py tests/test_main_lifespan_shutdown.py -v</code></pre>
+<p>Expected: all PASS (the lifespan test mocks the watcher module, so the return-type change is safe).</p>
+
+<h3>Step 7: Commit</h3>
+<pre><code>git add src/ormah/background/session_watcher.py src/ormah/background/scheduler.py src/ormah/main.py tests/test_background/test_session_watcher.py
+git commit -m "feat(session-watcher): periodic reconcile job + Observer supervision"</code></pre>
+
+<p><strong>Checklist:</strong></p>
+<ul>
+<li><span class="schip todo">todo</span> Step 1</li>
+<li><span class="schip todo">todo</span> Step 2</li>
+<li><span class="schip todo">todo</span> Step 3</li>
+<li><span class="schip todo">todo</span> Step 4</li>
+<li><span class="schip todo">todo</span> Step 5</li>
+<li><span class="schip todo">todo</span> Step 6</li>
+<li><span class="schip todo">todo</span> Step 7</li>
+</ul>
+
+</section>
+
+<section id="monitor">
+<h2>Task 5: <em>Standalone FSEvents leak monitor</em> (Part B, diagnostic) <a class="backlink" href="#monitor">↳</a></h2>
+
+<p class="meta">Files: <code>scripts/diag/fsevents_monitor.py</code></p>
+
+<p>A standalone script that proves <em>why</em> FSEvents misses events, without touching production. It logs events by type (including <code>on_moved</code>, which the production handler does NOT implement), enables watchdog's own native-flag DEBUG line (<code>is_coalesced</code> / <code>must_scan_subdirs</code> / <code>*_dropped</code>), and every N seconds diffs disk truth vs. events seen to name the leaked files.</p>
+
+<h3>Step 1: Create the script</h3>
+<p>Create <code>scripts/diag/fsevents_monitor.py</code>:</p>
+<pre><code>#!/usr/bin/env python3
+"""Standalone FSEvents leak monitor (diagnostic for r-spade/ormah#59).
+
+Proves WHY the session-watcher's live path misses some transcripts, WITHOUT touching
+production code. Run it alongside the server across a sleep/wake cycle and a heavy day,
+then read the log. It:
+  1. Logs every watchdog event by TYPE (created/modified/MOVED/deleted). The production
+     handler implements only on_created/on_modified — a transcript written via
+     rename/atomic-replace arrives as on_moved and is missed deterministically.
+  2. Enables watchdog's FSEvents DEBUG line: the raw native flags per event
+     (is_coalesced / must_scan_subdirs / *_dropped) — the kernel saying it dropped events.
+  3. Every --poll seconds, diffs disk truth vs. events: files whose mtime advanced but for
+     which NO event fired in the window = the leaks.
+
+Usage:
+  uv run --with watchdog python scripts/diag/fsevents_monitor.py \
+      --dir ~/.claude/projects --poll 30 --log /tmp/fsevents_monitor.log
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import threading
+import time
+from pathlib import Path
+
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+log = logging.getLogger("fsevents_monitor")
+
+
+class LoggingHandler(FileSystemEventHandler):
+    def __init__(self, seen: set[str], lock: threading.Lock) -> None:
+        self._seen = seen
+        self._lock = lock
+
+    def _record(self, kind: str, path: str) -> None:
+        if not path.endswith(".jsonl"):
+            return
+        with self._lock:
+            self._seen.add(path)
+        log.info("EVENT %-9s %s", kind, path)
+
+    def on_created(self, event):
+        if not event.is_directory:
+            self._record("created", event.src_path)
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            self._record("modified", event.src_path)
+
+    def on_moved(self, event):
+        # The production handler does NOT implement this — a leak if it fires for .jsonl.
+        if not event.is_directory:
+            self._record("MOVED", getattr(event, "dest_path", event.src_path))
+
+    def on_deleted(self, event):
+        if not event.is_directory:
+            self._record("deleted", event.src_path)
+
+
+def poll_disk_truth(root: Path, seen: set[str], lock: threading.Lock,
+                    interval: float, stop: threading.Event) -> None:
+    last_mtimes: dict[str, float] = {}
+    while not stop.wait(interval):
+        with lock:
+            events_this_window = set(seen)
+            seen.clear()
+        leaks = []
+        for f in root.rglob("*.jsonl"):
+            if "subagents" in f.parts:
+                continue
+            try:
+                m = f.stat().st_mtime
+            except OSError:
+                continue
+            key = str(f)
+            advanced = key not in last_mtimes or m > last_mtimes[key]
+            last_mtimes[key] = m
+            if advanced and key not in events_this_window:
+                leaks.append(key)
+        if leaks:
+            log.warning("LEAK %d file(s) advanced on disk with NO fsevent this window:", len(leaks))
+            for k in leaks:
+                log.warning("  LEAK %s", k)
+        else:
+            log.info("poll ok: every advanced file had an event")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dir", default="~/.claude/projects")
+    ap.add_argument("--poll", type=float, default=30.0)
+    ap.add_argument("--log", default="/tmp/fsevents_monitor.log")
+    ap.add_argument("--duration", type=float, default=0.0, help="seconds; 0 = until Ctrl-C")
+    args = ap.parse_args()
+
+    logging.basicConfig(
+        filename=args.log, level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logging.getLogger().addHandler(logging.StreamHandler())
+    # Raw native FSEvents flags (is_coalesced / must_scan_subdirs / *_dropped):
+    logging.getLogger("watchdog.observers.fsevents").setLevel(logging.DEBUG)
+
+    root = Path(args.dir).expanduser().resolve()
+    seen: set[str] = set()
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    observer = Observer()
+    observer.schedule(LoggingHandler(seen, lock), str(root), recursive=True)
+    observer.start()
+    log.info("fsevents_monitor watching %s (poll=%ss, log=%s)", root, args.poll, args.log)
+
+    poller = threading.Thread(
+        target=poll_disk_truth, args=(root, seen, lock, args.poll, stop), daemon=True,
+    )
+    poller.start()
+
+    deadline = time.time() + args.duration if args.duration else None
+    try:
+        while True:
+            time.sleep(5)
+            log.info("observer.is_alive=%s", observer.is_alive())
+            if deadline and time.time() >= deadline:
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        observer.stop()
+        observer.join(timeout=5)
+        log.info("fsevents_monitor stopped")
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+
+<h3>Step 2: Smoke-test it (35s) against a synthetic write</h3>
+<pre><code>mkdir -p /tmp/fsmon_test
+( sleep 8; printf '{"x":1}\n' >> /tmp/fsmon_test/probe.jsonl; \
+  sleep 5; printf '{"x":2}\n' >> /tmp/fsmon_test/probe.jsonl ) &
+uv run --with watchdog python scripts/diag/fsevents_monitor.py \
+    --dir /tmp/fsmon_test --poll 10 --duration 35 --log /tmp/fsmon_test.log</code></pre>
+
+<p>Expected (in <code>/tmp/fsmon_test.log</code>): at least one <code>EVENT created</code>/<code>EVENT modified probe.jsonl</code>, periodic <code>observer.is_alive=True</code>, and <code>poll ok</code> lines. Clean up: <code>rm -rf /tmp/fsmon_test /tmp/fsmon_test.log</code>.</p>
+
+<h3>Step 3: Commit</h3>
+<pre><code>git add scripts/diag/fsevents_monitor.py
+git commit -m "feat(diag): standalone FSEvents leak monitor for session-watcher (#59)"</code></pre>
+
+<h3>After the plan: real run</h3>
+<p>Run the monitor ~1 day alongside the server (across a sleep/wake cycle):</p>
+<pre><code>nohup uv run --with watchdog python scripts/diag/fsevents_monitor.py \
+    --dir ~/.claude/projects --poll 60 --log /tmp/fsevents_monitor.log >/dev/null 2>&1 &</code></pre>
+
+<p>Read <code>/tmp/fsevents_monitor.log</code> for <code>LEAK</code> lines + the native flags that accompanied them, and fold the evidence into r-spade/ormah#59.</p>
+
+<p><strong>Checklist:</strong></p>
+<ul>
+<li><span class="schip todo">todo</span> Step 1</li>
+<li><span class="schip todo">todo</span> Step 2</li>
+<li><span class="schip todo">todo</span> Step 3</li>
+</ul>
+
+</section>
+
+<div class="spectrum">
+  <span class="s1"></span>
+  <span class="s2"></span>
+  <span class="s3"></span>
+</div>
+
+<div class="signature">
+  <div class="name">Session-watcher <em>reconcile</em> plan</div>
+  <div class="role">Implementation: 5 tasks, 28 steps, council-validated</div>
+</div>
+
+  </main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:188fd5ddcefb37d25521215549887d8cf8bbe7dafa4a6f290715c1bfe01bcf42 -->

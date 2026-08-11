@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADR-0003: Orphan Progress Guard — Implementation Plan</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">ADR-0003: Orphan Progress Guard — Implementation Plan</div>
+  <a href="#overview">Overview: Orphan Progress Guard</a>
+  <a href="#global-constraints" class="lvl-3">Global constraints</a>
+  <a href="#interfaces" class="lvl-3">Interfaces (shared across tasks)</a>
+  <a href="#verified-parser-facts" class="lvl-3">Verified parser facts the tests rely on</a>
+  <a href="#task-summary" class="lvl-3">Task summary</a>
+  <a href="#task-1">Task 1: should_rewind predicate in the parser</a>
+  <a href="#task-1-steps" class="lvl-3">Steps (6 total)</a>
+  <a href="#task-2">Task 2: Gate the session-watcher rewind</a>
+  <a href="#task-2-steps" class="lvl-3">Steps (6 total)</a>
+  <a href="#task-3">Task 3: Gate the whisper-hook rewind</a>
+  <a href="#task-3-steps" class="lvl-3">Steps (5 total)</a>
+  <a href="#task-4">Task 4: Verify, PR upstream, merge into the Beta</a>
+  <a href="#task-4-steps" class="lvl-3">Steps (6 total)</a>
+</nav>
+<main>
+<div class="metrics">
+  <div class="metric">
+    <div class="big">4</div>
+    <div class="label">Tasks</div>
+  </div>
+  <div class="metric">
+    <div class="big">23</div>
+    <div class="label">Steps</div>
+  </div>
+  <div class="metric">
+    <div class="big">bug #149</div>
+    <div class="label">Target</div>
+  </div>
+</div>
+
+<div class="progress">
+  <div class="fill" style="width: 0%"></div>
+</div>
+
+<h2 id="overview">Overview: Orphan Progress Guard</h2>
+
+<p class="eyebrow">Goal</p>
+<p class="statement">Kill bug #149 — a false-positive <code>leading_orphan</code> re-ingests the same transcript forever (36× in 14h) and strands its ~530KB tail — by gating the rewind on forward progress, per the accepted design in <code>docs/adr/0003-recovery-drops-orphan-fragment.md</code>.</p>
+
+<p class="eyebrow">Architecture</p>
+<p>One stateless predicate <code>should_rewind(result, start_offset)</code> in <code>src/ormah/transcript/parser.py</code> returns True only when the flagged parse made <strong>no forward progress</strong> (<code>safe_end_offset &lt;= start_offset</code>). Both rewind sites — the watcher (<code>session_watcher.py</code>) and the whisper hook (<code>cli_adapter.py</code>) — call it instead of checking <code>result.leading_orphan</code> directly, so the two paths cannot diverge. An orphan <strong>with</strong> progress is dropped and the cursor advances; the genuine legacy case still rewinds once.</p>
+
+<p><strong>Tech stack:</strong> Python 3.11+, pytest (<code>asyncio_mode=auto</code>), ruff.</p>
+
+<h3 id="global-constraints">Global constraints</h3>
+
+<ul>
+  <li><strong>Branch &amp; worktree:</strong> contribution branch cut from <code>upstream/main</code> (NEVER from <code>local-main</code>), per <code>FORK-WORKFLOW.md</code>. NEVER <code>git checkout</code> a branch inside <code>/Users/andre/Documents/GitHub/Tools/ormah</code> — it is the live Beta; a checkout crashes every whisper hook. Work ONLY in the worktree created in <a href="#task-1">Task 1</a> Step 0.</li>
+  <li><strong>Worktree path:</strong> <code>/Users/andre/Documents/GitHub/Tools/ormah-wt-149</code>, branch <code>fix/leading-orphan-progress-guard</code>.</li>
+  <li><strong>Test command inside the worktree:</strong> venv lives in the main clone; PYTHONPATH pins the worktree's <code>src/</code> ahead of the editable install.</li>
+  <li><strong>Absolute paths only</strong> in every command. A "no tests collected" / "no such file" error is almost always a wrong CWD — anchor, don't retry.</li>
+  <li><strong>Do not touch</strong> <code>docs/adr/</code> in the branch: ADRs are local overlay, not tracked upstream.</li>
+  <li><strong>Lint:</strong> <code>ruff check src/ tests/</code> must not add new errors (4 pre-existing errors exist on local-main only; the worktree is cut from upstream and should be clean).</li>
+  <li><strong>Style:</strong> match upstream comment density; comments explain constraints, not the diff.</li>
+</ul>
+
+<h3 id="interfaces">Interfaces (shared across tasks)</h3>
+
+<ul>
+  <li><strong>Task 1 produces</strong> <code>should_rewind(result: TranscriptResult, start_offset: int) -&gt; bool</code>, importable as <code>from ormah.transcript.parser import should_rewind</code>. <a href="#task-2">Tasks 2</a>–<a href="#task-3">3</a> consume it.</li>
+  <li><strong>Fixture record shapes</strong> (Claude Code JSONL), used identically in all test tasks.</li>
+</ul>
+
+<h3 id="verified-parser-facts">Verified parser facts the tests rely on</h3>
+
+<p class="eyebrow">(verified against upstream/main:src/ormah/transcript/parser.py, 2026-07-21)</p>
+
+<ul>
+  <li><code>_safe_end</code> initializes to <code>start_offset</code> (line 224): a slice that closes nothing has <code>safe_end_offset == start_offset</code> — no progress.</li>
+  <li>The orphan flag fires at the first text-bearing assistant record with <code>user_turn_count == 0 and start_offset &gt; 0</code> (line ~290).</li>
+  <li>The terminal-stop_reason boundary advance is nested inside <code>if text and user_turn_count &gt; 0:</code>, so a dropped orphan record NEVER advances the boundary — even if it carries <code>end_turn</code>.</li>
+  <li>Upstream <code>parse_transcript(path, start_offset=0)</code> has NO <code>max_bytes</code> param (that is a local-main queued change — do not reference it in this branch).</li>
+</ul>
+
+<h3 id="task-summary">Task summary</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>File</th>
+      <th>Deliverable</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td><code>01-should-rewind-predicate.md</code></td>
+      <td><code>should_rewind</code> in <code>parser.py</code> + parser-level TDD (API-error fixture, no-progress fixture, large-orphan variant)</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><code>02-session-watcher-gate.md</code></td>
+      <td>Watcher rewind gated by <code>should_rewind</code> + regression tests (advance-without-reingest, legacy-still-rewinds)</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><code>03-whisper-hook-gate.md</code></td>
+      <td>Hook rewind gated by <code>should_rewind</code> + cursor test; existing legacy-recovery test keeps passing</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td><code>04-integration-pr-beta.md</code></td>
+      <td>Full suite + ruff, push to <code>fork</code>, /council-pr against #149, merge into <code>local-main</code>, restart Beta, verify the loop is dead</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="phase p-o"><span class="pn">1</span> should_rewind predicate in the parser</div>
+
+<h2 id="task-1"><em>Task 1:</em> should_rewind predicate in the parser</h2>
+
+<p class="eyebrow">Files</p>
+<ul>
+  <li><strong>Modify:</strong> <code>src/ormah/transcript/parser.py</code> (add one function after <code>parse_transcript</code>)</li>
+  <li><strong>Test:</strong> <code>tests/test_transcript/test_parser.py</code> (new class <code>TestShouldRewind</code>)</li>
+</ul>
+
+<p class="eyebrow">Interfaces</p>
+<ul>
+  <li><strong>Consumes:</strong> <code>parse_transcript(path, start_offset=0) -&gt; TranscriptResult</code> (existing); <code>TranscriptResult.leading_orphan: bool</code>, <code>TranscriptResult.safe_end_offset: int</code> (existing).</li>
+  <li><strong>Produces:</strong> <code>should_rewind(result: TranscriptResult, start_offset: int) -&gt; bool</code> — <a href="#task-2">Tasks 2</a> and <a href="#task-3">3</a> import <code>from ormah.transcript.parser import parse_transcript, should_rewind</code>.</li>
+</ul>
+
+<h3 id="task-1-steps">Steps (6 total)</h3>
+
+<details>
+  <summary>Step 0: Create the worktree (one-time setup)</summary>
+  <p>Expected: <code>Preparing worktree (new branch 'fix/leading-orphan-progress-guard')</code>. Do NOT touch the main clone's checkout. All subsequent steps run inside <code>/Users/andre/Documents/GitHub/Tools/ormah-wt-149</code>.</p>
+</details>
+
+<details>
+  <summary>Step 1: Write the failing tests</summary>
+  <p>Append to <code>tests/test_transcript/test_parser.py</code>. Five test cases: API error orphan with progress, no-progress orphan, no-orphan no-progress, large orphan with progress, legacy orphan with later turns.</p>
+</details>
+
+<details>
+  <summary>Step 2: Run tests — verify they fail for the right reason</summary>
+  <p>Expected: collection error <code>ImportError: cannot import name 'should_rewind'</code>.</p>
+</details>
+
+<details>
+  <summary>Step 3: Implement the predicate</summary>
+  <p>In <code>src/ormah/transcript/parser.py</code>, immediately after <code>parse_transcript</code>: <code>return result.leading_orphan and result.safe_end_offset &lt;= start_offset</code></p>
+</details>
+
+<details>
+  <summary>Step 4: Run tests — verify they pass</summary>
+  <p>Expected: <code>5 passed</code>. Also run the whole parser suite.</p>
+</details>
+
+<details>
+  <summary>Step 5: Commit</summary>
+  <pre><code>feat(parser): should_rewind gates orphan recovery on forward progress (#149)</code></pre>
+</details>
+
+<div class="phase p-b"><span class="pn">2</span> Gate the session-watcher rewind</div>
+
+<h2 id="task-2"><em>Task 2:</em> Gate the session-watcher rewind</h2>
+
+<p class="eyebrow">Files</p>
+<ul>
+  <li><strong>Modify:</strong> <code>src/ormah/background/session_watcher.py</code> (the <code>leading_orphan</code> block inside <code>_ingest_session</code>, ~line 774)</li>
+  <li><strong>Test:</strong> <code>tests/test_background/test_session_watcher.py</code></li>
+</ul>
+
+<p class="eyebrow">Interfaces</p>
+<ul>
+  <li><strong>Consumes:</strong> <code>should_rewind(result, start_offset) -&gt; bool</code> from <a href="#task-1">Task 1</a>.</li>
+  <li><strong>Produces:</strong> behavior change only. The state entry's <code>end_offset</code> becomes strictly monotonic for the #149 byte pattern.</li>
+</ul>
+
+<h3 id="task-2-steps">Steps (6 total)</h3>
+
+<details>
+  <summary>Step 1: Write failing regression test (the #149 loop)</summary>
+  <p>An assistant 'API Error' record right after a terminal end_turn flags leading_orphan on the next tick. The watcher must NOT rewind to 0 (36x whole-file re-extractions); it drops the fragment, ingests the tail past the boundary, and the following tick is a cheap NO_PROGRESS.</p>
+</details>
+
+<details>
+  <summary>Step 2: Write failing companion test (legacy recovery preserved)</summary>
+  <p>A genuine legacy mid-response cursor (orphan AND no forward progress) still triggers the one-time whole-file recovery, re-pairing the tail with its prompt.</p>
+</details>
+
+<details>
+  <summary>Step 2b: Write residual-case test (ADR consequence)</summary>
+  <p>With the guard, an advanced-but-below-min_turns payload on an ACTIVE file defers (TRANSIENT) and re-parses on later ticks as a parse-only no-op — no rewind, no LLM call, no duplication.</p>
+</details>
+
+<details>
+  <summary>Step 2c: Write accepted-loss pinning test (council ajuste #1)</summary>
+  <p>A genuine legacy mid-response cursor in a file that ALSO has later closed turns — no rewind, the fragment tail is dropped (bounded, one-time loss), the later turn is ingested, cursor reaches EOF.</p>
+</details>
+
+<details>
+  <summary>Step 3: Run all four — verify expected failures and passes</summary>
+  <p>Expected: step 1, 2b, 2c FAIL on rewind check; step 2 (legacy) PASSES.</p>
+</details>
+
+<details>
+  <summary>Step 4: Gate the rewind</summary>
+  <p>In <code>src/ormah/background/session_watcher.py</code>, replace <code>if result.leading_orphan:</code> with <code>if should_rewind(result, prev_offset):</code></p>
+</details>
+
+<details>
+  <summary>Step 5: Run the file's full suite — verify green</summary>
+  <p>Expected: all pass — including the new tests and every pre-existing recovery test.</p>
+</details>
+
+<details>
+  <summary>Step 6: Commit</summary>
+  <pre><code>fix(session-watcher): drop orphan fragment on progress instead of rewinding (#149)</code></pre>
+</details>
+
+<div class="phase p-g"><span class="pn">3</span> Gate the whisper-hook rewind</div>
+
+<h2 id="task-3"><em>Task 3:</em> Gate the whisper-hook rewind</h2>
+
+<p class="eyebrow">Files</p>
+<ul>
+  <li><strong>Modify:</strong> <code>src/ormah/adapters/cli_adapter.py</code> (the <code>leading_orphan</code> block inside <code>cmd_whisper_store</code>, ~line 447)</li>
+  <li><strong>Test:</strong> <code>tests/test_whisper/test_whisper_out.py</code> (one new test in <code>TestWhisperStoreCursor</code>)</li>
+</ul>
+
+<p class="eyebrow">Interfaces</p>
+<ul>
+  <li><strong>Consumes:</strong> <code>should_rewind(result, start_offset) -&gt; bool</code> from <a href="#task-1">Task 1</a>.</li>
+  <li><strong>Produces:</strong> behavior change only. The whisper cursor becomes strictly monotonic for the #149 byte pattern.</li>
+</ul>
+
+<p>The existing test <code>TestWhisperStoreCursor::test_legacy_mid_response_cursor_recovered</code> covers the genuine legacy case (orphan + no progress → rewind) and MUST keep passing untouched.</p>
+
+<h3 id="task-3-steps">Steps (5 total)</h3>
+
+<details>
+  <summary>Step 1: Write the failing test</summary>
+  <p>ADR-0003 regression (bug #149, hook path): a false-positive leading_orphan — an assistant 'API Error' record right after the end_turn boundary the cursor is parked on — must not re-send the whole transcript. The orphan is dropped and only the tail past the cursor is sent; the cursor advances to EOF.</p>
+</details>
+
+<details>
+  <summary>Step 2: Run it — verify it fails for the right reason</summary>
+  <p>Expected: FAIL on <code>assert "Answer one" not in bodies[0]["content"]</code> — the unguarded rewind re-parses from 0 and re-sends the whole transcript.</p>
+</details>
+
+<details>
+  <summary>Step 3: Gate the rewind</summary>
+  <p>In <code>src/ormah/adapters/cli_adapter.py</code>, replace <code>if result.leading_orphan:</code> with <code>if should_rewind(result, start_offset):</code> and update imports to include <code>should_rewind</code>.</p>
+</details>
+
+<details>
+  <summary>Step 4: Run the whisper suite — verify green</summary>
+  <p>Expected: all pass — <code>test_legacy_mid_response_cursor_recovered</code> (no-progress → still rewinds) and the new false-positive test both green.</p>
+</details>
+
+<details>
+  <summary>Step 5: Commit</summary>
+  <pre><code>fix(whisper-hook): drop orphan fragment on progress instead of rewinding (#149)</code></pre>
+</details>
+
+<div class="phase p-o"><span class="pn">4</span> Verify, PR upstream, merge into the Beta</div>
+
+<h2 id="task-4"><em>Task 4:</em> Verify, PR upstream, merge into the Beta</h2>
+
+<p class="eyebrow">Files</p>
+<ul>
+  <li><strong>No new source files.</strong> Operations: full test run, lint, push to <code>fork</code>, /council-pr, merge into <code>local-main</code>, Beta restart + live verification.</li>
+</ul>
+
+<p class="eyebrow">Interfaces</p>
+<ul>
+  <li><strong>Consumes:</strong> the three commits from <a href="#task-1">Tasks 1</a>–<a href="#task-3">3</a> on branch <code>fix/leading-orphan-progress-guard</code>.</li>
+  <li><strong>Produces:</strong> an upstream PR against issue #149 (base <code>r-spade:main</code>, head <code>fork:fix/leading-orphan-progress-guard</code>) and the fix live on the Beta.</li>
+</ul>
+
+<h3 id="task-4-steps">Steps (6 total)</h3>
+
+<details>
+  <summary>Step 1: Full fast suite + lint in the worktree</summary>
+  <p>Expected: 0 failures, 0 ruff errors. Known caveat: a handful of failures can be environmental (global <code>~/.config/ormah/.env</code> leaking into bare <code>Settings()</code>); compare against the same failure set on a clean <code>upstream/main</code> checkout before blaming the branch.</p>
+</details>
+
+<details>
+  <summary>Step 2: Push the branch to the fork</summary>
+  <p>Never push to <code>upstream</code>/<code>origin</code> (both point to r-spade). If a council guard blocks a push, the explicit command bypasses it (the guard is council's, not git's).</p>
+</details>
+
+<details>
+  <summary>Step 3: /council-pr (review + open the PR)</summary>
+  <p>Run <code>/council-pr</code> from the worktree. Council from a worktree needs the untracked <code>.council/</code> + <code>CLAUDE.md</code> bridged via symlink from the main clone. PR: base <code>r-spade:main</code>, head <code>AndreLFSMartins:fix/leading-orphan-progress-guard</code>, body says <code>Fixes #149</code>, summarizes the guard and cites the 36×/14h replay evidence.</p>
+</details>
+
+<details>
+  <summary>Step 4: Merge into local-main (Recipe B — run in the MAIN clone)</summary>
+  <p>Expected conflicts: likely in <code>src/ormah/background/session_watcher.py</code> (local <code>_ingest_session</code> has extra params and calls <code>parse_transcript(path, start_offset=prev_offset, max_bytes=flush_bytes)</code>). Resolution: keep the local call shape and apply the guard. Add Beta byte-cap regression test (council ajuste #2) before committing the merge.</p>
+</details>
+
+<details>
+  <summary>Step 5: Restart the Beta and verify the loop is dead</summary>
+  <p>Live verification: watch the server log for ~30–60 min of normal use and confirm <code>"recovering legacy mid-response cursor"</code> does NOT reappear for the transcript that looped (before the fix it fired every ~27 min). Also confirm the previously-stranded tail was ingested. Report the grep/count output, not a verdict.</p>
+</details>
+
+<details>
+  <summary>Step 6: Cleanup</summary>
+  <p>Keep the branch until the upstream PR lands; delete it on the next Recipe C sync.</p>
+</details>
+
+<div class="callout">
+  <strong>Planning complete.</strong> Each <a href="#task-1">Task 1</a>–<a href="#task-4">4</a> is self-contained. Dispatch implementers with <code>superpowers:subagent-driven-development</code> or work through in sequence. Full suite (parser + watcher + whisper + integration) validates the fix across both rewind sites and the Beta merge path.
+</div>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:38b1bf72fdac69bfc7e446dcf527c6854033bd96dfd6cbedad1935a83b0e94cc -->

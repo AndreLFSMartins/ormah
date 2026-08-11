@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ingest Batch Content Budget</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">Ingest Batch Content Budget</div>
+  <a href="#overview">Overview</a>
+  <a href="#overview-constraints" class="lvl-3">Global Constraints</a>
+  <a href="#overview-files" class="lvl-3">File Structure</a>
+  <a href="#overview-index" class="lvl-3">Task Index</a>
+  <a href="#overview-trap" class="lvl-3">The Trap That Will Bite</a>
+  <a href="#overview-raw-budget" class="lvl-3">What the Raw Budget Does and Does NOT Bound</a>
+  <a href="#overview-scope" class="lvl-3">Out of Scope</a>
+  <a href="#overview-rollout" class="lvl-3">Rollout Note</a>
+  <a href="#overview-done" class="lvl-3">Definition of Done</a>
+  <a href="#task-1">Task 1 Budget the Batch on Conversation Length</a>
+  <a href="#task-1-steps" class="lvl-3">Steps</a>
+  <a href="#task-2">Task 2 Independent Raw-Byte Ceiling + Rewind Invariant</a>
+  <a href="#task-2-steps" class="lvl-3">Steps</a>
+  <a href="#task-3">Task 3 Rename Setting, Warn on Old Var, Rewire Watcher</a>
+  <a href="#task-3-steps" class="lvl-3">Steps</a>
+  <a href="#task-4">Task 4 Enforce flush_chars ≤ ingest_chunk_chars</a>
+  <a href="#task-4-steps" class="lvl-3">Steps</a>
+  <a href="#task-5">Task 5 Make Bigger Payload Safe on Any Provider</a>
+  <a href="#task-5-refusal" class="lvl-3">Capacity Refusal (Step 5b)</a>
+  <a href="#task-5-steps" class="lvl-3">Steps (8 steps including 5b)</a>
+  <a href="#task-6">Task 6 Replace Provisional Defaults with Measured Ones</a>
+  <a href="#task-6-traps" class="lvl-3">Traps in This Measurement</a>
+  <a href="#task-6-steps" class="lvl-3">Steps</a>
+  <a href="#task-7">Task 7 Correct Three Falsified Claims in ADR-0001</a>
+  <a href="#task-7-corrections" class="lvl-3">Corrections</a>
+  <a href="#task-7-residuals" class="lvl-3">Residuals Recorded</a>
+  <a href="#task-7-steps" class="lvl-3">Steps</a>
+</nav>
+<main>
+<p class="eyebrow">ADR-0001 Amendment 3 · Implementation Plan</p>
+
+<h1 id="title"><em>Ingest Batch</em> Content Budget</h1>
+
+<p class="statement">Budget each Batch on conversation length instead of raw transcript bytes, hitting the ~15K-token recall sweet spot instead of 5.6% of it.</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="big">7</div>
+    <div class="label">tasks</div>
+  </div>
+  <div class="metric">
+    <div class="big">15</div>
+    <div class="label">steps</div>
+  </div>
+  <div class="metric">
+    <div class="big">8</div>
+    <div class="label">files touched</div>
+  </div>
+</div>
+
+<div class="progress">
+  <div class="fill" style="width: 0%"></div>
+</div>
+
+<section>
+<h2 id="overview">Overview</h2>
+
+<p><strong>Goal:</strong> Budget each ingest Batch on the conversation length the Extractor actually receives, instead of raw transcript bytes, so batches hit the ~15K-token recall sweet spot instead of landing at 5.6% of it.</p>
+
+<p><strong>Architecture:</strong> <code>parse_transcript</code>'s single byte-delta predicate splits into two progress-guarded budgets — cleaned-conversation length and an independent raw-byte ceiling — either of which closes a Batch. The config surface is renamed to the new unit, the <code>flush ≤ chunk</code> invariant that Amendment 2 prescribed is finally enforced, and the ingest path stops sending a variable payload against a fixed provider timeout.</p>
+
+<p><strong>Tech Stack:</strong> Python 3.11+, pydantic-settings, pytest (<code>asyncio_mode = auto</code>), ruff.</p>
+
+<p><strong>Spec:</strong> <a href="../../specs/2026-07-25-ingest-batch-content-budget-design.md"><code>../../specs/2026-07-25-ingest-batch-content-budget-design.md</code></a> — read it first; it carries the evidence and the rejected alternatives.</p>
+
+<h3 id="overview-constraints">Global Constraints</h3>
+
+<ul>
+<li><strong>Never <code>git checkout</code> a branch inside <code>/Users/andre/Documents/GitHub/Tools/ormah</code></strong> — it is the live Beta and a branch switch breaks every whisper hook. Work in a worktree cut from <code>local-main</code>.</li>
+<li><strong>Beta-only by impossibility.</strong> <code>upstream/main</code> has no <code>max_bytes</code>/<code>_would_overshoot</code> in the parser and no <code>session_watcher_flush_bytes</code> in config. No upstream PR. Read <code>FORK-WORKFLOW.md</code> before any branch op.</li>
+<li>Code, comments, identifiers and commit messages in <strong>English</strong>.</li>
+<li>ruff: <code>target-version = py311</code>, <code>line-length = 100</code>. Run <code>ruff check src/ tests/</code> before every commit.</li>
+<li>Tests run from the <strong>worktree's own venv</strong>: <code>./.venv/bin/python -m pytest</code>. Default run excludes <code>integration</code>-marked tests.</li>
+<li><strong>Batch target is 60000 cleaned chars (~15K tokens) and does not move in this plan.</strong> It is a quality bound (context rot on multi-item extraction), not a capacity bound. Raising it needs an <code>eval/</code> A/B.</li>
+<li><strong>Both budgets keep the progress guard (<code>_safe_len > 0</code>).</strong> Making either absolute breaks the ADR-0003 rewind invariant proved in Task 2. <code>stop_offset</code> remains the only absolute limit.</li>
+<li>Never claim a step passed without pasting the command output.</li>
+</ul>
+
+<h3 id="overview-files">File Structure</h3>
+
+<table>
+<thead>
+<tr>
+<th>file</th>
+<th>responsibility</th>
+<th>tasks</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/ormah/transcript/parser.py</code></td>
+<td>boundary selection + both budgets</td>
+<td>1, 2</td>
+</tr>
+<tr>
+<td><code>src/ormah/config.py</code></td>
+<td>settings, validators, deprecation warning</td>
+<td>3, 4, 6</td>
+</tr>
+<tr>
+<td><code>src/ormah/background/session_watcher.py</code></td>
+<td>plumbs settings into <code>_ingest_session</code></td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>src/ormah/engine/memory_engine.py</code></td>
+<td>chunking + payload-derived timeout</td>
+<td>4, 5</td>
+</tr>
+<tr>
+<td><code>src/ormah/background/llm/ollama_adapter.py</code></td>
+<td>pin <code>num_ctx</code></td>
+<td>5</td>
+</tr>
+<tr>
+<td><code>tests/test_transcript/test_parser.py</code></td>
+<td>parser-level budget behaviour</td>
+<td>1, 2</td>
+</tr>
+<tr>
+<td><code>tests/test_background/test_session_watcher_flush.py</code></td>
+<td>config + end-to-end flush gate</td>
+<td>3, 4</td>
+</tr>
+<tr>
+<td><code>tests/test_engine/test_ingest_extraction.py</code></td>
+<td>chunking + timeout hint</td>
+<td>4, 5</td>
+</tr>
+<tr>
+<td><code>docs/adr/0001-batch-size-and-ordering.md</code></td>
+<td>three factual corrections</td>
+<td>7</td>
+</tr>
+</tbody>
+</table>
+
+<h3 id="overview-index">Task Index</h3>
+
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>file</th>
+<th>deliverable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><a href="#task-1">01-content-budget.md</a></td>
+<td><code>_format_turn</code> + prefix sums + content predicate replaces the byte predicate</td>
+</tr>
+<tr>
+<td>2</td>
+<td><a href="#task-2">02-raw-ceiling.md</a></td>
+<td>independent raw-byte ceiling + the <code>capped ⇒ progress</code> property test</td>
+</tr>
+<tr>
+<td>3</td>
+<td><a href="#task-3">03-config-surface.md</a></td>
+<td>rename to <code>flush_chars</code>, deprecation warning, watcher plumbing</td>
+</tr>
+<tr>
+<td>4</td>
+<td><a href="#task-4">04-chunk-invariant.md</a></td>
+<td><strong>⛔ Amendment 2:</strong> <code>flush_chars ≤ ingest_chunk_chars ≤ ingest_max_content_chars</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td><a href="#task-5">05-provider-fit.md</a></td>
+<td>payload-derived timeout, <code>num_ctx</code> pinned, minimum-window documented</td>
+</tr>
+<tr>
+<td>6</td>
+<td><a href="#task-6">06-measure-defaults.md</a></td>
+<td>measure the corpus and a real extraction; set <code>max_raw_bytes</code> and the timeout rate from evidence</td>
+</tr>
+<tr>
+<td>7</td>
+<td><a href="#task-7">07-adr-corrections.md</a></td>
+<td>amend ADR-0001 with the three statements this work falsified</td>
+</tr>
+</tbody>
+</table>
+
+<p><strong>Task ordering:</strong> Tasks 1→5 are strictly ordered. Task 6 must run <strong>after</strong> 5 (it needs the real predicate and the real timeout path) and <strong>before</strong> merge — it is what turns two provisional defaults into measured ones. Task 7 can run any time after 6.</p>
+
+<h3 id="overview-trap">The Trap That Will Bite</h3>
+
+<p>Existing flush tests pass <code>_write_turns(path, turns=4, pad=20000)</code>, whose padding is <strong>plain user text</strong> — so raw bytes ≈ cleaned chars and the test passes identically under both units. A test that survives the axis change unchanged is not testing the budget. Every discriminating fixture in this plan pads with <code>tool_use</code> / <code>tool_result</code> content, so raw ≫ cleaned.</p>
+
+<h3 id="overview-raw-budget">What the Raw Budget Does and Does NOT Bound</h3>
+
+<div class="callout">
+<p><strong>Council R1, Codex</strong></p>
+<p>The raw budget bounds <strong>multi-turn accumulation within a slice</strong>. It does <strong>not</strong> bound the cost of a single pathological record, for two structural reasons: the predicate runs at commit sites, <em>after</em> <code>readline()</code> + <code>json.loads</code> have already processed the record, and the <code>_safe_len > 0</code> progress guard deliberately exempts the first closed turn.</p>
+<p>That limitation is <strong>pre-existing and unchanged by this plan</strong>: today's <code>max_bytes</code> predicate has the identical structure and the identical exemption, and <code>session_watcher.py:880</code> parses the whole file <strong>uncapped</strong> on the rewind-probe path by design (a capped probe mis-parks recoverable files). Measured, raw span per slice already reaches p99 3.5 MB under the current byte budget.</p>
+<p>Do not "fix" it inside this plan. A pre-decode line-size limit would make a legitimately huge single turn permanently un-ingestable — silent data loss, the failure class this ADR chain exists to remove — and a quarantine state was explicitly descoped on 2026-07-25. Single-record parse cost belongs to its own ADR, where that trade-off can be decided deliberately. State the narrow claim in the ADR (Task 7) rather than widening the mechanism here.</p>
+</div>
+
+<h3 id="overview-scope">Out of Scope</h3>
+
+<ul>
+<li>ADR-0004 slice 3 — <strong>descoped 2026-07-25</strong>, do not replan it.</li>
+<li>The <code>claude_cli_adapter</code> cancellation-epoch/deadline race — a real open defect, but a different axis.</li>
+<li>Raising the batch target to ~30K tokens — needs an <code>eval/</code> A/B first, never a speculative bump.</li>
+<li>pytest contamination of the production log; <code>ORMAH_DELETION_ENABLED=false</code>.</li>
+</ul>
+
+<h3 id="overview-rollout">Rollout Note</h3>
+
+<p>~408 stranded transcripts were still draining as of 2026-07-25. Landing this mid-drain changes payload size in flight, which muddies both the measurement in Task 6 and any post-merge observation. Prefer landing after the drain completes; if you cannot wait, say so explicitly in the PR rather than letting the numbers be read as steady-state.</p>
+
+<h3 id="overview-done">Definition of Done</h3>
+
+<ul>
+<li><code>./.venv/bin/python -m pytest tests/ -q</code> green in the worktree.</li>
+<li><code>ruff check src/ tests/</code> clean.</li>
+<li>The orphan/rewind tests in <code>tests/test_transcript/test_parser.py</code> and <code>tests/test_background/test_session_watcher.py</code> pass <strong>unedited</strong> (Task 2 depends on this).</li>
+<li>Task 6's measurement output is pasted into the PR description.</li>
+<li><code>/council</code> on this plan <strong>before</strong> any code; <code>/council-pr</code> before merging to <code>local-main</code>.</li>
+</ul>
+
+</section>
+
+<section>
+<h2 id="task-1"><em>Task 1</em> Budget the Batch on Conversation Length</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>src/ormah/transcript/parser.py:199-203</code> (extract <code>_format_turn</code>)</li>
+<li>Modify: <code>src/ormah/transcript/parser.py:206-262</code> (signature, counters, predicate)</li>
+<li>Modify: <code>src/ormah/transcript/parser.py:301,332,356,339,359</code> (call sites)</li>
+<li>Modify: <code>src/ormah/background/session_watcher.py:864,889</code> (the only two callers of the renamed keyword)</li>
+<li>Test: <code>tests/test_transcript/test_parser.py</code> (new tests appended)</li>
+</ul>
+
+<div class="callout warn">
+<p><strong>The watcher call sites move in THIS task, not Task 3</strong> (council R3, Codex). Renaming the keyword here while <code>session_watcher.py</code> still passes <code>max_bytes=</code> would leave Task 1 and Task 2 as knowingly broken commits — <code>_ingest_session</code> would raise <code>TypeError</code>, which its own <code>except Exception</code> converts into <code>NO_PROGRESS</code>, so the watcher suite Task 2 asks you to run could not pass. Every commit in this plan must be independently green.</p>
+</div>
+
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Consumes: nothing (first task).</li>
+<li>Produces: <code>parse_transcript(path, start_offset=0, max_conversation_chars=None, stop_offset=None)</code>. The <code>max_bytes</code> keyword is <strong>gone</strong> — Task 2 adds <code>max_raw_bytes</code> as a separate keyword. Also exported for tests: <code>_format_turn(turn) -&gt; str</code> and <code>_TURN_SEPARATOR = "\n\n"</code>.</li>
+</ul>
+
+<p>Read the spec section "1 · Parser predicate" before starting. The commit-site asymmetry table there is the part that gets implemented wrong if skimmed.</p>
+
+<h3 id="task-1-steps">Steps</h3>
+
+<ul>
+<li><input type="checkbox" disabled> <strong>Step 1: Write the failing tests</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 2: Run the tests to verify they fail</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 3: Extract the shared turn renderer</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 4: Change the signature and the docstring</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 5: Add the counters and the predicate</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 6: Update the three commit sites</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 7: Re-express the existing parser test</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 7b: Move the two watcher call sites in the SAME commit</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 7c: Rename the keyword at the remaining TEST call sites too</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 8: Run the FULL suite, not just the parser</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 9: Lint and commit</strong></li>
+</ul>
+
+<div class="callout">
+<p><strong>⛔ Stage <code>session_watcher.py</code> and the flush tests too</strong> — both council peers caught an earlier draft that described moving the call sites in prose but staged only the parser. A commit that renames the keyword without its callers <code>TypeError</code>s on checkout, and <code>_ingest_session</code>'s <code>except Exception</code> converts that into a silent <code>NO_PROGRESS</code>. Verify the <strong>committed tree</strong>, not the dirty working tree.</p>
+</div>
+
+</section>
+
+<section>
+<h2 id="task-2"><em>Task 2</em> Independent Raw-Byte Ceiling + Rewind Invariant</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>src/ormah/transcript/parser.py</code> (signature + second predicate + both call-site guards)</li>
+<li>Test: <code>tests/test_transcript/test_parser.py</code></li>
+</ul>
+
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Consumes: Task 1's <code>parse_transcript(..., max_conversation_chars=None, ...)</code>, <code>_commit_turn</code>, <code>_would_overshoot</code>, <code>_projected_len</code>.</li>
+<li>Produces: <code>parse_transcript(path, start_offset=0, max_conversation_chars=None, max_raw_bytes=None, stop_offset=None)</code> and <code>result.capped</code> set by <strong>either</strong> budget.</li>
+</ul>
+
+<p><strong>Why this exists.</strong> A pure content budget leaves the raw span unbounded: measured, a 60000-char slice spans ~1.4 MB at p50 and ~16 MB at p99. Resource safety is a different concern from recall and needs its own bound. The default value is <strong>not</strong> decided here — Task 6 measures it. This task ships the parameter defaulting to <code>None</code> (disabled), so nothing changes behaviourally until Task 6.</p>
+
+<div class="callout warn">
+<p><strong>The one rule you may not break.</strong> The raw ceiling is a <em>budget</em>, not a ceiling in the <code>stop_offset</code> sense: it keeps the same <code>_safe_len > 0</code> progress guard. That guard is the entire proof that a cap cannot produce a rewind. <code>stop_offset</code> stays the only absolute limit.</p>
+</div>
+
+<h3 id="task-2-steps">Steps</h3>
+
+<ul>
+<li><input type="checkbox" disabled> <strong>Step 1: Write the failing tests</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 2: Run the tests to verify they fail</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 3: Add the parameter</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 4: Add the second predicate</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 5: Wire it into the three commit sites</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 6: Run the full transcript suite</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 7: Run the session-watcher suite to catch collateral damage</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 8: Lint and commit</strong></li>
+</ul>
+
+<p>Key tests: <code>test_raw_ceiling_binds_independently_of_the_content_budget</code>, <code>test_raw_ceiling_keeps_the_progress_guard</code>, and <code>test_capped_always_implies_forward_progress</code> (property test on 1400 real slices).</p>
+
+</section>
+
+<section>
+<h2 id="task-3"><em>Task 3</em> Rename Setting, Warn on Old Var, Rewire Watcher</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>src/ormah/config.py:99</code> (field), <code>:561-566</code> (floor validator), <code>:575-586</code> (cap validator)</li>
+<li>Modify: <code>src/ormah/background/session_watcher.py</code> (8 reference updates)</li>
+<li>Test: <code>tests/test_background/test_session_watcher_flush.py</code> (comprehensive test updates)</li>
+</ul>
+
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Consumes: Task 1/2's <code>parse_transcript(..., max_conversation_chars=..., max_raw_bytes=...)</code>.</li>
+<li>Produces: <code>Settings.session_watcher_flush_chars: int = 60000</code>, <code>Settings.session_watcher_max_raw_bytes: int | None = None</code>, <code>_ingest_session(..., flush_chars=..., max_raw_bytes=...)</code>, <code>SessionWatcher(..., flush_chars=..., max_raw_bytes=...)</code></li>
+</ul>
+
+<p><strong>Migration decision.</strong> <code>session_watcher_flush_bytes</code> appears nowhere outside tests. A transparent alias would silently reinterpret a tuned value across incomparable units. So: <strong>rename, and warn loudly if the old env var is present.</strong></p>
+
+<div class="callout">
+<p><strong>Council R1 (Cursor)</strong>: a floor of <code>>= flush_chars</code> compares bytes to chars and permits a ~200KB ceiling, which closes tool-heavy slices long before the char sweet spot — re-creating the axis error Amendment 3 exists to fix, one scale up.</p>
+</div>
+
+<h3 id="task-3-steps">Steps</h3>
+
+<ul>
+<li><input type="checkbox" disabled> <strong>Step 1: Write the failing tests</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 2: Run the tests to verify they fail</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 3: Rename the setting</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 4: Rename the validators</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 5: Add the deprecation warning</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 6: Rewire the session watcher</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 7: Sweep the remaining references</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 8: Run the full suite</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 9: Lint and commit</strong></li>
+</ul>
+
+<div class="callout">
+<p><strong>Council R1 (Codex)</strong>: Settings loads <code>~/.config/ormah/.env</code> and <code>./.env</code>, so checking <code>os.environ</code> alone misses the likely case — an operator who set the old key in a config file gets no warning.</p>
+</div>
+
+</section>
+
+<section>
+<h2 id="task-4"><em>Task 4</em> Enforce <code>flush_chars ≤ ingest_chunk_chars</code></h2>
+
+<div class="callout">
+<p><strong>⛔ ADR-0001 Amendment 2</strong></p>
+<p><strong>This task is not optional and it cannot ship separately.</strong> Amendment 2 prescribed a <code>flush ≤ chunk</code> validator that was never added. Today <code>ingest_chunk_chars = 40000 &lt; flush = 60000</code>, and the violation is masked only because payloads never approach 40000 chars. The moment Task 1 lands, every full Batch splits into two chunk-blind extraction calls, re-introducing exactly the cross-chunk blindness the sweet-spot sizing exists to remove.</p>
+</div>
+
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>src/ormah/config.py:347</code> (default), <code>:568-573</code> (validator), <code>_flush_chars_within_cap</code></li>
+<li>Test: <code>tests/test_background/test_session_watcher_flush.py</code>, <code>tests/test_engine/test_ingest.py:292-296</code></li>
+</ul>
+
+<p><strong>Value decision.</strong> Set <code>ingest_chunk_chars = 60000</code>: the minimum that satisfies the invariant, smallest blast radius.</p>
+
+<h3 id="task-4-steps">Steps</h3>
+
+<ul>
+<li><input type="checkbox" disabled> <strong>Step 1: Write the failing tests</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 2: Run the tests to verify they fail</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 3: Raise the default</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 4: Add the invariant to the model validator</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 5: Fix the tests the new invariant breaks</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 6: Run the full suite</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 7: Lint and commit</strong></li>
+</ul>
+
+<p>Key test: <code>test_a_full_batch_reaches_the_extractor_as_one_chunk</code> — a payload the size of a full Batch must produce exactly ONE extraction call.</p>
+
+</section>
+
+<section>
+<h2 id="task-5"><em>Task 5</em> Make Bigger Payload Safe on Any Provider</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>src/ormah/config.py</code> (two new settings + validators)</li>
+<li>Modify: <code>src/ormah/engine/memory_engine.py:2849-2868</code> (payload-derived timeout)</li>
+<li>Modify: <code>src/ormah/background/llm/ollama_adapter.py:13-50</code> (pin <code>num_ctx</code>)</li>
+<li>Create: <code>src/ormah/ingest_capacity.py</code> (shared capacity arithmetic)</li>
+<li>Modify: <code>CONTEXT.md</code> (minimum-window requirement)</li>
+<li>Test: <code>tests/test_engine/test_ingest_extraction.py</code></li>
+</ul>
+
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Consumes: Task 3/4's settings.</li>
+<li>Produces: <code>Settings.ingest_timeout_per_10k_chars: float = 60.0</code> (provisional), <code>Settings.ingest_timeout_max_seconds: int = 900</code>, <code>Settings.ollama_num_ctx: int = 65536</code>, <code>OllamaAdapter(..., num_ctx=65536)</code>, <code>_ingest_adapter_baseline_timeout(settings) -&gt; int</code></li>
+</ul>
+
+<div class="callout warn">
+<p><strong>⛔ The hint must never LOWER the provider's own timeout</strong> (council R1, both peers)</p>
+<p>Verified: <code>llm/__init__.py:47</code> builds <code>ClaudeCliAdapter(timeout=120)</code> while <code>ollama</code>/<code>litellm</code> get 60. A naive derived timeout formula gives a 4K chunk 84s under <code>claude_cli</code>, below today's 120s — a regression on the common short-flush path.</p>
+<p>The hint is therefore a <strong>floor-raising</strong> formula:
+<code>hint = min(max(baseline, base + rate * len(rendered_prompt) / 10000), ingest_timeout_max_seconds)</code></p>
+</div>
+
+<h3 id="task-5-refusal">Capacity Refusal (Step 5b)</h3>
+
+<div class="callout">
+<p><strong>Council R3, Codex — conceded</strong></p>
+<p>A capacity refusal returns <code>EXTRACT_ERR_CALL_FAILED</code>, which maps to <code>TRANSIENT</code>, and the cursor is held but never reaches failure caps, so a deterministic overflow requeues forever. Make the misconfiguration unreachable: validate against <code>ingest_max_content_chars</code>, not <code>flush_chars</code>. The boot validator rejects a window too small; the runtime preflight refuses to send an oversized call.</p>
+</div>
+
+<h3 id="task-5-steps">Steps (8 steps including 5b)</h3>
+
+<ul>
+<li><input type="checkbox" disabled> <strong>Step 1: Write the failing tests</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 2: Run the tests to verify they fail</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 3: Add the settings</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 4: Derive the timeout in the ingest path</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 5: Pin the Ollama input window</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 5b: Fail loud instead of truncating silently</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 6: Document the minimum window</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 6b: Fix the EXISTING adapter tests that adding num_ctx breaks</strong></li>
+</ul>
+
+<div class="callout warn">
+<p><strong>⚠️ Residual 1</strong> — the char estimate is not a proof. A tokenizer can spend more than one token on a single code point (emoji, rare scripts). No chars-per-token divisor is a true upper bound; 2.0 is a strong heuristic. Closing this properly needs model-aware token counting.</p>
+<p><strong>⚠️ Residual 2</strong> — this covers <code>ollama</code>, the only provider whose window we pin. For <code>claude_cli</code> and <code>litellm</code> the window is not introspectable and the requirement stays documentation.</p>
+</div>
+
+</section>
+
+<section>
+<h2 id="task-6"><em>Task 6</em> Replace Provisional Defaults with Measured Ones</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>scripts/measure_ingest_budget.py</code></li>
+<li>Modify: <code>src/ormah/config.py</code> (<code>session_watcher_max_raw_bytes</code>, <code>ingest_timeout_per_10k_chars</code>)</li>
+</ul>
+
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Consumes: everything from Tasks 1–5, working end to end.</li>
+<li>Produces: two measured numbers, and the evidence to paste into the PR description.</li>
+</ul>
+
+<div class="callout">
+<p><strong>This task is the gate.</strong> Tasks 2 and 5 shipped <code>max_raw_bytes = None</code> and a guessed timeout rate. Merging with those in place ships a disabled safety budget and a made-up constant. Run this after Task 5 and before <code>/council-pr</code>.</p>
+</div>
+
+<h3 id="task-6-traps">Traps in This Measurement</h3>
+
+<ul>
+<li><strong>Import only <code>ormah.transcript.parser</code>. Never <code>ormah.main</code></strong> — it runs <code>setup_logging</code> and writes to the production log.</li>
+<li>Use <code>./.venv/bin/python</code>, not the system Python.</li>
+<li>Live state is <code>~/.claude/projects</code>. <strong>Exclude <code>.bak-*</code> siblings</strong> — they inflate counts.</li>
+<li>The health endpoint is <code>/admin/health</code>, never <code>/health</code> (SPA catch-all returns HTML with 200).</li>
+<li>Do not run this while a large backlog drain is in flight — it competes for the same provider.</li>
+</ul>
+
+<h3 id="task-6-steps">Steps</h3>
+
+<ul>
+<li><input type="checkbox" disabled> <strong>Step 1: Write the measurement script</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 2: Run it and record the output</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 3: Set the raw ceiling from the measured p99</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 4: Time REAL extractions against the configured provider</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 5: Derive the timeout rate — non-negative by construction</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 6: Re-run the full suite</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 7: Commit</strong></li>
+</ul>
+
+<div class="callout warn">
+<p><strong>⛔ Council R1, both peers:</strong> do <strong>not</strong> time <code>ingest_llm_generate</code> on bare conversation. Omitting <code>_INGEST_LLM_PROMPT</code>, the response schema and JSON mode omits the generation workload — which dominates extraction latency.</p>
+<p><strong>Never point the measurement engine at the live store</strong> — copy only provider-related settings into a throwaway <code>memory_dir</code>; read live transcripts as input only.</p>
+</div>
+
+<p><strong>Gate:</strong> <code>INVARIANT VIOLATIONS</code> must be 0. Anything else means a budget lost its progress guard — stop and return to Task 1/2.</p>
+
+</section>
+
+<section>
+<h2 id="task-7"><em>Task 7</em> Correct Three Falsified Claims in ADR-0001</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>docs/adr/0001-batch-size-and-ordering.md</code> (Amendment 3, lines 123-165)</li>
+</ul>
+
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>Consumes: measurements from Task 6 and property test from Task 2.</li>
+<li>Produces: an ADR whose Amendment 3 matches what was actually built and measured.</li>
+</ul>
+
+<div class="callout">
+<p>An ADR that keeps a falsified claim is worse than no ADR: the next person re-derives from it. All three corrections are load-bearing — each one changed a decision in this plan.</p>
+</div>
+
+<h3 id="task-7-corrections">Corrections</h3>
+
+<ol>
+<li><strong>Resource-protection claim</strong> — The byte budget was <strong>not</strong> providing accidental resource protection. The progress guard commits a single oversized turn regardless, so the realised raw span per slice was already p99 <strong>3.5 MB</strong> under <code>flush_bytes = 60000</code> — 58× the budget. The raw ceiling is therefore a <strong>new</strong> constraint.</li>
+
+<li><strong>"Constraint dissolved" claim</strong> — The <strong>client-side</strong> constraint is dissolved. The <strong>provider</strong> timeout is not: <code>claude_cli_timeout_seconds = 120</code> and <code>llm_timeout_seconds = 60</code> are still live, and the ingest path sent variable payload against them without using <code>timeout_hint_seconds</code>. Raising the payload to ~60000 chars requires deriving the timeout from the payload.</li>
+
+<li><strong>Migration claim</strong> — The old env var is set in <strong>no</strong> install: appears nowhere outside tests, no installer writes it. A transparent alias would reinterpret a tuned value across incomparable units. The old variable is therefore ignored, with explicit startup warning.</li>
+
+<li><strong>ADR-0003 interaction</strong> — <strong>✅ Resolved:</strong> a cap only fires with <code>_safe_len > 0</code>, which implies the safe boundary advanced, so <strong>no budget on either axis can produce a rewind</strong>. Verified on 1400 real slices (0 violations) and pinned as a property test.</li>
+</ol>
+
+<h3 id="task-7-residuals">Residuals Recorded</h3>
+
+<ul>
+<li><strong>⚠️ The capacity guard is a heuristic, not a proof.</strong> An adversarially token-dense transcript can still overflow. Closing this needs model-aware token counting.</li>
+<li><strong>⚠️ Only <code>ollama</code> is guarded.</strong> <code>claude_cli</code> and <code>litellm</code> windows are not introspectable; for them the ~16–18K-token requirement is documentation only.</li>
+</ul>
+
+<h3 id="task-7-steps">Steps</h3>
+
+<ul>
+<li><input type="checkbox" disabled> <strong>Step 1: Correct the resource-protection claim</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 2: Correct the "constraint dissolved" claim</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 3: Correct the migration claim</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 4: Close the open question</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 5: Add a provenance line to the measurement table</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 5b: Record the two capacity residuals</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 6: Verify no other claim in the amendment is now stale</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 7: Commit</strong></li>
+<li><input type="checkbox" disabled> <strong>Step 8: Final gate before merge</strong></li>
+</ul>
+
+</section>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:b06f443f1841a0ea882f300817c4960f4040dbfe7c149873aa15d1eb92c6f023 -->

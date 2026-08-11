@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Synthetic-Pattern Rot Detection — Implementation Plan</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+/* task checklist */
+.task-steps ul{list-style:none;padding:0;margin:20px 0}
+.task-steps li{margin:12px 0;padding-left:28px;position:relative}
+.task-steps input[type="checkbox"]{position:absolute;left:0;top:2px;width:18px;height:18px;cursor:pointer}
+.task-steps label{display:inline;cursor:pointer}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <div class="eyebrow">Superpowers Plan</div>
+    <div class="doc-title"><em>Synthetic-Pattern Rot Detection</em></div>
+    <a href="#overview">Overview</a>
+    <a href="#task-1" class="lvl-3">Task 1: Match Pattern</a>
+    <a href="#task-2" class="lvl-3">Task 2: Whisper Column</a>
+    <a href="#task-3" class="lvl-3">Task 3: Detection Logic</a>
+    <a href="#task-4" class="lvl-3">Task 4: Job & Registration</a>
+  </nav>
+
+  <main>
+    <h2 id="overview"><em>Overview</em> & Architecture</h2>
+
+    <p class="eyebrow">Issue #143</p>
+    <p><strong>Goal:</strong> Detect synthetic-prompt patterns that stopped matching and file a proposal asking the user to remove or repair them — so the #134 pattern list stops rotting invisibly.</p>
+
+    <h3>Architecture</h3>
+    <p><code>is_synthetic_prompt</code> starts returning <em>which</em> regex matched instead of a bool; that value lands in a new <code>whisper_decisions.matched_pattern</code> column; a daily LLM-free job compares each live pattern's <code>last_seen</code> against a rot threshold and files a <code>pattern</code> proposal into the existing <code>proposals</code> table. Nothing is auto-applied.</p>
+
+    <h3>Stack</h3>
+    <p>Python 3.11+, FastAPI, SQLite, APScheduler, pytest (<code>asyncio_mode=auto</code>), ruff (line-length 100, target py311).</p>
+
+    <p class="meta">Spec: <a href="#">2026-07-16-synthetic-pattern-rot-detection-design.md</a>
+    | Issue: <a href="https://github.com/r-spade/ormah/issues/143">#143</a> — slice 1 of 2
+    | Revision: REV 2 — council-reviewed 2026-07-16 (Cursor: approved with caveats; Codex: needs-attention, 2 criticals). 6 findings accepted, 4 rejected.</p>
+
+    <h3>Global Constraints</h3>
+    <ul>
+      <li><strong>Branch:</strong> cut <code>feat/synthetic-pattern-rot-detection</code> from <code>fix/whisper-synthetic-prompt-filter</code>, <strong>not</strong> from <code>upstream/main</code> (PR #141 is still OPEN and the consumed APIs do not exist upstream). Push to <code>fork</code>, never <code>upstream</code>. See <code>FORK-WORKFLOW.md</code>.</li>
+      <li><strong>Do not commit this plan or the spec.</strong> <code>docs/superpowers/</code> is gitignored (<code>.gitignore:103</code>).</li>
+      <li><strong>ProposalType must be <code>pattern</code>, never <code>decay</code>.</strong> <code>decay_manager.py:20-24</code> runs <code>DELETE FROM proposals WHERE type='decay' AND status='pending'</code> on every run, unguarded — reusing that value means our proposals get eaten nightly.</li>
+      <li><strong><code>proposed_action</code> must derive from the regex alone.</strong> It is the dedup key. Any count or date in it changes every run, the dedup never hits, and the job files one proposal per day forever. Variable evidence goes in <code>reason</code>.</li>
+      <li><strong>Callers of <code>match_synthetic_pattern</code> must test <code>is not None</code>, never truthiness.</strong> The empty regex <code>""</code> matches everything and returns <code>""</code> — falsy but a real match.</li>
+      <li><strong>No signal without the filter.</strong> <code>find_rotted_patterns</code> returns <code>[]</code> when <code>whisper_synthetic_filter_enabled</code> is false. With the filter off nothing writes <code>silent_synthetic</code>, so every pattern would age into a false proposal claiming an upstream rename that never happened (council C1).</li>
+      <li style="border-left:2px solid var(--accent);padding-left:12px;margin-top:16px;padding-top:0;padding-bottom:12px"><span style="font-weight:700">Rot needs opportunity, per pattern.</span> A pattern is only rotted if enough whisper traffic happened <em>since it last fired</em> (<code>whisper_pattern_rot_min_opportunity</code>, default 50). "Was there any traffic at all" was satisfied by a single prompt after a month away and rotted the whole list (final review).</li>
+      <li style="border-left:2px solid var(--accent);padding-left:12px;margin-top:16px;padding-top:0;padding-bottom:12px"><span style="font-weight:700">Zero-valued knobs are rejected.</span> <code>rot_days</code>, <code>monitor_interval_minutes</code>, <code>rot_min_matches</code> and <code>rot_min_opportunity</code> must all be ≥ 1. At <code>0</code>, <code>interval_minutes</code> became an invisible 1-second hot loop and <code>rot_days</code> silently disabled the job — opposite disasters, both silent (final review).</li>
+      <li><strong><code>Database</code> takes a <code>Path</code>, never a <code>str</code></strong> — <code>db.py:23</code> calls <code>db_path.parent.mkdir()</code>.</li>
+      <li>Ruff: line-length 100, <code>from __future__ import annotations</code> at the top of new modules.</li>
+      <li>Every task ends green on <code>python -m pytest &lt;its test file&gt; -v</code> before commit.</li>
+    </ul>
+
+    <h3>File Structure</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Responsibility</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>src/ormah/engine/prompt_classifier.py</code></td>
+          <td><strong>Modify.</strong> <code>is_synthetic_prompt → bool</code> becomes <code>match_synthetic_pattern → str | None</code>.</td>
+        </tr>
+        <tr>
+          <td><code>src/ormah/api/routes_agent.py:16,149-157</code></td>
+          <td><strong>Modify.</strong> Call-site: new import, <code>is not None</code> test, pass <code>matched_pattern</code> through.</td>
+        </tr>
+        <tr>
+          <td><code>src/ormah/index/schema.sql:222-238</code></td>
+          <td><strong>Modify.</strong> <code>matched_pattern TEXT</code> on <code>whisper_decisions</code> (fresh installs).</td>
+        </tr>
+        <tr>
+          <td><code>src/ormah/index/db.py</code></td>
+          <td><strong>Modify.</strong> <code>_migrate_whisper_decisions_schema</code> + its call inside <code>_migrate()</code>.</td>
+        </tr>
+        <tr>
+          <td><code>src/ormah/engine/context_builder.py:293-327</code></td>
+          <td><strong>Modify.</strong> <code>_log_decision</code> gains <code>matched_pattern</code>.</td>
+        </tr>
+        <tr>
+          <td><code>src/ormah/engine/memory_engine.py:1257-1273</code></td>
+          <td><strong>Modify.</strong> <code>note_synthetic_whisper_skip</code> threads <code>matched_pattern</code>.</td>
+        </tr>
+        <tr>
+          <td><code>src/ormah/config.py:267-268</code></td>
+          <td><strong>Modify.</strong> Two settings.</td>
+        </tr>
+        <tr>
+          <td><code>src/ormah/models/proposals.py:12-15</code></td>
+          <td><strong>Modify.</strong> <code>ProposalType.pattern</code>.</td>
+        </tr>
+        <tr>
+          <td><code>ui/src/types.ts:84</code></td>
+          <td><strong>Modify.</strong> Hand-maintained union mirror.</td>
+        </tr>
+        <tr>
+          <td><code>src/ormah/background/synthetic_pattern_monitor.py</code></td>
+          <td><strong>Create.</strong> Detection (pure) + the job.</td>
+        </tr>
+        <tr>
+          <td><code>src/ormah/background/scheduler.py</code></td>
+          <td><strong>Modify.</strong> Register the job.</td>
+        </tr>
+        <tr>
+          <td><code>src/ormah/api/routes_admin.py:24-55</code></td>
+          <td><strong>Modify.</strong> <code>_TASK_RUNNERS</code> + <code>_TASK_DESCRIPTIONS</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Tasks</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>File</th>
+          <th>Deliverable</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td><code>01-match-synthetic-pattern.md</code></td>
+          <td><code>match_synthetic_pattern</code> returns the regex source; boundary still filters correctly.</td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td><code>02-matched-pattern-column.md</code></td>
+          <td>The boundary records <em>which</em> pattern fired in <code>whisper_decisions</code>.</td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td><code>03-detection-logic.md</code></td>
+          <td>Settings + <code>ProposalType.pattern</code> + <code>find_rotted_patterns</code> (pure, no side effects).</td>
+        </tr>
+        <tr>
+          <td>4</td>
+          <td><code>04-job-and-registration.md</code></td>
+          <td>The job files deduped proposals and is registered in the scheduler.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p><strong>Order is strict:</strong> task 2 consumes task 1's return value; task 4 consumes task 3's detection and task 2's column.</p>
+
+    <h3>Deviation from the spec (deliberate, verified)</h3>
+    <p>The spec said to register the job in four places including <code>_SLEEP_CYCLE_ORDER</code>. <strong>Reading the code corrected this:</strong> <code>whisper_log_cleanup</code> — the closest analogue (background whisper maintenance, no LLM) — is registered <em>only</em> in <code>scheduler.py</code> and appears in neither <code>_TASK_RUNNERS</code> nor <code>_SLEEP_CYCLE_ORDER</code> (verified: <code>grep whisper_log_cleanup src/ormah/api/routes_admin.py</code> returns nothing).</p>
+    <p>This plan registers in <code>scheduler.py</code> + <code>_TASK_RUNNERS</code> + <code>_TASK_DESCRIPTIONS</code> (the manual <code>/admin</code> trigger is what makes rot verifiable without waiting 30 days) but <strong>not</strong> <code>_SLEEP_CYCLE_ORDER</code> — that pass is memory consolidation; config hygiene does not belong in it.</p>
+    <p>Also not touched: <code>_stagger_factor</code> (<code>scheduler.py:33-38</code>), which hardcodes the four LLM jobs. This job makes no LLM call.</p>
+
+    <h3>Verification (after task 4 — not "tests pass")</h3>
+    <ol>
+      <li><code>make test</code> and <code>make lint</code> green, output cited.</li>
+      <li>Open a pre-change DB: confirm <code>matched_pattern</code> exists (<code>PRAGMA table_info(whisper_decisions)</code>) and the server starts.</li>
+      <li>Drive the real path on the running Beta: send <code>&lt;task-notification&gt;test</code> to <code>/agent/whisper</code>, confirm one <code>whisper_decisions</code> row with <code>outcome='silent_synthetic'</code> and <code>matched_pattern='&lt;task-notification&gt;'</code>.</li>
+      <li>Force rot: <code>ORMAH_WHISPER_PATTERN_ROT_DAYS=1</code> (<code>0</code> is now rejected by the validator), trigger via <code>/admin</code>, confirm one proposal per live pattern with history; trigger again, confirm no duplicates. Note the pattern also needs <code>whisper_pattern_rot_min_opportunity</code> (50) decisions logged since it last fired, or the opportunity guard correctly stays silent.</li>
+      <li>Run <code>run_decay</code> and confirm the <code>pattern</code> proposals survive (the <code>decay_manager.py:20-24</code> trap).</li>
+    </ol>
+
+    <h3>Out of scope</h3>
+    <p>The LLM miner (slice 2); wiring the orphaned <code>ReviewQueue</code> (#82); editing the user's <code>.env</code>; auto-applying patterns. Also out of scope, though found while exploring — each deserves its own issue: the unguarded <code>DELETE</code> in <code>decay_manager.py:20-24</code>, the fragile <code>"\n---\n"</code> split at <code>routes_agent.py:353</code>, and <code>ResolveProposalRequest</code> accepting <code>pending</code> (<code>proposals.py:36</code>).</p>
+
+    <!-- Task 1 -->
+    <h2 id="task-1"><em>Task 1:</em> Match Synthetic Pattern</h2>
+
+    <p class="eyebrow">Return which pattern fired</p>
+
+    <h3>Files</h3>
+    <ul>
+      <li><strong>Modify:</strong> <code>src/ormah/engine/prompt_classifier.py:29-47</code></li>
+      <li><strong>Modify:</strong> <code>src/ormah/api/routes_agent.py:16</code> (import), <code>:149-157</code> (call-site)</li>
+      <li><strong>Test:</strong> <code>tests/test_engine/test_prompt_classifier.py</code> (class <code>TestIsSyntheticPrompt</code>, ~L523)</li>
+      <li><strong>Test:</strong> <code>tests/test_engine/test_whisper_context.py</code> (class <code>TestSyntheticPromptEndpoint</code>)</li>
+    </ul>
+
+    <h3>Interfaces</h3>
+    <ul>
+      <li><strong>Consumes:</strong> nothing (first task).</li>
+      <li><strong>Produces:</strong> <code>match_synthetic_pattern(prompt: str, extra_patterns: Sequence[str] = ()) → str | None</code> in <code>ormah.engine.prompt_classifier</code>. Returns the regex <strong>source string</strong> that matched (<code>r"&lt;task-notification&gt;"</code> for builtins, the raw operator string otherwise), or <code>None</code> when the prompt is human. <a href="#task-2">Task 2</a> threads this value into the DB; <a href="#task-3">Task 3</a> matches it against <code>_SYNTHETIC_PATTERNS[i].pattern</code>.</li>
+    </ul>
+
+    <h3>Why this shape</h3>
+    <p><code>is_synthetic_prompt</code> already knows which regex matched and throws it away. Rot detection needs exactly that. There is one production call-site, so no <code>is_synthetic_prompt</code> wrapper is kept — a wrapper with zero consumers is speculative abstraction.</p>
+
+    <p class="callout"><strong>The one way this breaks:</strong> an operator can configure the empty regex <code>""</code>. It matches everything and returns <code>""</code> — falsy, but a real match. Truthiness at the call-site would silently stop filtering every prompt for that operator. Steps 1 and 6 pin this.</p>
+
+    <h3>Steps</h3>
+    <div class="task-steps">
+      <ul>
+        <li><input type="checkbox" id="t1s1" disabled><label for="t1s1"><strong>Step 1: Write the failing unit tests</strong></label></li>
+        <li><input type="checkbox" id="t1s2" disabled><label for="t1s2"><strong>Step 2: Run the tests to verify they fail</strong></label></li>
+        <li><input type="checkbox" id="t1s3" disabled><label for="t1s3"><strong>Step 3: Implement it</strong></label></li>
+        <li><input type="checkbox" id="t1s4" disabled><label for="t1s4"><strong>Step 4: Run the tests to verify they pass</strong></label></li>
+        <li><input type="checkbox" id="t1s5" disabled><label for="t1s5"><strong>Step 5: Update the call-site</strong></label></li>
+        <li><input type="checkbox" id="t1s6" disabled><label for="t1s6"><strong>Step 6: Add the boundary tests</strong></label></li>
+        <li><input type="checkbox" id="t1s7" disabled><label for="t1s7"><strong>Step 7: Run the full affected suites</strong></label></li>
+        <li><input type="checkbox" id="t1s8" disabled><label for="t1s8"><strong>Step 8: Lint</strong></label></li>
+        <li><input type="checkbox" id="t1s9" disabled><label for="t1s9"><strong>Step 9: Commit</strong></label></li>
+      </ul>
+    </div>
+
+    <p class="meta">9 steps · ~40 lines of code</p>
+
+    <!-- Task 2 -->
+    <h2 id="task-2"><em>Task 2:</em> Record Pattern in Whisper Column</h2>
+
+    <p class="eyebrow">Matched pattern lands in whisper_decisions</p>
+
+    <h3>Files</h3>
+    <ul>
+      <li><strong>Modify:</strong> <code>src/ormah/index/schema.sql:222-238</code></li>
+      <li><strong>Modify:</strong> <code>src/ormah/index/db.py</code> (new <code>_migrate_whisper_decisions_schema</code>, called from <code>_migrate()</code> near L254)</li>
+      <li><strong>Modify:</strong> <code>src/ormah/engine/context_builder.py:293-327</code> (<code>_log_decision</code>)</li>
+      <li><strong>Modify:</strong> <code>src/ormah/engine/memory_engine.py:1257-1273</code> (<code>note_synthetic_whisper_skip</code>)</li>
+      <li><strong>Modify:</strong> <code>src/ormah/api/routes_agent.py</code> (pass <code>matched_pattern=matched</code>)</li>
+      <li><strong>Test:</strong> <code>tests/test_engine/test_whisper_context.py</code></li>
+      <li><strong>Test:</strong> <code>tests/test_index/</code> (migration test — see Step 6)</li>
+    </ul>
+
+    <h3>Interfaces</h3>
+    <ul>
+      <li><strong>Consumes:</strong> <code>match_synthetic_pattern(...) → str | None</code> from <a href="#task-1">Task 1</a>, bound to local <code>matched</code> at <code>routes_agent.py</code>.</li>
+      <li><strong>Produces:</strong> column <code>whisper_decisions.matched_pattern TEXT</code> (NULL except on <code>silent_synthetic</code> rows), holding the regex source. <a href="#task-3">Task 3</a> reads it with <code>SELECT matched_pattern, MAX(logged_at) ... GROUP BY matched_pattern</code>.</li>
+    </ul>
+
+    <h3>Why whisper_decisions and not a new table</h3>
+    <p>It is already one-row-per-call, already receives <code>silent_synthetic</code> (<code>memory_engine.py:1270</code>), and is already indexed on <code>logged_at</code> — which is exactly what the rot query needs. The table stores <code>prompt_hash</code> only, never prompt text (<code>schema.sql:221</code>); this column does not change that.</p>
+
+    <h3>Steps</h3>
+    <div class="task-steps">
+      <ul>
+        <li><input type="checkbox" id="t2s1" disabled><label for="t2s1"><strong>Step 1: Write the failing test</strong></label></li>
+        <li><input type="checkbox" id="t2s2" disabled><label for="t2s2"><strong>Step 2: Run the tests to verify they fail</strong></label></li>
+        <li><input type="checkbox" id="t2s3" disabled><label for="t2s3"><strong>Step 3: Add the column for fresh installs</strong></label></li>
+        <li><input type="checkbox" id="t2s4" disabled><label for="t2s4"><strong>Step 4: Add the migration for existing DBs</strong></label></li>
+        <li><input type="checkbox" id="t2s5" disabled><label for="t2s5"><strong>Step 5: Thread the value through the three layers</strong></label></li>
+        <li><input type="checkbox" id="t2s6" disabled><label for="t2s6"><strong>Step 6: Write the migration test</strong></label></li>
+        <li><input type="checkbox" id="t2s7" disabled><label for="t2s7"><strong>Step 7: Run the tests to verify they pass</strong></label></li>
+        <li><input type="checkbox" id="t2s8" disabled><label for="t2s8"><strong>Step 8: Run the full suite</strong></label></li>
+        <li><input type="checkbox" id="t2s9" disabled><label for="t2s9"><strong>Step 9: Lint and commit</strong></label></li>
+      </ul>
+    </div>
+
+    <p class="meta">9 steps · ~60 lines of changes across 5 files</p>
+
+    <!-- Task 3 -->
+    <h2 id="task-3"><em>Task 3:</em> Detection Logic & Settings</h2>
+
+    <p class="eyebrow">Pure function over the DB; no writes yet</p>
+
+    <h3>Files</h3>
+    <ul>
+      <li><strong>Modify:</strong> <code>src/ormah/config.py:267-268</code></li>
+      <li><strong>Modify:</strong> <code>src/ormah/models/proposals.py:12-15</code></li>
+      <li><strong>Modify:</strong> <code>ui/src/types.ts:84</code></li>
+      <li><strong>Create:</strong> <code>src/ormah/background/synthetic_pattern_monitor.py</code></li>
+      <li><strong>Create:</strong> <code>tests/test_background/test_synthetic_pattern_monitor.py</code></li>
+    </ul>
+
+    <h3>Interfaces</h3>
+    <ul>
+      <li><strong>Consumes:</strong> <code>whisper_decisions.matched_pattern</code> (<a href="#task-2">Task 2</a>); <code>_SYNTHETIC_PATTERNS</code> from <code>ormah.engine.prompt_classifier</code>.</li>
+      <li><strong>Produces,</strong> in <code>ormah.background.synthetic_pattern_monitor</code>:
+        <ul>
+          <li><code>BUILTIN = "builtin"</code>, <code>OPERATOR = "operator"</code></li>
+          <li><code>RottedPattern</code> — frozen dataclass with <code>pattern: str</code>, <code>origin: str</code>, <code>last_seen: str</code></li>
+          <li><code>live_patterns(settings) → list[tuple[str, str]]</code> — <code>(pattern_source, origin)</code>, deduped by pattern</li>
+          <li><code>find_rotted_patterns(conn, settings, now: datetime) → list[RottedPattern]</code> — <strong>pure read, no writes</strong></li>
+          <li><code>ProposalType.pattern</code> in <code>ormah.models.proposals</code></li>
+          <li>Settings <code>whisper_pattern_rot_days</code>, <code>whisper_pattern_monitor_interval_minutes</code>, <code>whisper_pattern_rot_min_matches</code></li>
+        </ul>
+      </li>
+    </ul>
+
+    <p class="callout"><strong>Task 4 wraps</strong> <code>find_rotted_patterns</code> in the job that files proposals.</p>
+
+    <h3>Why detection is split from proposing</h3>
+    <p>This half is a pure function over the DB. It can be tested exhaustively by injecting <code>now</code> — no clock, no waiting 30 days, no side effects to unwind.</p>
+
+    <h3>Steps</h3>
+    <div class="task-steps">
+      <ul>
+        <li><input type="checkbox" id="t3s1" disabled><label for="t3s1"><strong>Step 1: Add the settings</strong></label></li>
+        <li><input type="checkbox" id="t3s2" disabled><label for="t3s2"><strong>Step 2: Add the proposal type</strong></label></li>
+        <li><input type="checkbox" id="t3s3" disabled><label for="t3s3"><strong>Step 3: Write the failing tests</strong></label></li>
+        <li><input type="checkbox" id="t3s4" disabled><label for="t3s4"><strong>Step 4: Run the tests to verify they fail</strong></label></li>
+        <li><input type="checkbox" id="t3s5" disabled><label for="t3s5"><strong>Step 5: Implement the detection</strong></label></li>
+        <li><input type="checkbox" id="t3s6" disabled><label for="t3s6"><strong>Step 6: Run the tests to verify they pass</strong></label></li>
+        <li><input type="checkbox" id="t3s7" disabled><label for="t3s7"><strong>Step 7: Lint and commit</strong></label></li>
+      </ul>
+    </div>
+
+    <p class="meta">7 steps · ~100 lines of code + 11 comprehensive unit tests</p>
+
+    <!-- Task 4 -->
+    <h2 id="task-4"><em>Task 4:</em> Job & Registration</h2>
+
+    <p class="eyebrow">File deduped proposals and register with scheduler</p>
+
+    <h3>Files</h3>
+    <ul>
+      <li><strong>Modify:</strong> <code>src/ormah/background/synthetic_pattern_monitor.py</code> (append the job)</li>
+      <li><strong>Modify:</strong> <code>src/ormah/background/scheduler.py</code> (register, near the <code>whisper_log_cleanup</code> block at L166-174)</li>
+      <li><strong>Modify:</strong> <code>src/ormah/api/routes_admin.py:24-38</code> (<code>_TASK_RUNNERS</code>), <code>:40-55</code> (<code>_TASK_DESCRIPTIONS</code>)</li>
+      <li><strong>Test:</strong> <code>tests/test_background/test_synthetic_pattern_monitor.py</code> (append)</li>
+      <li><strong>Test:</strong> <code>tests/test_background/test_scheduler.py</code> (append)</li>
+    </ul>
+
+    <h3>Interfaces</h3>
+    <ul>
+      <li><strong>Consumes:</strong> <code>find_rotted_patterns</code>, <code>RottedPattern</code>, <code>BUILTIN</code>, <code>OPERATOR</code> (<a href="#task-3">Task 3</a>); <code>ProposalType.pattern</code> (<a href="#task-3">Task 3</a>); <code>whisper_decisions.matched_pattern</code> (<a href="#task-2">Task 2</a>).</li>
+      <li><strong>Produces:</strong> <code>run_synthetic_pattern_monitor(engine, *, now: datetime | None = None) → dict[str, int]</code> returning <code>{"rotted": N, "proposals_created": M}</code>. The <code>now</code> keyword mirrors <code>run_whisper_log_cleanup</code> (<code>whisper_log_cleanup.py:13-17</code>) and is what makes rot testable without waiting 30 days.</li>
+    </ul>
+
+    <h3>Registration decision (deviates from spec)</h3>
+    <p><code>scheduler.py</code> + <code>_TASK_RUNNERS</code> + <code>_TASK_DESCRIPTIONS</code>, but <strong>not</strong> <code>_SLEEP_CYCLE_ORDER</code> and <strong>not</strong> <code>_stagger_factor</code>. See the <a href="#overview">Overview</a> "Deviation" section.</p>
+
+    <h3>Steps</h3>
+    <div class="task-steps">
+      <ul>
+        <li><input type="checkbox" id="t4s1" disabled><label for="t4s1"><strong>Step 1: Write the failing tests</strong></label></li>
+        <li><input type="checkbox" id="t4s2" disabled><label for="t4s2"><strong>Step 2: Run the tests to verify they fail</strong></label></li>
+        <li><input type="checkbox" id="t4s3" disabled><label for="t4s3"><strong>Step 3: Implement the job</strong></label></li>
+        <li><input type="checkbox" id="t4s4" disabled><label for="t4s4"><strong>Step 4: Run the tests to verify they pass</strong></label></li>
+        <li><input type="checkbox" id="t4s5" disabled><label for="t4s5"><strong>Step 5: Register in the scheduler</strong></label></li>
+        <li><input type="checkbox" id="t4s6" disabled><label for="t4s6"><strong>Step 6: Register the manual trigger</strong></label></li>
+        <li><input type="checkbox" id="t4s7" disabled><label for="t4s7"><strong>Step 7: Test the registration</strong></label></li>
+        <li><input type="checkbox" id="t4s8" disabled><label for="t4s8"><strong>Step 8: Full suite and lint</strong></label></li>
+        <li><input type="checkbox" id="t4s9" disabled><label for="t4s9"><strong>Step 9: Commit</strong></label></li>
+        <li><input type="checkbox" id="t4s10" disabled><label for="t4s10"><strong>Step 10: Manual verification from overview</strong></label></li>
+      </ul>
+    </div>
+
+    <p class="meta">10 steps · ~80 lines of code + 10 behavioral tests</p>
+
+    <!-- Footer -->
+    <div class="spectrum">
+      <span class="s1"></span>
+      <span class="s2"></span>
+      <span class="s3"></span>
+    </div>
+
+    <div class="signature">
+      <div class="name">Synthetic-Pattern Rot Detection</div>
+      <div class="role">Plan · Issue #143 · Slice 1</div>
+    </div>
+
+  </main>
+
+<!-- rich-doc-src-sha256:2ae5f553cf04f5a94ff4537893d3d72b328bf564908611fd9a085313bcaf301f -->
+</body>
+</html>

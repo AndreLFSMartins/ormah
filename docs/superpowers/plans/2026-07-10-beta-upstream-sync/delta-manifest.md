@@ -1,0 +1,215 @@
+# delta-manifest — Beta-only commits classification (Task 1, 2026-07-10)
+
+## base-status (I2)
+- pr90/#92: STALE (2 commits behind upstream 2e76b5b) — re-rebase
+- pr87: STALE (2 commits behind) — re-rebase (Task 4)
+
+## to-pr79
+EMPTY. The 5 hardening commits (b395c1f 2d37ca9 ecfd65d d0d71da d39b2de, dated 2026-07-05) are ALREADY in #79 at tip a15bcad by patch-id. Decision #2 already satisfied — Task 3 needs NO cherry-pick.
+
+## ingest-redundant (34 commits)
+Ingest/claude_cli-domain commits on local-main whose patch-id diverged from #79's rebased versions. Semantically provided by #79 in the assembly; local-main already has them. C1 audit should show these PRESENT.
+
+- 7434770 2026-06-02 fix(api): run engine-bound routes in the threadpool, not the event loop
+- dfdc989 2026-06-15 fix(session-watcher): ingest only appended turns via byte cursor (#33)
+- 08cd9b0 2026-06-15 fix(session-watcher): ingest only appended turns via byte cursor (#33)
+- bad08b0 2026-06-16 fix(background): tolerate markdown-fenced JSON in LLM maintenance jobs
+- ccfb6e0 2026-06-16 fix(llm): disable Ollama thinking to stop JSON truncation
+- 9f3674a 2026-06-16 fix(background): tolerate markdown-fenced JSON in maintenance jobs
+- 86487bf 2026-06-17 docs(plan): sigma.js WebGL graph view implementation plan (8 tasks)
+- cc102de 2026-06-17 docs(plan): rich HTML companions for the 9 sigma.js plan files
+- 86a285c 2026-06-17 docs(plan): keep only the overview HTML companion; drop per-task companions
+- 43e9d6c 2026-06-17 chore: gitignore local tool artifacts (.council, docs/superpowers, graphify-out)
+- 6ae4b1f 2026-06-24 fix(session-watcher): ingest only appended turns via byte cursor (#33)
+- 5122398 2026-06-24 fix(session-watcher): safe-payload ingest, idle flush + retry, in-flight guard (#34)
+- 028a48a 2026-06-24 fix(session-watcher): log safe_user_turn_count to match ingested payload
+- 01aabeb 2026-06-24 fix(session-watcher): reschedule in-flight-skipped events; reset node_ids on shrink (#34)
+- a969ea1 2026-06-25 fix(transcript): close turns by completion signal so multi-record responses stay whole
+- 1adf970 2026-06-25 fix(session-watcher): stop reconcile job before watchers on shutdown; test recreate-failur
+- ce7f34a 2026-06-26 feat(session-watcher): add session_watcher_catchup_concurrency setting (#52)
+- e763cc6 2026-06-26 refactor(session-watcher): optional state_lock guards _ingest_session state write (#52)
+- 53c93ae 2026-06-26 feat(session-watcher): under-lock stop check + _ingesting in-flight tracker + catchup_inge
+- 1e8ac19 2026-06-26 feat(session-watcher): _iter_catchup_candidates + _run_catchup with in-flight retry pass (
+- 0d9deb0 2026-06-26 feat(session-watcher): off-bind-path catch-up with uncapped drain-before-close for live + 
+- e53ced8 2026-06-26 refactor(session-watcher): drop orphaned _scan_sessions; _run_catchup is the single catch-
+- aa63725 2026-06-26 test(session-watcher): adopt SessionWatcherHandle return type (#52)
+- a6bd6f8 2026-06-26 style(session-watcher): split semicolon test statements to satisfy ruff E702 (#52)
+- 743a86d 2026-06-26 test(session-watcher): prove drain completes before engine.shutdown (#52)
+- 0ec703b 2026-06-26 fix(session-watcher): transactional startup tears down observers on partial failure (#52)
+- ed56c32 2026-06-26 fix(session-watcher): drain in-flight + cover catch-up thread start in transactional start
+- d6d7851 2026-07-02 feat(llm): ClaudeCliAdapter via claude -p --no-session-persistence (stdin, subscription, b
+- 7b31a7a 2026-07-02 feat(llm): generic ingest_llm_provider/model seam routes extraction; maintenance untouched
+- ccb24b3 2026-07-02 fix(cli): whisper-store gate treats non-dict 200 body as failure (fail-closed)
+- d07b189 2026-07-02 fix(security): claude_cli extractor actually denies all tools (was fail-open)
+- a39e7b1 2026-07-02 fix(security): disable inherited hooks in claude_cli child + clean the stub transcript
+- 3448f26 2026-07-02 fix(security): never treat claude_cli session_id as a glob when cleaning the stub
+- 2dcd9d1 2026-07-03 feat(config): add session_watcher flush_bytes/retry_seconds settings
+
+## beta-keep (150 commits) — MUST survive the Task 6 merge (not in any PR, not upstream)
+
+
+### UI/galaxy (#22) (49)
+- 57981f8 2026-06-15 feat(index): bump nodes.seq on content write in builder (#26)
+- 51c3396 2026-06-15 feat(index): reset auto_link watermark on full_rebuild (#26)
+- 512e1f2 2026-06-17 fix(ui): AdminPanel surfaces degraded sleep-cycle instead of false success (I2)
+- 40a69d1 2026-06-17 build(ui): add sigma/graphology deps + vitest test runner
+- faa52aa 2026-06-17 refactor(ui): extract pure graph visual helpers + self-role map
+- f06ad9e 2026-06-17 feat(ui): buildGraph + applyAppearance (in-place restyle) for graphology
+- 163a017 2026-06-17 feat(ui): sigma reducers — hover, multi-highlight, glow-only, legend focus, filter-dim
+- 14a0fc8 2026-06-17 feat(ui): injectable FA2 layout wrapper with settle/reheat + static fallback
+- 97b157f 2026-06-17 feat(ui): mount sigma + FA2 layout in GraphView
+- fc7139d 2026-06-17 feat(ui): sigma hover highlight + click selection
+- 3d1f691 2026-06-17 feat(ui): port GraphView imperative ref API to sigma
+- c721ef5 2026-06-17 feat(ui): legend focus (space/tier/role/edge) + filter-dim via reducer
+- 1b2ce1c 2026-06-17 feat(ui): node drag reheat + hover tooltip
+- 044a90a 2026-06-17 feat(ui): focusNodeId prop + sigma zoom controls
+- 4730b44 2026-06-17 fix(ui): map FilterDrawer node-type filter to dimmed.type (C2 parity)
+- 94aeaf1 2026-06-17 fix(ui): store domain node type under nodeType (sigma reserves node.type)
+- 1c471df 2026-06-17 test(ui): Playwright organic-layout (non-grid) + node-drag/reheat tests
+- 079cf34 2026-06-17 chore(ui): remove cytoscape deps + orphan module declarations
+- 42c8e60 2026-06-17 refactor(ui): centralize node/edge/tier enum lists in types.ts (review)
+- a3c4b41 2026-06-17 fix(graph): size nodes in layout-position units so they scale with zoom
+- 5b60e5e 2026-06-17 feat(graph): size nodes by degree, not access_count
+- 8e1445d 2026-06-17 feat(graph): size by unique-neighbour count after edges are built
+- 03a3d76 2026-06-17 feat(graph): show node label only on hover (Obsidian-style)
+- be6212f 2026-06-17 fix(graph): remove duplicate native label on hover — HTML tooltip is the sole hover displa
+- 61165a4 2026-06-17 fix(graph): re-fit camera to whole graph when clearing a legend focus
+- 84e8408 2026-06-24 fix(graph): force full-graph zoom-out when clearing legend focus
+- 67e6df5 2026-06-24 refactor(graph): extract fitToNodes into fit.ts (no behavior change)
+- 652c6de 2026-06-24 test(graph): failing test — fitToNodes uses raw coords instead of framed
+- 6600ec6 2026-06-24 fix(graph): frame legend/space focus in framed coords so nodes stop vanishing
+- d965f06 2026-06-24 test(graph): manual real-sigma smoke — space focus frames the space (bbox containment)
+- 084b293 2026-06-29 feat(ui-api): active-graph-first default + space drill-down for /ui/graph (#22)
+- bcbbe74 2026-06-29 feat(ui): fetchGraph space param + GraphData.all_spaces/has_no_space + ViewScope type (#22
+- fe28d30 2026-06-29 feat(ui): buildSpaceLegend + scopeLabel + requestGuard pure helpers (#22)
+- a174a63 2026-06-29 feat(ui): active-first wiring + scope-aware dimming + drill/banner + loadGraph guard/error
+- 9f6823e 2026-06-29 docs(ui): note the no-space '' filter injection is load-bearing for canvas dimming (#22)
+- 61015a4 2026-06-29 feat(ui): English UI copy + global "Show all" archival mode (#22 follow-up)
+- 3c49bac 2026-06-29 feat(ui): default to "show all" + ungate per-space drill from clusterBySpace (#22)
+- afe8e90 2026-06-29 fix(store): normalize placeholder space strings to None + migration (#22)
+- 475d959 2026-06-29 fix(background): normalize auto_cluster majority space (#22 council follow-up)
+- f0ce0c4 2026-06-29 feat(engine): space_locked flag so auto_cluster respects curated globals (#22)
+- 7d467ae 2026-06-29 fix(engine): harden space_locked against scoping/staleness gaps (#22 council)
+- 1b982f0 2026-06-30 fix(engine): enforce identity-space invariant on all write paths (#22 council)
+- 304f9ae 2026-06-30 fix(ui): scope-aware TopBar count + drill-exit preserves space deselections (#22 slice-A f
+- 586e354 2026-06-30 fix(ui): auto-add new mid-session spaces to the filter, keep deselections (#22 council)
+- f4f6cd9 2026-06-30 feat(ui): add crossSpaceMixing cohesion metric (#22 slice B)
+- 9afbcb4 2026-06-30 feat(ui): macro/micro per-space cluster layout, Barnes-Hut + radius slots (#22 slice B)
+- 40cd780 2026-06-30 feat(ui): cluster-by-space toggle checkbox + setter (#22 slice B)
+- 5305325 2026-06-30 feat(ui): size-gated cluster layout (largest-space gate, DEV mode hook) (#22 slice B)
+- 64e98f4 2026-07-05 fix(index): atomic full_rebuild + abort-on-partial; startup tolerates rebuild failure
+
+### other-code (46)
+- 86e962e 2026-06-02 fix(db): thread-local SQLite connections with per-connection sqlite-vec
+- 72349f6 2026-06-02 refactor(db): make transaction depth counter thread-local
+- d0b2231 2026-06-02 perf(background): chunk all-nodes write transactions
+- 9cf0f93 2026-06-02 fix(db,api): harden transaction lock + document whisper async constraint
+- c3c7bad 2026-06-14 fix(db): resolve graph/search connections per-thread, not captured at init
+- 2980f74 2026-06-15 feat(engine): stamp archived_at on entering archival, clear on leaving (#28)
+- 6aa6e3e 2026-06-15 feat(store): stamp deleted_at on soft_delete; add list_deleted/purge (#28)
+- 3d57c0b 2026-06-15 feat(background): forgetting gates + atomic guarded soft-delete (#28)
+- d8f29ca 2026-06-15 feat(background): cap backstop forget-score eviction respecting protections (#28)
+- 4a2c28f 2026-06-15 feat(background): phase B hard-purge of expired tombstones (#28)
+- 1840bbf 2026-06-15 feat(background): register forgetting manager job (#28)
+- 26795a8 2026-06-15 feat(background): lazy atomic legacy archived_at file backfill (#28)
+- 706d29e 2026-06-15 refactor(background): address final-review nits — purge reuses known path, log forgetting 
+- c9d54e1 2026-06-16 feat(background): run forgetting_manager in the sleep-cycle pass (#28)
+- 997a26c 2026-06-16 fix(server): exit cleanly on port conflict instead of KeepAlive respawn loop
+- 171d87a 2026-06-16 fix(server): exit cleanly on port conflict instead of KeepAlive respawn loop
+- 3765072 2026-06-17 refactor(engine): extract _embed_node_rows returning embedded/failed ids (#32)
+- 4b36b27 2026-06-17 feat(engine): backfill_embeddings (delta + schema-bump, no quarantine) (#32)
+- 2c93111 2026-06-17 perf(engine): stop blocking startup on full re-embed; recovery moves to job (#32)
+- d76cc38 2026-06-17 feat(background): embedding_backfill job, non-ok on incomplete store (#32)
+- b29981e 2026-06-17 feat(background): register embedding_backfill job with post-bind first run (#32)
+- 4c72d3b 2026-06-17 feat(api): run embedding_backfill in the sleep-cycle run-all pass (#32)
+- cd43e77 2026-06-17 feat(server): scheduler-independent embedding backfill fallback with retry/backoff (#32)
+- dccdfb5 2026-06-17 feat(engine): expose embedding_gap + schema_version in stats; E2E recovery test (#32)
+- 0544283 2026-06-17 fix(api): run_all_tasks returns status=degraded + HTTP 503 when any task fails (C1/I1)
+- f1fceb7 2026-06-17 fix(main): lifecycle-aware backfill fallback with degraded health signal (C2/CH1/CH2)
+- 2062f24 2026-06-17 fix(main): keep fallback thread handle when it survives the join timeout (CR1)
+- b1f6592 2026-06-17 fix(api): /admin/health reports degraded when scheduler embedding_backfill fails (CR2)
+- bb5830f 2026-06-17 fix(engine): make embedding backfill cooperatively cancellable (CRA/IA)
+- b9b13ab 2026-06-17 fix(main): atomic fallback singleton + forward stop_event; revert CR1 (CRB)
+- 96525b5 2026-06-17 fix(api): run-all records task outcomes in JobTracker so health reflects manual runs (CRC)
+- 132f828 2026-06-17 fix(main): join fallback thread without timeout so engine never closes mid-backfill (C-A/C
+- 6d54746 2026-06-17 fix(lifecycle): cancel scheduler backfill on shutdown + bounded fallback join with post-ti
+- b02d98d 2026-06-17 fix(lifecycle): bounded scheduler shutdown + guard schema DELETE on cancel; lifespan shutd
+- 59b57ba 2026-06-17 fix(lifecycle): per-lifespan stop event in app.state so reload cannot rearm an orphan work
+- ff37b17 2026-06-24 feat(parser): safe boundary payload (text-bearing assistant completes a pair)
+- ed603de 2026-06-25 feat(engine): whisper-health coverage/precision aggregation
+- de13afb 2026-06-25 feat(engine): expose whisper_health in stats()
+- cafe89f 2026-06-25 test(api): assert whisper_health present in /admin/stats
+- 7029667 2026-06-25 test: correct schema reference in whisper-health comment
+- ac6f539 2026-06-25 fix(engine): read whisper-health aggregates under one snapshot
+- 7859402 2026-06-27 fix(engine): double-checked locking in _get_hybrid_search (#27)
+- b8c3883 2026-07-02 fix(cli): gate whisper-store cursor advance on ingest status, cover claude_cli extraction 
+- c8b2c40 2026-07-02 test(background): prove claude_cli ingest path suppresses transcript persistence
+- e68abae 2026-07-02 test(whisper): patch ingest_llm_generate seam for extraction path
+- 1811b2f 2026-07-02 fix(cli): advance whisper cursor only on status:processed; validate claude_cli timeout
+
+### docs (19)
+- fd31a29 2026-06-15 docs(background): bounded forgetting (#28) design spec
+- b0316d3 2026-06-15 docs(background): bounded forgetting (#28) HTML companion
+- b5425e9 2026-06-15 docs(background): bounded forgetting (#28) implementation plan
+- 4d7aa02 2026-06-15 docs(background): bounded forgetting (#28) plan HTML companions
+- 96985ee 2026-06-15 docs(background): revise #28 plan per council R1 (cap protections, TOCTOU, archived_at dur
+- fc4ce29 2026-06-15 docs(background): revise #28 plan per council R3 (hybrid guard, atomic soft_delete, move-f
+- 71c4c50 2026-06-15 docs(background): finalize #28 plan per council R4 (H9 write-all; document accepted deleti
+- cc4d132 2026-06-15 docs(background): cite engine race follow-up as #29 in #28 spec
+- 44a16b7 2026-06-17 docs(spec): embedding delta backfill + continuous reconciliation (#32)
+- b80980a 2026-06-17 docs(spec): rich HTML companion for embedding delta backfill (#32)
+- 7438b8b 2026-06-17 docs(plan): embedding delta backfill implementation plan, 8 tasks (#32)
+- aafae4a 2026-06-17 docs(plan): rich HTML companion for embedding delta backfill overview (#32)
+- 7272d9d 2026-06-17 docs(plan): rich HTML companions for all 8 task files (#32)
+- 87385a9 2026-06-17 docs(plan): revise #32 plan per council R1 — quarantine, scheduler fallback, completeness,
+- b0167b4 2026-06-17 docs(council): R2 review of revised #32 plan — quarantine critique, recommend simpler desi
+- c535bfa 2026-06-17 docs(plan): reconcile #32 plan to implemented no-quarantine design + regen companions
+- 4174db0 2026-06-17 docs(spec): graph view WebGL live-force migration to sigma.js
+- 342e96f 2026-06-17 docs(spec): graph view WebGL live-force migration to sigma.js
+- 9674f55 2026-06-25 docs(main): correct shutdown-race comment (remove_job narrows, not closes)
+
+### dedup/maintenance (17)
+- b7e93de 2026-06-15 docs(background): design spec for incremental auto-linker cursor (#26)
+- 8ceb1de 2026-06-15 docs(background): implementation plan for incremental auto-linker cursor (#26)
+- 3ee3dfa 2026-06-15 docs(background): revise #26 design+plan after council (v2)
+- f1c5731 2026-06-15 docs(background): v3 design+plan addressing council v2 (#26)
+- 4b1050e 2026-06-15 feat(config): add auto_link_max_nodes_per_run (#26)
+- 33ab79d 2026-06-15 feat(index): add monotonic nodes.seq column + backfill (#26)
+- f190f4c 2026-06-15 feat(background): integer seq watermark helpers (#26)
+- a85516c 2026-06-15 feat(background): incremental seq node select (#26)
+- 80b8a10 2026-06-15 feat(background): classify invalid LLM output as error, not None (#26)
+- d99d4d2 2026-06-15 feat(background): drive auto_linker by seq cursor, retry on LLM failure (#26)
+- f9c77d8 2026-06-15 feat(background): share seq scan in _find_link_candidates (#26)
+- e4634d8 2026-06-15 chore(style): fix E702 semicolons in tests, remove unused json import (#26)
+- 74a4152 2026-06-15 docs(background): regenerate v3 HTML companions (#26)
+- 83521fd 2026-06-15 fix(index): create idx_nodes_seq in _migrate, not schema.sql (#26)
+- b458e47 2026-06-15 docs(background): revise #28 plan per council R2 (atomic guarded delete, lazy legacy backf
+- d7cf6a6 2026-06-30 fix(background): don't advance auto_link watermark past unembedded nodes (#26)
+- 9cf18d4 2026-07-03 feat(dedup): duplicate_checked table + full node-mutation invalidation (5 sites)
+
+### setup/hooks (#70) (10)
+- d117d83 2026-06-30 refactor(setup): module-level argv-aware _is_ormah_hook + _merge_hooks (#70)
+- 846bcbc 2026-06-30 fix(setup): fail-closed atomic _install_hooks; preserve co-tenant Claude hooks (#70)
+- b5a610d 2026-06-30 fix(setup): fail-closed success-gated Codex hook install (#70)
+- 6887cac 2026-06-30 fix(setup): preserve .env comments and ordering, atomic write (#70)
+- 89e0e08 2026-06-30 fix(setup): fail-closed on non-object hooks section; collapse dup .env keys (#70)
+- fae511f 2026-06-30 fix(setup): fail-closed on non-list hooks event (nested schema drift) (#70)
+- 2d155ce 2026-06-30 fix(setup): preserve hook matchers not modified by the merge (#70)
+- 6098cad 2026-06-30 fix(setup): make _is_ormah_hook total — preserve malformed hook entries (#70)
+- f77c7a7 2026-06-30 fix(setup): total crash-free hook merge with fail-closed backstop (#70)
+- 7e4c8a4 2026-07-01 fix(setup): preserve symlinks and untouched hook matchers
+
+### chore/style (4)
+- 66dcdaf 2026-06-17 chore: gitignore .council/ ephemeral run artifacts
+- b4a84f1 2026-06-17 style(test): move threading import to top of fallback test module (E402)
+- da8e16e 2026-06-26 chore: gitignore local tool dirs (council, superpowers, graphify, cursor, etc.)
+- 82e6804 2026-06-27 chore: gitignore .codebase-memory/ (regenerable mcp graph artifact)
+
+### index/rebuild (3)
+- 22cd865 2026-06-15 feat(index): add durable archived_at timestamp to nodes (#28)
+- 6b4ffce 2026-06-17 feat(config): add embedding backfill + index-retry settings (#32)
+- a19cac7 2026-06-17 feat(engine): bounded retry in _index_embedding to reduce embedding gaps (#32)
+
+### config (2)
+- 34fde4e 2026-06-15 feat(config): bounded forgetting settings (#28)
+- 35b1569 2026-06-24 feat(config): session_watcher_idle_threshold (default 30s)

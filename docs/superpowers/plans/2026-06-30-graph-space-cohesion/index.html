@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Graph Per-Space Cohesion — Implementation Plan</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Implementation</div>
+  <h1 class="doc-title">Graph Per-Space <em>Cohesion</em></h1>
+  <a href="#overview">Overview</a>
+  <a href="#why-the-size-gate">Why the size gate</a>
+  <a href="#run-commands">Run commands</a>
+  <a href="#file-structure">File structure</a>
+  <a href="#key-facts">Key facts</a>
+  <a href="#task-1">Task 1: crossSpaceMixing metric</a>
+  <a href="#task-2">Task 2: computeClusterLayout</a>
+  <a href="#task-3">Task 3: clusterBySpace toggle</a>
+  <a href="#task-4">Task 4: GraphView wiring</a>
+  <a href="#task-5">Task 5: Full verification</a>
+</nav>
+
+<main>
+
+<section id="overview">
+  <h2>Overview</h2>
+
+  <p class="statement">When <code>clusterBySpace</code> is on and the graph is small enough to lay out cheaply, render each space as a cohesive cluster on a deterministic macro/micro ring, replacing the global FA2 smear (~26.8% cross-space).</p>
+
+  <div class="callout">
+    <span class="label">For agentic workers</span>
+    REQUIRED SUB-SKILL: Use <code>superpowers:subagent-driven-development</code> (recommended) or <code>superpowers:executing-plans</code> to implement this plan task-by-task. Steps use checkbox syntax for tracking. Each subagent gets this overview plus its own task file.
+  </div>
+
+  <h3>Goal and architecture</h3>
+
+  <p>New pure module <code>ui/src/graph/clusterLayout.ts</code> computes final node positions (per-space synchronous FA2 micro-layout with Barnes-Hut plus macro ring with slots sized by cluster radius). <code>GraphView</code> picks the layout: cluster (static, synchronous) only when <code>clusterBySpace</code> is on AND the largest single space is small (<code>largestSpaceSize(nodes) &lt;= CLUSTER_LAYOUT_MAX_SPACE_NODES</code>); otherwise the existing global FA2 worker. A new FilterDrawer checkbox drives <code>clusterBySpace</code>. No new dependency; no backend change.</p>
+
+  <h3>Tech stack</h3>
+  <ul>
+    <li>Vite/TS, graphology + graphology-layout-forceatlas2 (already in bundle), vitest (pure-function tests — vitest includes <code>src/**/*.test.ts</code>; there is NO React Testing Library, so component wiring is verified by <code>tsc</code>/<code>build</code> plus the existing Playwright E2E plus manual smoke)</li>
+    <li><strong>Spec:</strong> <code>docs/superpowers/specs/2026-06-30-graph-space-cohesion-design.md</code></li>
+  </ul>
+
+  <h3>File structure</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>File</th>
+        <th>Responsibility</th>
+        <th>Task</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ui/src/graph/clusterLayout.ts</code></td>
+        <td>Pure: <code>crossSpaceMixing</code> + <code>computeClusterLayout</code> (macro/micro, Barnes-Hut, radius-sized slots) + <code>largestSpaceSize</code> + <code>CLUSTER_LAYOUT_MAX_SPACE_NODES</code></td>
+        <td>1, 2</td>
+      </tr>
+      <tr>
+        <td><code>ui/src/graph/clusterLayout.test.ts</code></td>
+        <td>vitest unit tests</td>
+        <td>1, 2</td>
+      </tr>
+      <tr>
+        <td><code>ui/src/components/FilterDrawer.tsx</code></td>
+        <td>New "layout" checkbox driving <code>clusterBySpace</code></td>
+        <td>3</td>
+      </tr>
+      <tr>
+        <td><code>ui/src/App.tsx</code></td>
+        <td><code>toggleClusterBySpace</code> setter + DEV-only <code>window.__ormahSetClusterBySpace</code> hook</td>
+        <td>3</td>
+      </tr>
+      <tr>
+        <td><code>ui/src/graph/forceLayout.ts</code></td>
+        <td>Export the existing NOOP static layout</td>
+        <td>4</td>
+      </tr>
+      <tr>
+        <td><code>ui/src/components/GraphView.tsx</code></td>
+        <td>Mount-effect layout pick (largest-space gate) + <code>__ormahLayoutMode</code> DEV hook + <code>clusterBySpace</code> dep + immediate <code>layoutReady</code></td>
+        <td>4</td>
+      </tr>
+      <tr>
+        <td><code>ui/playwright/test_graph_drag.py</code></td>
+        <td>Force cluster off before asserting global-worker reheat</td>
+        <td>4</td>
+      </tr>
+      <tr>
+        <td><code>ui/playwright/test_graph_cluster.py</code></td>
+        <td>Assert the cluster path runs (mode + node count)</td>
+        <td>4</td>
+      </tr>
+    </tbody>
+  </table>
+
+</section>
+
+<section id="why-the-size-gate">
+  <h2>Why the <em>size gate</em> (council R1, accepted)</h2>
+
+  <p>The original plan assumed the rendered graph is the small active set. It is not: App mounts with <code>loadAll()</code> (<code>App.tsx:150</code>, <code>?scope=all</code>) → the full graph incl. archival (~8.3k nodes), and <code>clusterBySpace</code> defaults <code>true</code> (<code>App.tsx:60</code>). Running synchronous FA2 over the full store on the main thread would freeze the UI. The gate routes the large default to the async worker (cohesion not attempted there — it is a zoomed-out hairball anyway) and applies cluster cohesion only where it is visible and affordable: the active view, a drilled space, or any graph whose largest single space is under the threshold. The gate keys on the <strong>largest space</strong> (not the total) because FA2 cost is per-space, and the micro layout enables <strong>Barnes-Hut</strong> for parity with the global worker (council R2).</p>
+
+</section>
+
+<section id="run-commands">
+  <h2>Run commands (this repo)</h2>
+
+  <ul>
+    <li>Frontend tests: <code>( cd ui && npm run test )</code></li>
+    <li>Type-check + build: <code>( cd ui && npm run build )</code></li>
+    <li>Single test file: <code>( cd ui && npx vitest run src/graph/clusterLayout.test.ts )</code></li>
+    <li>Playwright drag E2E (needs DEV server): <code>( cd ui && python3 playwright/test_graph_drag.py )</code></li>
+    <li>Playwright cluster E2E (needs DEV server): <code>( cd ui && python3 playwright/test_graph_cluster.py )</code></li>
+  </ul>
+
+  <p><em>Anchor every command to <code>ui/</code> via a subshell, never a bare <code>cd</code> that leaks.</em></p>
+
+</section>
+
+<section id="file-structure">
+  <h2>Key <em>facts</em> the engineer must not rediscover</h2>
+
+  <ul>
+    <li><code>MemoryNode.space</code> is <code>string | null</code>. Treat <code>null</code> and <code>""</code> as ONE "no-space" bucket (key <code>""</code>).</li>
+    <li><code>Edge</code> uses <code>source_id</code> / <code>target_id</code>.</li>
+    <li><code>forceAtlas2.assign(graph, { iterations, settings })</code> is the synchronous API (default export of <code>graphology-layout-forceatlas2</code>); deterministic given starting x/y.</li>
+    <li><code>clusterBySpace</code> is <code>filters.clusterBySpace</code> (boolean, default <code>true</code>, <code>App.tsx:60</code>). It is NOT a <code>Set</code>, so <code>toggleFilter</code> (which mutates Sets) cannot drive it — Task 3 adds a dedicated setter.</li>
+    <li>The mount effect (<code>GraphView.tsx:321</code>) deps are <code>[nodes, edges, userNodeId]</code>; Task 4 adds <code>clusterBySpace</code> so toggling re-runs the layout (full remount is fine for a mode switch).</li>
+    <li>The size gate keys on <code>largestSpaceSize(nodes)</code> (largest per-space count), NOT total node count — FA2 runs per space, so a 1500-node graph split across many small spaces is cheap.</li>
+    <li><code>test_graph_drag.py</code> asserts <code>reheated_delta &gt; 0.001</code> (FA2 worker resumes after drag). That only holds on the global-worker path, so Task 4 makes the test force <code>clusterBySpace=false</code> first.</li>
+  </ul>
+
+</section>
+
+<section id="key-facts">
+  <h2>Task order</h2>
+
+  <ol>
+    <li><strong>Task 1</strong> — <code>crossSpaceMixing</code> metric helper (TDD).</li>
+    <li><strong>Task 2</strong> — <code>computeClusterLayout</code> (TDD): radius-sized macro slots + <code>CLUSTER_LAYOUT_MAX_NODES</code>.</li>
+    <li><strong>Task 3</strong> — FilterDrawer checkbox + App setter + DEV hook (no unit test; <code>build</code> verifies).</li>
+    <li><strong>Task 4</strong> — GraphView size-gated wiring + <code>forceLayout</code> export + Playwright fix (<code>build</code> + E2E).</li>
+    <li><strong>Task 5</strong> — full verification (build, vitest, Playwright, manual smoke).</li>
+  </ol>
+
+  <h3>Out of scope</h3>
+  <ul>
+    <li>Slice C (LOD / progressive rendering).</li>
+    <li>Cohesion on the large incl-archival default view (intentionally left to the worker; upgrade path: per-space layout in the worker if that view ever needs cohesion).</li>
+    <li>Any backend / <code>/ui/graph</code> change.</li>
+  </ul>
+
+</section>
+
+<!-- TASK 1 -->
+<section id="task-1">
+  <h2>Task 1: <em>crossSpaceMixing</em> metric helper</h2>
+
+  <div class="phase p-o">
+    <span class="pn">1</span> Pure metric / test-only
+  </div>
+
+  <p><strong>Files:</strong></p>
+  <ul>
+    <li>Create: <code>ui/src/graph/clusterLayout.ts</code></li>
+    <li>Test: <code>ui/src/graph/clusterLayout.test.ts</code></li>
+  </ul>
+
+  <p>Pure, test-only metric: the fraction of nodes whose nearest neighbour (by position) belongs to a different space. Task 2's tests assert this drops well below the 26.8% baseline, so it ships first.</p>
+
+  <div class="progress">
+    <div class="bar"><div class="fill" style="width: 0%"></div></div>
+    <div class="label">5 steps</div>
+  </div>
+
+  <h3>Step 1: Write the failing test</h3>
+
+  <p>Create <code>ui/src/graph/clusterLayout.test.ts</code>:</p>
+
+  <pre><code>import { describe, expect, it } from "vitest";
+import type { MemoryNode } from "../types";
+import { crossSpaceMixing } from "./clusterLayout";
+
+// Minimal MemoryNode factory — only id/space matter for layout/metric.
+function node(id: string, space: string | null): MemoryNode {
+  return {
+    id, type: "concept", tier: "working", source: "", space,
+    title: id, content: "", created: "", updated: "", last_accessed: "",
+    access_count: 0, file_path: "", file_hash: "",
+  };
+}
+
+describe("crossSpaceMixing", () => {
+  it("is 0 when each node's nearest neighbour shares its space", () => {
+    const nodes = [node("a1", "A"), node("a2", "A"), node("b1", "B"), node("b2", "B")];
+    const pos = new Map([
+      ["a1", { x: 0, y: 0 }], ["a2", { x: 1, y: 0 }],   // A cluster near origin
+      ["b1", { x: 100, y: 0 }], ["b2", { x: 101, y: 0 }], // B cluster far away
+    ]);
+    expect(crossSpaceMixing(pos, nodes)).toBe(0);
+  });
+
+  it("is 1 when every node's nearest neighbour is a different space (interleaved)", () => {
+    const nodes = [node("a1", "A"), node("b1", "B"), node("a2", "A"), node("b2", "B")];
+    const pos = new Map([
+      ["a1", { x: 0, y: 0 }], ["b1", { x: 1, y: 0 }],
+      ["a2", { x: 2, y: 0 }], ["b2", { x: 3, y: 0 }],
+    ]);
+    expect(crossSpaceMixing(pos, nodes)).toBe(1);
+  });
+
+  it("returns 0 for fewer than two positioned nodes", () => {
+    expect(crossSpaceMixing(new Map([["a1", { x: 0, y: 0 }]]), [node("a1", "A")])).toBe(0);
+  });
+});</code></pre>
+
+  <h3>Step 2: Run test to verify it fails</h3>
+
+  <p>Run: <code>( cd ui && npx vitest run src/graph/clusterLayout.test.ts )</code></p>
+  <p><strong>Expected:</strong> FAIL — <code>crossSpaceMixing</code> is not exported / module not found.</p>
+
+  <h3>Step 3: Write minimal implementation</h3>
+
+  <p>Create <code>ui/src/graph/clusterLayout.ts</code>:</p>
+
+  <pre><code>import type { MemoryNode } from "../types";
+
+/**
+ * Fraction of nodes whose nearest neighbour (by Euclidean position) belongs to a
+ * different space. Test-only diagnostic for cluster cohesion — NOT called in render.
+ * ponytail: O(n^2) brute force; only ever runs over test fixtures, so no kd-tree.
+ */
+export function crossSpaceMixing(
+  positions: Map<string, { x: number; y: number }>,
+  nodes: MemoryNode[],
+): number {
+  const pts = nodes
+    .map((n) => ({ space: n.space ?? "", p: positions.get(n.id) }))
+    .filter((x): x is { space: string; p: { x: number; y: number } } => x.p !== undefined);
+  if (pts.length < 2) return 0;
+  let cross = 0;
+  for (let i = 0; i < pts.length; i++) {
+    let best = Infinity;
+    let bestSpace = pts[i].space;
+    for (let j = 0; j < pts.length; j++) {
+      if (i === j) continue;
+      const dx = pts[i].p.x - pts[j].p.x;
+      const dy = pts[i].p.y - pts[j].p.y;
+      const d = dx * dx + dy * dy;
+      if (d < best) {
+        best = d;
+        bestSpace = pts[j].space;
+      }
+    }
+    if (bestSpace !== pts[i].space) cross += 1;
+  }
+  return cross / pts.length;
+}</code></pre>
+
+  <h3>Step 4: Run test to verify it passes</h3>
+
+  <p>Run: <code>( cd ui && npx vitest run src/graph/clusterLayout.test.ts )</code></p>
+  <p><strong>Expected:</strong> PASS (3 tests).</p>
+
+  <h3>Step 5: Commit</h3>
+
+  <pre><code>git add ui/src/graph/clusterLayout.ts ui/src/graph/clusterLayout.test.ts
+git commit -m "feat(ui): add crossSpaceMixing cohesion metric (#22 slice B)"</code></pre>
+
+</section>
+
+<!-- TASK 2 -->
+<section id="task-2">
+  <h2>Task 2: <em>computeClusterLayout</em> macro/micro layout</h2>
+
+  <div class="phase p-b">
+    <span class="pn">2</span> Core layout engine
+  </div>
+
+  <p><strong>Files:</strong></p>
+  <ul>
+    <li>Modify: <code>ui/src/graph/clusterLayout.ts</code> (add <code>computeClusterLayout</code>, <code>ClusterLayoutOptions</code>, <code>CLUSTER_LAYOUT_MAX_SPACE_NODES</code>, <code>largestSpaceSize</code>)</li>
+    <li>Test: <code>ui/src/graph/clusterLayout.test.ts</code> (add a <code>computeClusterLayout</code> describe block)</li>
+  </ul>
+
+  <p>Per-space synchronous FA2 (micro) translated onto a macro ring whose <strong>angular slots are sized by each cluster's radius</strong> (no overlap). Two council R2 hardenings: (1) the micro FA2 enables <strong>Barnes-Hut</strong> for parity with the global worker, so a big space stays O(n log n); (2) intra-space edges are bucketed in <strong>one O(E) pass</strong>, not rescanned per space. The size gate (Task 4) keys on the <strong>largest single space</strong>, since FA2 cost is per-space — <code>largestSpaceSize</code> is exported for it.</p>
+
+  <div class="progress">
+    <div class="bar"><div class="fill" style="width: 0%"></div></div>
+    <div class="label">5 steps</div>
+  </div>
+
+  <h3>Step 1: Write the failing test</h3>
+
+  <p>Append to <code>ui/src/graph/clusterLayout.test.ts</code> (reuse the <code>node</code> factory from Task 1). See full code listing in the Task 1 section.</p>
+
+  <h3>Step 2: Run test to verify it fails</h3>
+
+  <p>Run: <code>( cd ui && npx vitest run src/graph/clusterLayout.test.ts )</code></p>
+  <p><strong>Expected:</strong> FAIL — <code>computeClusterLayout</code> / <code>largestSpaceSize</code> / <code>CLUSTER_LAYOUT_MAX_SPACE_NODES</code> not exported.</p>
+
+  <h3>Step 3: Write minimal implementation</h3>
+
+  <p>Add to <code>ui/src/graph/clusterLayout.ts</code>:</p>
+
+  <pre><code>import Graph from "graphology";
+import forceAtlas2 from "graphology-layout-forceatlas2";
+import type { Edge, MemoryNode } from "../types";
+
+/**
+ * Max nodes in a SINGLE space for the synchronous cluster path. FA2 cost is
+ * per-space, so the gate keys on the largest space, not the total. Above this,
+ * GraphView keeps the async global FA2 worker (council R1+R2).
+ * ponytail: a flat per-space cap, not a measured frame budget.
+ */
+export const CLUSTER_LAYOUT_MAX_SPACE_NODES = 1500;
+
+/** Largest per-space node count (null/"" share the no-space bucket). Gate input. */
+export function largestSpaceSize(nodes: MemoryNode[]): number {
+  const counts = new Map<string, number>();
+  let max = 0;
+  for (const n of nodes) {
+    const c = (counts.get(n.space ?? "") ?? 0) + 1;
+    counts.set(n.space ?? "", c);
+    if (c > max) max = c;
+  }
+  return max;
+}
+
+export interface ClusterLayoutOptions {
+  iterations?: number;
+}
+
+/**
+ * Macro/micro layout: each space laid out independently with synchronous FA2
+ * (micro, Barnes-Hut for parity with the global worker), then placed on a macro
+ * ring whose angular slot per space is sized by that cluster's radius.
+ */
+export function computeClusterLayout(
+  nodes: MemoryNode[],
+  edges: Edge[],
+  opts: ClusterLayoutOptions = {},
+): Map<string, { x: number; y: number }> {
+  const iterations = opts.iterations ?? 100;
+  const positions = new Map<string, { x: number; y: number }>();
+  if (nodes.length === 0) return positions;
+
+  const bySpace = new Map<string, MemoryNode[]>();
+  const spaceOf = new Map<string, string>();
+  for (const n of nodes) {
+    const key = n.space ?? "";
+    const bucket = bySpace.get(key);
+    if (bucket) bucket.push(n);
+    else bySpace.set(key, [n]);
+    spaceOf.set(n.id, key);
+  }
+
+  const edgesBySpace = new Map<string, Array<[string, string]>>();
+  for (const e of edges) {
+    const ss = spaceOf.get(e.source_id);
+    if (ss !== undefined && ss === spaceOf.get(e.target_id)) {
+      const b = edgesBySpace.get(ss);
+      if (b) b.push([e.source_id, e.target_id]);
+      else edgesBySpace.set(ss, [[e.source_id, e.target_id]]);
+    }
+  }
+
+  const spaceKeys = [...bySpace.keys()].sort();
+  const MARGIN = 60;
+  const clusters = spaceKeys.map((space) => {
+    const members = bySpace.get(space)!;
+    const sub = new Graph({ type: "directed" });
+    members.forEach((m, mi) => {
+      const a = (2 * Math.PI * mi) / members.length;
+      const r = 10 + (mi % 7);
+      sub.addNode(m.id, { x: r * Math.cos(a), y: r * Math.sin(a) });
+    });
+    for (const [s, t] of edgesBySpace.get(space) ?? []) {
+      if (sub.hasNode(s) && sub.hasNode(t) && !sub.hasEdge(s, t)) sub.addEdge(s, t);
+    }
+    if (sub.order > 1) {
+      const settings = { ...forceAtlas2.inferSettings(sub), barnesHutOptimize: sub.order > 1000 };
+      forceAtlas2.assign(sub, { iterations, settings });
+    }
+    let lx = 0, ly = 0;
+    sub.forEachNode((_id, a) => { lx += a.x as number; ly += a.y as number; });
+    const cx = lx / sub.order, cy = ly / sub.order;
+    const local: Array<{ id: string; x: number; y: number }> = [];
+    let rad = 0;
+    sub.forEachNode((id, a) => {
+      const dx = (a.x as number) - cx, dy = (a.y as number) - cy;
+      rad = Math.max(rad, Math.hypot(dx, dy));
+      local.push({ id, x: dx, y: dy });
+    });
+    return { local, slot: rad + MARGIN };
+  });
+
+  const totalSlot = clusters.reduce((s, c) => s + c.slot, 0);
+  const macroRadius = Math.max(200, totalSlot / Math.PI);
+  let acc = 0;
+  for (const c of clusters) {
+    const frac = c.slot / totalSlot;
+    const theta = 2 * Math.PI * (acc + frac / 2);
+    acc += frac;
+    const cx = macroRadius * Math.cos(theta);
+    const cy = macroRadius * Math.sin(theta);
+    for (const p of c.local) positions.set(p.id, { x: cx + p.x, y: cy + p.y });
+  }
+  return positions;
+}</code></pre>
+
+  <h3>Step 4: Run test to verify it passes</h3>
+
+  <p>Run: <code>( cd ui && npx vitest run src/graph/clusterLayout.test.ts )</code></p>
+  <p><strong>Expected:</strong> PASS (Task 1 + Task 2 tests).</p>
+
+  <h3>Step 5: Commit</h3>
+
+  <pre><code>git add ui/src/graph/clusterLayout.ts ui/src/graph/clusterLayout.test.ts
+git commit -m "feat(ui): macro/micro per-space cluster layout, Barnes-Hut + radius slots (#22 slice B)"</code></pre>
+
+</section>
+
+<!-- TASK 3 -->
+<section id="task-3">
+  <h2>Task 3: <em>clusterBySpace</em> toggle (FilterDrawer + App)</h2>
+
+  <div class="phase p-g">
+    <span class="pn">3</span> UI control + setter
+  </div>
+
+  <p><strong>Files:</strong></p>
+  <ul>
+    <li>Modify: <code>ui/src/components/FilterDrawer.tsx</code> (new "layout" section with a cluster checkbox + prop)</li>
+    <li>Modify: <code>ui/src/App.tsx</code> (<code>toggleClusterBySpace</code> setter; DEV-only <code>window.__ormahSetClusterBySpace</code>)</li>
+  </ul>
+
+  <p><code>clusterBySpace</code> is a boolean (not a <code>Set</code>), so the existing <code>onToggle</code>/<code>toggleFilter</code> (which mutate Sets) cannot drive it. This task adds a dedicated boolean setter plus a checkbox, making the OFF path user-reachable and the GraphView effect dep (Task 4) live. No vitest unit test (no RTL) — verified by <code>tsc</code>/<code>build</code>; the DEV hook also lets the Playwright drag test force the mode (Task 4).</p>
+
+  <div class="progress">
+    <div class="bar"><div class="fill" style="width: 0%"></div></div>
+    <div class="label">6 steps</div>
+  </div>
+
+  <h3>Step 1: Add the prop + checkbox to FilterDrawer</h3>
+
+  <p>In <code>ui/src/components/FilterDrawer.tsx</code>, add to the <code>Props</code> interface (after <code>onToggle</code>):</p>
+
+  <pre><code>  onToggleClusterBySpace: () => void;</code></pre>
+
+  <p>Add <code>onToggleClusterBySpace</code> to the destructured params in the component signature. Then add a new section as the FIRST <code>filter-section</code> in the returned JSX:</p>
+
+  <pre><code>      &lt;div className="filter-section"&gt;
+        &lt;div className="filter-section-title"&gt;layout&lt;/div&gt;
+        &lt;div className="filter-option" onClick={onToggleClusterBySpace}&gt;
+          &lt;div className={`filter-checkbox ${filters.clusterBySpace ? "checked" : ""}`} /&gt;
+          &lt;span&gt;cluster by space&lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;</code></pre>
+
+  <h3>Step 2: Add the setter + DEV hook in App.tsx</h3>
+
+  <p>In <code>ui/src/App.tsx</code>, after the existing <code>toggleFilter</code> <code>useCallback</code>, add:</p>
+
+  <pre><code>  const toggleClusterBySpace = useCallback(
+    () => setFilters((f) => ({ ...f, clusterBySpace: !f.clusterBySpace })),
+    [],
+  );
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    (window as unknown as Record<string, unknown>).__ormahSetClusterBySpace = (v: boolean) =>
+      setFilters((f) => ({ ...f, clusterBySpace: v }));
+  }, []);</code></pre>
+
+  <h3>Step 3: Pass the setter into FilterDrawer</h3>
+
+  <p>In the <code>&lt;FilterDrawer ... /&gt;</code> usage in <code>ui/src/App.tsx</code>, add the prop:</p>
+
+  <pre><code>        onToggle={toggleFilter}
+        onToggleClusterBySpace={toggleClusterBySpace}</code></pre>
+
+  <h3>Step 4: Type-check + build</h3>
+
+  <p>Run: <code>( cd ui && npm run build )</code></p>
+  <p><strong>Expected:</strong> <code>tsc -b</code> passes, <code>vite build</code> completes.</p>
+
+  <h3>Step 5: Run the frontend suite</h3>
+
+  <p>Run: <code>( cd ui && npm run test )</code></p>
+  <p><strong>Expected:</strong> all tests pass (this task adds no unit test, but must not break any).</p>
+
+  <h3>Step 6: Commit</h3>
+
+  <pre><code>git add ui/src/components/FilterDrawer.tsx ui/src/App.tsx
+git commit -m "feat(ui): cluster-by-space toggle checkbox + setter (#22 slice B)"</code></pre>
+
+</section>
+
+<!-- TASK 4 -->
+<section id="task-4">
+  <h2>Task 4: Size-gated <em>layout</em> wiring in GraphView</h2>
+
+  <div class="phase p-o">
+    <span class="pn">4</span> Mount effect wiring + E2E
+  </div>
+
+  <p><strong>Files:</strong></p>
+  <ul>
+    <li>Modify: <code>ui/src/graph/forceLayout.ts</code> (export the existing NOOP static layout)</li>
+    <li>Modify: <code>ui/src/components/GraphView.tsx</code> (gate on largest space + DEV <code>__ormahLayoutMode</code>)</li>
+    <li>Modify: <code>ui/playwright/test_graph_drag.py</code> (force <code>clusterBySpace=false</code>)</li>
+    <li>Create: <code>ui/playwright/test_graph_cluster.py</code> (asserts the cluster path is taken)</li>
+  </ul>
+
+  <p>The mount effect uses cluster (static) layout ONLY when <code>clusterBySpace</code> is on AND the largest single space is small. A DEV-exposed <code>window.__ormahLayoutMode</code> lets Playwright assert which path ran (closes the coverage gap).</p>
+
+  <div class="progress">
+    <div class="bar"><div class="fill" style="width: 0%"></div></div>
+    <div class="label">9 steps</div>
+  </div>
+
+  <h3>Step 1: Export the NOOP static layout from forceLayout.ts</h3>
+
+  <p>In <code>ui/src/graph/forceLayout.ts</code>, change the private <code>NOOP_STATIC</code> into an exported <code>STATIC_LAYOUT</code>:</p>
+
+  <pre><code>export const STATIC_LAYOUT: ForceLayout = {
+  start() {}, stop() {}, kill() {}, reheat() {}, isRunning: () => false, available: false,
+};</code></pre>
+
+  <h3>Step 2: Add imports to GraphView.tsx</h3>
+
+  <p>Extend the import at line 14:</p>
+
+  <pre><code>import { createForceLayout, STATIC_LAYOUT, type ForceLayout } from "../graph/forceLayout";
+import {
+  CLUSTER_LAYOUT_MAX_SPACE_NODES,
+  computeClusterLayout,
+  largestSpaceSize,
+} from "../graph/clusterLayout";</code></pre>
+
+  <h3>Step 3: Size-gate the layout in the mount effect</h3>
+
+  <p>Replace the current force-layout block with:</p>
+
+  <pre><code>      const useCluster = clusterBySpace && largestSpaceSize(nodes) <= CLUSTER_LAYOUT_MAX_SPACE_NODES;
+      if (import.meta.env.DEV) {
+        (window as unknown as Record<string, unknown>).__ormahLayoutMode = useCluster ? "cluster" : "global";
+      }
+      let layout: ForceLayout;
+      let layoutWatchdog: ReturnType<typeof setTimeout> | null = null;
+      if (useCluster) {
+        const pos = computeClusterLayout(nodes, edges);
+        graph.forEachNode((id) => {
+          const p = pos.get(id);
+          if (p) {
+            graph.setNodeAttribute(id, "x", p.x);
+            graph.setNodeAttribute(id, "y", p.y);
+          }
+        });
+        layout = STATIC_LAYOUT;
+        setLayoutReady(true);
+      } else {
+        layout = createForceLayout(graph);
+        layout.start();
+        layoutWatchdog = setTimeout(() => setLayoutReady(true), 800);
+      }
+      layoutRef.current = layout;</code></pre>
+
+  <p>Guard the cleanup: <code>if (layoutWatchdog !== null) clearTimeout(layoutWatchdog);</code></p>
+
+  <h3>Step 4: Add clusterBySpace to the mount-effect deps</h3>
+
+  <p>In the dependency array: <code>}, [nodes, edges, userNodeId, clusterBySpace]);</code></p>
+
+  <h3>Step 5: Force the global-worker path in the drag E2E</h3>
+
+  <p>In <code>ui/playwright/test_graph_drag.py</code>, replace the wait pair with:</p>
+
+  <pre><code>        page.wait_for_selector("canvas", timeout=30000)
+        page.evaluate("window.__ormahSetClusterBySpace && window.__ormahSetClusterBySpace(false)")
+        page.wait_for_timeout(6000)</code></pre>
+
+  <h3>Step 6: Add a Playwright test for cluster mode</h3>
+
+  <p>Create <code>ui/playwright/test_graph_cluster.py</code>:</p>
+
+  <pre><code>import sys
+from playwright.sync_api import sync_playwright
+
+URL = "http://localhost:5173"
+
+
+def main() -> int:
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.goto(URL, wait_until="domcontentloaded")
+        page.wait_for_selector("canvas", timeout=30000)
+        page.evaluate("window.__ormahSetClusterBySpace && window.__ormahSetClusterBySpace(true)")
+        page.wait_for_timeout(2000)
+        mode = page.evaluate("window.__ormahLayoutMode")
+        count = page.evaluate("window.__ormahGraph ? window.__ormahGraph.order : 0")
+        browser.close()
+
+    if mode != "cluster":
+        print(f"FAIL: expected cluster layout mode, got {mode!r}")
+        return 1
+    if not count or count < 1:
+        print(f"FAIL: graph has no nodes (order={count})")
+        return 1
+    print(f"PASS: cluster mode active over {count} nodes")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())</code></pre>
+
+  <h3>Step 7: Type-check + build</h3>
+
+  <p>Run: <code>( cd ui && npm run build )</code></p>
+  <p><strong>Expected:</strong> <code>tsc -b</code> passes, <code>vite build</code> completes.</p>
+
+  <h3>Step 8: Run the full frontend unit suite</h3>
+
+  <p>Run: <code>( cd ui && npm run test )</code></p>
+  <p><strong>Expected:</strong> all tests pass, including <code>clusterLayout.test.ts</code>.</p>
+
+  <h3>Step 9: Commit</h3>
+
+  <pre><code>git add ui/src/graph/forceLayout.ts ui/src/components/GraphView.tsx \
+  ui/playwright/test_graph_drag.py ui/playwright/test_graph_cluster.py
+git commit -m "feat(ui): size-gated cluster layout (largest-space gate, DEV mode hook) (#22 slice B)"</code></pre>
+
+</section>
+
+<!-- TASK 5 -->
+<section id="task-5">
+  <h2>Task 5: Full <em>verification</em></h2>
+
+  <div class="phase p-b">
+    <span class="pn">5</span> QA &amp; integration
+  </div>
+
+  <p><strong>Files:</strong> none (verification only).</p>
+
+  <p>Confirm the slice ships green across all surfaces and that the council R1 findings are closed.</p>
+
+  <div class="progress">
+    <div class="bar"><div class="fill" style="width: 0%"></div></div>
+    <div class="label">5 steps</div>
+  </div>
+
+  <h3>Step 1: Type-check + build</h3>
+
+  <p>Run: <code>( cd ui && npm run build )</code></p>
+  <p><strong>Expected:</strong> <code>tsc -b</code> clean, <code>vite build</code> completes with no errors.</p>
+
+  <h3>Step 2: Full frontend unit suite</h3>
+
+  <p>Run: <code>( cd ui && npm run test )</code></p>
+  <p><strong>Expected:</strong> all test files pass, including the new <code>clusterLayout.test.ts</code> (Tasks 1–2).</p>
+
+  <h3>Step 3: Playwright E2E (against the Vite dev server)</h3>
+
+  <p>The <code>__ormah*</code> DEV hooks only exist under <code>import.meta.env.DEV</code>, so both tests target the Vite dev server (:5173). Start <code>make ui-dev</code>, then run both:</p>
+
+  <pre><code>( cd ui && uv run --with playwright python playwright/test_graph_drag.py )
+( cd ui && uv run --with playwright python playwright/test_graph_cluster.py )</code></pre>
+
+  <p><strong>Expected:</strong> <code>PASS: node dragged and layout re-heated</code> and <code>PASS: cluster mode active over N nodes</code>.</p>
+
+  <h3>Step 4: Manual smoke — cluster cohesion + gate + toggle</h3>
+
+  <p>Open the graph view at <code>http://localhost:8787</code> and verify:</p>
+
+  <ul>
+    <li><strong>Cohesion (small graph):</strong> drill into a space (or a vault under ~1500 nodes) with the cluster checkbox ON → spaces render as separate clusters on a ring, not one central blob.</li>
+    <li><strong>Gate (large default):</strong> the default "All memories · incl. archival" view does NOT freeze on load — it animates via the global worker.</li>
+    <li><strong>Toggle:</strong> open Settings → the new "layout · cluster by space" checkbox toggles; OFF reverts to the global force layout; ON re-clusters where the gate allows.</li>
+    <li><strong>No artificial delay:</strong> in cluster mode the graph appears without the ~800ms post-settle pause.</li>
+  </ul>
+
+  <h3>Step 5: Restart the working-tree server (deploy the change)</h3>
+
+  <pre><code>launchctl kickstart -k gui/$(id -u)/com.ormah.server.dev
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8787</code></pre>
+
+  <p><strong>Expected:</strong> <code>200</code>.</p>
+
+</section>
+
+<!-- CLOSE -->
+<div class="spectrum">
+  <span class="s1"></span>
+  <span class="s2"></span>
+  <span class="s3"></span>
+</div>
+
+<div class="signature">
+  <div class="name">Graph Per-Space <em>Cohesion</em></div>
+  <div class="role">#22 Slice B — Implementation Plan</div>
+</div>
+
+</main>
+
+<!-- rich-doc-src-sha256:138b2e83cdc161698bbc59cdc0c3646eb856b55a16faf3b0d34740d60e70663a -->
+</body>
+</html>

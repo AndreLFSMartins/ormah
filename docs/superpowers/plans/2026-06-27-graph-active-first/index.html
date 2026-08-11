@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<!-- rich-doc-src-sha256:8fc12b0871ba8d1a1eb0ee28dd13642dfb6b41c5e46845aa07c48f33a283eb54 -->
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graph active-first com drill-down de espaço — Implementation Plan (#22 slice 1)</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --line:#e6e3dd; --accent:#d97757; --bg:#faf9f7; --code-bg:#f4f2ee; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; line-height:1.6; }
+  .wrap { display:grid; grid-template-columns:260px 1fr; max-width:1180px; margin:0 auto; }
+  nav { position:sticky; top:0; align-self:start; height:100vh; overflow:auto; padding:32px 20px; border-right:1px solid var(--line); font-size:13px; }
+  nav h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 12px; }
+  nav a { display:block; color:var(--ink); text-decoration:none; padding:4px 0; border-left:2px solid transparent; padding-left:10px; }
+  nav a:hover { border-left-color:var(--accent); color:var(--accent); }
+  main { padding:48px 56px; max-width:820px; }
+  h1 { font-size:30px; line-height:1.2; margin:0 0 8px; }
+  h2 { font-size:22px; margin:40px 0 12px; padding-top:12px; border-top:1px solid var(--line); }
+  h3 { font-size:16px; margin:24px 0 8px; }
+  .lead { color:var(--muted); font-size:15px; margin-bottom:24px; }
+  .meta { font-size:13px; color:var(--muted); margin-bottom:8px; }
+  .meta b { color:var(--ink); }
+  code { background:var(--code-bg); padding:1px 5px; border-radius:4px; font-size:13px; font-family:"SF Mono",Menlo,Consolas,monospace; }
+  table { border-collapse:collapse; width:100%; margin:16px 0; font-size:14px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  .chip { display:inline-block; font-size:11px; padding:1px 8px; border-radius:10px; background:var(--code-bg); color:var(--muted); }
+  .chip.ok { background:#e7f1e9; color:#2f7a46; }
+  .chip.defer { background:#fdf0e8; color:#b85c2e; }
+  ul { padding-left:20px; }
+  .accent { color:var(--accent); }
+  footer { margin-top:48px; padding-top:16px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <h2>Tasks</h2>
+  <a href="#overview">00 · Overview</a>
+  <a href="#t1">01 · Backend gating</a>
+  <a href="#t2">02 · Types + fetchGraph</a>
+  <a href="#t3">03 · Helpers puros</a>
+  <a href="#t4">04 · Wiring App/GraphView</a>
+  <a href="#t5">05 · Verificação</a>
+  <a href="#t6">06 · Fixes council v2</a>
+  <a href="#council">Ajustes do council</a>
+</nav>
+<main>
+  <h1>Graph active-first com drill-down de espaço</h1>
+  <div class="lead">Implementation Plan — issue #22, slice 1 (renderer sigma.js). Companion do plano dividido em <code>docs/superpowers/plans/2026-06-27-graph-active-first/</code>.</div>
+  <div class="meta"><b>Goal:</b> graph view carrega por padrão só o <i>active graph</i> (tiers core/working + nó self); archival sob demanda via drill-down de espaço.</div>
+  <div class="meta"><b>Stack:</b> backend Python/FastAPI/pytest (<code>.venv/bin/python -m pytest</code>); frontend Vite/TS/vitest (<code>ui/</code>).</div>
+  <div class="meta"><b>Spec:</b> <code>docs/superpowers/specs/2026-06-27-graph-active-first-design.md</code> · <b>Vetado por 2 passadas do council.</b></div>
+
+  <h2 id="overview">00 · Overview</h2>
+  <p>Gating no <b>backend</b> (<code>GET /ui/graph</code>): default retorna não-archival (+ nó self); <code>?space=S</code> traz um espaço completo (active+archival); <code>?space=</code> seleciona o grupo sem-espaço; edges podadas ao set de nós; campos aditivos <code>all_spaces</code> e <code>has_no_space</code>. O fetch e o <code>viewScope</code> vivem no <code>App.tsx</code>; o <code>GraphView</code> é apresentacional. Lógica testável isolada em funções puras (vitest só inclui <code>src/**/*.test.ts</code>; sem teste de componente).</p>
+  <p><b>Out of scope:</b> coesão por espaço (fatia B), LOD (fatia C), on-demand por busca/foco, cap no active graph. Não regredir features do PR#17. <code>docs/superpowers/</code> é gitignored.</p>
+
+  <h2 id="t1">01 · Backend gating <span class="chip ok">implementado</span></h2>
+  <p><code>src/ormah/api/routes_ui.py</code> <code>get_graph</code>: três branches de query (default <code>tier != 'archival' OR id = user</code>; <code>?space=S</code>; <code>?space=</code> grupo sem-espaço), edges podadas em Python (com comentário <code>ponytail:</code>), <code>all_spaces</code> + <code>has_no_space</code>. Teste: <code>tests/test_api/test_routes_graph.py</code> (8 testes).</p>
+
+  <h2 id="t2">02 · Types + fetchGraph <span class="chip ok">implementado</span></h2>
+  <p><code>GraphData</code> ganha <code>all_spaces?</code> e <code>has_no_space?</code> (opcionais); novo tipo <code>ViewScope</code>. <code>fetchGraph(opts?: {space?})</code> monta <code>?space=</code> (guard <code>!== undefined</code> p/ o grupo sem-espaço). Teste: <code>ui/src/api.test.ts</code> (3).</p>
+
+  <h2 id="t3">03 · Helpers puros</h2>
+  <p>Funções puras testáveis: <code>buildSpaceLegend(nodes, allSpaces, hasNoSpace)</code> — chips de todos os espaços (espaço só-archival aparece count 0; grupo sem-espaço val <code>""</code>); <code>scopeLabel(viewScope)</code> — label do banner + <code>showBack</code>; <code>createRequestGuard()</code> — guarda de sequência p/ reloads (F2).</p>
+
+  <h2 id="t4">04 · Wiring App/GraphView</h2>
+  <p>App: estado <code>viewScope</code>/<code>hasNoSpace</code>, <code>loadGraph(space?)</code> com guarda de sequência, props ao GraphView. GraphView: botão drill por linha de espaço (preserva o focus-click do PR#17), banner de escopo via <code>scopeLabel</code>, legenda via <code>buildSpaceLegend</code>. <code>buildGraph</code> inalterado.</p>
+
+  <h2 id="t5">05 · Verificação</h2>
+  <p>Suite backend (<code>.venv/bin/python -m pytest tests/test_api</code>) + frontend (<code>npm run test</code> + <code>npm run build</code>) + smoke manual via <code>make dev</code>: default sem archival, banner, drill carrega espaço+archival, voltar, sem regressão do PR#17.</p>
+
+  <h2 id="t6">06 · Fixes do council v2</h2>
+  <p>Extrair <code>buildDimmed</code> → <code>ui/src/graph/dimming.ts</code> puro e <b>scope-aware</b> (em drill não dimar por space/tier) — fecha C1/C2 e a lacuna de cobertura; <code>loadGraph</code> com <code>.catch</code>+toast (C3) e <code>""</code> em <code>filters.spaces</code>; correções de contagem (C4).</p>
+
+  <h2 id="council">Ajustes do council</h2>
+  <table>
+    <tr><th>Item</th><th>Origem</th><th>Veredito</th></tr>
+    <tr><td>F1 archival sem-espaço inalcançável</td><td>council v1</td><td><span class="chip ok">aceito</span></td></tr>
+    <tr><td>F2 race de reload</td><td>council v1</td><td><span class="chip ok">aceito</span></td></tr>
+    <tr><td>F3 filtro de edges em Python</td><td>council v1</td><td><span class="chip defer">deferido</span></td></tr>
+    <tr><td>C1 dimming esconde no-space/drilled</td><td>council v2 (Cursor)</td><td><span class="chip ok">aceito (verificado)</span></td></tr>
+    <tr><td>C2 drill vs tier archival off</td><td>council v2 (Cursor)</td><td><span class="chip ok">aceito</span></td></tr>
+    <tr><td>C3 loadGraph sem .catch</td><td>council v2 (Cursor)</td><td><span class="chip ok">aceito</span></td></tr>
+    <tr><td>CX1 valid_until / outdated como active</td><td>council v2 (Codex)</td><td><span class="chip defer">deferido</span></td></tr>
+    <tr><td>CX2 espaço null legacy</td><td>council v2 (Codex)</td><td><span class="chip">rejeitado</span></td></tr>
+  </table>
+
+  <footer>Companion do plano · #22 slice 1 · gerado para navegação humana. Fonte canônica: os arquivos <code>.md</code> no mesmo diretório.</footer>
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,286 @@
+diff --git a/src/ormah/background/scheduler.py b/src/ormah/background/scheduler.py
+index 4aa1738..7e70b21 100644
+--- a/src/ormah/background/scheduler.py
++++ b/src/ormah/background/scheduler.py
+@@ -4,6 +4,8 @@ from __future__ import annotations
+ 
+ from datetime import datetime, timedelta, timezone
+ import logging
++import threading
++from typing import Optional
+ 
+ from apscheduler.schedulers.background import BackgroundScheduler
+ 
+@@ -17,11 +19,17 @@ logger = logging.getLogger(__name__)
+ _MISFIRE_GRACE = 120
+ 
+ 
+-def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTracker]:
++def start_scheduler(
++    engine: MemoryEngine,
++    stop_event: Optional[threading.Event] = None,
++) -> tuple[BackgroundScheduler, JobTracker]:
+     """Register and start all background jobs.
+ 
+     Returns ``(scheduler, tracker)`` so the caller can inspect job health
+     via ``tracker.snapshot()``.
++
++    ``stop_event``, when provided, is forwarded to the embedding_backfill job so
++    it can cancel cooperatively between encodes on scheduler shutdown.
+     """
+     scheduler = BackgroundScheduler()
+     tracker = JobTracker()
+@@ -127,13 +135,19 @@ def start_scheduler(engine: MemoryEngine) -> tuple[BackgroundScheduler, JobTrack
+ 
+     from ormah.background.embedding_backfill import run_embedding_backfill
+ 
++    # Closure captures stop_event so the scheduler job can cancel cooperatively
++    # between encodes when shutdown is requested (C2). tracked() calls fn(*args);
++    # with a no-arg closure it calls _run_embedding_backfill() directly.
++    def _run_embedding_backfill():
++        run_embedding_backfill(engine, stop_event=stop_event)
++
+     # Reconcile the vector store (delta + schema bump). A post-bind first run
+     # (~10s after start) guarantees recovery right after the port binds even when
+     # the operator sets the interval to a very large value (999999) to rely on the
+     # 02:00 sleep-cycle instead. max_instances=1: a slow run on a large gap must
+     # never overlap the next tick.
+     scheduler.add_job(
+-        tracked(tracker, "embedding_backfill", run_embedding_backfill, engine),
++        tracked(tracker, "embedding_backfill", _run_embedding_backfill),
+         "interval",
+         minutes=s.embedding_backfill_interval_minutes,
+         id="embedding_backfill",
+diff --git a/src/ormah/main.py b/src/ormah/main.py
+index 8f1dc42..e0bcc81 100644
+--- a/src/ormah/main.py
++++ b/src/ormah/main.py
+@@ -54,12 +54,17 @@ import threading
+ # /admin/health while no scheduler exists.
+ _BACKFILL_FALLBACK_BASE_BACKOFF = 30.0  # seconds
+ _BACKFILL_FALLBACK_MAX_BACKOFF = 600.0  # seconds
++_FALLBACK_JOIN_TIMEOUT = 30.0  # seconds — bounded join for the fallback thread (C1)
+ 
+ _fallback_lock = threading.Lock()
+ _fallback_thread: threading.Thread | None = None
+ _fallback_stop_event: threading.Event | None = None
+ _fallback_degraded: bool = False
+ 
++# Signals the scheduler's embedding_backfill job to cancel on shutdown.
++# The fallback uses its own _fallback_stop_event; the two paths never coexist.
++_lifecycle_stop_event = threading.Event()
++
+ 
+ def _start_backfill_fallback(engine) -> None:
+     """Heal missing vectors off a daemon thread when the scheduler is unavailable
+@@ -105,15 +110,12 @@ def _start_backfill_fallback(engine) -> None:
+         thread.start()
+ 
+ 
+-def _stop_backfill_fallback() -> None:
+-    """Signal the fallback thread to stop and join it without a timeout. Idempotent.
++def _stop_backfill_fallback() -> bool:
++    """Signal stop and join the fallback thread with a bounded timeout.
+ 
+-    Mirrors scheduler.shutdown(wait=True): the cooperative cancellation guarantees
+-    the thread exits after the in-flight encode completes (the backfill loop is not
+-    infinite — once stop_event is set and the current encode finishes, the loop
+-    exits and _run returns). Joining without a timeout ensures the engine is never
+-    closed while the thread can still touch the DB (C-A), and the handle is cleared
+-    only after the thread is confirmed dead, so the singleton guard stays intact (C-B).
++    Returns True if the thread survived the join (caller must skip engine.shutdown()
++    to avoid use-after-close; the handle is kept so the singleton guard still blocks
++    a second fallback — C-A/C-B). Returns False when the thread is confirmed dead.
+ 
+     Lock discipline: signal + read handle under lock; join outside the lock (do not
+     hold the lock during a potentially long join); clear handle under lock after join.
+@@ -124,10 +126,18 @@ def _stop_backfill_fallback() -> None:
+             _fallback_stop_event.set()
+         thread = _fallback_thread
+     if thread is not None:
+-        thread.join()  # no timeout — engine must not close until the thread is dead
++        thread.join(timeout=_FALLBACK_JOIN_TIMEOUT)
++        if thread.is_alive():
++            logger.critical(
++                "Embedding backfill fallback did not stop within %.0fs; keeping the "
++                "thread handle and skipping engine shutdown to avoid use-after-close.",
++                _FALLBACK_JOIN_TIMEOUT,
++            )
++            return True
+     with _fallback_lock:
+         _fallback_thread = None
+         _fallback_stop_event = None
++    return False
+ 
+ 
+ @asynccontextmanager
+@@ -144,8 +154,9 @@ async def lifespan(app: FastAPI):
+     try:
+         from ormah.background.scheduler import start_scheduler
+ 
++        _lifecycle_stop_event.clear()  # reset defensivo para reload no mesmo processo
+         logger.info("Starting background scheduler...")
+-        scheduler, tracker = start_scheduler(engine)
++        scheduler, tracker = start_scheduler(engine, stop_event=_lifecycle_stop_event)
+         app.state.scheduler = scheduler
+         app.state.job_tracker = tracker
+         app.state.maintenance_manager = MaintenanceManager(engine, tracker=tracker)
+@@ -182,6 +193,13 @@ async def lifespan(app: FastAPI):
+ 
+     yield
+ 
++    # Ask the scheduler's embedding_backfill job to cancel cooperatively.
++    # scheduler.shutdown(wait=True) below honours this: the job exits between
++    # encodes. A single encoder.encode() call mid-flight is not interruptible
++    # (fundamental limit), but wait=True ensures the DB is released before any
++    # close — no corruption.
++    _lifecycle_stop_event.set()
++
+     # Shutdown — stop session watcher first
+     if hasattr(app.state, "session_watcher_observers"):
+         stop_session_watcher(app.state.session_watcher_observers)
+@@ -190,13 +208,21 @@ async def lifespan(app: FastAPI):
+     if hasattr(app.state, "hippocampus_observers"):
+         stop_hippocampus(app.state.hippocampus_observers)
+ 
+-    # Shutdown — stop the scheduler-independent backfill fallback if it is running
+-    _stop_backfill_fallback()
++    # Shutdown — stop the scheduler-independent backfill fallback if it is running.
++    # If the fallback thread survived the bounded join (C1), skip engine.shutdown()
++    # to avoid use-after-close (C-A/C-B); the handle is kept for the singleton guard.
++    fallback_alive = _stop_backfill_fallback()
+ 
+-    # Shutdown — wait for running jobs to finish (up to 10s)
++    # Shutdown — wait for running jobs to finish (job cooperates via _lifecycle_stop_event)
+     if hasattr(app.state, "scheduler"):
+         app.state.scheduler.shutdown(wait=True)
+-    engine.shutdown()
++
++    if not fallback_alive:
++        engine.shutdown()
++    else:
++        logger.critical(
++            "Skipping engine.shutdown(): fallback thread still alive (avoids use-after-close)"
++        )
+     logger.info("Ormah stopped")
+ 
+ 
+diff --git a/tests/test_background/test_scheduler_embedding_backfill.py b/tests/test_background/test_scheduler_embedding_backfill.py
+index 6357992..d92783f 100644
+--- a/tests/test_background/test_scheduler_embedding_backfill.py
++++ b/tests/test_background/test_scheduler_embedding_backfill.py
+@@ -1,6 +1,10 @@
+ """The embedding_backfill job must be registered with a post-bind first run (#32)."""
+ from __future__ import annotations
+ 
++import threading
++
++from unittest.mock import patch
++
+ from ormah.background.scheduler import start_scheduler
+ 
+ 
+@@ -14,3 +18,31 @@ def test_embedding_backfill_job_registered(engine):
+         assert job.next_run_time is not None
+     finally:
+         scheduler.shutdown(wait=False)
++
++
++def test_scheduler_passes_stop_event_to_embedding_backfill(engine):
++    """C2: start_scheduler deve injetar o stop_event no job embedding_backfill."""
++    evt = threading.Event()
++    received_kwargs = {}
++
++    def _fake_run(eng, stop_event=None):
++        received_kwargs["stop_event"] = stop_event
++
++    with patch(
++        "ormah.background.embedding_backfill.run_embedding_backfill",
++        side_effect=_fake_run,
++    ):
++        scheduler, _tracker = start_scheduler(engine, stop_event=evt)
++        try:
++            job = scheduler.get_job("embedding_backfill")
++            assert job is not None, "job embedding_backfill deve estar registrado"
++            # Executa o job diretamente (sem APScheduler thread pool)
++            job.func()
++        finally:
++            scheduler.shutdown(wait=False)
++
++    assert "stop_event" in received_kwargs, "run_embedding_backfill não foi chamado"
++    assert received_kwargs["stop_event"] is evt, (
++        f"stop_event injetado deve ser o mesmo evento passado a start_scheduler; "
++        f"recebido: {received_kwargs['stop_event']!r}"
++    )
+diff --git a/tests/test_main_backfill_fallback.py b/tests/test_main_backfill_fallback.py
+index 1e523e5..8a7f4c9 100644
+--- a/tests/test_main_backfill_fallback.py
++++ b/tests/test_main_backfill_fallback.py
+@@ -257,6 +257,67 @@ def test_stop_cancels_long_backfill_within_join(monkeypatch):
+     assert eng.saw_stop is True
+ 
+ 
++# ---------------------------------------------------------------------------
++# C1 — bounded join com política pós-timeout
++# ---------------------------------------------------------------------------
++
++
++def test_stop_returns_true_when_thread_survives_timeout(monkeypatch):
++    """C1: se o join expira (encode travado), _stop retorna True e handle é mantido (C-B)."""
++    monkeypatch.setattr(main, "_FALLBACK_JOIN_TIMEOUT", 0.1)
++    monkeypatch.setattr(main, "_BACKFILL_FALLBACK_BASE_BACKOFF", 0.001)
++
++    release = _threading.Event()
++
++    def _blocking(engine, stop_event=None):
++        # Ignora stop_event mid-call — simula encoder.encode() travado
++        release.wait(timeout=5.0)
++
++    monkeypatch.setattr(
++        "ormah.background.embedding_backfill.run_embedding_backfill",
++        _blocking,
++    )
++
++    main._start_backfill_fallback(object())
++    # Aguarda o thread entrar no blocking
++    _wait_for(lambda: main._fallback_thread is not None
++              and main._fallback_thread.is_alive(), timeout=2.0)
++
++    result = main._stop_backfill_fallback()
++
++    assert result is True, "_stop deve retornar True quando thread sobrevive ao timeout"
++    assert main._fallback_thread is not None, "handle deve ser mantido (C-B) para bloquear segunda instância"
++
++    # Cleanup: libera o encode e espera o thread morrer
++    release.set()
++    _wait_for(lambda: not main._fallback_thread.is_alive(), timeout=3.0)
++    with main._fallback_lock:
++        main._fallback_thread = None
++        main._fallback_stop_event = None
++
++
++def test_stop_returns_false_when_thread_exits(monkeypatch):
++    """C1: quando o thread sai antes do timeout, _stop retorna False e handle é limpo."""
++    monkeypatch.setattr(main, "_FALLBACK_JOIN_TIMEOUT", 5.0)
++    monkeypatch.setattr(main, "_BACKFILL_FALLBACK_BASE_BACKOFF", 0.001)
++
++    def _quick(engine, stop_event=None):
++        return  # sai imediatamente ao receber stop_event
++
++    monkeypatch.setattr(
++        "ormah.background.embedding_backfill.run_embedding_backfill",
++        _quick,
++    )
++
++    main._start_backfill_fallback(object())
++    _wait_for(lambda: main._fallback_thread is not None, timeout=2.0)
++
++    result = main._stop_backfill_fallback()
++
++    assert result is False, "_stop deve retornar False quando thread encerra normalmente"
++    assert main._fallback_thread is None, "handle deve ser limpo quando thread está morto"
++
++
+ def test_stop_does_not_return_while_backfill_thread_alive(monkeypatch):
+     """M-A: _stop_backfill_fallback must NOT return while the thread is alive.
+ 

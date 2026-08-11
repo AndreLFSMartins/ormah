@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>auto_linker edge-write hardening — Ormah superpowers plan</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&family=Lora:ital@0;1&display=swap" rel="stylesheet">
+    <style>
+* { box-sizing: border-box; }
+
+:root {
+  --ink: #141413;
+  --paper: #faf9f5;
+  --hairline: #e8e6dc;
+  --secondary: #b0aea5;
+  --accent-orange: #d97757;
+  --accent-blue: #6a9bcc;
+  --accent-green: #788c5d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #faf9f5;
+    --paper: #141413;
+    --hairline: #333331;
+    --secondary: #6d6b64;
+  }
+}
+
+body {
+  font-family: Lora, Georgia, serif;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--paper);
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+}
+
+nav.toc {
+  background: var(--paper);
+  border-right: 1px solid var(--hairline);
+  padding: 2rem 1.5rem;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  font-family: Poppins, sans-serif;
+}
+
+nav.toc .eyebrow {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  color: var(--secondary);
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+
+nav.toc .title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.4;
+  margin-bottom: 2rem;
+  color: var(--ink);
+}
+
+nav.toc .title em {
+  font-style: italic;
+  font-weight: 700;
+  color: var(--accent-orange);
+}
+
+nav.toc ol {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+nav.toc li {
+  margin-bottom: 0.75rem;
+}
+
+nav.toc a {
+  color: var(--secondary);
+  text-decoration: none;
+  font-size: 0.95rem;
+  transition: color 0.2s;
+}
+
+nav.toc a:hover, nav.toc a.active {
+  color: var(--accent-orange);
+}
+
+main {
+  padding: 3rem 4rem;
+  max-width: 900px;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: Poppins, sans-serif;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 2.5rem 0 1rem 0;
+  color: var(--ink);
+}
+
+h1 {
+  font-size: 2.5rem;
+  margin-top: 0;
+}
+
+h2 {
+  font-size: 1.75rem;
+  margin-top: 3rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--hairline);
+}
+
+h2 em {
+  font-style: italic;
+  color: var(--accent-orange);
+  font-weight: 700;
+}
+
+h3 {
+  font-size: 1.25rem;
+  color: var(--ink);
+}
+
+h4 {
+  font-size: 1.1rem;
+  color: var(--ink);
+}
+
+p {
+  margin: 1.25rem 0;
+  color: var(--ink);
+}
+
+a {
+  color: var(--accent-orange);
+  text-decoration: none;
+  border-bottom: 1px solid currentColor;
+}
+
+a:hover {
+  opacity: 0.7;
+}
+
+blockquote {
+  border-left: 2px solid var(--hairline);
+  padding-left: 1.5rem;
+  margin: 1.5rem 0;
+  color: var(--secondary);
+  font-style: italic;
+}
+
+code {
+  font-family: Menlo, Monaco, Courier New, monospace;
+  font-size: 0.9em;
+  background: rgba(217, 119, 87, 0.08);
+  padding: 0.2em 0.4em;
+  border-radius: 3px;
+  color: var(--accent-orange);
+}
+
+pre {
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 1.5rem 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  color: var(--ink);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5rem 0;
+  border: 1px solid var(--hairline);
+}
+
+thead {
+  background: rgba(217, 119, 87, 0.05);
+  border-bottom: 2px solid var(--hairline);
+}
+
+th {
+  font-family: Poppins, sans-serif;
+  font-weight: 600;
+  text-align: left;
+  padding: 0.75rem 1rem;
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--hairline);
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+tbody tr:hover {
+  background: rgba(217, 119, 87, 0.03);
+}
+
+.callout {
+  background: rgba(217, 119, 87, 0.08);
+  border-left: 3px solid var(--accent-orange);
+  padding: 1rem;
+  margin: 1.5rem 0;
+  border-radius: 2px;
+}
+
+.callout.warn {
+  background: rgba(220, 100, 80, 0.08);
+  border-left-color: #dc6450;
+}
+
+.callout strong {
+  color: var(--accent-orange);
+}
+
+.callout.warn strong {
+  color: #dc6450;
+}
+
+.meta {
+  font-family: Poppins, sans-serif;
+  font-size: 0.85rem;
+  color: var(--secondary);
+  margin-bottom: 2rem;
+  font-weight: 500;
+}
+
+.statement {
+  font-family: Lora, Georgia, serif;
+  font-size: 1.1rem;
+  font-style: italic;
+  color: var(--ink);
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border-left: 3px solid var(--accent-orange);
+  padding-left: 1.5rem;
+}
+
+.checkbox {
+  font-family: Poppins, sans-serif;
+  font-size: 0.9rem;
+  margin: 0.5rem 0;
+  display: flex;
+  align-items: center;
+}
+
+.checkbox input {
+  margin-right: 0.75rem;
+  cursor: pointer;
+  accent-color: var(--accent-orange);
+}
+
+.checkbox input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.checkbox label {
+  cursor: pointer;
+  flex: 1;
+}
+
+.checkbox input:checked + label {
+  color: var(--secondary);
+  text-decoration: line-through;
+}
+
+ul, ol {
+  margin: 1.25rem 0;
+  padding-left: 2rem;
+}
+
+li {
+  margin-bottom: 0.5rem;
+}
+
+@media (max-width: 768px) {
+  body {
+    grid-template-columns: 1fr;
+  }
+
+  nav.toc {
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--hairline);
+    position: static;
+    padding: 1.5rem;
+  }
+
+  main {
+    padding: 1.5rem;
+  }
+
+  h1 {
+    font-size: 1.8rem;
+  }
+
+  h2 {
+    font-size: 1.4rem;
+  }
+}
+    </style>
+</head>
+<body>
+<nav class="toc">
+    <div class="eyebrow">Ormah Superpowers</div>
+    <div class="title"><em>auto_linker</em> edge-write hardening</div>
+    <ol>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#pr-a">PR A: Idempotent edges</a></li>
+        <li><a href="#pr-b">PR B: Concurrency guard</a></li>
+        <li><a href="#pr-c">PR C: Reason persistence</a></li>
+        <li><a href="#task-8">Task 8: Landing on Beta</a></li>
+    </ol>
+</nav>
+
+<main>
+<h1>auto_linker edge-write hardening</h1>
+
+<p class="meta">For agentic workers: REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.</p>
+
+<div class="statement">Stop <code>auto_linker</code> from aborting an entire run (and freezing its watermark) on a <code>UNIQUE constraint failed: edges</code> collision, close the concurrency hole that triggers the collision, and stop the index rebuild from wiping the <code>reason</code> of every edge.</div>
+
+<h2 id="overview"><em>Overview</em></h2>
+
+<h3>Architecture</h3>
+
+<p>Three independent concerns, three PRs against <code>upstream/main</code>, plus a landing task that carries the fix into the live Beta. PR A makes the edge write idempotent and a single bad pair non-fatal (fixes issue #117). PR B closes the manual-trigger concurrency hole in the admin routes (what triggered the observed collision). PR C makes <code>reason</code> survive a reindex, which today it cannot, because the markdown <code>Connection</code> model has no <code>reason</code> field at all.</p>
+
+<p><strong>Tech Stack:</strong> Python 3.11+, SQLite, FastAPI, pytest (asyncio_mode=auto), APScheduler 3.11.</p>
+
+<h3>Background — diagnosed 2026-07-13</h3>
+
+<p><code>auto_linker</code> failed on every long run with:</p>
+
+<pre><code>WARNING: Auto-linker failed: UNIQUE constraint failed: edges.source_id, edges.target_id, edges.edge_type</code></pre>
+
+<p>Root cause is a check-then-insert race. The "does this edge exist?" guard runs at <strong>collection</strong> time; the <code>INSERT</code> runs at <strong>apply</strong> time, after the LLM judgment call. Any concurrent edge writer in that window creates the row first, and the raw <code>INSERT</code> explodes.</p>
+
+<p>Two amplifiers turn one collision into a total run failure:</p>
+
+<ol>
+<li>The edge <code>INSERT</code> shares a transaction with <code>INSERT OR IGNORE INTO auto_link_checked</code>, so the rollback also erases the "checked" marker — the poisoned pair returns on every future run.</li>
+<li>Nothing catches the exception at the call site, so the <code>IntegrityError</code> reaches the top-level <code>except</code>, aborts the run, and the watermark never advances. On the live store this froze the cursor at seq 333726 with a ~13k backlog.</li>
+</ol>
+
+<p>Ruled out with evidence: intra-run duplication and the LLM echoing bad IDs.</p>
+
+<h3>Verified facts (do not re-litigate)</h3>
+
+<p><strong>All three bugs exist on <code>upstream/main</code>.</strong> The Beta differs substantially in these files but the fixes apply verbatim to both.</p>
+
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>max_instances=1</code> is already APScheduler default</td>
+<td>Verified — do NOT touch scheduler.py</td>
+</tr>
+<tr>
+<td><code>reason</code> cannot survive via SQL fix</td>
+<td>Markdown file is source of truth; requires model + serialization change (PR C)</td>
+</tr>
+<tr>
+<td>All three PRs independent</td>
+<td>Can review and land separately; A fixes the live outage</td>
+</tr>
+</tbody>
+</table>
+
+<h3>File structure</h3>
+
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Responsibility</th>
+<th>PR</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/ormah/background/auto_linker.py</code></td>
+<td>Idempotent edge write; a failing pair must not abort the run</td>
+<td>A</td>
+</tr>
+<tr>
+<td><code>src/ormah/background/conflict_detector.py</code></td>
+<td>Same raw INSERT, same latent bug</td>
+<td>A</td>
+</tr>
+<tr>
+<td><code>src/ormah/background/job_tracker.py</code></td>
+<td>Track which jobs are currently running</td>
+<td>B</td>
+</tr>
+<tr>
+<td><code>src/ormah/api/routes_admin.py</code></td>
+<td>Refuse a manual trigger while the job runs; stop reporting completed on failure</td>
+<td>B</td>
+</tr>
+<tr>
+<td><code>src/ormah/models/node.py</code></td>
+<td><code>Connection.reason</code> — makes the reason part of the file format</td>
+<td>C</td>
+</tr>
+<tr>
+<td><code>src/ormah/store/markdown.py</code></td>
+<td>Round-trip reason through YAML frontmatter</td>
+<td>C</td>
+</tr>
+<tr>
+<td><code>src/ormah/index/builder.py</code></td>
+<td>Write reason when indexing edges from markdown</td>
+<td>C</td>
+</tr>
+</tbody>
+</table>
+
+<h3>Task index</h3>
+
+<ul>
+<li><strong><a href="#pr-a">PR A</a></strong> (closes #117): Tasks 1–3</li>
+<li><strong><a href="#pr-b">PR B</a></strong> (new issue): Tasks 4–5</li>
+<li><strong><a href="#pr-c">PR C</a></strong> (new issue): Tasks 6–7</li>
+<li><strong><a href="#task-8">Task 8</a></strong>: Landing on Beta (unfreezes the live watermark)</li>
+</ul>
+
+<p><strong>PR A is the only one that fixes a live outage. Land it first, then Task 8.</strong></p>
+
+<h3>Setup</h3>
+
+<p>The live server executes the <code>Tools/ormah</code> working tree via editable install. Work in an isolated worktree:</p>
+
+<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git fetch upstream
+git worktree add /Users/andre/Documents/GitHub/Tools/ormah/.claude/worktrees/edges-117 \
+  -b fix/117-auto-linker-idempotent-edges upstream/main</code></pre>
+
+<div class="callout warn">
+<strong>CRITICAL — the editable-install trap:</strong> <code>pip install -e .</code> pins <code>import ormah</code> to the live tree's <code>src/</code>. pytest from a worktree collects TESTS from the worktree but imports SOURCE from the live tree, silently testing the wrong code. Every pytest invocation MUST use <code>PYTHONPATH</code>:
+
+<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah/.claude/worktrees/edges-117
+export PYTHONPATH=/Users/andre/Documents/GitHub/Tools/ormah/.claude/worktrees/edges-117/src
+/Users/andre/Documents/GitHub/Tools/ormah/.venv/bin/python -c "import ormah; print(ormah.__file__)"
+# MUST print a path under .claude/worktrees/edges-117/src</code></pre>
+</div>
+
+<p>Baseline before touching anything:</p>
+
+<pre><code>/Users/andre/Documents/GitHub/Tools/ormah/.venv/bin/python -m pytest tests/ -q --ignore=tests/test_cloud 2>&1 | tail -3
+# Expected: ~12 failed (environmental, read global ~/.config/ormah/.env)</code></pre>
+
+<p><strong>Push remote:</strong> <code>origin</code> points at r-spade/ormah (upstream); the fork is <code>fork</code> remote (AndreLFSMartins/ormah). Push branches to fork, open PRs against r-spade/ormah:main.</p>
+
+<hr>
+
+<h2 id="pr-a"><em>PR A</em> — Idempotent edge writes (closes #117)</h2>
+
+<p class="meta">Branch: fix/117-auto-linker-idempotent-edges off upstream/main</p>
+
+<h3>Task 1: _apply_edge becomes idempotent</h3>
+
+<p>An edge that already exists is not an error — someone else created the same link while we were waiting on the LLM. Ignore it and let the <code>auto_link_checked</code> marker commit, so the pair is never re-judged.</p>
+
+<p><strong>The markdown append must become idempotent, NOT conditional on winning the race.</strong> The markdown file is the source of truth — reindexing deletes a node's edges and recreates them from the file. If the winner committed the DB row but failed to save its markdown, the edge exists only in the index. If we then skip our own markdown append because we "lost", the next reindex deletes the edge — while <code>auto_link_checked</code> stops the pair from ever being reconsidered. The link is gone forever.</p>
+
+<p>So: always ensure the connection is in the file, adding it only if it is not already there. That is idempotent and self-healing.</p>
+
+<h4>Files</h4>
+<ul>
+<li>Modify: <code>src/ormah/background/auto_linker.py:285-312</code></li>
+<li>Test: <code>tests/test_background/test_auto_linker.py</code></li>
+</ul>
+
+<div class="checkbox">
+<input type="checkbox" id="task-1-1" disabled>
+<label for="task-1-1"><strong>Step 1: Write the failing test</strong> — Append test code to test_auto_linker.py</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-1-2" disabled>
+<label for="task-1-2"><strong>Step 2: Run tests to verify they fail</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-1-3" disabled>
+<label for="task-1-3"><strong>Step 3: Implement</strong> — Replace _apply_edge body with INSERT OR IGNORE + idempotent markdown append</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-1-4" disabled>
+<label for="task-1-4"><strong>Step 4: Run tests to verify they pass</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-1-5" disabled>
+<label for="task-1-5"><strong>Step 5: Commit</strong></label>
+</div>
+
+<h3>Task 2: one bad pair must not abort the run</h3>
+
+<p><code>_apply_edge</code> can still raise (e.g. foreign-key violation). That reaches the top-level except and kills the run, freezing the watermark for the whole store. Catch it at the call site, log which pair, and fail closed on that node.</p>
+
+<div class="checkbox">
+<input type="checkbox" id="task-2-1" disabled>
+<label for="task-2-1"><strong>Step 1: Write the failing test</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-2-2" disabled>
+<label for="task-2-2"><strong>Step 2: Run it to verify it fails</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-2-3" disabled>
+<label for="task-2-3"><strong>Step 3: Implement</strong> — Wrap _apply_edge call with exception handling</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-2-4" disabled>
+<label for="task-2-4"><strong>Step 4: Run the auto_linker suite</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-2-5" disabled>
+<label for="task-2-5"><strong>Step 5: Commit</strong></label>
+</div>
+
+<h3>Task 3: same raw INSERT in conflict_detector</h3>
+
+<p><code>conflict_detector</code> writes contradicts/evolved_from edges with the same unguarded INSERT, and it runs concurrently with <code>auto_linker</code>. Same latent bug, same fix.</p>
+
+<div class="checkbox">
+<input type="checkbox" id="task-3-1" disabled>
+<label for="task-3-1"><strong>Step 1: Write the failing test</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-3-2" disabled>
+<label for="task-3-2"><strong>Step 2: Run it</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-3-3" disabled>
+<label for="task-3-3"><strong>Step 3: Implement</strong> — Change both INSERT to INSERT OR IGNORE</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-3-4" disabled>
+<label for="task-3-4"><strong>Step 4: Run the conflict-detector suite</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-3-5" disabled>
+<label for="task-3-5"><strong>Step 5: Full suite + lint, then commit</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-3-6" disabled>
+<label for="task-3-6"><strong>Step 6: Open the PR</strong></label>
+</div>
+
+<hr>
+
+<h2 id="pr-b"><em>PR B</em> — Admin triggers must not start a job that is already running</h2>
+
+<p class="meta">Branch: fix/admin-task-run-concurrency off upstream/main (independent of PR A)</p>
+
+<p><strong>Why:</strong> <code>POST /admin/tasks/{task_id}/run</code> calls <code>runner(engine)</code> directly, bypassing the scheduler. A manual trigger started a second <code>auto_linker</code> while the scheduled one was running; both read the same frozen watermark and raced each other's edge writes. The route also returns <code>{"status": "completed"}</code> unconditionally — it reported success for the run that had just failed, which is how the outage stayed invisible.</p>
+
+<div class="callout warn">
+<strong>Do NOT add max_instances=1 to the scheduler.</strong> Verified: it is already the APScheduler 3.11 default. The scheduler was never the problem. The only concurrency hole is POST /admin/tasks/{id}/run.
+</div>
+
+<h3>Task 4: JobTracker knows which jobs are in flight</h3>
+
+<p>The routes need to ask "is this job running right now?". <code>JobTracker</code> already wraps every scheduled job and is already on <code>app.state.job_tracker</code>, so it is the natural place — but it only records outcomes, never in-flight state.</p>
+
+<div class="checkbox">
+<input type="checkbox" id="task-4-1" disabled>
+<label for="task-4-1"><strong>Step 1: Write the failing test</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-4-2" disabled>
+<label for="task-4-2"><strong>Step 2: Run them to verify they fail</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-4-3" disabled>
+<label for="task-4-3"><strong>Step 3: Implement</strong> — Add is_running() and run_guard() to JobTracker</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-4-4" disabled>
+<label for="task-4-4"><strong>Step 4: Run them to verify they pass</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-4-5" disabled>
+<label for="task-4-5"><strong>Step 5: Commit</strong></label>
+</div>
+
+<h3>Task 4b: runners must stop swallowing their own failures</h3>
+
+<p><code>run_auto_linker</code> and <code>run_conflict_detection</code> catch everything, log, and return <code>None</code>. A route inspecting the return value sees success for a run that just died.</p>
+
+<div class="checkbox">
+<input type="checkbox" id="task-4b-1" disabled>
+<label for="task-4b-1"><strong>Step 1: Write the failing test</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-4b-2" disabled>
+<label for="task-4b-2"><strong>Step 2: Run it to verify it fails</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-4b-3" disabled>
+<label for="task-4b-3"><strong>Step 3: Implement</strong> — Return {"error": str(e)} instead of None</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-4b-4" disabled>
+<label for="task-4b-4"><strong>Step 4: Verify</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-4b-5" disabled>
+<label for="task-4b-5"><strong>Step 5: Commit</strong></label>
+</div>
+
+<h3>Task 5: admin routes refuse a duplicate run</h3>
+
+<div class="checkbox">
+<input type="checkbox" id="task-5-1" disabled>
+<label for="task-5-1"><strong>Step 1: Write the failing test</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-5-2" disabled>
+<label for="task-5-2"><strong>Step 2: Run them to verify they fail</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-5-3" disabled>
+<label for="task-5-3"><strong>Step 3: Implement</strong> — Guard with tracker.run_guard(), return 409 on conflict</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-5-4" disabled>
+<label for="task-5-4"><strong>Step 4: Run the API suite</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-5-5" disabled>
+<label for="task-5-5"><strong>Step 5: Full suite + lint, then commit and open the PR</strong></label>
+</div>
+
+<hr>
+
+<h2 id="pr-c"><em>PR C</em> — reason survives a reindex</h2>
+
+<p class="meta">Branch: fix/edge-reason-survives-reindex off upstream/main (independent of PR A and B)</p>
+
+<p><strong>The finding:</strong> on the live store, <strong>100% of 27,507 edges have reason = NULL</strong> — including types only <code>auto_linker</code> and <code>conflict_detector</code> can create. So reasons are being written and then erased.</p>
+
+<p><strong>Why an SQL fix cannot work:</strong> The markdown file is the source of truth. <code>Connection</code> has only <code>target</code>, <code>edge</code>, <code>weight</code> — no <code>reason</code> field. Reindexing deletes a node's edges and recreates them from markdown, so <code>reason</code> is structurally unrecoverable. The index updater runs every minute. Any <code>reason</code> therefore has a lifetime of at most ~60 seconds.</p>
+
+<p>The fix is to make <code>reason</code> part of the file format. <code>edges.reason</code> already exists in the schema — no DB migration is needed.</p>
+
+<h3>Task 6: Connection.reason round-trips through markdown</h3>
+
+<div class="checkbox">
+<input type="checkbox" id="task-6-1" disabled>
+<label for="task-6-1"><strong>Step 1: Write the failing test</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-6-2" disabled>
+<label for="task-6-2"><strong>Step 2: Run them to verify they fail</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-6-3" disabled>
+<label for="task-6-3"><strong>Step 3: Implement</strong> — Add reason field to Connection, parse/serialize via markdown</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-6-4" disabled>
+<label for="task-6-4"><strong>Step 4: Run the store suite</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-6-5" disabled>
+<label for="task-6-5"><strong>Step 5: Commit</strong></label>
+</div>
+
+<h3>Task 7: index writes reason, writers stop dropping it</h3>
+
+<div class="checkbox">
+<input type="checkbox" id="task-7-1" disabled>
+<label for="task-7-1"><strong>Step 1: Write the failing test</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-7-2" disabled>
+<label for="task-7-2"><strong>Step 2: Run them to verify they fail</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-7-3" disabled>
+<label for="task-7-3"><strong>Step 3: Implement</strong> — Update builder and writers to pass reason through</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-7-4" disabled>
+<label for="task-7-4"><strong>Step 4: Run the tests to verify they pass</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-7-5" disabled>
+<label for="task-7-5"><strong>Step 5: Full suite + lint</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-7-6" disabled>
+<label for="task-7-6"><strong>Step 6: Commit and open the PR</strong></label>
+</div>
+
+<hr>
+
+<h2 id="task-8"><em>Task 8</em> — Land the fix on the live Beta <strong>(unfreeze the watermark)</strong></h2>
+
+<p class="meta">This is the only task that fixes production. PRs A/B/C target upstream/main; the live server runs the Beta's local-main.</p>
+
+<p>Merging PR A into <code>local-main</code> will conflict in <code>auto_linker.py</code>, by design — the two sides changed the same function for different reasons.</p>
+
+<p>The Beta is what the launchd server executes (editable install). Do not experiment here.</p>
+
+<h3>Merge PR A and adapt the call-site guard</h3>
+
+<div class="checkbox">
+<input type="checkbox" id="task-8-1" disabled>
+<label for="task-8-1"><strong>Step 1: Back up the live index before touching anything</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-8-2" disabled>
+<label for="task-8-2"><strong>Step 2: Merge the PR A branch into local-main</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-8-3" disabled>
+<label for="task-8-3"><strong>Step 3: Resolve the conflict</strong> — Keep Beta's K-window, adapt PR A's guard to _flush()</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-8-4" disabled>
+<label for="task-8-4"><strong>Step 4: Add the Beta-only test for the stats counter</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-8-5" disabled>
+<label for="task-8-5"><strong>Step 5: Verify against the live source tree</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-8-6" disabled>
+<label for="task-8-6"><strong>Step 6: Commit the merge and restart the server</strong></label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-8-7" disabled>
+<label for="task-8-7"><strong>Step 7: Prove the watermark actually moves</strong> — Acceptance test for the whole plan</label>
+</div>
+
+<div class="checkbox">
+<input type="checkbox" id="task-8-8" disabled>
+<label for="task-8-8"><strong>Step 8: Drain the backlog</strong> — Read config before promising a drain window</label>
+</div>
+
+<hr>
+
+<div style="margin-top: 4rem; padding-top: 2rem; border-top: 2px solid var(--hairline);">
+    <p style="color: var(--secondary); font-size: 0.85rem; font-family: Poppins, sans-serif; margin: 0;">
+        <strong>5 sections · 8 tasks · 37 checkboxes</strong><br>
+        Plan files: 00-overview.md · 01-pr-a-auto-linker-idempotent.md · 02-pr-b-admin-concurrency-guard.md · 03-pr-c-edge-reason-persistence.md · 04-landing-on-beta.md
+    </p>
+</div>
+
+</main>
+</body>
+</html>
+
+<!-- rich-doc-src-sha256:ef2f3efe4fceaace3da70301e014bbd9b3a623208558ea9d87d3f8eb6e18c939 -->

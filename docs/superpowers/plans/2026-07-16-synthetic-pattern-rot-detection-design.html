@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Whisper: detect rotted synthetic-prompt patterns and propose corrections — Design</title>
+  <style>
+    /* rich-doc design system — Anthropic brand, document-oriented.
+       Light paper/ink, Lora italic display, Poppins body, system mono.
+       Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+       monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+       single <style>. Fonts come from Google Fonts (the only external request);
+       everything degrades to system serif/sans/mono offline. */
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+    :root{
+      /* Anthropic brand */
+      --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+      --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+      --accent:var(--orange);            /* fixed primary accent */
+      --font-head:"Poppins",Arial,sans-serif;
+      --font-body:"Lora",Georgia,serif;
+      --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+      --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+    }
+    [data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+      display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+    /* ---- TOC sidebar ---- */
+    nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+      border-right:1px solid var(--hairline);padding:46px 30px}
+    nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+      color:var(--accent);margin-bottom:14px}
+    nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+      letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+    nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+      padding:5px 0;border:none}
+    nav.toc a:hover{color:var(--ink)}
+    nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+    /* ---- main column ---- */
+    main{padding:56px 72px 140px;max-width:var(--maxw)}
+    .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+    .meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+    h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+      padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+    h2:first-of-type{margin-top:0}
+    /* anchor word inside a title → Lora italic, accent */
+    h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+      letter-spacing:-.005em}
+    h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+    p,li{color:var(--ink)} strong{font-weight:700}
+    a{color:var(--accent);text-underline-offset:2px}
+    a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+    a.backlink:hover{color:var(--accent)}
+
+    /* pull statement — Lora italic protagonist */
+    .statement{font:400 italic 26px/1.25 var(--font-body);
+      letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+    /* ---- callout: single accent, hairline, no shadow ---- */
+    .callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+      background:transparent;padding:14px 20px;margin:20px 0}
+    .callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+      color:var(--accent);display:block;margin-bottom:8px}
+    .callout.warn .label::after{content:" — watch out"}
+
+    /* ---- chips ---- */
+    .chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+      padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+    .chip.on{color:var(--accent);border-color:var(--accent)}
+
+    /* ---- tables: hairlines + mono headers, no heavy fills ---- */
+    table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+    th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+    th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+    tr:last-child td{border-bottom:none}
+    td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+    /* ---- figure / diagram ---- */
+    figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+    figure svg{max-width:100%;height:auto}
+    figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+      text-transform:uppercase;letter-spacing:.04em}
+
+    /* ---- code / details ---- */
+    code{font:14px var(--font-mono);color:var(--accent)}
+    pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+    pre code{color:inherit}
+    details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+    summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+      color:var(--stone);padding:12px 0}
+    summary:hover{color:var(--accent)}
+
+    /* ---- signature: monogram (always ink) + spectrum bar ---- */
+    .spectrum{display:flex;height:4px;margin:40px 0 22px}
+    .spectrum span{flex:1}
+    .spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+    .signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+      border-left:2px solid var(--accent);padding-left:16px}
+    .signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+    .signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+    /* ---- phase color-coding: thin left bar, accent cycles ---- */
+    .phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+      padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+    .phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+    .phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+    /* ---- metrics row: large numbers ---- */
+    .metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+    .metrics .metric{flex:0 1 auto}
+    .metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+    .metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+    /* ---- status chips: done / active / todo ---- */
+    .schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+      padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+    .schip.done{background:var(--green);color:#fff}
+    .schip.active{background:var(--orange);color:#fff}
+    .schip.todo{background:var(--hairline);color:var(--stone)}
+
+    /* ---- progress bar ---- */
+    .progress{margin:18px 0}
+    .progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+    .progress .fill{height:100%;background:var(--orange)}
+    .progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+    @media(max-width:880px){
+      body{grid-template-columns:1fr}
+      nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+      main{padding:32px 24px 90px}
+    }
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <span class="eyebrow">Spec</span>
+  <div class="doc-title">Whisper: detect rotted synthetic-prompt patterns</div>
+  <a href="#problem">Problem</a>
+  <a href="#scope">Scope: slice 1 of 2</a>
+  <a href="#findings">Findings</a>
+  <a class="lvl-3" href="#finding-1">1. No whisper_health table</a>
+  <a class="lvl-3" href="#finding-2">2. Proposal model is dead code</a>
+  <a class="lvl-3" href="#finding-3">3. retrieval_events absence insufficient</a>
+  <a class="lvl-3" href="#finding-4">4. ReviewQueue is orphaned</a>
+  <a class="lvl-3" href="#finding-5">5. Rot criterion</a>
+  <a href="#design">Design</a>
+  <a class="lvl-3" href="#design-branch">Branch strategy</a>
+  <a class="lvl-3" href="#design-c1">Component 1: match_synthetic_pattern()</a>
+  <a class="lvl-3" href="#design-c2">Component 2: matched_pattern column</a>
+  <a class="lvl-3" href="#design-c3">Component 3: synthetic_pattern_monitor</a>
+  <a class="lvl-3" href="#design-c4">Component 4: proposal</a>
+  <a class="lvl-3" href="#design-c5">Component 5: settings</a>
+  <a href="#testing">Testing</a>
+  <a href="#verification">Verification</a>
+  <a href="#out-of-scope">Out of scope</a>
+  <a href="#risks">Risks</a>
+</nav>
+
+<main>
+
+<div class="meta">
+  <div>Date: 2026-07-16</div>
+  <div>Status: Approved (brainstorming) — ready for implementation plan</div>
+  <div>Issue: <a href="https://github.com/r-spade/ormah/issues/143">#143</a> — slice 1 of 2</div>
+  <div>Depends on: <a href="https://github.com/r-spade/ormah/issues/134">#134</a> / PR <a href="https://github.com/r-spade/ormah/pull/141">#141</a> (OPEN upstream as of 2026-07-16)</div>
+</div>
+
+<h2 id="problem"><em>Problem</em></h2>
+
+<p>Issue #134 (PR #141) skips machine-generated turns by matching a prompt against a hardcoded list of three regexes plus operator-supplied <code>whisper_synthetic_prompt_patterns</code>. Both halves decay:</p>
+
+<ul>
+  <li><strong>Builtin defaults</strong> track Claude Code's machine-turn markers. Claude Code can rename or restructure them at any release. When it does, coverage silently drops to zero — the filter keeps "working", just matching nothing.</li>
+  <li><strong>Operator patterns</strong> track whatever headless scripts and agents an install happens to run. That set changes as the user's tooling changes, and nobody goes back to re-measure.</li>
+</ul>
+
+<p>There is no alarm for either. The only symptom is a slow return of wasted encode/search/rerank on turns no human reads — exactly the state #134 set out to fix.</p>
+
+<h2 id="scope"><em>Scope</em>: slice 1 of 2</h2>
+
+<p>Issue #143 describes two machines with very different costs. They are split:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Slice</th>
+      <th>What</th>
+      <th>Cost / risk</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>1 — this spec</strong></td>
+      <td>Instrument which pattern matched; detect patterns that rotted; propose corrections.</td>
+      <td>Deterministic, no LLM. A false positive asks a question the user rejects.</td>
+    </tr>
+    <tr>
+      <td><strong>2 — separate spec</strong></td>
+      <td>Mine <code>retrieval_events</code> residue for <em>emerging</em> patterns via clustering + hard negatives + LLM judge.</td>
+      <td>LLM cost. A false positive silences real memories, invisibly.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Slice 1 first because it delivers the alarm the issue says does not exist, and because the per-pattern counter it adds is the honest denominator for slice 2's evidence.</p>
+
+<h2 id="findings"><em>Findings</em> that changed the design</h2>
+
+<p>All verified by reading code at <code>local-main</code> (HEAD <code>5f93cce</code>). Each contradicts the issue text.</p>
+
+<h3 id="finding-1">1. <code>whisper_health</code> is not a table — nothing persisted can be "re-contaminated"</h3>
+
+<p>The issue speaks of "re-contaminated <code>whisper_health</code>". There is no such table. The full <code>CREATE TABLE</code> list in <code>src/ormah/index/schema.sql</code> is: <code>nodes</code>, <code>edges</code>, <code>node_tags</code>, <code>proposals</code>, <code>meta</code>, <code>merge_history</code>, <code>auto_link_checked</code>, <code>duplicate_checked</code>, <code>conflict_checked</code>, <code>consolidation_checked</code>, <code>audit_log</code>, <code>retrieval_events</code>, <code>whisper_log</code>, <code>affinity</code>, <code>signals</code>, <code>whisper_decisions</code>, <code>review_log</code>.</p>
+
+<p><code>whisper_health</code> is computed on the fly: <code>compute_whisper_health(conn, now) → dict</code> (<code>src/ormah/engine/whisper_health.py:68</code>), consumed at <code>memory_engine.py:1708</code> and exposed in the stats payload. It is a read-only projection, which is why the detector cannot live there (see <a href="#design">Design</a>, Component 3).</p>
+
+<h3 id="finding-2">2. The <code>Proposal</code> Pydantic model is dead code — there is nothing to "widen"</h3>
+
+<p>Issue item 3 says "<code>Proposal.source_nodes: list[str]</code> assumes memory nodes; either widen the model or use a sibling table". The premise is false: the model (<code>src/ormah/models/proposals.py:24</code>) is never instantiated. Writes and reads are raw SQL over dicts. The single writer hardcodes both <code>type</code> and <code>status</code> as SQL literals (<code>src/ormah/background/duplicate_merger.py:437-441</code>):</p>
+
+<pre><code>"INSERT INTO proposals (id, type, status, source_nodes, proposed_action, "
+"reason, created) VALUES (?, 'merge', 'pending', ?, ?, ?, ?)"</code></pre>
+
+<p>So the decision is not "widen the model vs sibling table" — it is "reuse the <code>proposals</code> table or not". We reuse it.</p>
+
+<p>Of the three <code>ProposalType</code> values, only <code>merge</code> is ever created. <code>conflict</code> is never created (<code>conflict_detector.py</code> writes edges directly at <code>:386</code> and <code>:394</code>), which makes the <code>approved + type == "conflict"</code> branch at <code>routes_agent.py:413-426</code> unreachable. <code>decay</code> is never created and is <strong>actively deleted on every run</strong> by an unguarded statement in <code>run_decay</code> (<code>src/ormah/background/decay_manager.py:20-24</code>):</p>
+
+<pre><code># One-time cleanup: remove legacy pending decay proposals
+conn.execute("DELETE FROM proposals WHERE type = 'decay' AND status = 'pending'")</code></pre>
+
+<p>The comment says "one-time" but there is no guard — it runs forever, daily. <strong>A new proposal type must not be named <code>decay</code> and must not reuse that value</strong>, or the decay manager will silently eat our proposals every night. This is the single sharpest trap in this design.</p>
+
+<h3 id="finding-3">3. Absence from <code>retrieval_events</code> does not identify a filtered prompt</h3>
+
+<p>The issue states that non-matching prompts "flow through the whole pipeline" and leave a row. That is <strong>necessary but not sufficient</strong>. Four early returns write <code>whisper_decisions</code> but never reach the <code>retrieval_events</code> insert: empty prompt and <code>&lt;=2</code> alphanumeric chars → <code>silent_short</code> (<code>context_builder.py:365-389</code>); no engine (<code>:391-398</code>); <code>intent.categories == ["conversational"]</code> → <code>silent_conversational</code> (<code>:410-421</code>). The insert itself is conditional on <code>session_id</code> (<code>context_builder.py:990</code>).</p>
+
+<p>Consequence for slice 2 (recorded here so it is not rediscovered): the candidate pool is a <em>subset</em> of unfiltered prompts. Consequence for slice 1: the reliable discriminator of "was filtered" is <code>whisper_decisions.outcome = 'silent_synthetic'</code>, <strong>not</strong> absence from <code>retrieval_events</code>. Slice 1 reads only <code>whisper_decisions</code>.</p>
+
+<h3 id="finding-4">4. The <code>ReviewQueue</code> UI exists and is orphaned</h3>
+
+<p><code>ui/src/components/ReviewQueue.tsx</code> (150 lines) is complete, with a working client at <code>ui/src/api.ts:43-51</code>. Nothing imports it — grep for <code>ReviewQueue|fetchProposals|resolveProposal</code> across <code>ui/</code> and <code>desktop/</code> returns only the definitions. #82 is "wire an orphan", not "build a screen". Out of scope here; noted because it means our proposals reach a human today only via MCP <code>list_proposals</code> (<code>src/ormah/adapters/mcp_adapter.py:294</code>), which is sufficient.</p>
+
+<h3 id="finding-5">5. "Matches zero" is the wrong rot criterion</h3>
+
+<p><code>&lt;scheduled-task&gt;</code> can match zero because the operator <strong>does not use scheduled tasks</strong>. That is irrelevance, not rot, and proposing removal would be noise. What separates them: <strong>rot = matched before and stopped</strong>; irrelevance = never matched.</p>
+
+<p>This is implemented as <code>last_seen</code>, not as two windows. <code>MAX(logged_at)</code> per pattern carries the same semantics at a fraction of the cost, and needs no bootstrap period beyond a single match: a pattern that never matched has no row and stays silent without any code deciding that.</p>
+
+<h2 id="design"><em>Design</em></h2>
+
+<h3 id="design-branch">Branch strategy</h3>
+
+<p>Issue #143 consumes what #141 introduces: <code>is_synthetic_prompt</code>, the setting <code>whisper_synthetic_prompt_patterns</code> (the target of the proposals), and the <code>silent_synthetic</code> outcome (the signal). None of the three exist in <code>upstream/main</code>, so the normal rule — cut from <code>upstream/main</code> — cannot apply.</p>
+
+<p>Cut <code>feat/synthetic-pattern-rot-detection</code> from <code>fix/whisper-synthetic-prompt-filter</code> (local and <code>fork</code> both at <code>8b671ad</code>, 6 commits ahead of <code>upstream/main</code>). Open the PR stacked on PR #141, or rebase onto <code>upstream/main</code> once #141 merges. Push to <code>fork</code>, never <code>upstream</code>.</p>
+
+<h3 id="design-c1">Component 1 — <code>match_synthetic_pattern()</code> (<code>src/ormah/engine/prompt_classifier.py</code>)</h3>
+
+<p>Replace <code>is_synthetic_prompt(prompt, extra_patterns) → bool</code> with:</p>
+
+<pre><code>def match_synthetic_pattern(prompt: str, extra_patterns: Sequence[str] = ()) → str | None:
+    """The source of the pattern that matched, or None when the prompt is human."""</code></pre>
+
+<p>It returns the regex <em>source</em> (<code>r"&lt;task-notification&gt;"</code> for builtins, the raw string for operator patterns) — stable, readable, and literally the string the user would put in or take out of <code>.env</code>. Matching semantics are unchanged: anchored <code>.match()</code> after <code>lstrip()</code>, invalid operator regex logged and skipped (fail-open).</p>
+
+<p>No <code>is_synthetic_prompt</code> wrapper is kept. There is exactly one production call-site (<code>routes_agent.py:149</code>); a wrapper with zero consumers is speculative abstraction.</p>
+
+<p><strong>The one way this change introduces a bug:</strong> an operator can configure the empty regex <code>""</code>, which matches everything and returns <code>""</code> — falsy. The call-site must test <code>is not None</code>, never truthiness. This gets a dedicated test.</p>
+
+<h3 id="design-c2">Component 2 — record the match (<code>whisper_decisions</code>)</h3>
+
+<p>Add <code>matched_pattern TEXT</code> to <code>whisper_decisions</code> — NULL except on <code>silent_synthetic</code> rows. Migration by <code>ALTER TABLE ADD COLUMN</code> in <code>_migrate()</code> (<code>src/ormah/index/db.py:129</code>), following the existing pattern there; <code>schema.sql:222-238</code> updated to match for fresh installs.</p>
+
+<p>The value threads from the boundary guard (<code>routes_agent.py:141-157</code>) through <code>engine.note_synthetic_whisper_skip</code> (<code>memory_engine.py:1257-1273</code>) into <code>ContextBuilder._log_decision</code> (<code>context_builder.py:293-327</code>), each gaining a <code>matched_pattern: str | None = None</code> keyword.</p>
+
+<p><code>whisper_decisions</code> is the right home: already one-row-per-call, already receives <code>silent_synthetic</code>, already indexed on <code>logged_at</code> — which is what the rot query needs. The table stores <code>prompt_hash</code> only, never text (<code>schema.sql:221</code>); this column does not change that.</p>
+
+<h3 id="design-c3">Component 3 — <code>synthetic_pattern_monitor</code> (<code>src/ormah/background/</code>)</h3>
+
+<p>A new scheduled job, no LLM, daily. Not folded into <code>whisper_log_cleanup</code> (unrelated responsibility) and not computed inside <code>whisper_health</code> (that is a read path called from a <code>GET</code>; creating proposals there would write to the DB whenever someone opens the stats screen).</p>
+
+<p>Steps:</p>
+
+<ol>
+  <li><strong>Traffic guard.</strong> If <code>whisper_decisions</code> has no row in the last <code>rot_days</code>, return. Without this, two weeks of user vacation rot every pattern at once.</li>
+  <li><strong>Collect live patterns:</strong> the three builtins from <code>_SYNTHETIC_PATTERNS</code> + the operator's <code>whisper_synthetic_prompt_patterns</code>, each tagged with its origin.</li>
+  <li><strong>Query <code>last_seen</code>:</strong>
+    <pre><code>SELECT matched_pattern, MAX(logged_at) FROM whisper_decisions
+WHERE outcome = 'silent_synthetic' AND matched_pattern IS NOT NULL
+GROUP BY matched_pattern</code></pre>
+    No row → never matched → stay silent. Row older than <code>rot_days</code> → rotted.
+  </li>
+  <li><strong>Propose</strong>, unless a proposal for that pattern already exists.</li>
+</ol>
+
+<p>Patterns present in history but absent from the live config (the user edited <code>.env</code>) are ignored: the job iterates live patterns and looks each one up, never the reverse.</p>
+
+<p>Registration touches the four places the repo requires (there is no declarative registry): <code>start_scheduler</code> (<code>background/scheduler.py:47-235</code>), <code>_TASK_RUNNERS</code>, <code>_TASK_DESCRIPTIONS</code> and <code>_SLEEP_CYCLE_ORDER</code> (<code>api/routes_admin.py:24-70</code>). It does <strong>not</strong> touch <code>_stagger_factor</code> (<code>scheduler.py:33-38</code>), which hardcodes the four LLM jobs — this job makes no LLM call.</p>
+
+<h3 id="design-c4">Component 4 — the proposal</h3>
+
+<p>A new <code>ProposalType</code> value — <code>pattern</code> — in <code>models/proposals.py:12-15</code>, mirrored in the hand-maintained union at <code>ui/src/types.ts:84</code>. Explicitly <strong>not</strong> <code>decay</code>, which the decay manager deletes nightly (Finding 2).</p>
+
+<p><code>INSERT INTO proposals</code> with <code>source_nodes = '[]'</code> (honest: there are no nodes; <code>GET /agent/proposals</code> enriches by looping node ids, so an empty list yields <code>nodes: []</code> and no error).</p>
+
+<p>Origin decides the text, because the two cases have opposite actions:</p>
+
+<ul>
+  <li><strong>operator pattern</strong> → <em>"Remove this entry from <code>ORMAH_WHISPER_SYNTHETIC_PROMPT_PATTERNS</code>: <code>&lt;regex&gt;</code>"</em></li>
+  <li><strong>builtin</strong> → <em>"Claude Code marker <code>&lt;regex&gt;</code> stopped appearing; it was likely renamed. Report upstream."</em> — telling the user to remove from their <code>.env</code> a pattern that is not in their <code>.env</code> is an instruction impossible to follow.</li>
+</ul>
+
+<p><strong>Dedup is what decides whether this feature works or becomes spam.</strong> The job runs daily and the pattern stays rotted daily. Dedup is <code>SELECT 1 FROM proposals WHERE type = &lt;new&gt; AND proposed_action = ?</code>, which <strong>forces <code>proposed_action</code> to derive from the regex alone, with no variable numbers in it</strong>. Putting "not seen for 47 days" in <code>proposed_action</code> would change it every 24h, the dedup would never hit, and the job would create one proposal per day forever. All variable evidence (last_seen, historical count) goes in <code>reason</code>, which is not part of the dedup key. Dedup deliberately matches resolved rows too: rejecting a proposal kills it for good.</p>
+
+<p>Approve/reject need no new code. A type with no branch in <code>routes_agent.py:388-426</code> falls through to the plain <code>UPDATE status</code> — nothing is auto-applied, which is requirement #1 of the issue. The <code>approved</code>-then-side-effect-fails hazard (<code>routes_agent.py:379-397</code>) does not reach us precisely because there is no side effect to run.</p>
+
+<h3 id="design-c5">Component 5 — settings (<code>src/ormah/config.py</code>)</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Setting</th>
+      <th>Default</th>
+      <th>Meaning</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>whisper_pattern_rot_days</code></td>
+      <td><code>30</code></td>
+      <td><code>last_seen</code> older than this → rotted. Also the traffic-guard window.</td>
+    </tr>
+    <tr>
+      <td><code>whisper_pattern_monitor_interval_minutes</code></td>
+      <td><code>1440</code></td>
+      <td>Job interval, matching the other daily jobs.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="testing"><em>Testing</em></h2>
+
+<p>Mould: <code>tests/test_background/test_duplicate_merger.py</code> — real <code>engine</code> fixture (<code>tests/conftest.py:132-137</code>). No LLM to mock here, so no <code>reset_adapter()</code> dance.</p>
+
+<p><code>tests/test_engine/test_prompt_classifier.py</code> (adapting the 8 existing <code>TestIsSyntheticPrompt</code> cases to the new return type):</p>
+<ul>
+  <li>returns the builtin's regex source for each of the three markers</li>
+  <li>returns the operator's raw string for an <code>extra_patterns</code> match</li>
+  <li>returns <code>None</code> for a human prompt, for <code>&lt;ide_opened_file&gt;</code>-wrapped human text, and for a human asking <em>about</em> a marker (anchoring guard)</li>
+  <li>invalid operator regex → skipped, other patterns still evaluated</li>
+  <li><strong>empty pattern <code>""</code> returns <code>""</code>, not <code>None</code></strong> — the falsy trap</li>
+</ul>
+
+<p><code>tests/test_engine/test_whisper_context.py</code>:</p>
+<ul>
+  <li>the boundary writes <code>matched_pattern</code> on the <code>silent_synthetic</code> row</li>
+  <li>a prompt matching an operator pattern records that pattern, not a builtin</li>
+</ul>
+
+<p><code>tests/test_background/test_synthetic_pattern_monitor.py</code>:</p>
+<ul>
+  <li>pattern never matched → no proposal</li>
+  <li>pattern matched within <code>rot_days</code> → no proposal</li>
+  <li>pattern last matched beyond <code>rot_days</code> → one proposal</li>
+  <li>no traffic in the window → no proposal even with rotted patterns (vacation guard)</li>
+  <li>second run → no duplicate</li>
+  <li>rejected proposal → not re-proposed</li>
+  <li>builtin vs operator → different <code>proposed_action</code> text</li>
+  <li>pattern in history but removed from config → no proposal</li>
+</ul>
+
+<p><code>tests/test_background/test_scheduler.py</code>:</p>
+<ul>
+  <li><code>"synthetic_pattern_monitor" in job_ids</code> (mould: <code>test_forgetting_job_is_registered</code>)</li>
+</ul>
+
+<h2 id="verification"><em>Verification</em> (not "tests pass")</h2>
+
+<ol>
+  <li><code>make test</code> and <code>make lint</code> green, output cited.</li>
+  <li>Fresh-DB migration: open a DB created before the change, confirm <code>matched_pattern</code> exists and the server starts.</li>
+  <li>Drive the real path: send a <code>&lt;task-notification&gt;</code> prompt to <code>/agent/whisper</code> on the running Beta, then confirm one <code>whisper_decisions</code> row with <code>outcome='silent_synthetic'</code> and <code>matched_pattern='&lt;task-notification&gt;'</code>.</li>
+  <li>Force a rot: set <code>whisper_pattern_rot_days=0</code>, trigger the job via <code>/admin</code>, confirm exactly one proposal per live pattern with history; trigger again and confirm no duplicates.</li>
+  <li>Confirm <code>run_decay</code> does not delete the new proposals (the <code>decay_manager.py:20-24</code> trap).</li>
+</ol>
+
+<h2 id="out-of-scope">Out of scope</h2>
+
+<ul>
+  <li>The LLM miner for emerging patterns — slice 2, separate spec.</li>
+  <li>Wiring the orphaned <code>ReviewQueue</code> — that is #82.</li>
+  <li>Editing the user's <code>.env</code>. The proposal renders the exact line; the user applies it.</li>
+  <li>Auto-applying any pattern.</li>
+  <li>Fixing the unguarded <code>DELETE</code> in <code>decay_manager.py:20-24</code>, the fragile <code>"\n---\n"</code> split at <code>routes_agent.py:353</code>, or <code>ResolveProposalRequest</code> accepting <code>pending</code>. Real defects, found while exploring, unrelated to this change — worth their own issues.</li>
+</ul>
+
+<h2 id="risks"><em>Risks</em> / unverified</h2>
+
+<ul>
+  <li><strong>Irreducible false positive.</strong> A pattern may not match because the traffic it would match did not happen — no subagents for <code>rot_days</code> makes <code>&lt;task-notification&gt;</code> look rotted. The issue acknowledges this implicitly ("silent_synthetic hitting zero <em>while subagents run</em>"); we have no way to know whether subagents ran. The traffic guard only catches total inactivity, not per-category inactivity. Accepted because the cost is a question the user rejects — unlike slice 2, where a false positive silences real memories invisibly.</li>
+  <li><strong>Bootstrap blind spot.</strong> A pattern that matched heavily <em>before</em> the migration and stopped just after will have no <code>matched_pattern</code> history, so it reads as "never matched" and stays silent. Fails toward not bothering the user. Self-corrects as history accumulates.</li>
+  <li><strong>Unverified:</strong> the exact <code>ALTER TABLE</code> idiom used by <code>_migrate()</code> (<code>db.py:129</code>) was reported by exploration but not read line-by-line; the plan must read it before writing the migration.</li>
+  <li><strong>Unverified:</strong> whether <code>GET /agent/proposals</code> renders acceptably with <code>source_nodes='[]'</code> was reasoned from code (<code>routes_agent.py:341-359</code>), not executed. Verification step 4 covers it.</li>
+  <li><strong>Dependency risk.</strong> If r-spade requests changes to #141 that rename <code>is_synthetic_prompt</code> or reshape the settings, this branch rebases and Component 1 shifts. Low cost, but real.</li>
+</ul>
+
+<div class="spectrum">
+  <span class="s1"></span>
+  <span class="s2"></span>
+  <span class="s3"></span>
+</div>
+
+<div class="signature">
+  <div class="name">Whisper synthetic-pattern rot detection</div>
+  <div class="role">Design spec — issue #143 slice 1</div>
+</div>
+
+</main>
+
+<!-- rich-doc-src-sha256:3750e032101448f6bafaead9219f39443d3d2ad4f04a4cce4a35e7f36cf219f1 -->
+
+</body>
+</html>

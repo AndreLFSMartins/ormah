@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Task 8: Remove cytoscape + final verification</title>
+  <style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;--orange:#d97757; --blue:#6a9bcc; --green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--lh-body:1.55; --lh-title:1.12; --maxw:1140px;}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:8px}
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;color:var(--stone)}
+@media(max-width:880px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:32px 24px 90px}}
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <div class="eyebrow">Task 8</div>
+    <h1 class="doc-title">Cleanup and <em>verify</em></h1>
+    <a href="00-overview.html">← Overview</a>
+  </nav>
+  <main>
+    <a href="00-overview.html" class="backlink">← Overview</a>
+    <div class="eyebrow">Task 8</div>
+    <h2>Remove cytoscape + final <em>verification</em></h2>
+
+    <p><code>GraphView.tsx</code> no longer imports cytoscape. Remove the dependencies and any code they left orphaned, then verify the whole UI is green.</p>
+
+    <h3>Files</h3>
+    <ul>
+      <li>Modify: <code>ui/package.json</code></li>
+      <li>Modify/remove: any now-dead helper in <code>ui/src/components/GraphView.tsx</code> (zoom helpers, cola edge-length, <code>clusterBySpace</code> graph mutations) that nothing references after Task 6.</li>
+    </ul>
+
+    <h3>Step 1: Confirm nothing still imports cytoscape</h3>
+    <p>Run: <code>grep -rn "cytoscape\|cola\|fcose" ui/src</code><br>
+    Expected: no matches. If any remain, they are dead code from the old body — remove them (do not re-add a renderer).</p>
+
+    <h3>Step 2: Remove the dependencies</h3>
+    <pre><code>( cd ui && npm uninstall cytoscape cytoscape-cola cytoscape-fcose @types/cytoscape )</code></pre>
+    <p>Expected: <code>package.json</code> no longer lists them.</p>
+
+    <h3>Step 3: Typecheck, unit tests, build</h3>
+    <pre><code>( cd ui && npx tsc --noEmit )
+( cd ui && npm run test )
+( cd ui && npm run build )</code></pre>
+    <p>Expected: no type errors; all unit tests pass; build succeeds.</p>
+
+    <h3>Step 4: Re-run the visual + drag tests (regression)</h3>
+    <div class="callout">
+      <span class="label">Council A5</span>
+      <p>The visual tests read the DEV-only <code>window.__ormahGraph</code> handle, so they MUST run against the Vite dev server (<code>:5173</code>), NOT the production build on <code>:8787</code>. Use <code>make dev</code>.</p>
+    </div>
+    <pre><code>make dev   # backend :8787 + vite dev :5173
+uv run --with playwright python ui/playwright/test_graph_layout.py
+uv run --with playwright python ui/playwright/test_graph_drag.py</code></pre>
+    <p>Expected: both <code>PASS</code> (organic non-grid + node drag re-heats); inspect <code>/tmp/ormah_sigma_layout.png</code>.</p>
+
+    <h3>Step 5: Manual parity pass against the spec success criteria</h3>
+    <p>Open http://localhost:5173 (dev) and confirm, citing what you see:</p>
+    <ul>
+      <li>Organic clusters, isolated nodes on the periphery, <strong>no grid/losango</strong>.</li>
+      <li>Colors by tier/space/self; node size varies with access_count; edge colors by type.</li>
+      <li>Labels appear (zoom-gated); zoom slider/buttons work; <strong>mouse-hover</strong> highlights node + neighbors and dims others; <strong>search-hover</strong> glows WITHOUT dimming (Council A4).</li>
+      <li>Legend click <strong>focuses</strong> that item (vivid + dim rest + camera fit) and clears on re-click (Council A1); App.tsx filters hide via the reducer without remounting (camera stays put — Council C2).</li>
+      <li><code>focusNodeId</code> from a caller centers the node; Insights/Review <code>highlightNodes</code> fits the matched set (Council H1).</li>
+      <li>Main thread stays responsive while the layout settles; toggling a filter does NOT reset the layout.</li>
+    </ul>
+
+    <h3>Step 6: Keep the knowledge graph current</h3>
+    <pre><code>graphify update .</code></pre>
+
+    <h3>Step 7: Commit</h3>
+    <pre><code>git add -A ui/
+git commit -m "chore(ui): remove cytoscape deps + dead code after sigma migration"</code></pre>
+
+    <h3>Step 8: Finish the branch</h3>
+    <p>Invoke <code>superpowers:finishing-a-development-branch</code> to decide merge/PR. The branch is <code>feat/graph-webgl-sigma</code>.</p>
+
+    <div class="callout">
+      <span class="label">Known carry-over</span>
+      <p>The spec commit <code>36f9091</code> is embedded in the pushed <code>fix/embedding-delta-backfill</code> (#32) history; those two doc files will ride along when #32 merges. Removing it would require rewriting a pushed branch — out of scope here. Flag it on #32 for an optional interactive rebase before merge.</p>
+    </div>
+
+    <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+    <div class="signature">
+      <div class="name">Task 8</div>
+      <div class="role">Graph WebGL Sigma Implementation</div>
+    </div>
+  </main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:d484a305a13a6dcf65e3b01ea3b12586c5ba42c5c40c4b6d86f8869e40957f96 -->

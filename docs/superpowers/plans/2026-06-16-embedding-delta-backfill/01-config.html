@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<!-- rich-doc-src-sha256:75491d261a12d568a46d3557acc68ff4ae62856d0f80f0325475183b5d79a322 -->
+<html lang="en" data-mode="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Task 01 — Config settings (#32)</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+:root{--paper:#faf9f5;--ink:#141413;--stone:#b0aea5;--hairline:#e8e6dc;--orange:#d97757;--blue:#6a9bcc;--green:#788c5d;--accent:var(--orange);--font-head:"Poppins",Arial,sans-serif;--font-body:"Lora",Georgia,serif;--font-mono:ui-monospace,"SF Mono",Menlo,monospace}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/1.55 var(--font-body);display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--hairline);padding:46px 28px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 26px/1.1 var(--font-body);margin:0 0 24px}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14px;font-family:var(--font-head);padding:5px 0}
+nav.toc a:hover{color:var(--ink)}
+main{padding:56px 64px 120px;max-width:1040px}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h1{font:400 italic 42px/1.08 var(--font-body);margin:12px 0 8px}
+h2{font:600 26px/1.12 var(--font-head);letter-spacing:-.015em;margin:48px 0 14px;padding-bottom:9px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2 em{font:400 italic 1.08em/1 var(--font-body);color:var(--accent)}
+h3{font:600 17px/1.3 var(--font-head);margin:28px 0 8px;scroll-margin-top:24px}
+.statement{font:400 italic 24px/1.25 var(--font-body);margin:24px 0;max-width:28em}
+p,li{color:var(--ink)}strong{font-weight:700}a{color:var(--accent)}
+code{font:13.5px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:15px;overflow-x:auto;font:12.5px/1.6 var(--font-mono);color:var(--ink)}pre code{color:inherit}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:10px 15px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}td code{color:var(--ink)}
+.step{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone);border:1px solid var(--hairline);border-radius:20px;padding:4px 10px;margin-right:8px}
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);padding:13px 18px;margin:18px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;color:var(--accent);display:block;margin-bottom:7px}
+.spectrum{display:flex;height:4px;margin:38px 0 20px}.spectrum span{flex:1}.spectrum .s1{background:var(--orange)}.spectrum .s2{background:var(--blue)}.spectrum .s3{background:var(--green)}
+.signature{border-left:2px solid var(--accent);padding-left:15px;color:var(--stone)}.signature .name{font:400 italic 17px/1 var(--font-body);color:var(--ink)}.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:860px){body{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}main{padding:30px 22px 80px}}
+</style></head><body>
+<nav class="toc"><div class="eyebrow">#32 · Task 01</div><div class="doc-title">Config settings</div>
+<a href="#what">What &amp; why</a><a href="#files">Files</a><a href="#s1">1 · Failing tests</a><a href="#s3">3 · Settings</a><a href="#s4">4 · Validators</a><a href="#s5">5 · Verify</a></nav>
+<main>
+<div class="eyebrow">Implementation plan · Task 01</div>
+<h1>Config <em>settings</em></h1>
+<div class="meta">3 settings · no deps</div>
+<p class="statement">Three knobs: the backfill cadence, and a bounded retry for the embedding write path.</p>
+
+<h2 id="what">What &amp; <em>why</em></h2>
+<p>Add three settings: <code>embedding_backfill_interval_minutes</code> (the recurring job cadence; set to <code>999999</code> to let the 02:00 sleep-cycle drive it), and <code>embedding_index_max_retries</code> / <code>embedding_index_retry_backoff_seconds</code> for the bounded retry that Task 04 adds to <code>_index_embedding</code>.</p>
+<div class="callout"><span class="label">Scope</span>This is the implemented set — <strong>three</strong> settings. No <code>embedding_schema_max_attempts</code> (the dropped quarantine knob).</div>
+
+<h2 id="files">Files <em>touched</em></h2>
+<table><thead><tr><th>Action</th><th>Path</th></tr></thead><tbody>
+<tr><td>Modify</td><td><code>src/ormah/config.py</code> (settings block ~L52-58; validators ~L280-311)</td></tr>
+<tr><td>Test</td><td><code>tests/test_config.py</code></td></tr></tbody></table>
+
+<h2 id="s1"><span class="step">Step 1</span><em>Failing</em> tests</h2>
+<pre><code>def test_embedding_backfill_settings_defaults():
+    from ormah.config import Settings
+    s = Settings()
+    assert s.embedding_backfill_interval_minutes == 60
+    assert s.embedding_index_max_retries == 2
+    assert s.embedding_index_retry_backoff_seconds == 0.5
+
+
+def test_embedding_backfill_interval_rejects_zero():
+    import pytest
+    from pydantic import ValidationError
+    from ormah.config import Settings
+    with pytest.raises(ValidationError):
+        Settings(embedding_backfill_interval_minutes=0)
+
+
+def test_embedding_index_max_retries_rejects_negative():
+    import pytest
+    from pydantic import ValidationError
+    from ormah.config import Settings
+    with pytest.raises(ValidationError):
+        Settings(embedding_index_max_retries=-1)
+
+
+def test_embedding_index_retry_backoff_rejects_negative():
+    import pytest
+    from pydantic import ValidationError
+    from ormah.config import Settings
+    with pytest.raises(ValidationError):
+        Settings(embedding_index_retry_backoff_seconds=-0.1)</code></pre>
+
+<h3 id="s2">Step 2 · Run to verify it fails</h3>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_config.py::test_embedding_backfill_settings_defaults -v</code> → FAIL (<code>AttributeError</code>/<code>ValidationError</code>, unknown field).</p>
+
+<h2 id="s3"><span class="step">Step 3</span>Add the <em>settings</em></h2>
+<p>In <code>src/ormah/config.py</code>, after the <code>auto_cluster_interval_minutes</code> line (~L58) inside the "Background intervals" block add:</p>
+<pre><code>    # Embedding backfill / vector-store reconciliation (#32).
+    # Set the interval to a very large value (e.g. 999999) to disable the
+    # in-process recurring job and let the 02:00 sleep-cycle (run-all) drive it.
+    embedding_backfill_interval_minutes: int = 60
+    embedding_index_max_retries: int = 2
+    embedding_index_retry_backoff_seconds: float = 0.5</code></pre>
+
+<h2 id="s4"><span class="step">Step 4</span>Add <em>validators</em></h2>
+<p>Add <code>embedding_backfill_interval_minutes</code> to the existing <code>_interval_minutes_positive</code> field_validator list (~L280-285):</p>
+<pre><code>    @field_validator(
+        "auto_link_interval_minutes",
+        "conflict_check_interval_minutes",
+        "duplicate_check_interval_minutes",
+        "auto_cluster_interval_minutes",
+        "embedding_backfill_interval_minutes",
+    )
+    @classmethod
+    def _interval_minutes_positive(cls, v: int) -> int:
+        if v &lt; 1:
+            raise ValueError(f"interval must be &gt;= 1 minute, got {v}")
+        return v</code></pre>
+<p>Then add two new validators below it:</p>
+<pre><code>    @field_validator("embedding_index_max_retries")
+    @classmethod
+    def _embedding_index_max_retries_nonneg(cls, v: int) -> int:
+        if v &lt; 0:
+            raise ValueError(f"embedding_index_max_retries must be &gt;= 0, got {v}")
+        return v
+
+    @field_validator("embedding_index_retry_backoff_seconds")
+    @classmethod
+    def _embedding_index_backoff_nonneg(cls, v: float) -> float:
+        if v &lt; 0:
+            raise ValueError(f"embedding_index_retry_backoff_seconds must be &gt;= 0, got {v}")
+        return v</code></pre>
+
+<h2 id="s5"><span class="step">Step 5</span><em>Verify</em> + commit</h2>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_config.py -v -k embedding_backfill or embedding_index</code> → PASS (4 tests).</p>
+<pre><code>.venv/bin/ruff check src/ormah/config.py tests/test_config.py
+git add src/ormah/config.py tests/test_config.py
+git commit -m "feat(config): add embedding backfill + index-retry settings (#32)"</code></pre>
+
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+<div class="signature"><span class="name">Ormah #32 · Task 01</span><span class="role">Config settings</span></div>
+</main></body></html>

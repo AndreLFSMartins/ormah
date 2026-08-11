@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Delta-selection for dedup/conflict (#81) — Implementation Plan</title>
+  <style>
+    /* rich-doc design system — Anthropic brand, document-oriented.
+       Light paper/ink, Lora italic display, Poppins body, system mono.
+       Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+       monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+       single <style>. Fonts come from Google Fonts (the only external request);
+       everything degrades to system serif/sans/mono offline. */
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+    :root{
+      /* Anthropic brand */
+      --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+      --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+      --accent:var(--orange);            /* fixed primary accent */
+      --font-head:"Poppins",Arial,sans-serif;
+      --font-body:"Lora",Georgia,serif;
+      --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+      --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+    }
+    [data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+      display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+    /* ---- TOC sidebar ---- */
+    nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+      border-right:1px solid var(--hairline);padding:46px 30px}
+    nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+      color:var(--accent);margin-bottom:14px}
+    nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+      letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+    nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+      padding:5px 0;border:none}
+    nav.toc a:hover{color:var(--ink)}
+    nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+    /* ---- main column ---- */
+    main{padding:56px 72px 140px;max-width:var(--maxw)}
+    .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+    .meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+    h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+      padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+    h2:first-of-type{margin-top:0}
+    /* anchor word inside a title → Lora italic, accent */
+    h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+      letter-spacing:-.005em}
+    h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+    p,li{color:var(--ink)} strong{font-weight:700}
+    a{color:var(--accent);text-underline-offset:2px}
+    a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+    a.backlink:hover{color:var(--accent)}
+
+    /* pull statement — Lora italic protagonist */
+    .statement{font:400 italic 26px/1.25 var(--font-body);
+      letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+    /* ---- callout: single accent, hairline, no shadow ---- */
+    .callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+      background:transparent;padding:14px 20px;margin:20px 0}
+    .callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+      color:var(--accent);display:block;margin-bottom:8px}
+    .callout.warn .label::after{content:" — watch out"}
+
+    /* ---- chips ---- */
+    .chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+      padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+    .chip.on{color:var(--accent);border-color:var(--accent)}
+
+    /* ---- tables: hairlines + mono headers, no heavy fills ---- */
+    table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+    th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+    th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+    tr:last-child td{border-bottom:none}
+    td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+    /* ---- figure / diagram ---- */
+    figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+    figure svg{max-width:100%;height:auto}
+    figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+      text-transform:uppercase;letter-spacing:.04em}
+
+    /* ---- code / details ---- */
+    code{font:14px var(--font-mono);color:var(--accent)}
+    pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+    pre code{color:inherit}
+    details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+    summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+      color:var(--stone);padding:12px 0}
+    summary:hover{color:var(--accent)}
+
+    /* ---- signature: monogram (always ink) + spectrum bar ---- */
+    .spectrum{display:flex;height:4px;margin:40px 0 22px}
+    .spectrum span{flex:1}
+    .spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+    .signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+      border-left:2px solid var(--accent);padding-left:16px}
+    .signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+    .signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+    /* ---- phase color-coding: thin left bar, accent cycles ---- */
+    .phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+      padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+    .phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+    .phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+    /* ---- metrics row: large numbers ---- */
+    .metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+    .metrics .metric{flex:0 1 auto}
+    .metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+    .metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+    /* ---- status chips: done / active / todo ---- */
+    .schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+      padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+    .schip.done{background:var(--green);color:#fff}
+    .schip.active{background:var(--orange);color:#fff}
+    .schip.todo{background:var(--hairline);color:var(--stone)}
+
+    /* ---- progress bar ---- */
+    .progress{margin:18px 0}
+    .progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+    .progress .fill{height:100%;background:var(--orange)}
+    .progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+    /* ---- step lists (checkbox rendering) ---- */
+    .steps{list-style:none;padding:0;margin:16px 0}
+    .steps li{margin:12px 0;font:400 15px/1.5 var(--font-body);color:var(--ink)}
+    .steps li::before{content:"☐ ";color:var(--stone);margin-right:8px;font-weight:600}
+    .steps li.done::before{content:"☑ ";color:var(--accent)}
+    .steps li strong{font-weight:600}
+    .steps .substep{margin:8px 0 8px 28px;color:var(--stone);font-size:14px;line-height:1.4}
+    .steps .substep code{font-size:13px}
+
+    @media(max-width:880px){
+      body{grid-template-columns:1fr}
+      nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+      main{padding:32px 24px 90px}
+    }
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <div class="eyebrow">Superpowers Plan</div>
+    <h1 class="doc-title">Delta-selection for dedup/conflict</h1>
+    <a href="#overview">Overview</a>
+    <a href="#task-1-watermark">Task 1: Watermark module</a>
+    <a href="#task-2-conflict-finder">Task 2: Conflict finder delta</a>
+    <a href="#task-3-conflict-advance">Task 3: Conflict advance</a>
+    <a href="#task-4-dedup-finder">Task 4: Dedup finder delta</a>
+    <a href="#task-5-dedup-run">Task 5: Dedup run rewrite</a>
+  </nav>
+
+  <main>
+    <section id="overview">
+      <h2><em>Overview:</em> Delta-selection for dedup/conflict (#81)</h2>
+
+      <p class="statement">Replace <code>ORDER BY RANDOM()</code>/full-scan candidate selection in <code>duplicate_merger</code> and <code>conflict_detector</code> with incremental seq-watermark selection, so maintenance converges on new work.</p>
+
+      <div class="callout">
+        <span class="label">For agentic workers</span>
+        Use <code>superpowers:subagent-driven-development</code> (recommended) or <code>superpowers:executing-plans</code> to implement this plan task-by-task. Each task lives in its own file next to this overview.
+      </div>
+
+      <h3>Architecture</h3>
+      <p>New shared <code>background/watermark.py</code> (key-parametrized get/set on <code>meta</code>). Both finders select seeds <code>seq &gt; watermark ORDER BY seq ASC LIMIT max_seeds</code>; vector neighbors stay age-unfiltered. <code>run_duplicate_detection</code> drops its inline full-scan loop and consumes <code>_find_merge_candidates</code>. Watermarks advance only in <code>run_*</code>, to the last contiguous seed prefix with zero LLM failures. Spec: <code>docs/superpowers/specs/2026-07-15-issue-81-delta-selection-design.md</code>.</p>
+
+      <h3>Tech stack</h3>
+      <p>Python 3.11+, sqlite, pytest (<code>asyncio_mode=auto</code>), fastembed (real embeddings in tests).</p>
+
+      <h3>Pre-flight (once, before Task 1)</h3>
+      <p>Per FORK-WORKFLOW.md: contribution branch from <code>upstream/main</code>, work in an isolated worktree so the Beta clone stays on <code>local-main</code>.</p>
+      <pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git fetch upstream
+git worktree add ../ormah-81 -b fix/81-delta-selection upstream/main
+cd /Users/andre/Documents/GitHub/Tools/ormah-81
+python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"</code></pre>
+      <p>All test commands in tasks run from <code>/Users/andre/Documents/GitHub/Tools/ormah-81</code> with <code>.venv/bin/python -m pytest</code>. When done: push <code>fix/81-delta-selection</code> to <code>fork</code> (never <code>upstream</code>), PR via <code>/council-pr</code>.</p>
+
+      <h3>Files</h3>
+      <table>
+        <tr><th>File</th><th>Change</th></tr>
+        <tr><td><code>src/ormah/background/watermark.py</code></td><td>Create — <code>get_watermark(conn, key)</code>, <code>set_watermark(engine, key, seq)</code></td></tr>
+        <tr><td><code>src/ormah/index/builder.py</code></td><td><code>full_rebuild</code> watermark reset (line 36) extended to the two new keys</td></tr>
+        <tr><td><code>src/ormah/config.py</code></td><td>Add <code>duplicate_check_max_nodes_per_run=500</code>, <code>conflict_check_max_nodes_per_run=500</code> (next to <code>auto_link_max_nodes_per_run</code>, ~line 132)</td></tr>
+        <tr><td><code>src/ormah/background/conflict_detector.py</code></td><td>Finder: opt-in <code>delta=True</code> watermark selection (+ scope stamp); run: advance cursor</td></tr>
+        <tr><td><code>src/ormah/background/duplicate_merger.py</code></td><td>Finder: opt-in <code>delta=True</code>; run: rewrite onto finder + advance cursor</td></tr>
+        <tr><td><code>tests/test_background/test_watermark.py</code></td><td>Create</td></tr>
+        <tr><td><code>tests/test_background/test_conflict_detector.py</code></td><td>Extend</td></tr>
+        <tr><td><code>tests/test_background/test_duplicate_merger.py</code></td><td>Extend</td></tr>
+      </table>
+      <p><strong>Not touched:</strong> <code>auto_linker.py</code> (avoids conflicts with queued PRs #119/#127), <code>memory_engine.py</code> (agent-path call sites keep positional <code>limit</code> AND legacy random selection — see invariants).</p>
+
+      <h3>Tasks</h3>
+      <ol>
+        <li><a href="#task-1-watermark">Task 1: Shared watermark module (TDD)</a></li>
+        <li><a href="#task-2-conflict-finder">Task 2: Delta-selection in <code>_find_conflict_candidates</code></a></li>
+        <li><a href="#task-3-conflict-advance">Task 3: Cursor advance in <code>run_conflict_detection</code></a></li>
+        <li><a href="#task-4-dedup-finder">Task 4: Delta-selection in <code>_find_merge_candidates</code></a></li>
+        <li><a href="#task-5-dedup-run">Task 5: <code>run_duplicate_detection</code> onto the finder + advance</a></li>
+      </ol>
+
+      <h3>Load-bearing invariants (every task must preserve)</h3>
+      <ul>
+        <li><strong>Neighbors are age-unfiltered.</strong> Only SEED selection is delta'd; <code>vec_store.search</code> results are never filtered by seq. New×old pairs must keep working.</li>
+        <li><strong>Watermark advances only past drained seeds.</strong> A seed is "drained" when its neighbor loop completed and none of its LLM checks returned <code>None</code>. Seeds with zero candidates (all prefiltered) are drained — they must not block the cursor.</li>
+        <li><strong>A vectorless seed is a fail-closed BARRIER (<code>break</code>, not skip).</strong> A seed with non-empty text whose vector is not persisted must STOP the finder's seed loop with <code>break</code> in delta mode — not <code>continue</code>. An empty/backfilling <code>node_vectors</code> table would return zero neighbors; if the loop merely skipped the seed and kept going, a later drained seed would advance the watermark PAST the hole and the skipped seed's pairs would never be re-derived. <code>break</code> makes <code>drained_seeds</code> a contiguous prefix by construction. Mirrors the auto_linker's upstream barrier contract.</li>
+        <li><strong>Advance is a contiguous prefix in seq order.</strong> First failed/undrained seed stops the cursor; later seeds are still processed in the same run but not passed.</li>
+        <li><strong>Delta is opt-in: <code>delta=False</code> (default) keeps TODAY's selection byte-for-byte.</strong> The agent/two-call path stays on legacy random selection and never advances any watermark. This is load-bearing: with the upstream default <code>llm_provider="none"</code> the <code>run_*</code> jobs never execute, so a watermark the agent path cannot advance would strand agent-driven deployments on the same oldest seed batch forever. Only the background <code>run_*</code> jobs pass <code>delta=True</code>.</li>
+        <li><strong>Auto-merge requeues the survivor.</strong> When a pair's node was merged away mid-run, the survivor's content rewrite allocates a fresh <code>seq</code>, so it re-enters the delta next run; skipping its stale pairs does not lose work and the seed stays drained.</li>
+        <li><strong><code>full_rebuild</code> resets ALL incremental watermarks.</strong> Upstream already resets <code>auto_link_watermark</code> because mass reindex re-allocates <code>seq</code>; the two new keys must join that DELETE or a rebuilt store sits entirely behind stale cursors.</li>
+        <li><strong>Scope toggle resets the conflict cursor.</strong> The conflict watermark is stamped with the <code>conflict_check_all_spaces</code> value it was advanced under; a mismatch on read treats the watermark as 0.</li>
+        <li><strong>Full content to the LLM in the dedup run.</strong> Finder <code>_nd</code> dicts truncate content to 400 chars; <code>run_duplicate_detection</code> re-fetches full rows by id before <code>_llm_check_duplicate</code>, or auto-merge would generate <code>merged_content</code> from truncated text (data loss).</li>
+        <li><strong>Existing prefilters intact:</strong> <code>auto_link_checked</code> skip, sim thresholds (0.25/0.4), same-type (dedup), <code>_BELIEF_TYPES</code> + space gate (conflict), contradicts/evolved_from edge skip (conflict), composite threshold (dedup), user-node exclusion.</li>
+      </ul>
+
+      <h3>Verification (after Task 5)</h3>
+      <pre><code>.venv/bin/python -m pytest tests/test_background/ -v      # all green
+.venv/bin/ruff check src/ tests/                          # clean
+.venv/bin/python -m pytest tests/ -q                      # full suite, no regressions</code></pre>
+      <p>Cite outputs in the completion report.</p>
+
+      <h3>Known limitations (documented in the PR body, out of scope)</h3>
+      <ul>
+        <li><strong>Deterministically failing seed parks the cursor</strong> — upstream #122.</li>
+        <li><strong>Pending-proposal skip semantics change</strong> (council-confirmed, deferred by design): the run suppresses creating a merge proposal for a pair when EITHER node already sits in ANY pending merge proposal. This OR-match is intentional upstream behavior and is kept verbatim. What #81 changes is the RECOVERY path: pre-#81 the full random re-scan eventually re-judged a suppressed pair, so a later-rejected proposal self-healed; under the watermark the seed drains and the cursor passes it, so a suppressed pair whose blocking proposal is later rejected stays unjudged until either node's content changes (seq bump). Proper fix is a separate feature — proposal rejection should requeue the affected pairs — out of scope for #81's selection change.</li>
+        <li><strong>N+1 re-fetch in the dedup run</strong> (minor, accepted): the data-loss guard re-fetches both full node rows per candidate (up to 2 SELECTs × the pair budget). Bounded and on a background job; a per-run <code>{id: row}</code> cache is a cheap future optimization, not needed for correctness.</li>
+        <li><strong>Embedding-corpus reindex does not reset the cursors</strong> (pre-existing #26 gap, shared with auto_linker — NEW upstream issue, not fixed here): <code>_reindex_all_embeddings</code> (memory_engine.py, fired on an embedding schema-version bump) replaces every vector WITHOUT bumping <code>seq</code> or clearing any watermark. <code>full_rebuild</code> clears all incremental cursors (this PR extended it); <code>_reindex_all_embeddings</code> does not — and neither does it for the pre-existing <code>auto_link_watermark</code>. So after a model/schema embedding upgrade, already-drained nodes are not re-examined with the new embeddings by ANY of the three jobs. A correct fix must distinguish a schema/model change (should reset) from a missing-vector backfill (should not — same embeddings restored) to avoid amplifying #32's full-re-embed cost, and it touches the embedding pipeline + auto_linker — cross-cutting, out of #81's selection scope. NOTE: a content EDIT is NOT affected — <code>update_node</code> re-embeds (<code>_index_embedding</code>) and bumps <code>seq</code>, so edited nodes re-enter the delta with a fresh vector.</li>
+        <li><strong>Permanent vectorless barrier replays paid LLM work until the node embeds</strong> (#122 territory): once a seed hits a permanent vectorless barrier, every run re-processes the later seeds in that batch (they never drain, so the cursor parks) and re-sends their pairs to the LLM. This is exactly auto_linker's fail-closed behavior (it too re-processes later nodes each run on a permanent barrier). Background dedup makes the replay slightly costlier than auto_linker because it deliberately ignores <code>auto_link_checked</code> (correct — that is auto_linker's table) and upstream has no dedup-verdict skip table (<code>duplicate_checked</code> is PR #79, not in this base). Transient embedding failures self-heal in one backfill cycle; a PERMANENTLY unembeddable node is the deadlock — bounded-retry / dead-letter quarantine is upstream #122. A once-per-run WARNING now logs when a barrier parks the cursor (observability).</li>
+        <li><strong>LLM judgment content ceiling:</strong> <code>_llm_check_duplicate</code> truncates content at 2000 chars (pre-existing upstream behavior, unchanged here). The Task 5 guard restores parity with today's run — it prevents the 400-char finder-preview REGRESSION, it does not widen the pre-existing 2000 ceiling.</li>
+      </ul>
+
+      <h3>Reconciliation note (#95 / judge_pairs)</h3>
+      <p>Open PR #95 introduces <code>judge_pairs</code> batching + pair-denominated caps in these same run loops. This plan is based on pure <code>upstream/main</code> (verified 2026-07-15 @ 4f66abc: no <code>pair_batch.py</code>, per-pair <code>_llm_check_*</code> calls, no <code>*_pairs_per_*</code> settings). Whichever lands second re-expresses the other: if #95 lands first, Tasks 3/5's advance logic moves to AFTER the candidates/verdicts zip (a <code>None</code> verdict marks its <code>seed_seq</code> failed) and the K-window flush replaces the linear loop. The same applies to the Recipe-B merge into <code>local-main</code>, which already carries #95.</p>
+      <p><strong>MANDATORY pre-flight for Tasks 3 and 5</strong> (base may have moved since this plan was written): run <code>grep -l judge_pairs src/ormah/background/conflict_detector.py src/ormah/background/duplicate_merger.py</code> in the worktree. Empty output → the Steps apply as written. Any hit → #95 landed first: STOP and re-express the task per this note (advance after the zip, keep <code>settings.*_max_pairs_per_run</code>, keep the K-window) before writing code.</p>
+    </section>
+
+    <section id="task-1-watermark">
+      <h2><em>Task 1:</em> Shared watermark module</h2>
+      <p class="meta">Read 00-overview.md first. Work in /Users/andre/Documents/GitHub/Tools/ormah-81</p>
+
+      <h3>Files</h3>
+      <ul>
+        <li>Create: <code>src/ormah/background/watermark.py</code></li>
+        <li>Modify: <code>src/ormah/index/builder.py:36</code> (full_rebuild watermark reset)</li>
+        <li>Test: <code>tests/test_background/test_watermark.py</code> (create)</li>
+      </ul>
+
+      <p>Key-parametrized generalization of the private trio in <code>auto_linker.py:13-32</code> (which is NOT touched — see overview). Keys used later: <code>duplicate_check_watermark</code>, <code>conflict_check_watermark</code>. <code>full_rebuild</code> re-allocates every node's <code>seq</code>, so it must clear the new cursors exactly like it already clears <code>auto_link_watermark</code> (overview invariant).</p>
+
+      <h3>Steps</h3>
+      <ul class="steps">
+        <li><strong>Step 1: Write the failing tests</strong>
+          <div class="substep">tests/test_background/test_watermark.py</div>
+          <pre><code>"""Tests for the shared seq-watermark helpers (#81)."""
+
+from __future__ import annotations
+
+from ormah.background.watermark import get_watermark, set_watermark
+
+
+def test_default_is_zero(engine):
+    assert get_watermark(engine.db.conn, "duplicate_check_watermark") == 0
+
+
+def test_roundtrip(engine):
+    set_watermark(engine, "duplicate_check_watermark", 42)
+    assert get_watermark(engine.db.conn, "duplicate_check_watermark") == 42
+
+
+def test_overwrite(engine):
+    set_watermark(engine, "conflict_check_watermark", 7)
+    set_watermark(engine, "conflict_check_watermark", 9)
+    assert get_watermark(engine.db.conn, "conflict_check_watermark") == 9
+
+
+def test_keys_are_independent(engine):
+    set_watermark(engine, "duplicate_check_watermark", 5)
+    assert get_watermark(engine.db.conn, "conflict_check_watermark") == 0
+    # and independent of the auto_linker's key
+    assert get_watermark(engine.db.conn, "auto_link_watermark") == 0
+
+
+def test_malformed_value_reads_as_zero(engine):
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            ("duplicate_check_watermark", "not-a-number"),
+        )
+    assert get_watermark(engine.db.conn, "duplicate_check_watermark") == 0
+
+
+def test_full_rebuild_resets_all_incremental_watermarks(engine):
+    """Mass reindex re-allocates seq; every incremental cursor must be cleared
+    (upstream already does this for auto_link_watermark, builder.py:36)."""
+    set_watermark(engine, "duplicate_check_watermark", 42)
+    set_watermark(engine, "conflict_check_watermark", 43)
+
+    engine.builder.full_rebuild()
+
+    assert get_watermark(engine.db.conn, "duplicate_check_watermark") == 0
+    assert get_watermark(engine.db.conn, "conflict_check_watermark") == 0</code></pre>
+        </li>
+        <li><strong>Step 2: Run tests to verify they fail</strong>
+          <div class="substep">Expected: FAIL — ModuleNotFoundError: No module named 'ormah.background.watermark'</div>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/test_watermark.py -v</code></pre>
+        </li>
+        <li><strong>Step 3: Write the implementation</strong>
+          <div class="substep">src/ormah/background/watermark.py</div>
+          <pre><code>"""Shared seq-watermark helpers for incremental background jobs (#81).
+
+Generalizes the pattern auto_linker introduced in #26: a job records the seq
+of the last fully-processed node under a key in ``meta`` and selects only
+``seq > watermark`` on the next run. auto_linker still uses its private copy
+(kept untouched to avoid conflicts with queued PRs); migrating it here is a
+follow-up.
+"""
+
+from __future__ import annotations
+
+DUPLICATE_WATERMARK_KEY = "duplicate_check_watermark"
+CONFLICT_WATERMARK_KEY = "conflict_check_watermark"
+
+
+def get_watermark(conn, key: str) -> int:
+    """Return the seq of the last fully-processed node for *key*, or 0."""
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_watermark(engine, key: str, seq: int) -> None:
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, str(seq)),
+        )</code></pre>
+        </li>
+        <li><strong>Step 4: Extend the full_rebuild reset</strong>
+          <div class="substep">In src/ormah/index/builder.py, replace line 36</div>
+          <pre><code>        self.db.conn.execute(
+            "DELETE FROM meta WHERE key IN "
+            "('auto_link_watermark', 'duplicate_check_watermark', 'conflict_check_watermark')"
+        )</code></pre>
+        </li>
+        <li><strong>Step 5: Run tests to verify they pass</strong>
+          <div class="substep">Expected: 6 passed</div>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/test_watermark.py -v</code></pre>
+        </li>
+        <li><strong>Step 6: Commit</strong>
+          <pre><code>git add src/ormah/background/watermark.py src/ormah/index/builder.py tests/test_background/test_watermark.py
+git commit -m "feat(background): shared seq-watermark helpers for incremental jobs (#81)"</code></pre>
+        </li>
+      </ul>
+    </section>
+
+    <section id="task-2-conflict-finder">
+      <h2><em>Task 2:</em> Delta-selection in <code>_find_conflict_candidates</code></h2>
+      <p class="meta">Depends on Task 1. Work in /Users/andre/Documents/GitHub/Tools/ormah-81</p>
+
+      <h3>Files</h3>
+      <ul>
+        <li>Modify: <code>src/ormah/config.py</code> (~line 133, right after <code>auto_link_max_nodes_per_run</code>)</li>
+        <li>Modify: <code>src/ormah/background/conflict_detector.py:104-131</code> (<code>_find_conflict_candidates</code> selection)</li>
+        <li>Test: <code>tests/test_background/test_conflict_detector.py</code> (extend)</li>
+      </ul>
+
+      <p><strong>Contract (overview invariant "delta is opt-in"):</strong> New keyword-only <code>delta: bool = False</code>.</p>
+      <ul>
+        <li><code>delta=False</code> (default): TODAY's selection byte-for-byte (<code>ORDER BY RANDOM()</code> full fetch, same filters), returns a plain candidate list. The agent path (<code>memory_engine.py:1678</code>, positional <code>limit</code>) hits this and its behavior does not change.</li>
+        <li><code>delta=True</code> (only the background run passes it): seeds = <code>seq &gt; watermark ORDER BY seq ASC LIMIT max_seeds</code> (default from <code>conflict_check_max_nodes_per_run</code>); vector neighbors stay age-unfiltered; each candidate carries <code>seed_seq</code>; returns <code>(candidates, drained_seeds)</code>. A scope-stamp mismatch treats the watermark as 0.</li>
+      </ul>
+
+      <h3>Steps</h3>
+      <ul class="steps">
+        <li><strong>Step 1: Write the failing tests</strong>
+          <div class="substep">Append to tests/test_background/test_conflict_detector.py. See full task file for complete test code.</div>
+        </li>
+        <li><strong>Step 2: Run tests to verify they fail</strong>
+          <div class="substep">Expected: FAIL — TypeError: _find_conflict_candidates() got an unexpected keyword argument 'delta'</div>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/test_conflict_detector.py -v -k "watermark or old_neighbor or max_seeds or drained"</code></pre>
+        </li>
+        <li><strong>Step 3: Add the settings</strong>
+          <div class="substep">In src/ormah/config.py, immediately after auto_link_max_nodes_per_run (~line 133)</div>
+          <pre><code>    duplicate_check_max_nodes_per_run: int = 500  # seed batch per dedup run (#81)
+    conflict_check_max_nodes_per_run: int = 500   # seed batch per conflict run (#81)</code></pre>
+        </li>
+        <li><strong>Step 4: Rewrite the finder's selection</strong>
+          <div class="substep">In src/ormah/background/conflict_detector.py, change signature and node fetch. See full task file for implementation.</div>
+        </li>
+        <li><strong>Step 5: Run the new tests, then the whole file</strong>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/test_conflict_detector.py -v</code></pre>
+        </li>
+        <li><strong>Step 6: Commit</strong>
+          <pre><code>git add src/ormah/config.py src/ormah/background/conflict_detector.py tests/test_background/test_conflict_detector.py
+git commit -m "feat(background): delta-select conflict seeds by seq watermark (#81)"</code></pre>
+        </li>
+      </ul>
+    </section>
+
+    <section id="task-3-conflict-advance">
+      <h2><em>Task 3:</em> Watermark advance in <code>run_conflict_detection</code></h2>
+      <p class="meta">Depends on Tasks 1–2. Work in /Users/andre/Documents/GitHub/Tools/ormah-81</p>
+
+      <h3>Files</h3>
+      <ul>
+        <li>Modify: <code>src/ormah/background/conflict_detector.py</code> (<code>run_conflict_detection</code>, ~line 215)</li>
+        <li>Test: <code>tests/test_background/test_conflict_detector.py</code> (extend)</li>
+      </ul>
+
+      <p><strong>Semantics (overview invariants):</strong> Cursor advances to the last CONTIGUOUS drained seed (seq order) with zero LLM failures; a <code>_llm_check_conflict</code> returning <code>None</code> marks its seed failed; later seeds still processed this run but not passed. Agent path never advances (it calls the finder directly, not this function).</p>
+
+      <h3>Steps</h3>
+      <ul class="steps">
+        <li><strong>Step 1: Write the failing tests</strong>
+          <div class="substep">Append to tests/test_background/test_conflict_detector.py. See full task file for complete test code.</div>
+        </li>
+        <li><strong>Step 2: Run tests to verify they fail</strong>
+          <div class="substep">Expected: FAIL — watermark stays 0 (run_conflict_detection does not advance it yet)</div>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/test_conflict_detector.py -v -k "advances or parks or noop"</code></pre>
+        </li>
+        <li><strong>Step 3: Implement the advance</strong>
+          <div class="substep">In run_conflict_detection (~line 215): switch finder call to delta=True, track failed seeds, advance contiguous clean prefix</div>
+          <pre><code>        from ormah.background.watermark import (
+            CONFLICT_WATERMARK_KEY, get_watermark, set_watermark,
+        )
+
+        candidates, drained_seeds = _find_conflict_candidates(
+            engine, limit=10_000, delta=True,
+        )
+        failed_seed_seqs: set[int] = set()
+        # ... collect failures in loop ...
+        for candidate in candidates:
+            llm_result = _llm_check_conflict(settings, node_a, node_b)
+            if llm_result is None:
+                failed_seed_seqs.add(candidate["seed_seq"])
+
+        # ponytail: contiguous-prefix advance
+        new_watermark = get_watermark(engine.db.conn, CONFLICT_WATERMARK_KEY)
+        for _seed_id, seed_seq in drained_seeds:  # ascending seq
+            if seed_seq in failed_seed_seqs:
+                break
+            new_watermark = seed_seq
+        set_watermark(engine, CONFLICT_WATERMARK_KEY, new_watermark)
+        with engine.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (CONFLICT_SCOPE_STAMP_KEY, _conflict_scope_value(settings)),
+            )</code></pre>
+        </li>
+        <li><strong>Step 4: Run the whole file</strong>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/test_conflict_detector.py -v</code></pre>
+        </li>
+        <li><strong>Step 5: Commit</strong>
+          <pre><code>git add src/ormah/background/conflict_detector.py tests/test_background/test_conflict_detector.py
+git commit -m "feat(background): advance conflict watermark past drained seeds (#81)"</code></pre>
+        </li>
+      </ul>
+    </section>
+
+    <section id="task-4-dedup-finder">
+      <h2><em>Task 4:</em> Delta-selection in <code>_find_merge_candidates</code></h2>
+      <p class="meta">Depends on Task 1. Work in /Users/andre/Documents/GitHub/Tools/ormah-81</p>
+
+      <h3>Files</h3>
+      <ul>
+        <li>Modify: <code>src/ormah/background/duplicate_merger.py:135-237</code> (<code>_find_merge_candidates</code>)</li>
+        <li>Test: <code>tests/test_background/test_duplicate_merger.py</code> (extend)</li>
+      </ul>
+
+      <p><strong>Contract (same as Task 2):</strong> Keyword-only <code>delta: bool = False</code>. Default keeps TODAY's selection byte-for-byte and plain-list return (agent path untouched); <code>delta=True</code> (background run only) selects seeds <code>seq &gt; duplicate_check_watermark ORDER BY seq ASC LIMIT max_seeds</code> and returns <code>(candidates, drained_seeds)</code>. Dedup has no scope stamp (no space gate here). Dedup-specific prefilters kept intact in BOTH modes: user-node exclusion, <code>auto_link_checked</code> skip, embedding sim ≥ 0.25, same-type, composite score ≥ <code>_COMPOSITE_THRESHOLD</code>.</p>
+
+      <h3>Steps</h3>
+      <ul class="steps">
+        <li><strong>Step 1: Write the failing tests</strong>
+          <div class="substep">Append to tests/test_background/test_duplicate_merger.py. See full task file for complete test code.</div>
+        </li>
+        <li><strong>Step 2: Run tests to verify they fail</strong>
+          <div class="substep">Expected: FAIL — TypeError and watermark stays 0 (selection still ORDER BY RANDOM())</div>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/test_duplicate_merger.py -v -k "watermark or old_neighbor or drained"</code></pre>
+        </li>
+        <li><strong>Step 3: Rewrite the finder's selection</strong>
+          <div class="substep">Mirror Task 2 exactly, with the dedup key and no scope stamp. See full task file for implementation.</div>
+        </li>
+        <li><strong>Step 4: Run the whole file</strong>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/test_duplicate_merger.py -v</code></pre>
+        </li>
+        <li><strong>Step 5: Commit</strong>
+          <pre><code>git add src/ormah/background/duplicate_merger.py tests/test_background/test_duplicate_merger.py
+git commit -m "feat(background): delta-select duplicate seeds by seq watermark (#81)"</code></pre>
+        </li>
+      </ul>
+    </section>
+
+    <section id="task-5-dedup-run">
+      <h2><em>Task 5:</em> <code>run_duplicate_detection</code> onto the finder + advance</h2>
+      <p class="meta">Depends on Tasks 1, 2 (settings), 4. Work in /Users/andre/Documents/GitHub/Tools/ormah-81</p>
+
+      <h3>Files</h3>
+      <ul>
+        <li>Modify: <code>src/ormah/background/duplicate_merger.py</code> (<code>run_duplicate_detection</code>, lines 240–386)</li>
+        <li>Test: <code>tests/test_background/test_duplicate_merger.py</code> (extend)</li>
+      </ul>
+
+      <p>The inline full-scan loop (plain <code>SELECT</code> over ALL nodes, its own vec search and prefilters, no skip check, no bound) is replaced by consuming <code>_find_merge_candidates(..., delta=True)</code>. Declared behavior change for the PR body: the run now honors the <code>auto_link_checked</code> skip and the per-run seed bound.</p>
+
+      <div class="callout warn">
+        <span class="label">Critical data-loss guard (overview invariant)</span>
+        Finder <code>_nd</code> dicts truncate <code>content</code> to 400 chars. <code>_llm_check_duplicate</code> output feeds <code>execute_merge(merged_content=...)</code> — judging/merging from 400-char previews would be a regression. The run MUST re-fetch untruncated rows by id before calling the LLM. Note the pre-existing ceiling: <code>_llm_check_duplicate</code> itself truncates at 2000 chars (upstream, unchanged by this plan) — the re-fetch restores PARITY with today's run, it does not widen that ceiling (documented in the overview's known limitations).
+      </div>
+
+      <h3>Steps</h3>
+      <ul class="steps">
+        <li><strong>Step 1: Write the failing tests</strong>
+          <div class="substep">Append to tests/test_background/test_duplicate_merger.py. See full task file for complete test code.</div>
+        </li>
+        <li><strong>Step 2: Run tests to verify they fail</strong>
+          <div class="substep">Expected: FAIL — test_run_does_not_rejudge_pair_below_watermark sees LLM calls; others fail on watermark == 0</div>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/test_duplicate_merger.py -v -k "rejudge or delta_pair or full_content or parks"</code></pre>
+        </li>
+        <li><strong>Step 3: Rewrite the run</strong>
+          <div class="substep">Replace body between user_node_id line (260) and final log (382). Keep LLM confirmation, auto-merge, proposal blocks VERBATIM; only selection and bookkeeping change.</div>
+          <pre><code>        from ormah.background.watermark import (
+            DUPLICATE_WATERMARK_KEY, get_watermark, set_watermark,
+        )
+
+        candidates, drained_seeds = _find_merge_candidates(
+            engine, limit=10_000, delta=True,
+        )
+        failed_seed_seqs: set[int] = set()
+        proposals_created = 0
+
+        for cand in candidates:
+            # Re-fetch FULL rows: finder previews truncated to 400 chars
+            node = engine.db.conn.execute(
+                "SELECT id, content, title, type FROM nodes WHERE id = ?",
+                (cand["node_a"]["id"],),
+            ).fetchone()
+            other = engine.db.conn.execute(
+                "SELECT id, content, title, type FROM nodes WHERE id = ?",
+                (cand["node_b"]["id"],),
+            ).fetchone()
+            if node is None or other is None:
+                continue  # merged/deleted earlier in this run
+
+            # ... LLM confirmation and auto-merge blocks unchanged ...
+            llm_result = _llm_check_duplicate(settings, node, other)
+            if llm_result is None:
+                failed_seed_seqs.add(cand["seed_seq"])
+                continue
+
+        # ponytail: contiguous-prefix advance
+        new_watermark = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
+        for _seed_id, seed_seq in drained_seeds:  # ascending seq
+            if seed_seq in failed_seed_seqs:
+                break
+            new_watermark = seed_seq
+        set_watermark(engine, DUPLICATE_WATERMARK_KEY, new_watermark)</code></pre>
+        </li>
+        <li><strong>Step 4: Run the whole file, then lint</strong>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/test_duplicate_merger.py -v
+.venv/bin/ruff check src/ormah/background/duplicate_merger.py</code></pre>
+        </li>
+        <li><strong>Step 5: Full-suite verification (overview gate)</strong>
+          <pre><code>.venv/bin/python -m pytest tests/test_background/ -v
+.venv/bin/python -m pytest tests/ -q
+.venv/bin/ruff check src/ tests/</code></pre>
+        </li>
+        <li><strong>Step 6: Commit</strong>
+          <pre><code>git add src/ormah/background/duplicate_merger.py tests/test_background/test_duplicate_merger.py
+git commit -m "refactor(background): route run_duplicate_detection through the delta finder (#81)"</code></pre>
+        </li>
+      </ul>
+    </section>
+
+    <div class="spectrum">
+      <span class="s1"></span>
+      <span class="s2"></span>
+      <span class="s3"></span>
+    </div>
+    <div class="signature">
+      <div class="name">Delta-selection for dedup/conflict</div>
+      <div class="role">Implementation Plan — Issue #81</div>
+    </div>
+  </main>
+
+  <!-- rich-doc-src-sha256:7ee39525daf57302d8b9c37700d9f887f22dcdd693020358e91e57e1f17f5544 -->
+</body>
+</html>

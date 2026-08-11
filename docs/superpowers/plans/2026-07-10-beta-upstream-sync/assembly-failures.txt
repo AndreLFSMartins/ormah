@@ -1,0 +1,9 @@
+FAILED tests/test_setup.py::TestConfigureClaudeCodeMcp::test_merges_with_existing_mcp_servers
+FAILED tests/test_setup.py::TestConfigureClaudeCodeMcp::test_writes_mcp_config_to_claude_json
+FAILED tests/test_setup.py::TestConfigureCodexMcp::test_preserves_existing_toml_content
+FAILED tests/test_setup.py::TestConfigureCodexMcp::test_replaces_existing_ormah_block
+FAILED tests/test_setup.py::TestConfigureCodexMcp::test_writes_mcp_config_to_codex_toml
+FAILED tests/test_setup.py::TestRemoveFastembedCache::test_deletes_known_model_dirs
+FAILED tests/test_setup.py::TestRemoveFastembedCache::test_removes_cache_dir_when_empty_after_cleanup
+FAILED tests/test_setup.py::TestRemoveFastembedCache::test_uses_default_fastembed_cache_dir
+FAILED tests/test_setup_json.py::test_detect_clients_none - AssertionError: a...
