@@ -120,6 +120,21 @@ Music/
 # Superpowers generated planning artifacts
 /docs/superpowers/
 
+# ...except they ARE versioned here (fork/local-main only), same deal as
+# graphify-out/ above: plans and specs are this Beta's decision history and are
+# worth more than a clean `git status`. Must come AFTER both rules above (l.94
+# unanchored, l.121 anchored) — a negation only works once every matching rule
+# has been seen. Anchored to the repo root, so a nested docs/superpowers/ inside
+# a worktree stays ignored.
+# What keeps this off upstream is NOT this file: it is .git/hooks/pre-push
+# (fail-closed on local-only paths) plus FORK-WORKFLOW.md Recipe A. Versioning
+# and shipping are separate concerns.
+# NOTE: this re-inlines ~4.6 MB into any tool that reads the working tree —
+# see the 1 MiB Codex-review limit noted at l.86. If /council-pr trips
+# "Input exceeds maximum length" again, fix it in the council's file selection,
+# not by re-ignoring this tree.
+!/docs/superpowers/
+
 # >>> dev-council ephemerals (managed by /council-init — do not edit) >>>
 .council/project-map.md
 .council/current-plan.md
