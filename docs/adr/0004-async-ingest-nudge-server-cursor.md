@@ -161,6 +161,10 @@ immediately into `failed/`, with the original job bytes preserved plus a `<name>
 `external` (provider down, timeout, EIO) retries forever with persisted backoff — the H1 rule that an
 outage must never discard real data.
 
+> **CORRECTED 2026-08-11.** "Retries forever" is the intent, not the behaviour. The backoff arithmetic
+> raises `OverflowError` at the 1025th attempt and the requeue never lands, so the retry stops there —
+> observed in production. See the amendment 2026-08-11 below.
+
 This is deliberate, not a defect: the alternative at that call site is a silent `complete()`, which would
 strand the bytes with no record at all. The code says so, and names its successor:
 *"keep a dead-letter record with a distinct reason (slice 3 owns the real policy) — never a silent
@@ -580,3 +584,80 @@ The accepted decision (client nudges, server owns the Cursor, one always-on work
 spool amendment, the rule that **suppression of selection is never expressed by moving the cursor**,
 and the 2026-08-09 finding that recoverability expires within roughly two weeks — all stand
 untouched. The recovery window is the item with a clock on it.
+
+## Amendment 2026-08-11 — H1's "retry forever" has a hard stop at attempt 1025, and a deleted transcript never reaches the dead-letter
+
+H1 — *an outage must never discard real data* — is the rule the spool's failure classing exists to serve:
+`external` retries forever with persisted backoff, everything else is deterministic and dead-lettered at
+once (`ingest_spool.py:234-243 @ 67f70d4`). Both halves are wrong in the code as shipped, and the two
+defects compose into a queue that neither retries nor records. Observed in production on 2026-08-11:
+**1040** occurrences of `Ingest drain run error: int too large to convert to float` between 03:37:18 and
+09:46:43, across 8 jobs, zero in the three preceding rotated logs.
+
+### The backoff cap is applied after the exponentiation, so it never guards the arithmetic
+
+```python
+delay = min(_BACKOFF_BASE_SECONDS * (2 ** (attempts - 1)), _BACKOFF_MAX_SECONDS)  # ingest_spool.py:247
+```
+
+`2 ** (attempts - 1)` is an arbitrary-precision `int`; `min(…, 300.0)` runs only on the product. Once
+`attempts - 1` crosses the float range the multiplication raises before any capping happens. Reproduced
+by execution: `attempts=1024 → 300.0`, `attempts=1025 → OverflowError: int too large to convert to float`
+— verbatim the logged message.
+
+`requeue` raises before `self._write_job(name, payload, _PENDING)` (`ingest_spool.py:272`), so **no
+retry is ever persisted**. This is not a cap that dead-letters — the outcome the docstring argues
+against — it is a break that strands. The distinction matters: a dead-letter is a record, this is
+neither progress nor record.
+
+At the 300 s ceiling, attempt 1025 arrives after roughly 3.5 days of continuous retry. **Any** genuine
+provider outage of that length hits the same wall, not only the deleted-transcript case below. The rule
+this ADR exists to protect fails precisely in the scenario it was written for.
+
+### A deleted transcript is classed as an external failure, against the contract
+
+```python
+except OSError as e:
+    logger.warning("Cannot read %s: %s", path, e)   # session_watcher.py:879
+    return IngestResult.TRANSIENT                   # :880
+```
+
+`FileNotFoundError` is an `OSError`, so a permanently deleted transcript is indistinguishable from
+`EIO`/`EACCES` here and becomes `TRANSIENT` → `requeue(job, failure_class="external")` → retried
+forever. `requeue`'s own contract says the opposite in as many words: *"deterministic (malformed job,
+**transcript deleted**, path no longer under any watch root): a retry cannot change the outcome, so the
+job is dead-lettered immediately"* (`ingest_spool.py:241-242`). The code contradicts its own docstring.
+This is what fed the 8 jobs to attempt 1025 in the first place.
+
+### The stranded job is re-admitted with no backoff, which is why it repeats
+
+The drain's own recovery keeps the broken job alive rather than quarantining it. `_run_job` raises →
+the handler tries `requeue` again (`session_watcher.py:1419-1420`) → same overflow, suppressed → the job
+stays in `running/` → the idle branch's `self.spool.recover(min_age_seconds=self._recover_stale_seconds)`
+(`:1401`, 60 s at `:1326`) renames it back to `pending/` (`ingest_spool.py:337`) **with the original
+payload**, whose `not_before` elapsed long ago → immediately claimed → same overflow. A ~60 s cycle per
+job, not a CPU spin, and permanent: the backoff that would slow it is exactly what fails to be written.
+
+This is a third-order consequence, not a separate defect. It disappears once the arithmetic stops
+raising; adding machinery here would treat the symptom.
+
+### How it ended, and what that cost
+
+The loop stopped because the spool was **deleted**, not fixed: every `ingest_queue/<root>/` subdirectory
+carries an mtime of 09:47, matching the 09:47:16 restart that recreated them. The 8 jobs are gone. Their
+transcripts were already unreadable — that is what jammed them — but whether any carried unconsumed
+content is now unknowable, and the deletion was indiscriminate: a legitimate job queued in that window
+would have gone with them. Manual destruction of the queue is the failure mode H1 forbids, arrived at
+from the opposite direction.
+
+*Not verified:* the log records four distinct paths across the 8 jobs, so the assumption that all eight
+were deleted transcripts is inference, not measurement. The queue is gone; it cannot be made one.
+
+### What this does not change
+
+The accepted decision stands, and so does the directory spool: the failure is in two expressions inside
+it, not in the choice of a spool over a job table. The 2026-08-10 windowed-parse cause is untouched —
+that defect moves the cursor over unconsumed bytes, this one refuses to retry a job at all; they share
+no mechanism. The repair order stated on 2026-08-09 (cause before repair) also holds here: both fixes
+are small and their cause is now measured, which is the difference between this amendment and the
+force-close one.
