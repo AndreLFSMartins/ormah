@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ormah — Ciclo de vida da memória (análise 2026-07-14)</title>
+<style>
+  :root {
+    --ink: #1a2330; --muted: #5c6b7a; --bg: #fafbfc; --card: #ffffff;
+    --line: #e3e8ee; --red: #c0392b; --green: #1e8449; --blue: #2874a6; --amber: #b7950b;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         color: var(--ink); background: var(--bg); margin: 0; padding: 2rem 1.5rem 4rem; line-height: 1.55; }
+  main { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.2rem; margin: 2.5rem 0 .5rem; border-bottom: 2px solid var(--line); padding-bottom: .35rem; }
+  .sub { color: var(--muted); font-size: .92rem; margin-bottom: 1.5rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 1.25rem; margin: 1rem 0; overflow-x: auto; }
+  .legend { display: flex; flex-wrap: wrap; gap: .9rem; font-size: .82rem; color: var(--muted); margin: .5rem 0 0; }
+  .legend span::before { content: "■ "; }
+  .l-red::before { color: var(--red); } .l-green::before { color: var(--green); }
+  .l-blue::before { color: var(--blue); } .l-amber::before { color: var(--amber); }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  th, td { border: 1px solid var(--line); padding: .5rem .7rem; text-align: left; vertical-align: top; }
+  th { background: #f0f3f6; }
+  .facts { font-size: .85rem; color: var(--muted); }
+  .facts code { background: #eef1f4; padding: .05rem .3rem; border-radius: 4px; }
+  ul.open { margin: .4rem 0 0 1.1rem; padding: 0; }
+  ul.open li { margin: .35rem 0; }
+  .mermaid { display: flex; justify-content: center; }
+  .tag { font-size: .72rem; font-weight: 600; padding: .1rem .45rem; border-radius: 99px; vertical-align: middle; }
+  .tag.hoje { background: #fde8e8; color: var(--red); }
+  .tag.prop { background: #eaf2fb; color: var(--blue); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Ormah — Ciclo de vida da memória</h1>
+  <div class="sub">Análise para a resposta ao PR #31 (bounded forgetting / Deep Recall) · dados medidos no Beta em 2026-07-14
+    · store: 14.629 nós (12.194 archival · 2.384 working · 51 core) · 231 tombstones em <code>deleted/</code></div>
+
+  <h2>1. Como funciona HOJE <span class="tag hoje">medido no Beta</span></h2>
+  <div class="card">
+    <pre class="mermaid">
+flowchart TD
+  classDef broken fill:#fde8e8,stroke:#c0392b,color:#7b241c
+  classDef hot fill:#e8f6f0,stroke:#1e8449,color:#145a32
+  classDef dead fill:#f2f3f4,stroke:#7f8c8d,color:#515a5a
+  classDef surface fill:#fef9e7,stroke:#b7950b,color:#7d6608
+
+  SW["session_watcher<br/>transcripts das sessões"] --> ING
+  REM["remember<br/>MCP · API · CLI"] --> ING
+  ING["INGEST — sem write-gate<br/>tudo vira nó novo, até o 13º duplicado"]:::broken
+
+  ING --> W["WORKING · n=2.384<br/>stability = 1.0 — knob fsrs_initial_stability morto"]:::hot
+  W -- "promote raro" --> CORE["CORE · n=51 · cap 50"]:::hot
+  W -- "decay: R &lt; 0,3 após ~29h sem recall explícito<br/>mediana 1 DIA até arquivar" --> A["ARCHIVAL · n=12.194 · 85%<br/>hoje significa: mais de ~1 dia de idade"]:::broken
+
+  WHISPER["WHISPER automático<br/>só core+working · máx 6 nós/prompt<br/>injeção NÃO conta como acesso"]:::surface -. lê .-> W
+  WHISPER -. lê .-> CORE
+  RECALL["RECALL explícito<br/>todos os tiers · archival com −0,1<br/>só 50 nós já acessados em 14,6k"]:::surface -. lê .-> A
+  MAINT["MANUTENÇÃO: dedup · conflict · auto_linker<br/>varrem TODOS os tiers — backlog ≈ 12k nunca converge"]:::broken -. varre .-> A
+
+  CFD["conflict_detector"] -- "grava edge contradicts e PARA<br/>as 2 memórias seguem vivas e recuperáveis · 69 edges" --> A
+  MOUT["mark_outdated — só quando o agente chama<br/>valid_until = now · usado 12x"] -- "some de toda busca,<br/>arquivo continua vivo" --> A
+
+  A -- "FORGETTING — armado no Beta<br/>gates: 90d archival + R&lt;0,05 + importância + grau ≤2 + sem feedback+<br/>hoje todos degenerados: R≈0 p/ todos, importância máx 0,56" --> DEL["deleted/ — soft-delete<br/>some de TODOS os índices: invisível até p/ deep search<br/>231 tombstones, merge e forgetting MISTURADOS"]:::broken
+  MERGER["duplicate_merger<br/>2.223 merges pendentes na fila"] -- "tombstone da dupla absorvida" --> DEL
+  MANUAL["delete manual / API"] --> DEL
+  DEL -- "purge após 30 dias<br/>sem distinguir a origem do tombstone" --> GONE[("hard delete<br/>irreversível")]:::dead
+    </pre>
+    <div class="legend">
+      <span class="l-red">quebrado / miscalibrado</span>
+      <span class="l-green">caminho quente</span>
+      <span class="l-amber">superfícies de leitura</span>
+    </div>
+  </div>
+  <p class="facts">Defeitos-chave: o relógio FSRS nasce com <code>stability=1.0</code> e só cresce com recall explícito (que quase nunca acontece) → "velho" = 1 dia; a importância nunca passa de 0,56, então o guard de 0,5/0,7 protege quase ninguém; o soft-delete remove o nó de <em>todos</em> os índices — o "cold" de hoje é lixeira, não camada; e a UI upstream (Cytoscape+cola) trava com ~15k nós — a motivação original do delete foi renderização, não dados.</p>
+
+  <h2>2. Como PASSARIA a funcionar <span class="tag prop">proposta em discussão — r-spade + eval 07-13</span></h2>
+  <div class="card">
+    <pre class="mermaid">
+flowchart TD
+  classDef novo fill:#eaf2fb,stroke:#2874a6,color:#1a5276
+  classDef hot fill:#e8f6f0,stroke:#1e8449,color:#145a32
+  classDef dead fill:#f2f3f4,stroke:#7f8c8d,color:#515a5a
+  classDef decisao fill:#fef9e7,stroke:#b7950b,color:#7d6608,stroke-dasharray:5 5
+
+  SRC["sessões + remember"] --> GATE["WRITE-GATE na entrada — novo, estilo mem0<br/>ADD · UPDATE · NOOP por similaridade<br/>ataca o problema nº1: produção 6x maior que consumo"]:::novo
+  GATE -- ADD --> W2["WORKING — janela de SEMANAS<br/>stability inicial calibrada ~7–14d<br/>reforço: recall + injeção whisper + feedback+"]:::hot
+  GATE -- "UPDATE: fato novo supersede o antigo" --> VU
+  W2 -- promote --> CORE2["CORE"]:::hot
+  W2 -- "decay calibrado:<br/>semanas sem nenhum sinal" --> A2["ARCHIVAL — genuinamente frio<br/>fora do whisper · FORA da manutenção pesada<br/>backlog cai de ~12k para ~2k"]
+  A2 -- "forgetting gates<br/>agora sobre sinais reais" --> COLD["COLD — novo estado<br/>continua INDEXADO, fora do recall normal<br/>com proveniência: quando/por que esfriou"]:::novo
+  COLD -- "DEEP RECALL — novo<br/>busca explícita e instrumentada<br/>telemetria de hits por idade" --> SURF["memória ressurgida"]:::novo
+  SURF -- "provou uso: feedback+" --> W2
+  COLD -- "purge SÓ explícito / opt-in<br/>decidido com dados do Deep Recall" --> GONE2[("hard delete")]:::dead
+
+  SLEEP["DESTILAÇÃO no sleep cycle — Letta-style<br/>gist consolidado por space; originais viram proveniência"]:::decisao -. curadoria .-> A2
+
+  CFD2["conflict_detector"] -- "conflito com direção temporal clara" --> PROP2["proposal: mark_outdated do perdedor<br/>humano/agente aprova"]:::novo
+  PROP2 --> VU["valid_until = now<br/>invalidado: fora de busca, vira histórico<br/>bi-temporalidade light — primitivo JÁ existe"]:::novo
+
+  MERGE2["tombstone de merge<br/>deleted_reason = merged"] -- "retention 30d — semântica de undo" --> GONE2
+  PRIV["pedido explícito do usuário<br/>privacidade / esquece isso"] --> GONE2
+
+  UI["UI: WebGL sigma.js + FA2 — já existe no local-main<br/>active-first + drill-down por space<br/>remove a motivação original do delete"]:::decisao
+    </pre>
+    <div class="legend">
+      <span class="l-blue">novo / mudança</span>
+      <span class="l-green">caminho quente</span>
+      <span class="l-amber">apoio / pré-requisito</span>
+    </div>
+  </div>
+
+  <h2>3. Soft × hard delete — por origem do nó</h2>
+  <div class="card">
+    <table>
+      <tr><th>Caso</th><th>O que fazer</th><th>Por quê</th></tr>
+      <tr><td><strong>Conflito / superseded</strong></td><td>Nem soft-delete: <code>mark_outdated</code> (valid_until) no perdedor</td><td>Primitivo já existe; invalidado sai de toda busca mas fica como histórico/proveniência</td></tr>
+      <tr><td><strong>Tombstone de merge</strong></td><td>Soft → hard após retention (como hoje)</td><td>Conteúdo absorvido pelo sobrevivente; tombstone só serve de undo</td></tr>
+      <tr><td><strong>Esfriado pelo forgetting</strong></td><td>Soft only = COLD, buscável via Deep Recall</td><td>Deletar destrói o experimento; com a UI corrigida não há pressão operacional</td></tr>
+      <tr><td><strong>Pedido do usuário (privacidade)</strong></td><td>Hard, imediato</td><td>Único caso em que hard delete é requisito</td></tr>
+    </table>
+  </div>
+
+  <h2>4. Decisões abertas (a discutir / levar ao r-spade)</h2>
+  <div class="card">
+    <ul class="open">
+      <li><strong>Recall normal continua vendo archival?</strong> Hoje vê (com −0,1). No modelo do r-spade, "normal recall searches active memory". Os dados não decidem — é mais dele que nosso.</li>
+      <li><strong>Janela-alvo do working:</strong> stability inicial 7–14d coloca a demoção em ~10–20 dias sem sinal. Qual o número certo?</li>
+      <li><strong>Injeção de whisper reforça stability?</strong> Recomendado sim, com peso menor que recall explícito — senão o FSRS nunca aprende. Risco: feedback-loop do que já está quente.</li>
+      <li><strong>Importância:</strong> recalibrar o scorer (máx atual 0,56) ou baixar thresholds?</li>
+      <li><strong>Sequência:</strong> calibração do relógio → UI WebGL upstream → cold layer + Deep Recall instrumentado → purge só com dados (3–6 meses de telemetria).</li>
+      <li><strong>Bomba de outubro:</strong> com deleção armada e gates degenerados, a coorte do backfill (07-06→08) fica elegível em massa ~05/10. Calibrar antes disso ou desarmar.</li>
+    </ul>
+  </div>
+
+  <p class="facts">Fontes: código em <code>local-main</code> (decay_manager, forgetting_manager, conflict_detector, hybrid_search, file_store), índice vivo do Beta (<code>~/.local/share/ormah/memory/index.db</code>, read-only), eval <code>docs/evaluation-2026-07-13-deep-review.md</code>, review do r-spade no PR #31 (2026-07-10). Números medidos em 2026-07-14.</p>
+</main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", flowchart: { curve: "basis", useMaxWidth: true } });
+</script>
+</body>
+</html>

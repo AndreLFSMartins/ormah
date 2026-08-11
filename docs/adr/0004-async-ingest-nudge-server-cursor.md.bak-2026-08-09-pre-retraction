@@ -1,0 +1,322 @@
+---
+status: accepted
+---
+
+# Ingest is async: the client nudges, the server owns the cursor and advances on job completion
+
+Both **Ingest** lanes coupled cursor-advance to a synchronous extraction that can outlast any client's
+patience. The **Hook lane** posts the delta over HTTP and advances its client-side **Cursor**
+(`whisper-cursors.json`) only on the response; extraction runs p50 118s / max 33.6min server-side while
+the client's httpx gives up at ~135s, so the **Cursor** never advances and the next **Session boundary**
+re-posts the same delta — the extraction completes server-side *and* is re-enqueued (the observed "same
+1.14M-char payload posted 5×"). The **Watcher lane** runs in-process (no client timeout), but a
+`claude -p` timeout returns `None` → classified provider-wide `EXTRACT_ERR_CALL_FAILED` → `TRANSIENT`
+with *no* per-slice cap increment → the same slice re-extracts every tick forever, burning quota and
+never quarantining (a second engine, distinct from the ADR-0003 recovery loop: this one re-does work
+rather than duplicating nodes). And the two lanes track independent cursors over the same files with no
+coordination (~250-500 double-ingested nodes — the two-cursor overlap).
+
+Decision: **the client never waits.** The **Hook lane** becomes a pure **Nudge** (`POST /ingest/nudge
+{path}`, 202, exit) — no content, no **Cursor**, no poll; `whisper-cursors.json` is deleted. The **server
+owns the single Cursor** and advances it on **job completion**, not on a request response. The Cursor +
+in-flight guard + `_ingest_session` worker — today reachable only behind the watchdog Observer and gated
+by `session_watcher_enabled` — is extracted into an always-on **Ingest worker**; the watchdog Observer
+and the reconcile sweep become optional **Producers** layered on top when the watcher is enabled.
+Nudge (boundary) and Observer (continuous) feed one worker → one Cursor, one guard → the overlap is gone,
+including for the watcher-on maintainer. Because nothing waits, the client timeout is removed and the
+server-side extraction timeout is sized generously to the model's real worst case (`.env`-overridable,
+per the ADR-0001 amendment); when it fires, a `TimeoutExpired` (a genuinely slow/toxic slice) counts
+toward the per-slice cap and quarantines after N, while a fast failure (connection refused, missing
+binary) stays uncapped `TRANSIENT` — preserving the H1 rule that a provider *outage* never quarantines
+real data. A slow timeout is not an outage; the two `except` clauses in the adapter already separate them.
+
+Durability: the **Cursor** is already durable; the queue and in-flight guard stay in-memory, and a
+**startup drain** (the existing reconcile pass, run for every install) re-enqueues any transcript whose
+Cursor is not at EOF. No durable job table — a lost in-memory job is re-derivable from "Cursor behind EOF".
+
+## Considered options
+
+- **`async:true` on the SessionEnd hook manifest only:** rejected — palliative. It stops the hook holding
+  the session, but the Cursor still advances only on the synchronous HTTP response, so the
+  freeze-and-re-post engine is untouched. (PreCompact already carries `async:true` and still showed the bug.)
+- **Hook posts content, server enqueues the bytes with its own session-keyed cursor:** rejected — a second
+  cursor + extraction path parallel to the watcher's; two implementations of the same cursored logic. The
+  server already reads these files (same machine), so posting content is redundant once it owns the Cursor.
+- **Only async-ify the hook, leave the watcher a separate lane:** rejected — smaller diff, but leaves two
+  cursors whenever the watcher is on, so the double-ingest overlap survives for exactly the users (the
+  maintainer included) who run the watcher.
+- **Durable SQLite job table:** rejected for now — the Cursor is already the durable truth and a lost job
+  self-heals via the startup drain; a job table is machinery for an error whose cost is low (Material
+  recurs, ADR-0002). Revisit only if measured drain latency hurts.
+- **Nudge + server-owned Cursor + lane convergence + generous timeout with slow/fast split (accepted):**
+  smallest change that attacks the root — deletes the client Cursor and the whole-delta re-post, unifies
+  the lanes, and closes the transient-retry loop without reintroducing the H1 outage risk.
+
+## Consequences
+
+- The hook loses all parse / space-detect / min-turns logic — it is a trigger. `whisper-cursors.json` is
+  removed; on upgrade the server Cursor may sit behind it and re-ingest one delta (dedup heals the
+  one-time overlap).
+- The always-on **Ingest worker** instantiates the handler (Cursor + guard + `_ingest_session`) regardless
+  of `session_watcher_enabled`; the Observer + reconcile attach only when it is enabled.
+- The worker stays **serial** — multi-window concurrency is a separate track (issue #150), out of scope here.
+- The `claude_cli` adapter must signal `TimeoutExpired` distinctly from other `None`-returns so the
+  cap/quarantine split can key on it.
+- Residual: an ended session whose in-memory job is lost while the server stays up (no crash) strands until
+  the next restart's drain; the generous timeout value is a measured knob, not a proven constant.
+- Provenance is **upstream**: the hook, the endpoint, and `session_watcher.py` all live in `upstream/main`,
+  so this is an upstream contribution merged into the Beta (`local-main`); ships after the P1 gate
+  (ADR-0002), which reduces the volume that would hit the redesigned lane.
+
+## Amendment 2026-07-22 — the durable queue is a directory spool, not the Cursor alone (and not a job table)
+
+The original text says the queue "stays in-memory" because "the Cursor is already the durable truth", and
+rejects a durable SQLite job table on that basis. Eight rounds of plan review invalidated the premise, and
+a prototype (`spool_proto*.py`, throwaway) measured the alternatives. Both halves of the original decision
+change; the accepted decision itself (client nudges, server owns the Cursor, one always-on worker) stands.
+
+**Why the premise failed.** Delivering the nudge needs three facts the Cursor does not model: *which
+boundary was accepted*, *whether ingestion was explicitly requested* (the consent signal when
+`session_watcher_enabled=False`), and *whether the server persisted the request before answering 202*.
+Each was squeezed into `.session_watcher_state` — a single JSON blob per watch dir, rewritten whole from
+four call sites (`session_watcher.py` 889/909/984/1046) via a non-atomic `write_text` (L700-703). Every
+added field produced a new race: stale-snapshot clobber between the API thread and the worker thread, a
+202 answered before the write landed, and path dedupe that did not survive a restart. The Cursor is a
+progress record; it was being asked to be a queue.
+
+**Why not the SQLite job table.** Measured, not assumed. `db.py:37-40` runs WAL with
+`synchronous=NORMAL`, so a committed `INSERT` survives process death but **not** power loss — the
+transactional-durability argument for the table does not hold here. Meanwhile writes are serialized with
+`busy_timeout=5000`, so a nudge arriving during a maintenance transaction can block up to 5s inside the
+one request path whose whole purpose is that nobody waits. The table would couple the cheapest operation
+in the system to its heaviest. The original rejection stands, for better reasons than the original ones.
+
+**Decision: a directory spool** under `memory_dir`, owned by the ingest lane and independent of the store:
+
+```
+ingest_queue/pending/<path-hash>.<boundary>.json     # one file per accepted nudge
+ingest_queue/running/<path-hash>.<boundary>.json     # claimed
+```
+
+The worker claims by `os.rename(pending/x, running/x)`; the rename **is** the mutual exclusion. Completion
+deletes the file. Startup renames everything under `running/` back to `pending/`. Measured properties:
+
+- **Claim exclusivity holds across processes** — 40 rounds × 8 racing processes, always exactly one winner.
+  `FileNotFoundError` on the loser is the mechanism, not an error to handle.
+- **The boundary MUST live in the filename.** One-file-per-path with overwrite loses the higher boundary
+  whenever a slower producer that measured an earlier EOF lands last: **135 of 300 races (45%)**, and the
+  lost nudge is unrecoverable when the watcher is disabled. With the boundary in the name, nudges never
+  overwrite each other: 0/300.
+- **Every write is `tmp` + `os.replace`.** A direct `write_text` of a 400 KB file with a concurrent reader
+  produced **7081 torn reads** against 664 clean ones over 1.5 s; via `os.replace`, 6210 clean and **0**
+  torn. This also applies to `_save_state`, whose current non-atomic write can destroy every Cursor in a
+  watch dir — fixed independently of this amendment.
+- **Claim-by-rename excludes per JOB, not per transcript.** Because the boundary-in-name rule puts several
+  files under one path, two workers can ingest the same transcript concurrently: 0 overlaps with 1 worker,
+  14 with 2, 21 with 4. The worker is serial (issue #150), so this is latent, not live. When concurrency
+  lands, claim the *path* with `os.mkdir(running/<path-hash>)` — atomic, `FileExistsError` means taken —
+  then sweep that path's files into it: 0 overlaps at 4 workers. Do not ship concurrency without it.
+
+**Durability level, named explicitly.** The spool is *not* fsynced by default. The threat model is process
+restart and server crash, not power loss — the same guarantee the store already gives under
+`synchronous=NORMAL`. The cost of upgrading is measured: `os.fsync` is nearly free (p50 0.147 ms vs
+0.127 ms) but on APFS does **not** flush to media; real durability needs `fcntl(F_FULLFSYNC)`, at p50
+**6.9 ms** / p95 9.0 ms per nudge. That is affordable if the guarantee is ever wanted; it is not the
+default, and the choice is a decision rather than an oversight.
+
+**Consequences that replace text above.**
+
+- The queue is durable; "the queue and in-flight guard stay in-memory" no longer holds. The startup drain
+  remains as a *recovery* producer, not as the durability mechanism.
+- The residual "an ended session whose in-memory job is lost while the server stays up strands until the
+  next restart" is **closed**: the job is a file on disk.
+- **Consent is now structural.** When `session_watcher_enabled=False` the worker drains the spool and
+  nothing else — a spool entry exists only because the user's own hook created it. This retires the
+  intent-only reconcile-scope rule the plan review had derived, and with it the tree walk (`rglob`) on
+  disabled installs.
+- The Cursor keeps its job: byte offsets remain the progress truth. A job leaving the spool means the
+  *intent* was consumed, never that the bytes were — an ingestion is capped by `flush_bytes` and may be
+  partial. The two must not be conflated.
+- The spool must live on the same filesystem as its `tmp` staging dir (rename atomicity is per-filesystem),
+  hence inside `memory_dir`, never `/tmp`.
+- **The client-side outbox survives.** Neither a spool nor a table protects against the server being
+  unreachable — the hook reaches neither. Its locking must take a **stable lock file**: locking the outbox
+  inode itself is now confirmed broken, not theoretical — with the drain rotating the file via
+  `os.replace`, three appenders produced **1140 mutual-exclusion violations** in 2 s (the lock survives on
+  an unlinked inode), against 0 with a separate lock file.
+- Verified on APFS/macOS only. Rename atomicity is POSIX; the numbers are not portable.
+
+## Field observation 2026-07-27 — the `no_safe_boundary` dead-letter has 533 transcripts and no drain
+
+Measured on the live Beta, read-only, while deciding the merge window for ADR-0001 Amendment 3. Recorded
+here because the mechanism is this ADR's, and because the code comment that created it points at a slice
+that no longer exists.
+
+**What it is.** `session_watcher.py:1279-1287`: when extraction returns NO_PROGRESS and
+`_idle_with_unsafe_tail()` holds — an idle transcript with bytes past the cursor that the parser closes
+nothing at, i.e. a single unterminated turn — the worker advances the cursor past the frozen prefix (so
+the sweep stops re-selecting the file) and calls `spool.requeue(job, failure_class="no_safe_boundary")`.
+In `ingest_spool.py:229-280` every class other than `external` is deterministic and is dead-lettered
+immediately into `failed/`, with the original job bytes preserved plus a `<name>.error` sidecar. Only
+`external` (provider down, timeout, EIO) retries forever with persisted backoff — the H1 rule that an
+outage must never discard real data.
+
+This is deliberate, not a defect: the alternative at that call site is a silent `complete()`, which would
+strand the bytes with no record at all. The code says so, and names its successor:
+*"keep a dead-letter record with a distinct reason (slice 3 owns the real policy) — never a silent
+complete."*
+
+**Provenance: local, not upstream.** `src/ormah/background/ingest_spool.py` does not exist in
+`upstream/main`, and the string appears nowhere in that branch's `session_watcher.py`. Introduced by
+`adbec81` "feat(ingest): always-on ingest worker; Observer and reconcile become optional producers
+(ADR-0004)". Nothing about this has ever been contributed upstream.
+
+**The gap.** ADR-0004 **slice 3 was descoped on 2026-07-25** (recorded in the content-budget plan
+overview: *"ADR-0004 slice 3 — descoped 2026-07-25, do not replan it"*). So the recording half shipped and
+the draining half never did. Descoping was reasonable while the dead-letter was empty. It is no longer
+empty, and the cost of the descope is now measurable rather than hypothetical.
+
+**Measured 2026-07-27 (~17:10 BRT)**, spool root `memory_dir/ingest_queue/<root_key>/`:
+
+| quantity | value |
+|---|---|
+| `pending` / `running` | **0 / 0** — the drain itself is complete |
+| dead-lettered jobs | **586** (1172 files: each job is `<name>.json` + a 39-byte `<name>.json.error`) |
+| **distinct transcripts** | **533** — 499 with a single record, max 5; not one file looping |
+| transcripts still on disk | 533 / 533 |
+| error text | 100% `deterministic failure: no_safe_boundary` |
+| by `reason` | 518 `reconcile`, 60 `drain`, 8 `nudge` |
+| growth | 427 at the Task 6 measurement (2026-07-26) → 586; most recent ~99 min before the reading |
+
+Note for anyone re-measuring: counting raw files gives 1172 and makes the `.error` sidecars look like
+corrupt JSON. Count `*.json` only.
+
+**What this does and does not mean.** `pending = 0` is not "nothing is stuck": 533 sessions have content
+that never entered the store, and their cursor has already advanced past it. Each is recoverable by hand —
+the job preserves `path` and `boundary` — but nothing recovers them automatically, and the set grows.
+
+**Not caused by, and not affected by, ADR-0001 Amendment 3.** `no_safe_boundary` is a boundary-detection
+outcome, not a budget outcome; the content budget and the raw ceiling do not participate in that branch.
+
+**UNVERIFIED, and the first thing to settle:** whether those orphaned bytes are genuinely lost or whether
+some other path reprocesses them later. `_mark_frozen_prefix_consumed` was read at its call site only; its
+consequences were not traced.
+
+> **ANSWERED 2026-07-28** — nothing reprocesses them. `_mark_frozen_prefix_consumed` advanced the cursor
+> precisely to stop re-selection, and `cursor == boundary == size` held across the whole sample. See the
+> slice 3 amendment below, which also measures the volume the step above asked for.
+
+**Suggested next steps, in order.**
+
+1. **Measure the orphaned volume before prioritising.** Each job carries `boundary`; compared against the
+   persisted cursor this bounds the bytes left behind. Without that number, "533 transcripts" could be a
+   few unterminated lines each or months of conversation — and priority is guesswork either way.
+2. **A minimal re-drain policy**, not necessarily all of slice 3. The common case is benign and
+   self-healing in principle: the session was open when the job ran, and has since closed. Re-admitting a
+   dead-lettered job once its transcript has grown a safe boundary would drain most of the 533 without any
+   new policy surface.
+
+## Amendment 2026-07-28 — slice 3: the frozen tail is force-closed automatically, behind an anti-rewind checkpoint
+
+`no_safe_boundary` no longer exists as a failure class. This amendment records the policy that replaced
+it, and — more importantly — records **why the obvious implementation is wrong**, so nobody reintroduces
+it.
+
+### What the measurement changed
+
+Re-measured on the live spool (549 distinct transcripts, all still on disk):
+
+| quantity | value |
+|---|---|
+| dead-lettered transcripts vs. entries in state | 549 of 609 — **90%** |
+| median coverage already ingested per transcript | **99.5%** |
+| never-closed tail, median | **998 B** — the last open JSONL line |
+| never-closed tail, total | 1.02 MB |
+| transcripts with real partial loss | 31 (worst: 15 turns / 66 KB) |
+| transcripts with "total" loss | 8 — sessions with **no assistant response at all**; nothing to extract |
+
+So the dead-letter was never a data-loss backlog: it is the **normal** end-of-session path, recorded as a
+deterministic failure. The defect was twofold — unbounded noise that masks real failures, and a dead
+session's open tail that is never recovered even when it holds turns.
+
+### Why pure force-close is wrong (the council rejected it; do not reintroduce it)
+
+Parking the cursor inside an open response makes the next slice start with an `assistant` and no `user`
+(`parser.py:351-353`) → `leading_orphan` → nothing commits → `_safe_end` does not advance →
+`should_rewind` is true (`parser.py:395`) → the watcher re-parses from offset 0 and **re-ingests the whole
+transcript**. The risk was never losing a fragment; it was **mass duplication**.
+
+The corollary bit us in the other direction too: a watermark that suppresses the rewind trades duplication
+for **silent loss** unless the ordering is exact. The invariant that closes both holes:
+
+> **force-close happens while the cursor is still at `safe_end`; park and watermark only after; a stale job
+> never plants a cursor.**
+
+### The policy as shipped
+
+**Force-close gate — all four must hold** (`_ingest_session`). Idle past `idle_threshold`; job **fresh**
+(`boundary is None or boundary >= size` — a stale ceiling must never force-close a response the file has
+since completed); **recoverable assistant content** past the safe boundary, computed exactly as
+`any(t.role == "assistant" for t in result.turns[len(result.safe_turns):])`; and **no pending `tool_use`**.
+
+That fourth criterion is deliberately asymmetric, and the asymmetry is the point: `stop_reason="tool_use"`
+is a *structural promise of continuation* — the tool will return and the response will close itself, so
+force-closing it would discard a continuation that was always going to arrive. A Codex turn with no
+`task_complete`, by contrast, is byte-for-byte indistinguishable from a dead session; no criterion
+separates it from the ordinary case, so it is force-closed. A `stat` that fails counts as **not fresh** —
+never force-close over a size you did not read.
+
+**`force_closed_until` is a cursor invariant, not a flag.** It means *"this cursor stopped past content
+that was never closed, up to N"*. Every writer that advances `end_offset` over unclosed bytes must record
+it, so the rule lives **inside** `_commit_state`: `new_offset` and `crosses_unsafe` are parameters, a
+metadata-only commit preserves the stored cursor by construction, and an entry that would mutate the cursor
+without declaring it is **rejected**. The watermark is written monotonically (`max`), because the extract-skip
+path inherits the *flag* from the slice that advanced — not the old *value*; keeping the old value would let
+`prev_offset > force_closed_until` come true again and resurrect the very rewind loop this exists to kill.
+
+The rewind call site — note the variable there is `existing`, not `entry`:
+
+```python
+if should_rewind(result, prev_offset) and prev_offset > (existing or {}).get("force_closed_until", 0):
+```
+
+`should_rewind` itself is unchanged; the decision belongs to the call site, which is what holds the state.
+Legacy entries lack the field (default 0), so ADR-0003 recovery stays intact for legacy cursors.
+
+**Parking no longer consumes bytes.** `_mark_frozen_prefix_consumed` advanced the cursor to mean "stop
+re-selecting this" — two different things, and conflating them opened a TOCTOU with **permanent** loss: a
+job fresh at classification goes stale between `_ingest_session` returning and the cursor mutation, the
+writer appends the terminal assistant meanwhile, the successor sees an orphan, the watermark suppresses the
+rewind, and the now-complete user/assistant pair becomes unreachable forever. Park therefore writes
+`parked_until` and **leaves the cursor alone**; selection is suppressed only while `size <= parked_until`,
+so growth past it re-selects the file and parsing resumes from the untouched safe cursor. The suppression is
+applied in **both** producer lanes — `reconcile` and `_enqueue_path` — because gating only the sweep would
+trade a full `failed/` for a hot enqueue loop on the Observer lane.
+
+**Disposition lives inside the state entry.** A `jsonl` ledger beside the state file cannot work: `_save_state`
+writes a pid-scoped temp, `fsync`s, and `os.replace`s; an append to another file does not participate in that
+rename, and `state_lock` gives thread exclusion, not crash atomicity. Both orderings break — ledger-first
+loses the cursor and re-extracts an already-closed slice; state-first keeps the watermark and loses the audit
+record. So `{kind, prev_cursor, boundary, at}` is written *within* the entry, in the same `os.replace` as the
+cursor: atomic by construction. A best-effort `jsonl` alongside may exist as history, but it is not what backs
+the replay promise.
+
+**A stale job enqueues its own successor before completing.** Merely completing would be a bet that "the next
+job carries `boundary = size`". `reconcile` is gated on the per-watch `discover` flag; on an *acceptance-only*
+root there is no Observer and no sweep, only external nudges — the recoverable tail would sit without a
+successor indefinitely. The successor is enqueued with the size **already measured** by `_ingest_session`
+(never a second `stat`, which would reopen the TOCTOU the disposition exists to close), and only when that
+size is strictly greater than the job's ceiling — `enqueue` is idempotent on `(path, boundary)` via `os.link`,
+so re-enqueuing at the same boundary would loop forever.
+
+### Accepted cost
+
+The continuation of a force-closed response is discarded as an orphan until a new user turn arrives, after
+which the flow normalises on its own. That is the "small piece" traded for automatic ingestion, decided
+explicitly on 2026-07-28. A slow tool (>600 s) keeps its file parked rather than force-closed — released as
+soon as the file grows.
+
+### Known gap, deliberately not closed here
+
+`pause_turn` is non-terminal in the parser but does **not** hold the tail; only `tool_use` does. If it shows
+up in practice, it is a force-close of a response that was still going to continue.
