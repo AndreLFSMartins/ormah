@@ -136,11 +136,21 @@ if result is IngestResult.GONE:
 `requeue` already dead-letters every `failure_class` other than `"external"`, so **`requeue` itself
 is not modified**. `EIO`/`EACCES` remain `TRANSIENT` and keep retrying forever, as H1 requires.
 
-**Amended 2026-08-11 (council):** a third classification site is required, in the parse block —
-`except FileNotFoundError: return IngestResult.GONE` before the generic `except Exception` at
-`:1045`. The two sites above cover only a transcript already gone when the job is claimed; the
-parser reopens the file, so one deleted mid-drain took the `NO_PROGRESS` → `complete` route and
-vanished without a record. See the Risks section.
+**Amended 2026-08-11 (council, round 1):** a third classification site is required, in the parse
+block — `except FileNotFoundError: return IngestResult.GONE` before the generic `except Exception`
+at `:1045`. The two sites above cover only a transcript already gone when the job is claimed; the
+parser re-reads the file itself, so one deleted mid-drain took the `NO_PROGRESS` → `complete`
+route and vanished without a record.
+
+**Amended again (council, round 2):** the three sites still leave the window *after*
+`_ingest_session` returns. `_idle_with_unsafe_tail` swallows an `ENOENT` in both its `stat`
+(`:1511`) and its `parse` (`:1520`), returning `False` either way, so the drain reaches
+`complete(job)` and erases the job. Closed with a **guard on the final disposition** at `:1499` —
+if the transcript no longer exists, `requeue(job, failure_class="transcript_deleted")` — rather
+than by making the predicate classify. That keeps one decision site and acts as a backstop for
+routes not yet enumerated. The measured inventory of every exception handler on the drain path,
+and why each is or is not reachable by a transcript `ENOENT`, is tabulated in
+`plans/2026-08-11-adr-0004-spool-h1-repair/03-verify-and-close.md`.
 
 ## Tests
 
