@@ -160,10 +160,10 @@ def _frozen_unchanged(entry: dict, st: os.stat_result) -> bool:
     )
 ```
 
-**`reconcile`** gains a second cheap-skip arm, and its first arm changes `>=` to `==`:
+**`reconcile`** gains a second cheap-skip arm; its first arm is left exactly as it is:
 
 ```python
-elif (entry.get("end_offset") or 0) == st.st_size and not entry.get("shrink_pending"):
+elif (entry.get("end_offset") or 0) >= st.st_size and not entry.get("shrink_pending"):
     continue
 elif _frozen_unchanged(entry, st):
     continue          # frozen, and byte-for-byte the file that was examined
@@ -172,12 +172,27 @@ elif _frozen_unchanged(entry, st):
 A separate `elif` rather than an `or` on the first: that arm carries the `shrink_pending`
 exception, and folding an independent gate into the same expression ties them together.
 
-**`>=` becomes `==`** (council round 2, codex, high). A cursor *above* EOF means the file shrank,
-which is not "fully consumed". While the first arm skipped on `>=`, the frozen predicate's
-cursor-above-EOF escape was unreachable and the shrink gate could be armed only through the
-Observer — in the one component that exists to recover dropped FSEvents. This repairs
-**pre-existing** behaviour; it is in scope only because the frozen fact's contract claims that
-escape works.
+**The `>=` stays, and that is a change of decision.** Council round 2 (codex, high) asked for
+`==`, on correct reasoning: a cursor *above* EOF means the file shrank, which is not "fully
+consumed", and while the arm skips on `>=` the shrink gate is armable only through the Observer —
+in the one component that exists to recover dropped FSEvents. The final whole-branch review then
+measured what `==` would do against the live store, and the change was pulled back out:
+
+- Upstream has used `==` since `4d8de6d` (2026-07-17) and never had `>=`, so the `>=` here is
+  Beta-local drift. But upstream pairs `==` with an in-memory retry park (`_reconcile_attempts`,
+  keyed on `(size, mtime_ns)`, bounded by `MAX_RECONCILE_RETRIES`) that this codebase does not
+  have — 0 occurrences. Nothing here bounds a cursor-above-EOF file whose content is unchanged.
+- Measured 2026-08-12 on the live Beta: 16 entries hold a cursor above EOF. Three of them have an
+  unchanged hash and would re-enqueue forever (`_ingest_session`'s guard returns `NO_PROGRESS`
+  before the shrink branch when the hash matches), re-reading and hashing 5.8 MB every sweep. The
+  other 13 would reset to offset 0 and re-ingest 59.0 MB, the largest file being 40 MB.
+- Seven of those 13 sit at exactly **83 bytes** above EOF, across files from 392 KB to 40 MB. A
+  constant offset across unrelated files is not a shrink; it is an unexplained cursor overshoot,
+  and re-ingesting 40 MB over it would be acting on a symptom nobody has diagnosed.
+
+So the repair is real but needs a bound this design does not provide, and it is tracked on its own
+evidence rather than carried here. The cost of leaving it: `_frozen_unchanged`'s cursor-above-EOF
+escape stays unreachable — which it already was, by the ceiling conjunct, so nothing is lost.
 
 **`_enqueue_path`** (`session_watcher.py:1361`) consults no state at all today — every FSEvent
 becomes an `enqueue`. It gains the same call. Gating only the sweep does not fix the defect, it
@@ -210,9 +225,10 @@ enqueue loop on the Observer lane."*
    not be what enforces this — it clamps `end_offset` only, and this design does not touch that
    field.
 6. **A never-seen file stays eligible.** A new entry may be born with the three frozen keys and
-   no `end_offset`. `reconcile` evaluates `(entry.get("end_offset") or 0) == size` → `0 == size`
-   is false → it falls through to the new gate and is judged there. Legacy entries lack the
-   fields, so `_frozen_unchanged` returns false, behaviour unchanged. No migration.
+   no `end_offset`. `reconcile` evaluates `(entry.get("end_offset") or 0) >= size` → `0 >= size`
+   is false for any non-empty file → it falls through to the new gate and is judged there. Legacy
+   entries lack the fields, so `_frozen_unchanged` returns false, behaviour unchanged. No
+   migration.
 7. **A confirmed shrink clears it.** The shrink reset (`session_watcher.py:962-966`) copies
    `dict(existing or {})` and updates only `hash`/`end_offset`. A frozen fact surviving that
    reset describes the file that was rotated away, and both producer gates would act on it. The
@@ -253,7 +269,6 @@ New tests, by the finding each one nets:
 | `test_reconcile_skips_a_frozen_file_until_it_changes` | growth re-opens, through the sweep |
 | `test_reconcile_reopens_a_frozen_file_that_was_rotated_smaller` | round 1 — shrink re-opens |
 | `test_reconcile_reopens_a_frozen_file_replaced_at_the_same_size` | same-size replacement, then re-arm |
-| `test_reconcile_selects_a_file_whose_cursor_sits_above_eof` | round 2, codex — the `>=` → `==` repair |
 | `test_reconcile_still_selects_a_never_seen_file_with_only_a_frozen_fact` | invariant 6 |
 | `test_enqueue_path_skips_a_frozen_file_until_it_changes` | the Observer lane carries the gate |
 | `test_enqueue_path_reopens_a_frozen_file_that_was_rotated_smaller` | round 1 — the lane that catches rotation today |
