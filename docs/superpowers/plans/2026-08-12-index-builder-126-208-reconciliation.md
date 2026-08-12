@@ -95,9 +95,13 @@ In **both** `test_full_rebuild_aborts_and_preserves_data_on_partial_failure` and
     def flaky(path, file_hash, prior=None, prior_fingerprints=None):
         calls["n"] += 1
         if calls["n"] == 1:
-            return original(path, file_hash)
+            return original(path, file_hash, prior=prior, prior_fingerprints=prior_fingerprints)
         raise OSError(24, "Too many open files")
 ```
+
+The kwargs are forwarded deliberately (council R1, Cursor low). `original(path, file_hash)` alone
+would drop `prior_fingerprints`, so the patch's one successful call would not exercise the #126
+invalidation even though `full_rebuild` passes it.
 
 `flaky_edges(path)` in `test_full_rebuild_edge_failure_does_not_abort_but_is_surfaced` is unchanged —
 `_index_file_edges` keeps its signature.
@@ -191,12 +195,18 @@ with:
         # path requests L_mem while holding L_db, the reverse of the order used by memory jobs.
         paths = list(self.file_store.list_paths())
         hashes: dict[Path, str] = {}
+        scan_complete = True
         for path in paths:
             try:
                 hashes[path] = self.file_store.file_hash(path)
+            except FileNotFoundError:
+                # Genuinely gone between listing and hashing. Letting it fall out of disk_ids is
+                # the correct signal: the removal phase below should drop its node.
+                logger.info("Skipping %s: removed between listing and hashing", path)
             except Exception as e:
-                # A file removed between listing and hashing. This used to be swallowed by the
-                # per-path try inside the loop; keep it non-fatal rather than killing the job.
+                # EMFILE, EIO, EACCES — the file is very likely still there. Absence is NOT
+                # established, so the removal phase must not run (council R1, both peers).
+                scan_complete = False
                 logger.warning("Failed to hash %s: %s", path, e)
 
         with self.db.transaction():
@@ -217,10 +227,42 @@ with:
                         self._index_file(path, file_hash, prior)
                         updated += 1
                 except Exception as e:
+                    # Any failure here also leaves this node out of disk_ids.
+                    scan_complete = False
                     logger.warning("Failed to process %s: %s", path, e)
 ```
 
-Leave the trailing `removed_ids` block and `return added, updated` untouched.
+- [ ] **Step 2b: Gate the removal phase on a complete scan**
+
+Replace the trailing removal block with:
+
+```python
+            # Only a COMPLETE scan proves absence. _remove_node here runs with keep_vectors=False,
+            # so a node dropped on a transient read error loses its vector permanently — nothing
+            # re-embeds it — and _remove_node does not clear the checked-pair tables, so the node
+            # would come back as new (prior=None) carrying stale verdicts, defeating #126.
+            pending_removal = indexed_ids - disk_ids
+            if scan_complete:
+                for node_id in pending_removal:
+                    self._remove_node(node_id)
+            elif pending_removal:
+                logger.warning(
+                    "incremental_update: scan incomplete, deferring removal of %d node(s)",
+                    len(pending_removal),
+                )
+
+        return added, updated
+```
+
+The transaction is **not** aborted: the adds and updates already applied are valid and worth
+keeping. Only the destructive phase is deferred, and the next `index_updater` tick (~60s) removes
+anything genuinely absent.
+
+This is the council R1 finding, raised independently by both peers. The defect is pre-existing —
+today's `except Exception` around the whole loop skips `disk_ids.add()` exactly the same way, on
+`local-main` and upstream alike — but this plan rewrites that block, and shipping it with a comment
+claiming "file removed" when `except Exception` guarantees no such thing would be authoring the
+defect, not inheriting it.
 
 `paths` is wrapped in `list()` deliberately. Upstream binds the bare `list_paths()` return and
 iterates it twice; that is safe only because `list_paths` returns `sorted(...)`. Were it ever made a
@@ -276,6 +318,88 @@ point of #208, and Task 1 Step 5 restored it along with the rest of HEAD. The bo
 
 Verify: `grep -n "file_store.file_hash" src/ormah/index/builder.py` must return exactly three hits —
 one each in `full_rebuild`, `incremental_update` and `index_single`, all outside a transaction.
+
+- [ ] **Step 3b: Write the two hash-failure regression tests**
+
+Both come from council R1. Neither invariant has coverage today: the existing abort tests
+monkeypatch `_index_file_nodes_only`, never `file_store.file_hash`. Append to
+`tests/test_index/test_builder.py`:
+
+```python
+def test_full_rebuild_aborts_when_hashing_fails(db, file_store, monkeypatch):
+    """A hash failure must skip the path, miss the count, and trip abort-on-partial (council R1)."""
+    for i in range(3):
+        file_store.save(MemoryNode(
+            type=NodeType.fact, source="agent:test",
+            content=f"Fact {i} for indexing.", title=f"Fact {i}"))
+
+    builder = IndexBuilder(db, file_store)
+    builder.full_rebuild()
+    before = db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    assert before == 3
+
+    original_hash = file_store.file_hash
+    calls = {"n": 0}
+
+    def flaky_hash(path):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError(24, "Too many open files")
+        return original_hash(path)
+
+    monkeypatch.setattr(file_store, "file_hash", flaky_hash)
+
+    with pytest.raises(RuntimeError, match=r"2/3 files"):
+        builder.full_rebuild()
+
+    assert db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == before
+
+
+def test_incremental_update_defers_removal_when_hashing_fails(db, file_store, monkeypatch):
+    """A transient hash failure must NOT be read as a deletion (council R1, both peers).
+
+    _remove_node runs with keep_vectors=False here, so a spurious removal loses the vector
+    permanently, and it does not clear the checked-pair tables, so #126 invalidation is bypassed.
+    """
+    node = MemoryNode(type=NodeType.fact, source="agent:test",
+                      content="Durable content.", title="Durable")
+    file_store.save(node)
+    builder = IndexBuilder(db, file_store)
+    builder.full_rebuild()
+    assert db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1
+
+    def always_fails(path):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(file_store, "file_hash", always_fails)
+    builder.incremental_update()
+
+    # The file is still on disk: the node must survive, vector included.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE id = ?", (node.id,)).fetchone()[0] == 1
+
+    # A genuine absence must still be removed once hashing works again.
+    monkeypatch.undo()
+    file_store.delete(node.id)
+    builder.incremental_update()
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE id = ?", (node.id,)).fetchone()[0] == 0
+```
+
+- [ ] **Step 3c: Run the two new tests to verify they discriminate**
+
+Before running them against the fix, confirm they fail against the unfixed code:
+
+```bash
+git stash push src/ormah/index/builder.py
+PYTHONPATH=$PWD/src $PY -m pytest tests/test_index/test_builder.py \
+  -k "hashing_fails" -v; echo "rc=$?"
+git stash pop
+```
+
+Expected: `test_incremental_update_defers_removal_when_hashing_fails` FAILS on the survival assert
+(the node was deleted). If it passes against the unfixed code, the test does not discriminate —
+stop and fix the test.
 
 - [ ] **Step 4: Run both lock-order tests — expect PASS**
 

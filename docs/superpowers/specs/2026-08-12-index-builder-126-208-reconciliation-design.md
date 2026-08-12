@@ -77,11 +77,55 @@ made a generator, the second loop would see nothing, `disk_ids` would stay empty
 **`index_single`** — `file_hash` read before the transaction; `prior`, the `unchanged` fingerprint
 comparison, and `keep_vectors=unchanged` stay inside.
 
+### Where the orthogonality breaks — the removal phase
+
+Amended 2026-08-12 after council round 1. Cursor (0.92) and Codex (0.99) independently found that the
+two changes are orthogonal on the *success* path only. On the failure path they cross, and the result
+is destructive.
+
+`incremental_update` derives deletions by subtraction: `removed_ids = indexed_ids - disk_ids`. A path
+that is skipped because hashing raised never reaches `disk_ids.add(node.id)`, so a **transient** hash
+failure — EMFILE, EIO, EACCES — is indistinguishable from a deleted file, and `_remove_node` runs.
+That call uses `keep_vectors=False`, so it drops `node_tags`, `edges`, `nodes_fts`, `nodes` **and
+`node_vectors`**; `builder.py:326-331` states plainly that losing the vector is permanent because the
+index updater never re-embeds. A systemic failure — fd exhaustion, the 2026-07-05 incident the
+`full_rebuild` guard exists to prevent — empties `disk_ids` and wipes the whole index while every
+markdown file sits intact on disk. `index_updater` runs every ~60s.
+
+Codex added the #126 crossing: `_remove_node` does not call `_invalidate_checked_pairs`, so the
+spuriously removed node returns on the next pass as new (`prior=None`) while `auto_link_checked`,
+`duplicate_checked` and `conflict_checked` still hold its stale verdicts — the precise outcome #126
+exists to prevent.
+
+The defect is **pre-existing**: today's single `except Exception` around the whole loop skips
+`disk_ids.add()` identically, on `local-main` and upstream alike. #208 does not introduce it. But
+this reconciliation rewrites that block, so the fix is in scope — shipping the rewrite with a comment
+asserting "file removed" when `except Exception` guarantees nothing of the sort would be authoring
+the defect rather than inheriting it.
+
+**Resolution:** `FileNotFoundError` on hashing means genuine absence and still feeds a removal. Any
+other exception, in hashing or in the processing loop, marks the pass incomplete and suppresses the
+removal phase entirely; the transaction still commits its adds and updates, and the next tick removes
+whatever is really gone. Absence must be positively established by a complete scan before anything is
+deleted.
+
 ## Testing
 
 Both test suites must pass together: the #208 coverage (threaded deadlock probe + structural
 assertion per entry point) and the #126 coverage (pair-verdict invalidation on changed content,
 vector retention on unchanged content).
+
+Two new tests close the gaps council round 1 identified. Neither invariant is covered today, because
+every existing abort test monkeypatches `_index_file_nodes_only` and none touches
+`file_store.file_hash`:
+
+- **`full_rebuild`, hash failure** — fail one path out of N and assert `RuntimeError` plus the
+  preservation of the previously committed index. This is the fail-closed composition the design
+  claimed as verified-by-inspection; without the test it can regress with the suite green.
+- **`incremental_update`, transient hash failure** — assert the node's row and vector survive, then
+  assert that a genuine deletion is still removed once hashing works again. The test must be run
+  against the unfixed code first and observed failing on the survival assert; one that passes both
+  ways does not discriminate.
 
 **The threaded deadlock test must fail as a hang, not as an error.** Run it against the
 reconciliation *before* the fix is applied and confirm the failure mode. A test that fails with
@@ -101,7 +145,10 @@ main repo. Any `pytest` run needs `PYTHONPATH=<worktree>/src`, verified by asser
 
 ## Scope
 
-**In:** the `builder.py` reconciliation, the two test-file conflict hunks, and completing the merge.
+**In:** the `builder.py` reconciliation, the two test-file conflict hunks, completing the merge, and
+the removal-phase completeness barrier with its two regression tests. The barrier is in scope not
+because the defect is new — it is pre-existing — but because this change rewrites the exact block
+that carries it, and rewriting it correctly costs about twelve lines.
 
 **Out**, deliberately — each is real, none blocks this:
 
@@ -120,7 +167,14 @@ main repo. Any `pytest` run needs `PYTHONPATH=<worktree>/src`, verified by asser
 
 - **Verified:** both sides of `builder.py` read directly; the #208 diff (`429dd0c`); the absence of
   the lock in `local-main`; the absence of external callers; the abort-on-partial interaction.
-- **Assumed:** that the two conflict hunks in `tests/test_index/test_builder.py` resolve by
-  coexistence the way the source does. Not yet opened — first thing to check on implementation.
-- **Assumed:** that the merge produces no third conflict beyond the two measured files. The
-  measurement is from 2026-08-11; re-run `git merge` and abort to confirm before planning around it.
+- **Verified 2026-08-12:** the removal-phase defect above, by reading `_remove_node`
+  (`builder.py:323-345`) and `_invalidate_checked_pairs` (`builder.py:275-291`) — the vector deletion
+  and the missing pair invalidation are both in the code, not inferred from the peer reports.
+- **Verified 2026-08-12:** the merge conflicts are exactly two files. A probe merge was run in the
+  sync worktree and aborted; `tests/test_index/test_builder.py` conflicts purely additively (HEAD's
+  #126 and abort tests against upstream's lock-order tests), which retires the earlier assumption.
+- **Assumed:** that suppressing the removal phase on an incomplete scan has no consumer depending on
+  same-tick deletion. `index_updater` runs every ~60s, so the deferral window is one tick — but no
+  caller of `incremental_update` was audited for that expectation.
+- **Assumed:** the merge base has not moved since the probe. Re-run `git merge` and confirm two
+  conflicting files before trusting the plan's line references.
