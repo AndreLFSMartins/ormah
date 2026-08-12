@@ -2690,10 +2690,10 @@ def test_idle_file_with_no_safe_boundary_is_dead_lettered(engine, tmp_path):
 
 
 def test_frozen_prefix_advance_never_passes_the_accepted_boundary(engine, tmp_path):
-    """council-pr F1: a nudge accepted boundary B; the live file then grew to S>B, still an
-    unterminated single turn, and went idle. The frozen-prefix advance must stop the cursor
-    at B (the accepted boundary), NEVER at raw EOF S -- bytes [B,S] were never accepted nor
-    extracted, so a later nudge at S must still be able to re-examine them."""
+    """council-pr F1, carried onto the suppression fact: a nudge accepted boundary B; the
+    live file then grew to S>B, still an unterminated single turn, and went idle. The
+    freeze must record B, NEVER raw EOF S -- bytes [B,S] were never accepted, so a later
+    nudge at S must still be able to re-examine them."""
     from ormah.background.ingest_spool import IngestSpool
 
     watch_dir = tmp_path / "projects"
@@ -2730,14 +2730,61 @@ def test_frozen_prefix_advance_never_passes_the_accepted_boundary(engine, tmp_pa
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         _drain_all(handler)
 
-    cursor = _load_state(watch_dir).get(rel, {}).get("end_offset", 0)
-    assert cursor <= boundary, (
-        f"frozen-prefix advance jumped the cursor to {cursor} (S={size}); it must never "
-        f"pass the accepted boundary B={boundary}, or bytes [B,S] are skipped forever"
+    entry = _load_state(watch_dir).get(rel, {})
+    assert (entry.get("end_offset") or 0) == 0, "the freeze must not move the cursor at all"
+    assert entry.get("frozen_until") == boundary, (
+        f"the freeze recorded {entry.get('frozen_until')} (S={size}); it must never pass "
+        f"the accepted boundary B={boundary}, or bytes [B,S] are suppressed forever"
     )
     # [B,S] was not permanently consumed: a second nudge at S can still claim it for work.
     spool.enqueue(jsonl, boundary=size, reason="nudge")
     assert spool.claim_next() is not None, "the second nudge at S must be claimable"
+
+
+def test_frozen_prefix_does_not_consume_bytes_the_next_job_can_ingest(engine, tmp_path):
+    """ADR-0004 2026-08-12 — the ratchet. A job whose accepted boundary cuts the first
+    assistant record in half closes nothing, so the frozen-prefix path fires. It must NOT
+    advance the cursor: a second job at the file's real EOF has to ingest the WHOLE
+    transcript. With the cursor advanced (the pre-fix behaviour) the second job resumes
+    mid-record and the content is unreachable — that happened 24 times in a row on one
+    production transcript, boundary climbing 98,985 -> 1,435,339, nothing ever ingested."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "ratchet.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    size = jsonl.stat().st_size
+
+    # A boundary strictly INSIDE the first assistant record: the parser reads that line
+    # (its start is below the ceiling) and _exceeds_ceiling refuses it at commit, so
+    # safe_end_offset == start_offset == 0 and _idle_with_unsafe_tail is True.
+    first_line = jsonl.read_bytes().split(b"\n")[0]
+    boundary = len(first_line) + 1 + 10
+    assert boundary < size
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        spool.enqueue(jsonl, boundary=boundary, reason="observer", force_flush=False)
+        _drain_all(handler)
+
+        entry = handler._state.get(rel, {})
+        assert entry.get("frozen_until") == boundary, \
+            "the freeze must be recorded as a suppression fact"
+        assert (entry.get("end_offset") or 0) == 0, \
+            "the freeze must NOT move the cursor over bytes nothing ingested"
+
+        spool.enqueue(jsonl, boundary=size, reason="reconcile", force_flush=False)
+        _drain_all(handler)
+
+    entry = handler._state[rel]
+    assert entry["end_offset"] == size, \
+        "the second job, at the real EOF, must ingest the whole transcript"
+    assert entry.get("node_ids"), "the content must have reached the store"
 
 
 def test_unexpected_exception_requeues_instead_of_stranding_in_running(engine, tmp_path):
@@ -2826,7 +2873,7 @@ def test_observer_job_respects_min_turns_but_nudge_force_flushes(engine, tmp_pat
         "a nudge job must force-flush a short just-ended session past the min_turns gate"
 
 
-def test_frozen_prefix_advance_never_moves_the_cursor_backward(engine, tmp_path):
+def test_frozen_prefix_park_is_monotonic(engine, tmp_path):
     """council-pr R2 F2: _mark_frozen_prefix_consumed must be monotonic. A stale or
     out-of-order boundary job (boundary < the current cursor) must NEVER rewind the cursor --
     that would re-open already-consumed bytes for duplicate extraction. The prior
@@ -2846,13 +2893,19 @@ def test_frozen_prefix_advance_never_moves_the_cursor_backward(engine, tmp_path)
     # cursor already well past, persisted to BOTH memory and disk
     _commit_state(handler._state, rel, {"end_offset": 4000}, handler._state_lock, watch_dir)
 
-    handler._mark_frozen_prefix_consumed(jsonl, rel, boundary=1000)   # stale, LOWER boundary
-    assert handler._state[rel]["end_offset"] == 4000, (
-        "a boundary below the current cursor must never rewind it (duplicate re-ingestion)"
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=3000, examined=jsonl.stat())
+    assert handler._state[rel]["frozen_until"] == 3000
+    assert handler._state[rel]["end_offset"] == 4000, "the park must not touch the cursor"
+
+    handler._mark_frozen_prefix_parked(     # stale, LOWER boundary
+        jsonl, rel, boundary=1000, examined=jsonl.stat())
+    assert handler._state[rel]["frozen_until"] == 3000, (
+        "a boundary below the current ceiling must never lower it (re-opens the ratchet)"
     )
-    assert _load_state(watch_dir).get(rel, {}).get("end_offset") == 4000, (
-        "the rewind must not be persisted to disk either"
+    assert _load_state(watch_dir).get(rel, {}).get("frozen_until") == 3000, (
+        "the stale boundary must not be persisted to disk either"
     )
+    assert _load_state(watch_dir).get(rel, {}).get("end_offset") == 4000
 
 
 def test_capped_continuation_inherits_the_producer_force_flush(engine, tmp_path):
@@ -3876,9 +3929,12 @@ class TestAboveCapOrphanRecovery:
         skipped = entry["skipped_slices"]
         assert skipped[0]["reason"] == "orphan_above_cap"
         assert skipped[0]["end"] < size            # == probe_safe_end, before the unclosed tail
-        # ...and the residual tail followed the standard frozen-prefix path (cursor at the
-        # accepted boundary, job dead-lettered as no_safe_boundary — pre-existing behavior).
-        assert entry["end_offset"] == size
+        # ...and the residual tail followed the standard frozen-prefix path (job
+        # dead-lettered as no_safe_boundary — pre-existing behavior).
+        # The residual unclosed tail is now PARKED, not consumed: the cursor stays at the
+        # abandoned range's end and the suppression fact carries the ceiling.
+        assert entry["end_offset"] == skipped[0]["end"]
+        assert entry["frozen_until"] == size
         assert list((handler.spool.root / "failed").glob("*.json")), \
             "residual unclosed tail must be dead-lettered, not silently completed"
         errs = list((handler.spool.root / "failed").glob("*.error"))

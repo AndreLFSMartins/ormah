@@ -1493,13 +1493,9 @@ class SessionHandler(FileSystemEventHandler):
             self.spool.complete(job)
             return
         # NO_PROGRESS: the closed delta at the safe boundary is empty.
-        if self._idle_with_unsafe_tail(path, rel, job.boundary):
-            # An idle transcript whose bytes never reach a safe boundary (a single
-            # unterminated turn): completing would strand those bytes forever. Advance the
-            # cursor past the frozen prefix so the sweep stops re-selecting it, and keep a
-            # dead-letter record with a distinct reason (slice 3 owns the real policy) —
-            # never a silent complete.
-            self._mark_frozen_prefix_consumed(path, rel, job.boundary)
+        examined = self._idle_with_unsafe_tail(path, rel, job.boundary)
+        if examined is not None:
+            self._mark_frozen_prefix_parked(path, rel, job.boundary, examined=examined)
             self.spool.requeue(job, failure_class="no_safe_boundary")
             return
         if self._state.get(rel, {}).get("shrink_pending"):
@@ -1527,10 +1523,16 @@ class SessionHandler(FileSystemEventHandler):
             return
         self.spool.complete(job)
 
-    def _idle_with_unsafe_tail(self, path: Path, rel: str, boundary: int | None = None) -> bool:
-        """True when the file is idle, has bytes past the cursor, yet the parser closes
-        nothing there (a single unterminated turn). Non-idle files keep being retried
-        (re-enqueued as they grow); an unparseable/empty delta is the file's own fault.
+    def _idle_with_unsafe_tail(
+        self, path: Path, rel: str, boundary: int | None = None
+    ) -> os.stat_result | None:
+        """The stat of an idle file that has bytes past the cursor yet closes nothing there
+        (a single unterminated turn), or None. Returning the STAT rather than a bool is what
+        lets the caller prove the parked file is the file that was parsed — see
+        _mark_frozen_prefix_parked (council round 2, codex).
+
+        Non-idle files keep being retried (re-enqueued as they grow); an unparseable/empty
+        delta is the file's own fault.
 
         The parse honours the accepted ``boundary`` as a ``stop_offset`` ceiling (council-pr
         F1): a still-growing session can have bytes past the boundary that the nudge never
@@ -1538,39 +1540,90 @@ class SessionHandler(FileSystemEventHandler):
         try:
             st = path.stat()
         except OSError:
-            return False
+            return None
         if time.time() - st.st_mtime <= self.idle_threshold:
-            return False
+            return None
         cursor = self._state.get(rel, {}).get("end_offset") or 0
         if st.st_size <= cursor:
-            return False
+            return None
         try:
             parsed = parse_transcript(path, start_offset=cursor, stop_offset=boundary)
         except Exception:
-            return False
-        return parsed.safe_end_offset <= cursor
+            return None
+        return st if parsed.safe_end_offset <= cursor else None
 
-    def _mark_frozen_prefix_consumed(
-        self, path: Path, rel: str, boundary: int | None = None
+    def _mark_frozen_prefix_parked(
+        self, path: Path, rel: str, boundary: int | None = None,
+        *, examined: os.stat_result,
     ) -> None:
-        """Advance the cursor over a dead-lettered frozen prefix so reconcile stops
-        re-selecting it — but NEVER past the accepted ``boundary`` (council-pr F1), and NEVER
-        BACKWARD past the current cursor (council-pr R2 F2). Jumping to raw EOF would mark bytes
-        [boundary, size] consumed even though no nudge accepted them; writing a boundary below
-        the current cursor (a stale/out-of-order job) would rewind it and re-open already-
-        consumed bytes for duplicate extraction. If the file later grows past a new, higher
-        boundary, that new nudge re-opens the remainder for examination."""
+        """Record that this file closed nothing up to ``boundary`` — WITHOUT moving the
+        cursor (ADR-0004, 2026-08-12).
+
+        The predecessor (`_mark_frozen_prefix_consumed`) expressed "stop re-selecting this"
+        by advancing ``end_offset``, which claims bytes nothing ingested. Measured on the
+        live Beta: 75 state entries whose cursor had been advanced with nothing ingested,
+        68 transcripts still on disk, and a whole-file parse closes recoverable content in
+        14 of them. Suppression of selection is never expressed by moving the cursor.
+
+        ``frozen_until`` means: the last examination of this file, up to byte N, closed
+        nothing; do not re-select it while the file is still exactly the one examined. It is
+        not a progress offset. Monotonic — a stale or out-of-order job carrying a LOWER
+        boundary must not lower the ceiling, which would re-open the ratchet this method
+        exists to stop. NEVER past the accepted ``boundary`` (council-pr F1): bytes above it
+        were never accepted, so a later, higher nudge must still be able to examine them.
+
+        ``frozen_ino``/``frozen_mtime_ns`` describe the file the examination actually read. A
+        ceiling alone cannot express "unchanged": a rotation to a size at or below it, or a
+        same-size replacement, would otherwise be suppressed forever (council round 1,
+        both peers). Identity is what the producers compare; the ceiling only bounds it.
+
+        ``examined`` is the stat ``_idle_with_unsafe_tail`` used. Re-stating here and
+        refusing on any difference closes a TOCTOU that would be worse than the one this
+        change removes (council round 2, codex, high): a rotation landing between the
+        examination and this call would record the REPLACEMENT's identity, and both
+        producers would then classify a file nobody has ever parsed as frozen-and-unchanged.
+        Writing no fact is always safe — the file is simply re-selected.
+
+        The monotonic rule applies to the CEILING only. Identity always converges (council
+        round 2, cursor, high): after a same-size replacement the producers correctly
+        re-open, the drain freezes again at the same ``target``, and an early return that
+        skipped the identity write would leave the stale identity in place forever — every
+        sweep re-selecting, re-dead-lettering, growing ``failed/`` without bound.
+
+        And monotonicity holds only WITHIN one identity (council round 3, both peers, the
+        single finding of that round). A ceiling belonging to a different file is not a
+        ratchet guard, it is a lie: file A frozen at 1000, replaced by an unparseable B of
+        size 500, would keep 1000, and ``frozen_until == st_size`` could never be true again.
+        Guarding on identity also makes ``ceiling <= st.st_size`` provable rather than
+        defensive: same inode and same mtime means the same bytes, so the stored ceiling was
+        computed from this very size.
+        """
         try:
-            size = path.stat().st_size
+            st = path.stat()
         except OSError:
             return
-        cursor = self._state.get(rel, {}).get("end_offset") or 0
-        target = min(boundary, size) if boundary is not None else size
-        if target <= cursor:
-            # stale/out-of-order boundary, or nothing new to skip -- monotonic: never rewind.
-            return
+        if (st.st_ino, st.st_mtime_ns, st.st_size) != (
+            examined.st_ino, examined.st_mtime_ns, examined.st_size
+        ):
+            return  # changed under the examination -- never park a file nobody parsed
+        target = min(boundary, st.st_size) if boundary is not None else st.st_size
         entry = dict(self._state.get(rel, {}))
-        entry["end_offset"] = target
+        same_file = (
+            entry.get("frozen_ino") == st.st_ino
+            and entry.get("frozen_mtime_ns") == st.st_mtime_ns
+        )
+        # Never lower the ceiling for the SAME file (an out-of-order job would re-open the
+        # ratchet); always take the new one for a different file.
+        ceiling = max(target, entry.get("frozen_until") or 0) if same_file else target
+        if (
+            entry.get("frozen_until") == ceiling
+            and entry.get("frozen_ino") == st.st_ino
+            and entry.get("frozen_mtime_ns") == st.st_mtime_ns
+        ):
+            return  # already recorded, identically -- no write
+        entry["frozen_until"] = ceiling
+        entry["frozen_ino"] = st.st_ino
+        entry["frozen_mtime_ns"] = st.st_mtime_ns
         _commit_state(self._state, rel, entry, self._state_lock, self.watch_dir)
 
     def cancel_pending_timers(self) -> None:
