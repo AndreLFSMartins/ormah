@@ -2874,10 +2874,10 @@ def test_observer_job_respects_min_turns_but_nudge_force_flushes(engine, tmp_pat
 
 
 def test_frozen_prefix_park_is_monotonic(engine, tmp_path):
-    """council-pr R2 F2: _mark_frozen_prefix_consumed must be monotonic. A stale or
-    out-of-order boundary job (boundary < the current cursor) must NEVER rewind the cursor --
-    that would re-open already-consumed bytes for duplicate extraction. The prior
-    ``end_offset = min(boundary, size)`` wrote the lower boundary directly."""
+    """council-pr R2 F2: the park's CEILING must be monotonic. A stale or out-of-order job
+    carrying a boundary lower than the current ``frozen_until`` must NEVER lower it -- that
+    would re-open the ratchet this method exists to stop. The park never touches the cursor
+    (``end_offset``) at all, in either direction."""
     from ormah.background.ingest_spool import IngestSpool
     from ormah.background.session_watcher import _commit_state
 
@@ -2906,6 +2906,106 @@ def test_frozen_prefix_park_is_monotonic(engine, tmp_path):
         "the stale boundary must not be persisted to disk either"
     )
     assert _load_state(watch_dir).get(rel, {}).get("end_offset") == 4000
+
+
+def test_park_refuses_a_file_that_changed_under_the_examination(engine, tmp_path):
+    """Council round 2, codex, high. The park stats the file AFTER the examination. A
+    rotation landing in between would record the REPLACEMENT's identity, and both producers
+    would then treat a file nobody has ever parsed as frozen-and-unchanged. Writing no fact
+    is always safe: the file is simply re-selected."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "raced.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    examined = jsonl.stat()
+
+    # the path is replaced between the examination and the park
+    jsonl.unlink()
+    _make_jsonl(jsonl, user_turns=2)
+
+    handler._mark_frozen_prefix_parked(
+        jsonl, rel, boundary=jsonl.stat().st_size, examined=examined)
+    assert "frozen_until" not in handler._state.get(rel, {}), \
+        "a file that changed under the examination must never be parked"
+
+
+def test_park_converges_identity_when_the_ceiling_does_not_rise(engine, tmp_path):
+    """Council round 2, cursor, high. After a same-size replacement the producers correctly
+    re-open (identity differs). The re-park lands on the SAME ceiling; if it returned early
+    the stale identity would stay forever and every sweep would re-select and re-dead-letter
+    the file — an unbounded failed/, the failure mode ADR-0004 exists to avoid."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "samesize.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    size = jsonl.stat().st_size
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=size, examined=jsonl.stat())
+    first_ino = handler._state[rel]["frozen_ino"]
+
+    # a NEW file at the same path with the SAME byte count
+    original = jsonl.read_bytes()
+    replacement = proj / "tmp.jsonl"
+    replacement.write_bytes(original)
+    replacement.replace(jsonl)
+    _mark_idle(jsonl)
+    assert jsonl.stat().st_size == size
+
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=size, examined=jsonl.stat())
+    entry = handler._state[rel]
+    assert entry["frozen_until"] == size, "the ceiling must not move"
+    assert entry["frozen_ino"] != first_ino, \
+        "identity must converge even when the ceiling does not rise"
+    assert entry["frozen_ino"] == jsonl.stat().st_ino
+
+
+def test_park_ceiling_is_monotonic_only_within_one_identity(engine, tmp_path):
+    """Council round 3, both peers, the only finding of that round. A ceiling belonging to
+    a different file is not a ratchet guard, it is a lie: file A frozen at a large size,
+    replaced by a SMALLER file that is also unparseable, would keep A's ceiling, and
+    `frozen_until == st_size` could never be true again — every sweep re-selecting and
+    re-dead-lettering, an unbounded failed/."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "shrinking.jsonl"
+    proj_big = "x" * 4000
+    jsonl.write_text(
+        json.dumps({"type": "user", "message": {"content": f"a long prompt {proj_big}"}})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"an answer that never closed {proj_big}"}]}})
+        + "\n"
+    )
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    big = jsonl.stat().st_size
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=big, examined=jsonl.stat())
+    assert handler._state[rel]["frozen_until"] == big
+
+    # replaced by a SMALLER file that is also unparseable
+    jsonl.unlink()
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    small = jsonl.stat().st_size
+    assert small < big
+
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=small, examined=jsonl.stat())
+    assert handler._state[rel]["frozen_until"] == small, (
+        "a ceiling from a different file must be replaced, not maxed — otherwise the "
+        "predicate can never re-arm and the file re-selects forever"
+    )
 
 
 def test_capped_continuation_inherits_the_producer_force_flush(engine, tmp_path):
