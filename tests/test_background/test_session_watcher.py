@@ -56,6 +56,19 @@ _LLM_RESPONSE = json.dumps({"memories": [
     },
 ]})
 
+# A second, content-distinct extraction result. The engine dedups a memory whose content
+# matches one already stored in the SAME store (_is_duplicate_memory), so a test that ingests
+# twice against one shared `engine` fixture needs two different memories or the second
+# ingest's node_ids comes back empty for a reason unrelated to what it is testing.
+_ROTATED_LLM_RESPONSE = json.dumps({"memories": [
+    {
+        "content": "The rotated transcript records a fresh decision distinct from the original.",
+        "type": "decision",
+        "title": "Rotated transcript decision",
+        "tags": ["rotated"],
+    },
+]})
+
 
 def _make_jsonl(path: Path, user_turns: int = 6) -> None:
     """Write a minimal JSONL transcript with the given number of user turns."""
@@ -2527,6 +2540,151 @@ def test_shrink_tick_one_requeues_without_reconcile(engine, tmp_path):
     assert handler.spool.pending_count() == 1
     failed_dir = handler.spool.root / "failed"
     assert not any(p.name.endswith(".json") for p in failed_dir.iterdir())
+
+
+def test_confirmed_shrink_clears_the_frozen_fact_through_the_producer(engine, tmp_path):
+    """A rotated file reuses its path at a smaller size. The frozen fact left over from the
+    PREVIOUS file must not survive the confirmed reset, and the whole route must run through
+    a real producer: council round 1 rejected a version of this test that called
+    spool.enqueue directly, because that is exactly the gate the defect lived in."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "rotated.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        # 1. a normal ingest: the entry gets a real cursor
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        cursor = handler._state[rel]["end_offset"]
+        assert cursor > 0
+
+        # 2. an unterminated turn is appended and the session dies -> the file freezes
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "user", "message": {"content": "a prompt that never got its answer"},
+            }) + "\n")
+        _mark_idle(jsonl)
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        assert handler._state[rel]["frozen_until"] > cursor
+
+        # 3. the path is rotated to a NEW, smaller file
+        jsonl.unlink()
+        _make_jsonl(jsonl, user_turns=2)
+        assert jsonl.stat().st_size < cursor
+        _mark_idle(jsonl)
+
+        # 4. tick 1 through the producer: the cursor above EOF is an explicit escape from
+        #    the frozen gate, so the Observer must still enqueue.
+        handler._enqueue_path(jsonl, "observer")
+        assert handler.spool.pending_count() == 1, "the shrink escape must reach the spool"
+        _drain_all(handler)
+        assert handler._state[rel]["shrink_pending"], "tick 1 must arm the marker"
+        assert "frozen_until" in handler._state[rel], "tick 1 does not reset anything yet"
+
+        # 5. tick 2 is the SAME job, returned to pending/ with a persisted backoff. Advancing
+        #    the spool's clock is what makes it due; enqueueing again would be a no-op on the
+        #    same (path, boundary) key and _drain_all would find nothing due.
+        #
+        #    This tick's extraction is made to fail (provider outage) ON PURPOSE. Measured: a
+        #    successful re-ingest immediately following the reset, in the SAME tick, always
+        #    rebuilds the entry from an empty dict regardless of the fix -- the reset zeroes
+        #    end_offset, so `carry = existing and prev_offset > 0` is false right after ANY
+        #    reset, which erases a stale frozen_until whether or not the reset commit itself
+        #    ever carried it forward. A version of this test that let tick 2 succeed passed
+        #    with BOTH fix sites reverted, proving nothing about the reset commit. Failing
+        #    the extraction keeps the reset's own commit as the LAST write this tick, so what
+        #    follows is actually checking the reset site, not the happy-path site.
+        with patch("ormah.background.ingest_spool.time.time",
+                   return_value=time.time() + 3600), \
+             patch(_LLM_PATCH, return_value=None):
+            _drain_all(handler)
+
+    reset_entry = handler._state[rel]
+    assert "shrink_pending" not in reset_entry, "tick 2 must have actually run and confirmed"
+    assert "frozen_until" not in reset_entry, \
+        "a confirmed shrink must drop the stale ceiling with the stale cursor"
+    assert "frozen_ino" not in reset_entry and "frozen_mtime_ns" not in reset_entry
+
+    # 6. the provider recovers on a later tick, past tick 2's own backoff: the rotated file's
+    #    real content still reaches the store -- the reset dropped the stale FACT, not the
+    #    file. A response distinct from step 1's avoids _is_duplicate_memory silently
+    #    skipping an identical memory already stored by step 1 in this same engine.
+    with patch("ormah.background.ingest_spool.time.time",
+               return_value=time.time() + 7200), \
+         patch(_LLM_PATCH, return_value=_ROTATED_LLM_RESPONSE):
+        _drain_all(handler)
+
+    entry = handler._state[rel]
+    assert entry.get("node_ids"), "the rotated file's content must reach the store"
+    assert "frozen_until" not in entry
+    assert "frozen_ino" not in entry and "frozen_mtime_ns" not in entry
+
+
+def test_successful_ingest_clears_the_frozen_fact(engine, tmp_path):
+    """Council round 1, cursor, medium: the happy-path commit carries the whole existing
+    entry forward, so a frozen fact would outlive the freeze it described and could only
+    mislead a later comparison.
+
+    The freeze must land on an entry that ALREADY has a real cursor (`end_offset > 0`):
+    freezing a file's very first-ever examination leaves nothing to carry, so
+    `carry = existing and prev_offset > 0` stays false and the happy-path commit rebuilds
+    the entry from an empty dict regardless of the fix -- proving nothing. Measured: a
+    version of this test that froze on a brand-new unterminated file (never ingested
+    before) passed even with the fix reverted."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "thaws.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        # 1. a normal ingest: the entry gets a real cursor to carry forward
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        cursor = handler._state[rel]["end_offset"]
+        assert cursor > 0
+
+        # 2. an unterminated turn is appended and the session dies -> the file freezes
+        #    WITHOUT moving the cursor (ADR-0004): end_offset stays at `cursor`.
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "user", "message": {"content": "a prompt that never got its answer"},
+            }) + "\n")
+        _mark_idle(jsonl)
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        assert handler._state[rel]["frozen_until"] > cursor
+        assert handler._state[rel]["end_offset"] == cursor
+
+        # 3. the session comes back and closes the turn: the next parse ingests it
+        #    INCREMENTALLY from `cursor` (prev_offset > 0), so carry is true this time and
+        #    the happy-path commit under test actually runs. A response distinct from step
+        #    1's avoids _is_duplicate_memory silently skipping an identical memory already
+        #    stored by step 1 in this same engine.
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "and a closing answer"}]},
+            }) + "\n")
+        _mark_idle(jsonl)
+        with patch(_LLM_PATCH, return_value=_ROTATED_LLM_RESPONSE):
+            handler._enqueue_path(jsonl, "observer")
+            _drain_all(handler)
+
+    entry = handler._state[rel]
+    assert entry.get("node_ids"), "the content must have been ingested"
+    assert "frozen_until" not in entry, "a successful ingest un-freezes the file"
+    assert "frozen_ino" not in entry and "frozen_mtime_ns" not in entry
 
 
 def test_reconcile_while_live_ingesting_does_not_double_enqueue(engine, tmp_path):

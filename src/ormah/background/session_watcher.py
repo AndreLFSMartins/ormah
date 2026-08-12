@@ -989,6 +989,11 @@ def _ingest_session(
         reset_entry = dict(existing or {})
         reset_entry.update({"hash": h, "end_offset": 0})
         reset_entry.pop("shrink_pending", None)
+        # The frozen fact belongs to the file that was rotated away. Left in place it would
+        # describe a file that no longer exists and the producer gates would act on it
+        # (ADR-0004, 2026-08-12).
+        for _k in ("frozen_until", "frozen_ino", "frozen_mtime_ns"):
+            reset_entry.pop(_k, None)
         _commit_state(state, rel, reset_entry, state_lock, watch_dir, allow_rewind=True)
         existing = state.get(rel)
     elif existing and existing.get("shrink_pending"):
@@ -1309,6 +1314,10 @@ def _ingest_session(
     })
     entry.pop("extract_fail_offset", None)  # a success at this offset clears the retry counter
     entry.pop("extract_fail_count", None)
+    # A successful ingest un-freezes the file: the fact described a parse that closed nothing,
+    # and this one closed something. Keeping it would leave a stale ceiling on a healthy entry.
+    for _k in ("frozen_until", "frozen_ino", "frozen_mtime_ns"):
+        entry.pop(_k, None)
     _commit_state(state, rel, entry, state_lock, watch_dir)
 
     logger.info(
