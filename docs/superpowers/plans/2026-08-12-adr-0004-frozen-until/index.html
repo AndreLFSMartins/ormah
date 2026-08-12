@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>frozen_until Implementation Plan</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">frozen_until Implementation Plan</div>
+  <a href="#goal-and-architecture">Goal and Architecture</a>
+  <a href="#global-constraints">Global Constraints</a>
+  <a href="#setup">Setup</a>
+  <a href="#task-overview">Task Overview</a>
+  <a href="#line-numbers">Line Numbers</a>
+  <a href="#task-1-steps" class="lvl-3">Steps 2-9</a>
+  <a href="#task-2-steps" class="lvl-3">Steps 1-7</a>
+  <a href="#task-3-steps" class="lvl-3">Steps 1-7</a>
+  <a href="#task-4-steps" class="lvl-3">Steps 1-7</a>
+  <a href="#task-5-steps" class="lvl-3">Steps 1-9</a>
+</nav>
+<main>
+<article>
+
+<div class="eyebrow">ADR-0004 Implementation</div>
+
+<h1><em>frozen_until</em> Implementation Plan</h1>
+
+<p class="statement">Stop the ingest lane from losing transcript content by moving selection suppression out of the cursor and into its own state field.</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="big">5</div>
+    <div class="label">Tasks</div>
+  </div>
+  <div class="metric">
+    <div class="big">39</div>
+    <div class="label">Steps</div>
+  </div>
+  <div class="metric">
+    <div class="big">Python 3.11</div>
+    <div class="label">Tech stack</div>
+  </div>
+</div>
+
+<div class="progress">
+  <div class="fill" style="width: 0%"></div>
+</div>
+
+<div class="chips">
+  <span class="schip">0 done</span>
+  <span class="schip active">39 to do</span>
+</div>
+
+<section>
+<h2 id="goal-and-architecture">Goal and Architecture</h2>
+
+<p><code>SessionHandler._mark_frozen_prefix_consumed</code> currently advances the cursor to mean "stop re-selecting this file", which marks never-ingested bytes as consumed. It is renamed <code>_mark_frozen_prefix_parked</code> and writes <code>frozen_until</code> instead, leaving <code>end_offset</code> untouched.</p>
+
+<p>Both producers — <code>reconcile</code> and <code>_enqueue_path</code> — gain a gate that skips a file while <code>size <= frozen_until</code>, so growth is what re-opens it. A confirmed shrink clears the field.</p>
+
+<p><strong>Spec:</strong> <a href="../../specs/2026-08-12-adr-0004-frozen-prefix-suppression-fact-design.md"><code>docs/superpowers/specs/2026-08-12-adr-0004-frozen-prefix-suppression-fact-design.md</code></a></p>
+</section>
+
+<section>
+<h2 id="global-constraints">Global Constraints</h2>
+
+<ul>
+  <li>All work happens in a <strong>git worktree cut from <code>local-main</code></strong>, never in <code>Tools/ormah</code> itself: that working tree is what the running Beta serves (launchd <code>com.ormah.server.dev</code>), and switching its branch crashes every whisper hook (FORK-WORKFLOW golden rule 1).</li>
+  <li><strong>Not an upstream contribution.</strong> Verified 2026-08-12: <code>src/ormah/background/ingest_spool.py</code> does not exist on <code>upstream/main</code> and <code>_mark_frozen_prefix_consumed</code> has 0 occurrences there. So the branch is cut from <code>local-main</code>, not <code>upstream/main</code>, and never pushed to <code>upstream</code>.</li>
+  <li>Test command: <code>python -m pytest tests/test_background/test_session_watcher.py -v</code></li>
+  <li>Lint command: <code>ruff check src/ tests/</code></li>
+  <li>Never use <code>git commit --no-verify</code>.</li>
+  <li>The field is named <code>frozen_until</code>. Never <code>parked_until</code> — that name belongs to the force-close design retracted on 2026-08-09, and live state entries still carry <code>parked_*</code> residue from it.</li>
+  <li><code>spool.requeue(job, failure_class="no_safe_boundary")</code> is <strong>not</strong> touched by any task. The dead-letter behaviour and its volume stay exactly as they are (ADR "Fix A", separate spec).</li>
+</ul>
+</section>
+
+<section>
+<h2 id="setup">Setup</h2>
+
+<p>Do this once, before Task 1:</p>
+
+<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git worktree add -b fix/adr-0004-frozen-until ../ormah-wt-frozen-until local-main
+cd ../ormah-wt-frozen-until
+pip install -e ".[dev]"
+</code></pre>
+
+<p>All file paths in the task files are relative to <code>../ormah-wt-frozen-until</code>.</p>
+</section>
+
+<section>
+<h2 id="task-overview">Task Overview</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>File</th>
+      <th>Deliverable</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td><a href="#task-1-the-suppression-fact"><code>01-suppression-fact.md</code></a></td>
+      <td><code>_mark_frozen_prefix_parked</code> writes <code>frozen_until</code>, cursor untouched; the reproducing test; three existing tests rewritten</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><a href="#task-2-reconcile-skips-frozen"><code>02-reconcile-gate.md</code></a></td>
+      <td><code>reconcile</code> skips a frozen file that has not grown; growth re-opens it</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><a href="#task-3-observer-lane"><code>03-enqueue-path-gate.md</code></a></td>
+      <td><code>_enqueue_path</code> (Observer lane) gets the same gate</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td><a href="#task-4-shrink-reset"><code>04-shrink-reset-clears.md</code></a></td>
+      <td>A confirmed shrink pops <code>frozen_until</code></td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td><a href="#task-5-verify-and-merge"><code>05-verify-and-merge.md</code></a></td>
+      <td>Full suite, lint, merge into <code>local-main</code>, prune the worktree</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Tasks are strictly ordered: Task 2's test relies on the field Task 1 introduces, Task 3 mirrors Task 2, Task 4 depends on the field existing.</p>
+</section>
+
+<section>
+<h2 id="line-numbers">Line Numbers</h2>
+
+<p>Pinned at <code>7667420</code> (<code>local-main</code>, 2026-08-12). If they have moved, locate the symbol by name — the code is what counts, the numbers are a convenience.</p>
+
+<ul>
+  <li><code>session_watcher.py:1502</code> — the call site inside <code>_run_job</code></li>
+  <li><code>session_watcher.py:1553</code> — <code>_mark_frozen_prefix_consumed</code> definition</li>
+  <li><code>session_watcher.py:1622-1629</code> — <code>reconcile</code>'s cheap-skip arm</li>
+  <li><code>session_watcher.py:1361</code> — <code>_enqueue_path</code></li>
+  <li><code>session_watcher.py:962-966</code> — the confirmed-shrink reset</li>
+</ul>
+</section>
+
+<section>
+<div class="phase p-o"><span class="pn">1</span> Task 1: the suppression fact replaces the cursor advance</div>
+
+<p class="eyebrow">Files:</p>
+<ul>
+  <li>Modify: <code>src/ormah/background/session_watcher.py:1502</code> (call site), <code>:1553-1575</code> (the method)</li>
+  <li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
+</ul>
+
+<p class="eyebrow">Interfaces:</p>
+<p><strong>Produces:</strong> <code>SessionHandler._mark_frozen_prefix_parked(self, path: Path, rel: str, boundary: int | None = None) -> None</code> — replaces <code>_mark_frozen_prefix_consumed</code>, same signature. Writes the state key <code>frozen_until: int</code> and never writes <code>end_offset</code>. Tasks 2, 3 and 4 read that key.</p>
+
+<details>
+<summary><strong>Step 1: Write the failing test</strong></summary>
+<p>Append to <code>tests/test_background/test_session_watcher.py</code>, next to the other frozen-prefix tests (after <code>test_frozen_prefix_advance_never_passes_the_accepted_boundary</code>):</p>
+<pre><code>def test_frozen_prefix_does_not_consume_bytes_the_next_job_can_ingest(engine, tmp_path):
+    """ADR-0004 2026-08-12 — the ratchet. A job whose accepted boundary cuts the first
+    assistant record in half closes nothing, so the frozen-prefix path fires. It must NOT
+    advance the cursor: a second job at the file's real EOF has to ingest the WHOLE
+    transcript. With the cursor advanced (the pre-fix behaviour) the second job resumes
+    mid-record and the content is unreachable — that happened 24 times in a row on one
+    production transcript, boundary climbing 98,985 -> 1,435,339, nothing ever ingested."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "ratchet.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    size = jsonl.stat().st_size
+
+    # A boundary strictly INSIDE the first assistant record: the parser reads that line
+    # (its start is below the ceiling) and _exceeds_ceiling refuses it at commit, so
+    # safe_end_offset == start_offset == 0 and _idle_with_unsafe_tail is True.
+    first_line = jsonl.read_bytes().split(b"\n")[0]
+    boundary = len(first_line) + 1 + 10
+    assert boundary < size
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        spool.enqueue(jsonl, boundary=boundary, reason="observer", force_flush=False)
+        _drain_all(handler)
+
+        entry = handler._state.get(rel, {})
+        assert entry.get("frozen_until") == boundary, \
+            "the freeze must be recorded as a suppression fact"
+        assert (entry.get("end_offset") or 0) == 0, \
+            "the freeze must NOT move the cursor over bytes nothing ingested"
+
+        spool.enqueue(jsonl, boundary=size, reason="reconcile", force_flush=False)
+        _drain_all(handler)
+
+    entry = handler._state[rel]
+    assert entry["end_offset"] == size, \
+        "the second job, at the real EOF, must ingest the whole transcript"
+    assert entry.get("node_ids"), "the content must have reached the store"
+</code></pre>
+</details>
+
+<h3 id="task-1-steps">Steps 2-9</h3>
+<p>Follow the detailed steps in task file 01-suppression-fact.md for completing the implementation, tests, and commit.</p>
+</section>
+
+<section>
+<div class="phase p-b"><span class="pn">2</span> Task 2: reconcile skips a frozen file until it grows</div>
+
+<p class="eyebrow">Files:</p>
+<ul>
+  <li>Modify: <code>src/ormah/background/session_watcher.py:1622-1631</code> (the cheap-skip arm of <code>reconcile</code>)</li>
+  <li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
+</ul>
+
+<p class="eyebrow">Interfaces:</p>
+<p><strong>Consumes:</strong> the state key <code>frozen_until: int</code> written by <a href="#task-1-the-suppression-fact">Task 1</a>.</p>
+<p><strong>Produces:</strong> nothing new. <code>SessionHandler.reconcile() -> int</code> keeps its signature and meaning (number of transcripts enqueued).</p>
+
+<p class="callout">Without this task the cursor no longer drops the file from the sweep, so <code>reconcile</code> re-enqueues a frozen transcript on every tick. <a href="#task-1-the-suppression-fact">Task 1</a> is not shippable alone.</p>
+
+<h3 id="task-2-steps">Steps 1-7</h3>
+<p>Write and run two failing tests (<code>test_reconcile_skips_a_frozen_file_until_it_grows</code> and <code>test_reconcile_still_selects_a_never_seen_file_with_only_a_frozen_fact</code>), then add a third <code>elif</code> gate in <code>reconcile</code> that checks <code>frozen_until</code>. See task file 02-reconcile-gate.md for complete details.</p>
+</section>
+
+<section>
+<div class="phase p-g"><span class="pn">3</span> Task 3: the Observer lane gets the same gate</div>
+
+<p class="eyebrow">Files:</p>
+<ul>
+  <li>Modify: <code>src/ormah/background/session_watcher.py:1361-1375</code> (<code>_enqueue_path</code>)</li>
+  <li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
+</ul>
+
+<p class="eyebrow">Interfaces:</p>
+<p><strong>Consumes:</strong> the state key <code>frozen_until: int</code> written by <a href="#task-1-the-suppression-fact">Task 1</a>.</p>
+<p><strong>Produces:</strong> nothing new. <code>SessionHandler._enqueue_path(self, path: Path, reason: str) -> None</code> keeps its signature.</p>
+
+<p class="callout"><code>_enqueue_path</code> consults no state at all today: every FSEvent becomes an <code>enqueue</code>. Gating only the sweep does not fix the defect, it relocates it — the ADR already recorded this: <em>"the suppression is applied in both producer lanes, because gating only the sweep would trade a full <code>failed/</code> for a hot enqueue loop on the Observer lane."</em></p>
+
+<h3 id="task-3-steps">Steps 1-7</h3>
+<p>Write the failing test <code>test_enqueue_path_skips_a_frozen_file_until_it_grows</code>, then update <code>_enqueue_path</code> to check <code>frozen_until</code> before enqueueing. Mirror the approach from Task 2. See task file 03-enqueue-path-gate.md for complete implementation details.</p>
+</section>
+
+<section>
+<div class="phase p-o"><span class="pn">4</span> Task 4: a confirmed shrink clears the suppression fact</div>
+
+<p class="eyebrow">Files:</p>
+<ul>
+  <li>Modify: <code>src/ormah/background/session_watcher.py:962-966</code> (the confirmed-shrink reset inside <code>_ingest_session</code>)</li>
+  <li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
+</ul>
+
+<p class="eyebrow">Interfaces:</p>
+<p><strong>Consumes:</strong> the state key <code>frozen_until: int</code> written by <a href="#task-1-the-suppression-fact">Task 1</a>, and the gates from <a href="#task-2-reconcile-skips-frozen">Tasks 2</a> & <a href="#task-3-observer-lane">3</a>.</p>
+<p><strong>Produces:</strong> nothing new.</p>
+
+<p class="callout warn">The reset builds its entry with <code>dict(existing or {})</code> and updates only <code>hash</code>/<code>end_offset</code>. A <code>frozen_until</code> surviving it would sit <strong>above</strong> the rotated file's size and suppress the fresh content — the same defect with the sign flipped: the cursor stops claiming bytes it never ingested, and the ceiling starts hiding bytes nobody ever examined.</p>
+
+<h3 id="task-4-steps">Steps 1-7</h3>
+<p>Write the failing test <code>test_confirmed_shrink_clears_the_frozen_fact</code>, then add a single <code>pop("frozen_until", None)</code> to the shrink reset at line 962-966. The stale ceiling belongs to the rotated file and must not carry over. See task file 04-shrink-reset-clears.md for complete details.</p>
+</section>
+
+<section>
+<div class="phase p-b"><span class="pn">5</span> Task 5: verify the whole change, then land it in the Beta</div>
+
+<p class="eyebrow">Files:</p>
+<p>Modify: none (verification and integration only)</p>
+
+<p class="eyebrow">Interfaces:</p>
+<p><strong>Consumes:</strong> everything <a href="#task-1-the-suppression-fact">Tasks 1</a>–<a href="#task-4-shrink-reset">4</a> produced.</p>
+
+<h3 id="task-5-steps">Steps 1-9</h3>
+<p>Run the full test suite and lint check. Verify the old method name is completely gone. Confirm <code>ingest_spool.py</code> is untouched and the diff contains only the four changes (renamed method, two gates, one pop). Merge to <code>local-main</code>, restart the server, record the production baseline count, prune the worktree, and amend ADR-0004 with errata and findings. See task file 05-verify-and-merge.md for full verification and merge procedures.</p>
+</section>
+
+</article>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:46ac801e24d8acaf2cc25405662f2571d0b480b519a1160ebde7c040363b7d85 -->
