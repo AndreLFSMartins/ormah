@@ -42,9 +42,23 @@ jobs/day) is out of scope for this plan by decision, and a diff there means the 
 
 Run: `git diff local-main -- src/`
 
-Expected: three hunks only — the renamed method with its new body, the third `elif` in
-`reconcile`, the gate in `_enqueue_path`, plus the one-line `pop` in the shrink reset. Anything
-else is scope creep and should be reverted before merging.
+Expected these hunks and no others:
+
+1. `_mark_frozen_prefix_parked` — the renamed method with its new body.
+2. `_idle_with_unsafe_tail` — returns `os.stat_result | None` instead of `bool`.
+3. The `_run_job` call site that threads the examined stat into the park.
+4. The new module-level `_frozen_unchanged`.
+5. `reconcile` — `>=` becomes `==` on the fully-consumed arm, plus the new frozen arm.
+6. `_enqueue_path` — the gate.
+7. Two `pop` loops: the confirmed-shrink reset and the successful-ingest commit.
+
+Anything else is scope creep and should be reverted before merging.
+
+Hunk 5's `>=` → `==` is the one change that repairs **pre-existing** behaviour rather than
+behaviour this plan introduced: a cursor above EOF meant "fully consumed", so a shrunk
+transcript was dropped from the sweep and the shrink gate was reachable only through the
+Observer. It is included because the frozen fact's contract claims that escape works. If a
+tighter diff is wanted, this hunk and its test are the separable piece.
 
 - [ ] **Step 6: Merge into the running Beta**
 
