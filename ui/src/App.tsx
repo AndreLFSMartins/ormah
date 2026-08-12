@@ -13,6 +13,7 @@ import InsightsPanel from "./components/InsightsPanel";
 import AdminPanel from "./components/AdminPanel";
 import AgentsPanel from "./components/AgentsPanel";
 import ProtectionPanel from "./components/ProtectionPanel";
+import UpdateBanner from "./components/UpdateBanner";
 import ToastContainer from "./components/Toast";
 import type { ToastData } from "./components/Toast";
 import {
@@ -140,9 +141,12 @@ export default function App() {
   // Explicit "show all" — loads every node (all tiers + spaces). Opt-in only;
   // dimming treats kind:"all" like a drill, so a stale tier/space filter can't
   // hide what the user asked to see. Shares the request guard with loadGraph.
+  // Returns the in-flight promise so a caller that must sequence work after the
+  // reload can await it (the post-restore handler does). Callers that don't care
+  // — the mount effect, the banner — simply ignore it.
   const loadAll = useCallback(() => {
     const token = reqGuard.current.begin();
-    fetchGraph({ all: true })
+    return fetchGraph({ all: true })
       .then((data) => {
         if (!reqGuard.current.isLatest(token)) return; // drop stale response
         setGraph(data);
@@ -161,6 +165,15 @@ export default function App() {
   // banner. Fits a curated/lean graph where the whole graph is worth seeing on load.
   useEffect(() => {
     loadAll();
+  }, [loadAll]);
+
+  // A full restore replaces every node, so reload with the same scope the mount
+  // effect uses (loadAll), not the active-only loadGraph() upstream called here —
+  // upstream's loadGraph WAS its mount loader; loadAll is ours.
+  const handleRestoreComplete = useCallback(async () => {
+    setSelectedDetail(null);
+    setFocusNodeId(null);
+    await loadAll();
   }, [loadAll]);
 
   useEffect(() => {
@@ -317,6 +330,7 @@ export default function App() {
         searchInputRef={searchInputRef}
         protectionState={protectionState}
       />
+      <UpdateBanner />
       <div className="graph-container">
         {graph && (
           // Council C2: pass full graph.nodes/graph.edges + filters prop so filter
@@ -378,9 +392,11 @@ export default function App() {
       />
       <ProtectionPanel
         open={activePanel === "protection"}
+        nodeCount={graph.nodes.length}
         onClose={() => setActivePanel(null)}
         onToast={addToast}
         onStatusChange={handleProtectionStatusChange}
+        onRestoreComplete={handleRestoreComplete}
       />
       {themeTransition && (
         <div

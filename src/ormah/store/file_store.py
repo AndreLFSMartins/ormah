@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+from functools import wraps
 import logging
 import os
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +20,15 @@ from ormah.store.markdown import parse_node, serialize_node
 logger = logging.getLogger(__name__)
 
 
+def _serialized_store_operation(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._operation_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
 class FileStore:
     """Manages memory node files on disk.
 
@@ -26,13 +37,15 @@ class FileStore:
     every markdown file.
     """
 
-    def __init__(self, nodes_dir: Path) -> None:
+    def __init__(self, nodes_dir: Path, operation_lock=None) -> None:
         self.nodes_dir = nodes_dir
+        self._operation_lock = operation_lock or threading.RLock()
         self.nodes_dir.mkdir(parents=True, exist_ok=True)
         # id -> Path cache, populated lazily on first miss
         self._id_cache: dict[str, Path] = {}
         self._cache_built = False
 
+    @_serialized_store_operation
     def save(self, node: MemoryNode) -> Path:
         """Write a node to disk atomically. Returns the file path.
 
@@ -64,6 +77,7 @@ class FileStore:
         self._id_cache[node.id] = path
         return path
 
+    @_serialized_store_operation
     def load(self, node_id: str) -> MemoryNode | None:
         """Load a node by ID. Returns None if not found."""
         path = self._find_file(node_id)
@@ -71,6 +85,7 @@ class FileStore:
             return None
         return self._load_path(path)
 
+    @_serialized_store_operation
     def delete(self, node_id: str) -> bool:
         """Delete a node file. Returns True if deleted."""
         path = self._find_file(node_id)
@@ -80,6 +95,7 @@ class FileStore:
         self._id_cache.pop(node_id, None)
         return True
 
+    @_serialized_store_operation
     def soft_delete(self, node_id: str) -> bool:
         """Move a node file to the deleted/ directory, stamping deleted_at atomically.
 
@@ -161,6 +177,7 @@ class FileStore:
                 return True
         return False
 
+    @_serialized_store_operation
     def list_all(self) -> list[MemoryNode]:
         """Load all nodes from disk."""
         nodes = []
@@ -171,14 +188,17 @@ class FileStore:
                 continue  # skip malformed files
         return nodes
 
+    @_serialized_store_operation
     def list_paths(self) -> list[Path]:
         """List all markdown file paths."""
         return sorted(self.nodes_dir.glob("*.md"))
 
+    @_serialized_store_operation
     def file_hash(self, path: Path) -> str:
         """Compute SHA-256 hash of a file's contents."""
         return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
 
+    @_serialized_store_operation
     def touch_access(self, node_id: str) -> MemoryNode | None:
         """Update last_accessed and access_count. Returns updated node."""
         node = self.load(node_id)

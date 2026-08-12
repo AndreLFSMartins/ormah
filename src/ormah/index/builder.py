@@ -31,6 +31,15 @@ class IndexBuilder:
         to accept a partial rebuild anyway (e.g. known-corrupt files that should be skipped).
         """
         paths = list(self.file_store.list_paths())
+        # FileStore calls take L_mem. Complete them before the write transaction so no builder
+        # path requests L_mem while holding L_db, the reverse of the order used by memory jobs.
+        hashes: dict[Path, str] = {}
+        for path in paths:
+            try:
+                hashes[path] = self.file_store.file_hash(path)
+            except Exception as e:
+                logger.warning("Failed to hash %s: %s", path, e)
+
         count = 0
         with self.db.transaction() as conn:
             # #126: capture the fingerprints BEFORE the wipe. A rebuild over CHANGED content
@@ -64,8 +73,10 @@ class IndexBuilder:
 
             # Two-pass: nodes first, then edges (to satisfy FK constraints)
             for path in paths:
+                if path not in hashes:
+                    continue  # hashing failed above; already logged
                 try:
-                    self._index_file_nodes_only(path, prior_fingerprints=prior_fps)
+                    self._index_file_nodes_only(path, hashes[path], prior_fingerprints=prior_fps)
                     count += 1
                 except Exception as e:
                     logger.warning("Failed to index %s: %s", path, e)
@@ -115,34 +126,66 @@ class IndexBuilder:
         indexed_ids = set(indexed.keys())
         disk_ids: set[str] = set()
 
+        # FileStore calls take L_mem. Complete them before the write transaction so no builder
+        # path requests L_mem while holding L_db, the reverse of the order used by memory jobs.
+        paths = list(self.file_store.list_paths())
+        hashes: dict[Path, str] = {}
+        scan_complete = True
+        for path in paths:
+            try:
+                hashes[path] = self.file_store.file_hash(path)
+            except FileNotFoundError:
+                # Genuinely gone between listing and hashing. Letting it fall out of disk_ids is
+                # the correct signal: the removal phase below should drop its node.
+                logger.info("Skipping %s: removed between listing and hashing", path)
+            except Exception as e:
+                # EMFILE, EIO, EACCES — the file is very likely still there. Absence is NOT
+                # established, so the removal phase must not run (council 2026-08-12, both peers).
+                scan_complete = False
+                logger.warning("Failed to hash %s: %s", path, e)
+
         with self.db.transaction():
-            for path in self.file_store.list_paths():
+            for path in paths:
+                if path not in hashes:
+                    continue  # hashing failed above; already logged
                 try:
-                    file_hash = self.file_store.file_hash(path)
+                    file_hash = hashes[path]
                     node = parse_node(path.read_text(encoding="utf-8"))
                     disk_ids.add(node.id)
 
                     if node.id not in indexed:
-                        self._index_file(path)
+                        self._index_file(path, file_hash)
                         added += 1
                     elif indexed[node.id] != file_hash:
                         prior = self._prior_row(node.id)  # read BEFORE the delete (#126)
                         self._remove_node(node.id, keep_vectors=True)
-                        self._index_file(path, prior)
+                        self._index_file(path, file_hash, prior)
                         updated += 1
                 except Exception as e:
+                    # Any failure here also leaves this node out of disk_ids.
+                    scan_complete = False
                     logger.warning("Failed to process %s: %s", path, e)
 
-            # Remove nodes whose files were deleted
-            removed_ids = indexed_ids - disk_ids
-            for node_id in removed_ids:
-                self._remove_node(node_id)
+            # Only a COMPLETE scan proves absence. _remove_node here runs with keep_vectors=False,
+            # so a node dropped on a transient read error loses its vector permanently — nothing
+            # re-embeds it — and _remove_node does not clear the checked-pair tables, so the node
+            # would come back as new (prior=None) carrying stale verdicts, defeating #126.
+            pending_removal = indexed_ids - disk_ids
+            if scan_complete:
+                for node_id in pending_removal:
+                    self._remove_node(node_id)
+            elif pending_removal:
+                logger.warning(
+                    "incremental_update: scan incomplete, deferring removal of %d node(s)",
+                    len(pending_removal),
+                )
 
         return added, updated
 
     def index_single(self, path: Path) -> None:
         """Index or re-index a single file."""
         node = parse_node(path.read_text(encoding="utf-8"))
+        file_hash = self.file_store.file_hash(path)  # takes L_mem: must precede the write txn
         with self.db.transaction():
             prior = self._prior_row(node.id)  # read BEFORE the delete (#126)
             # The vector is still valid exactly when the content fingerprint is: title and
@@ -155,7 +198,7 @@ class IndexBuilder:
                 node.title, node.content, node.type.value, node.space
             )
             self._remove_node(node.id, keep_vectors=unchanged)
-            self._index_file(path, prior)
+            self._index_file(path, file_hash, prior)
 
     def _prior_row(self, node_id: str) -> sqlite3.Row | None:
         """The stored fingerprint + seq, read BEFORE _remove_node deletes the row.
@@ -167,14 +210,17 @@ class IndexBuilder:
             "SELECT seq, content_fingerprint FROM nodes WHERE id = ?", (node_id,)
         ).fetchone()
 
-    def _index_file(self, path: Path, prior: sqlite3.Row | None = None) -> None:
+    def _index_file(
+        self, path: Path, file_hash: str, prior: sqlite3.Row | None = None
+    ) -> None:
         """Index a single markdown file into the database (nodes + edges)."""
-        self._index_file_nodes_only(path, prior)
+        self._index_file_nodes_only(path, file_hash, prior)
         self._index_file_edges(path)
 
     def _index_file_nodes_only(
         self,
         path: Path,
+        file_hash: str,
         prior: sqlite3.Row | None = None,
         prior_fingerprints: dict[str, str | None] | None = None,
     ) -> None:
@@ -186,7 +232,6 @@ class IndexBuilder:
         """
         text = path.read_text(encoding="utf-8")
         node = parse_node(text)
-        file_hash = self.file_store.file_hash(path)
         conn = self.db.conn
         new_fp = content_fingerprint(node.title, node.content, node.type.value, node.space)
 

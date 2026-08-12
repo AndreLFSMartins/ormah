@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
 
 import frontmatter
@@ -300,3 +301,51 @@ def test_purge_skipped_when_disabled(engine):
     run_forgetting(engine)  # deletion_enabled defaults to False
 
     assert node_id in _tombstone_ids(engine)
+
+
+# --- lock order (upstream 0.14.8 restore-exclusion lock) ---
+
+
+def test_sweep_does_not_deadlock_against_a_concurrent_writer(engine):
+    """The sweep must take L_mem BEFORE L_db, like every other memory job.
+
+    Upstream's restore-exclusion lock decorates 10 engine writers and 8 FileStore methods with
+    a shared RLock (L_mem), and each decorated writer then opens a write txn (L_db) inside it:
+    L_mem -> L_db. delete_node_guarded is the Beta's own TOCTOU fix (#28), which upstream never
+    saw and so never decorated: it opens the txn FIRST and only then calls the now-decorated
+    file_store.soft_delete -- L_db -> L_mem. Its only production caller is this sweep, likewise
+    the one background job left undecorated. Opposite orders on two locks = deadlock.
+    """
+    _enable(engine)
+    _make_eligible(engine)
+
+    sweep_holds_db = threading.Event()
+    writer_holds_mem = threading.Event()
+    real_soft_delete = engine.file_store.soft_delete
+
+    def instrumented_soft_delete(node_id):
+        # Reached from inside delete_node_guarded's write txn: this thread holds L_db and is
+        # one call away from taking L_mem. Give the writer its chance to grab L_mem first.
+        sweep_holds_db.set()
+        writer_holds_mem.wait(timeout=1.0)  # times out once the sweep holds L_mem itself
+        return real_soft_delete(node_id)
+
+    engine.file_store.soft_delete = instrumented_soft_delete
+
+    def writer():
+        """What @_serialized_memory_operation + a write txn do on any MCP write: L_mem, L_db."""
+        sweep_holds_db.wait(timeout=5.0)
+        with engine._memory_operation_lock:
+            writer_holds_mem.set()
+            with engine.db.transaction():
+                pass
+
+    sweep_thread = threading.Thread(target=run_forgetting, args=(engine,), daemon=True)
+    writer_thread = threading.Thread(target=writer, daemon=True)
+    sweep_thread.start()
+    writer_thread.start()
+    sweep_thread.join(timeout=10.0)
+    writer_thread.join(timeout=10.0)
+
+    assert not sweep_thread.is_alive(), "sweep held L_db while waiting for L_mem"
+    assert not writer_thread.is_alive(), "writer held L_mem while waiting for L_db"

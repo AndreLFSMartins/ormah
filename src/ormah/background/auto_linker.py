@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_link_type
+from ormah.background.memory_lock import serialized_memory_job
 
 logger = logging.getLogger(__name__)
 
@@ -391,6 +392,7 @@ def _apply_edge(
     return edge_created
 
 
+@serialized_memory_job
 def run_auto_linker(engine) -> dict | None:
     """Incrementally link nodes with seq above the watermark, judging candidate
     pairs in K-sized LLM calls (#87) and advancing only past fully-resolved nodes.

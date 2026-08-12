@@ -19,6 +19,7 @@ from ormah.cloud.state import (
     ProtectionOperation,
     ProtectionOperationKind,
     ProtectionOperationPhase,
+    ProtectionReasonCode,
     ProtectionState,
 )
 
@@ -48,6 +49,7 @@ def _operation(
 @dataclass
 class FakeProtectionService:
     release_backup: threading.Event | None = None
+    restore_busy_once: bool = False
 
     def __post_init__(self):
         self.calls: list[tuple] = []
@@ -81,6 +83,47 @@ class FakeProtectionService:
     def verify_now(self, snapshot_id=None):
         self.calls.append(("verify_now", snapshot_id))
         return _operation(ProtectionOperationKind.VERIFY)
+
+    def prepare_restore(self):
+        self.calls.append(("prepare_restore",))
+        return ProtectionOperation(
+            operation_id="durable-restore-preparation",
+            kind=ProtectionOperationKind.RESTORE,
+            phase=ProtectionOperationPhase.READY,
+            state=ProtectionState.PROTECTED,
+            snapshot_id=SNAPSHOT_ID,
+            verified_node_count=1817,
+            snapshot_created_at="2026-08-09T10:00:00+00:00",
+            prepared_backup_name="memory_private_prepared_name",
+        )
+
+    def restore_prepared(self, prepared):
+        self.calls.append(("restore_prepared", prepared.prepared_backup_name))
+        if self.restore_busy_once:
+            self.restore_busy_once = False
+            return ProtectionOperation(
+                operation_id="durable-restore-busy",
+                kind=ProtectionOperationKind.RESTORE,
+                phase=ProtectionOperationPhase.FAILED,
+                state=ProtectionState.PROTECTED,
+                reason_code=ProtectionReasonCode.STORE_BUSY,
+                message="Memory is busy.",
+                snapshot_id=prepared.snapshot_id,
+            )
+        return ProtectionOperation(
+            operation_id="durable-restore",
+            kind=ProtectionOperationKind.RESTORE,
+            phase=ProtectionOperationPhase.COMPLETED,
+            state=ProtectionState.PROTECTED,
+            snapshot_id=prepared.snapshot_id,
+            verified_node_count=prepared.verified_node_count,
+            snapshot_created_at=prepared.snapshot_created_at,
+            safety_backup_name="memory_safety_backup",
+        )
+
+    def discard_prepared_restore(self, prepared):
+        self.calls.append(("discard_prepared_restore", prepared.prepared_backup_name))
+        return True
 
 
 class FakeRecoveryKitService:
@@ -167,6 +210,12 @@ def test_all_protection_routes_require_local_capability(protection_app):
         ("POST", "/admin/cloud/protection/disable", {}),
         ("POST", "/admin/cloud/protection/backup", {}),
         ("POST", "/admin/cloud/protection/verify", {}),
+        ("POST", "/admin/cloud/protection/restore/prepare", {}),
+        (
+            "POST",
+            f"/admin/cloud/protection/restore/{INTENT_ID}/confirm",
+            {},
+        ),
         ("POST", "/admin/cloud/protection/recovery-kit/prepare", {}),
         (
             "POST",
@@ -257,6 +306,7 @@ def test_product_status_redacts_paths_credentials_and_secret_material(
         ("/admin/cloud/protection/disable", {"delete_remote": True}),
         ("/admin/cloud/protection/backup", {"advance_head": True}),
         ("/admin/cloud/protection/verify", {"presigned_url": "https://example.test"}),
+        ("/admin/cloud/protection/restore/prepare", {"snapshot_id": SNAPSHOT_ID}),
         (
             "/admin/cloud/protection/recovery-kit/prepare",
             {"path": "/secret"},
@@ -315,6 +365,91 @@ def test_repeated_active_backup_joins_one_operation(protection_app):
     service.release_backup.set()
     assert _poll(client, first.json()["operation_id"])["status"] == "completed"
     assert service.calls.count(("backup_and_verify", "manual-ui")) == 1
+
+
+def test_restore_preparation_is_verified_then_claimed_once(protection_app):
+    client, service, _, _ = protection_app
+
+    response = client.post(
+        "/admin/cloud/protection/restore/prepare",
+        headers=HEADERS,
+        json={},
+    )
+    assert response.status_code == 202
+    preparation_id = response.json()["operation_id"]
+    prepared = _poll(client, preparation_id)
+
+    assert prepared["phase"] == "ready"
+    assert prepared["verified_node_count"] == 1817
+    assert prepared["snapshot_created_at"] == "2026-08-09T10:00:00+00:00"
+    assert "memory_private_prepared_name" not in str(prepared)
+
+    confirmed = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/confirm",
+        headers=HEADERS,
+        json={},
+    )
+    assert confirmed.status_code == 202
+    restored = _poll(client, confirmed.json()["operation_id"])
+    assert restored["phase"] == "completed"
+    assert restored["safety_backup_name"] == "memory_safety_backup"
+    assert ("restore_prepared", "memory_private_prepared_name") in service.calls
+
+    repeated = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/confirm",
+        headers=HEADERS,
+        json={},
+    )
+    assert repeated.status_code == 409
+
+
+def test_restore_preparation_cancel_discards_private_copy(protection_app):
+    client, service, _, _ = protection_app
+    response = client.post(
+        "/admin/cloud/protection/restore/prepare", headers=HEADERS, json={}
+    )
+    preparation_id = response.json()["operation_id"]
+    assert _poll(client, preparation_id)["phase"] == "ready"
+
+    canceled = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/cancel",
+        headers=HEADERS,
+        json={},
+    )
+
+    assert canceled.status_code == 200
+    assert canceled.json() == {"status": "discarded"}
+    assert ("discard_prepared_restore", "memory_private_prepared_name") in service.calls
+    repeated = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/cancel",
+        headers=HEADERS,
+        json={},
+    )
+    assert repeated.status_code == 409
+
+
+def test_store_busy_restore_can_retry_same_verified_preparation(protection_app):
+    client, service, _, _ = protection_app
+    service.restore_busy_once = True
+    response = client.post(
+        "/admin/cloud/protection/restore/prepare", headers=HEADERS, json={}
+    )
+    preparation_id = response.json()["operation_id"]
+    assert _poll(client, preparation_id)["phase"] == "ready"
+
+    first = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/confirm",
+        headers=HEADERS,
+        json={},
+    )
+    assert _poll(client, first.json()["operation_id"])["reason_code"] == "store_busy"
+    second = client.post(
+        f"/admin/cloud/protection/restore/{preparation_id}/confirm",
+        headers=HEADERS,
+        json={},
+    )
+    assert second.status_code == 202
+    assert _poll(client, second.json()["operation_id"])["phase"] == "completed"
 
 
 def test_unknown_operation_returns_404(protection_app):
@@ -462,3 +597,90 @@ def test_recovery_confirmation_failure_does_not_leak_service_error(protection_ap
     assert response.status_code == 409
     assert response.json() == {"detail": "The saved recovery kit could not be verified."}
     assert "secret" not in response.text.lower()
+
+
+def test_remote_reports_a_backup_made_by_another_device(protection_app, monkeypatch):
+    """The only signal a second machine leaves is a snapshot this device did not upload."""
+
+    client, _, _, _ = protection_app
+    monkeypatch.setattr(
+        routes_protection,
+        "cloud_status_payload",
+        lambda settings, **kwargs: {
+            "last_successful_backup_snapshot_id": "01MINE",
+            "last_verified_snapshot_id": "01MINE",
+        },
+    )
+    monkeypatch.setattr(
+        routes_protection,
+        "newest_cloud_snapshot",
+        lambda settings: {
+            "snapshot_id": "01THEIRS",
+            "created_at": "2026-08-09T09:14:00+00:00",
+            "size_bytes": 1238414,
+        },
+    )
+
+    payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
+
+    assert payload["snapshot_id"] == "01THEIRS"
+    assert payload["from_this_device"] is False
+    # This device never checked that snapshot, so it cannot vouch for it.
+    assert payload["restore_tested_here"] is False
+    assert payload["error"] is None
+
+
+def test_remote_recognises_this_devices_own_verified_upload(protection_app, monkeypatch):
+    client, _, _, _ = protection_app
+    monkeypatch.setattr(
+        routes_protection,
+        "cloud_status_payload",
+        lambda settings, **kwargs: {
+            "last_successful_backup_snapshot_id": "01MINE",
+            "last_verified_snapshot_id": "01MINE",
+        },
+    )
+    monkeypatch.setattr(
+        routes_protection,
+        "newest_cloud_snapshot",
+        lambda settings: {
+            "snapshot_id": "01MINE",
+            "created_at": "2026-08-09T17:03:44+00:00",
+            "size_bytes": 10,
+        },
+    )
+
+    payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
+
+    assert payload["from_this_device"] is True
+    assert payload["restore_tested_here"] is True
+
+
+def test_remote_degrades_without_taking_the_panel_down(protection_app, monkeypatch):
+    """Not knowing what the cloud holds must never break protection status."""
+
+    client, _, _, _ = protection_app
+
+    def unreachable(settings):
+        raise RuntimeError("nodename nor servname provided: never-return-this-token")
+
+    monkeypatch.setattr(routes_protection, "newest_cloud_snapshot", unreachable)
+
+    response = client.get("/admin/cloud/protection/remote", headers=HEADERS)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["snapshot_id"] is None
+    assert payload["from_this_device"] is False
+    assert payload["error"]
+    assert "never-return-this-token" not in response.text
+
+
+def test_remote_reports_an_empty_store_without_error(protection_app, monkeypatch):
+    client, _, _, _ = protection_app
+    monkeypatch.setattr(routes_protection, "newest_cloud_snapshot", lambda settings: None)
+
+    payload = client.get("/admin/cloud/protection/remote", headers=HEADERS).json()
+
+    assert payload["snapshot_id"] is None
+    assert payload["error"] is None
