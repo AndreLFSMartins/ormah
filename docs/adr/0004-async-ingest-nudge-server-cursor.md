@@ -661,3 +661,35 @@ that defect moves the cursor over unconsumed bytes, this one refuses to retry a 
 no mechanism. The repair order stated on 2026-08-09 (cause before repair) also holds here: both fixes
 are small and their cause is now measured, which is the difference between this amendment and the
 force-close one.
+
+## Amendment 2026-08-12 — the windowed-parse defect reproduces post-wipe; neither fix from 08-09/08-10 has shipped
+
+The 2026-08-11 amendment's "how it ended" section left an open question: whether the queue deletion also
+ended the windowed-parse defect it wasn't targeting. It did not — this is a fresh reproduction, not
+residue from before the wipe.
+
+**Observed:** two `no_safe_boundary` dead-letters in `ingest_queue/66b287858fdea3e3/failed/`, both created
+2026-08-12 (after the 08-11 09:47 queue recreation): `reason: drain` at 12:56 (`boundary=796621`, the
+transcript at `.../Tools-ormah/a861349c-….jsonl` — the session that produced the prior handoff) and
+`reason: nudge` at 11:29 (`boundary=379845`, `.../AndreMartins/8b53f0ac-….jsonl`). Both transcripts are
+still on disk, both larger than their recorded boundary today (job 1: transcript now 1,200,759 B vs.
+boundary 796,621 — 404 KB of growth since the dead-letter; job 2's transcript also intact). Per the
+2026-08-10 finding, both are consistent with the cause already identified: a user turn opening before the
+windowed `boundary` with a terminator past it, refused by `_exceeds_ceiling`, cursor advanced over the
+refused prompt by `_mark_frozen_prefix_consumed`.
+
+**Confirms:** neither shipped fix from the 08-09/08-10 amendments — (A) re-admit-on-growth for the benign
+majority, (B) a suppression-fact mechanism replacing the cursor-advancing park — is present on `local-main`
+(`grep` for `force_closed_until`/`parked_until` in `session_watcher.py`: 0 hits, consistent with the
+08-09 amendment's symbol table). The defect is not historical; it is the live behavior of the code that
+ships today.
+
+**Recoverability, both jobs:** unlike the 08-09 population (85% of transcripts already rotated off disk),
+both of today's two transcripts are present and growing — recoverable by hand per the same mechanism the
+08-09 amendment describes (`path` + `boundary` on the dead-lettered job). No recovery was performed here;
+this amendment only records the reproduction. **The clock the 08-09 amendment measured (~2-week window)
+applies to these two starting today, 2026-08-12.**
+
+**No code change made.** Decided explicitly: further work on this ADR (implementing Fix A, Fix B, or a
+manual recovery of these two jobs) requires `superpowers:brainstorming` first, per this repo's standing
+rule that any behavior change starts there — not a continuation of this reproduction.
