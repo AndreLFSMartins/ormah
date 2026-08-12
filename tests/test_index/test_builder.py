@@ -56,7 +56,7 @@ def test_incremental_update(db, file_store):
     assert rows[0] == 2
 
 
-# --- lock order (0.14.8 restore-exclusion lock) ---
+# --- lock order (0.14.7+ restore-exclusion lock) ---
 
 
 def test_incremental_update_does_not_deadlock_against_a_memory_job(engine):
@@ -102,3 +102,51 @@ def test_incremental_update_does_not_deadlock_against_a_memory_job(engine):
 
     assert not builder_thread.is_alive(), "incremental_update held L_db while waiting for L_mem"
     assert not job_thread.is_alive(), "memory job held L_mem while waiting for L_db"
+
+
+def test_builder_never_takes_file_lock_inside_write_transaction(engine):
+    """All builder entry points must finish FileStore calls before taking L_db."""
+    real_lock = engine._memory_operation_lock
+    violations: list[int] = []
+
+    class OrderProbe:
+        def __enter__(self):
+            tx_depth = getattr(engine.db._local, "tx_depth", 0)
+            if tx_depth > 0:
+                violations.append(tx_depth)
+            return real_lock.__enter__()
+
+        def __exit__(self, *args):
+            return real_lock.__exit__(*args)
+
+    engine.file_store._operation_lock = OrderProbe()
+
+    # Exercise full rebuild and single-file indexing.
+    engine.builder.full_rebuild()
+    single = MemoryNode(
+        type=NodeType.fact,
+        source="agent:test",
+        content="single content",
+        title="single",
+    )
+    single_path = engine.file_store.save(single)
+    engine.builder.index_single(single_path)
+
+    # Exercise every incremental branch: new, changed, then deleted.
+    incremental = MemoryNode(
+        type=NodeType.fact,
+        source="agent:test",
+        content="new content",
+        title="incremental",
+    )
+    engine.file_store.save(incremental)
+    assert engine.builder.incremental_update() == (1, 0)
+
+    incremental.content = "changed content"
+    engine.file_store.save(incremental)
+    assert engine.builder.incremental_update() == (0, 1)
+
+    engine.file_store.delete(incremental.id)
+    assert engine.builder.incremental_update() == (0, 0)
+
+    assert not violations, f"FileStore lock acquired inside db.transaction(): {violations}"
