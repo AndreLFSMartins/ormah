@@ -4616,3 +4616,109 @@ def test_transcript_deleted_after_ingest_returns_is_dead_lettered(engine, tmp_pa
     errs = list((handler.spool.root / "failed").glob("*.error"))
     assert errs and "transcript_deleted" in errs[0].read_text()
 
+
+def test_enqueue_path_skips_a_frozen_file_until_it_changes(engine, tmp_path):
+    """The Observer lane must honour the same suppression fact as reconcile. Gating only
+    the sweep trades a growing failed/ for a hot enqueue loop on every FSEvent."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "frozen.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    size = jsonl.stat().st_size
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        assert handler._state[rel]["frozen_until"] == size
+
+        handler._enqueue_path(jsonl, "observer")     # a second FSEvent, file unchanged
+        assert handler.spool.pending_count() == 0, \
+            "an unchanged frozen file must not be re-enqueued by the Observer"
+
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "user",
+                "message": {"content": "a second prompt long enough to parse here"},
+            }) + "\n")
+        handler._enqueue_path(jsonl, "observer")
+        assert handler.spool.pending_count() == 1, \
+            "growth must re-open the Observer lane too"
+
+
+def test_enqueue_path_reopens_a_frozen_file_that_was_rotated_smaller(engine, tmp_path):
+    """Council round 1, critical: this is the lane that catches rotation today, because it
+    consults no state at all. A ceiling-only gate here would suppress a rotated transcript
+    permanently — and with reconcile also gated, nothing else would ever find it."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "rotated.jsonl"
+    # A single unterminated turn, padded well past what a 6-turn complete conversation
+    # takes -- `_partial_unterminated`'s own ~220 bytes is smaller than ANY _make_jsonl
+    # output, which would make "rotated smaller" unreachable with these helpers combined.
+    padding = "x" * 4000
+    jsonl.write_text(
+        json.dumps({"type": "user", "message": {"content": f"a long prompt {padding}"}})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"an answer that never closed {padding}"}]}})
+        + "\n"
+    )
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        frozen = handler._state[rel]["frozen_until"]
+
+        jsonl.unlink()
+        _make_jsonl(jsonl, user_turns=6)
+        assert jsonl.stat().st_size < frozen
+        _mark_idle(jsonl)
+
+        handler._enqueue_path(jsonl, "observer")
+        assert handler.spool.pending_count() == 1, \
+            "a rotated file must be re-enqueued, not hidden behind the old ceiling"
+        _drain_all(handler)
+
+    assert handler._state[rel].get("node_ids"), "the rotated file's content must be ingested"
+
+
+def test_enqueue_path_re_arms_suppression_after_a_same_size_replacement(engine, tmp_path):
+    """Council round 2, cursor, medium: proving the re-open is half the story. If the re-park
+    does not converge identity, every FSEvent re-enqueues the same unparseable file forever
+    and failed/ grows without bound — the failure mode the frozen fact exists to prevent."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "samesize.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        original = jsonl.read_bytes()
+
+        replacement = proj / "tmp.jsonl"
+        replacement.write_bytes(original)
+        replacement.replace(jsonl)
+        _mark_idle(jsonl)
+
+        handler._enqueue_path(jsonl, "observer")
+        assert handler.spool.pending_count() == 1, "the replacement must re-open the lane"
+        _drain_all(handler)
+
+        assert handler._state[rel]["frozen_ino"] == jsonl.stat().st_ino
+        handler._enqueue_path(jsonl, "observer")
+        assert handler.spool.pending_count() == 0, \
+            "suppression must re-arm on the new identity, not loop forever"
+

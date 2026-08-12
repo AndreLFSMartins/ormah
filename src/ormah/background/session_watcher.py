@@ -1392,12 +1392,23 @@ class SessionHandler(FileSystemEventHandler):
         if self._stop_event.is_set() or self.spool is None:
             return
         try:
-            boundary = path.stat().st_size
+            st = path.stat()
         except OSError:
+            return
+        # Frozen and byte-for-byte unchanged -> the last parse of this file closed nothing,
+        # and this event would only reproduce that dead-letter. BOTH producer lanes carry the
+        # gate: suppressing only the sweep would trade a growing failed/ for a hot enqueue
+        # loop here (ADR-0004, 2026-08-12). The predicate is _frozen_unchanged, shared with
+        # reconcile — never a second copy, which is how the two would drift apart.
+        try:
+            rel = str(path.relative_to(self.watch_dir))
+        except ValueError:
+            rel = None      # outside this watch -- no state to consult, enqueue as before
+        if rel is not None and _frozen_unchanged(self._state.get(rel, {}), st):
             return
         # force_flush=False: the Observer/idle-retry lane is discovery, never an explicit ask;
         # it must respect min_turns/idle so an active session is not fragmented (council-pr R2).
-        self.spool.enqueue(path, boundary=boundary, reason=reason, force_flush=False)
+        self.spool.enqueue(path, boundary=st.st_size, reason=reason, force_flush=False)
         self.wake()
 
     # --- Consumer side: the one serial drain thread ---------------------------------------
