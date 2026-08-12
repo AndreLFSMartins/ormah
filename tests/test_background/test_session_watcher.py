@@ -4186,3 +4186,99 @@ class TestCommitStateMonotonic:
         monkeypatch.undo()
         assert _load_state(tmp_path)["a.jsonl"]["end_offset"] == 100
 
+
+# --- ADR-0004: a deleted transcript is deterministic, never an external failure ---
+
+def test_deleted_transcript_is_dead_lettered_not_retried_forever(engine, tmp_path):
+    """requeue's contract names this case: "transcript deleted ... a retry cannot change
+    the outcome, so the job is dead-lettered immediately". FileNotFoundError is an OSError,
+    so it fell into the generic handler, was classed "external", and retried forever --
+    which is what fed 8 jobs to the backoff overflow on 2026-08-11."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "gone.jsonl"
+    jsonl.write_text('{"type":"user"}\n', encoding="utf-8")
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    handler.spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+    jsonl.unlink()                       # the transcript is gone before the drain claims it
+
+    _drain_all(handler)
+
+    failed = list((handler.spool.root / "failed").glob("*.json"))
+    assert len(failed) == 1, "a deleted transcript must be dead-lettered, not retried"
+    assert handler.spool.pending_count() == 0, (
+        "it must not go back to pending as an external failure"
+    )
+    assert list((handler.spool.root / "running").iterdir()) == []
+    errs = list((handler.spool.root / "failed").glob("*.error"))
+    assert errs and "transcript_deleted" in errs[0].read_text()
+
+
+def test_transcript_deleted_mid_drain_is_dead_lettered_not_completed(engine, tmp_path, monkeypatch):
+    """TOCTOU: _file_hash and stat both succeed, then the parser re-reads the file and finds
+    it gone. That FileNotFoundError lands in the generic `except Exception` -> NO_PROGRESS ->
+    complete(job): the job is erased with NO dead-letter record. Silent loss is the one thing
+    H1 forbids outright."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "vanishes.jsonl"
+    jsonl.write_text('{"type":"user"}\n', encoding="utf-8")
+
+    import ormah.background.session_watcher as sw
+    real_parse = sw.parse_transcript
+
+    def _delete_then_parse(path, *args, **kwargs):
+        # Gone before the parser touches it at all, so the ENOENT surfaces from the parser's
+        # own path.stat() rather than its open(). Either raises FileNotFoundError into the
+        # same handler, which is what this test pins.
+        Path(path).unlink(missing_ok=True)
+        return real_parse(path, *args, **kwargs)
+
+    monkeypatch.setattr(sw, "parse_transcript", _delete_then_parse)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    handler.spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+
+    _drain_all(handler)
+
+    failed = list((handler.spool.root / "failed").glob("*.json"))
+    assert len(failed) == 1, (
+        "a transcript deleted mid-drain must leave a dead-letter record, never be completed"
+    )
+    assert handler.spool.pending_count() == 0
+    errs = list((handler.spool.root / "failed").glob("*.error"))
+    assert errs and "transcript_deleted" in errs[0].read_text()
+
+
+def test_transcript_deleted_after_ingest_returns_is_dead_lettered(engine, tmp_path, monkeypatch):
+    """The transcript survives _ingest_session (which returns NO_PROGRESS on its own merits)
+    and is deleted before the drain decides. _idle_with_unsafe_tail swallows the ENOENT in both
+    its stat and its parse, returning False, so the drain would complete(job) -- erasing it with
+    no dead-letter record."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "late.jsonl"
+    jsonl.write_text('{"type":"user"}\n', encoding="utf-8")
+
+    import ormah.background.session_watcher as sw
+
+    def _no_progress_then_delete(*args, **kwargs):
+        jsonl.unlink(missing_ok=True)          # gone AFTER the ingest decision, before the drain's
+        return sw.IngestResult.NO_PROGRESS
+
+    monkeypatch.setattr(sw, "_ingest_session", _no_progress_then_delete)
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    handler.spool.enqueue(jsonl, boundary=jsonl.stat().st_size, reason="nudge")
+
+    _drain_all(handler)
+
+    failed = list((handler.spool.root / "failed").glob("*.json"))
+    assert len(failed) == 1, "a transcript gone by decision time must leave a dead-letter record"
+    errs = list((handler.spool.root / "failed").glob("*.error"))
+    assert errs and "transcript_deleted" in errs[0].read_text()
+

@@ -47,6 +47,7 @@ class IngestResult(Enum):
     OK = "ok"                    # committed new content
     NO_PROGRESS = "no_progress"  # nothing new at the safe boundary, or unparseable (file's fault) -> park-eligible
     TRANSIENT = "transient"      # external failure (engine error) or defer -> retry, never park
+    GONE = "gone"                # the transcript no longer exists -> deterministic, dead-letter
 
 _STATE_FILENAME = ".session_watcher_state"
 MAX_EXTRACT_FAILURES = 3  # per-slice extraction failures (provider present) before skipping it
@@ -875,11 +876,19 @@ def _ingest_session(
 
     try:
         h = _file_hash(path)
+    except FileNotFoundError:
+        # Deterministic, not external: no retry can bring a deleted transcript back, and
+        # classing it "external" is what retried 8 jobs into the backoff overflow.
+        logger.info("Transcript no longer exists, dead-lettering: %s", path)
+        return IngestResult.GONE
     except OSError as e:
         logger.warning("Cannot read %s: %s", path, e)
         return IngestResult.TRANSIENT
     try:
         size = path.stat().st_size
+    except FileNotFoundError:
+        logger.info("Transcript no longer exists, dead-lettering: %s", path)
+        return IngestResult.GONE
     except OSError as e:
         logger.warning("Cannot stat %s: %s", path, e)
         return IngestResult.TRANSIENT
@@ -1042,6 +1051,12 @@ def _ingest_session(
                 # why a future change to should_rewind or to these close sites could silently
                 # widen it.
                 abandon_range = (original_offset, probe_safe_end)
+    except FileNotFoundError:
+        # The parser re-reads the file, so it can vanish after the hash/stat above. Without
+        # this clause the generic handler below returns NO_PROGRESS, and the drain COMPLETES
+        # the job -- erasing it with no dead-letter record at all.
+        logger.info("Transcript vanished mid-parse, dead-lettering: %s", path)
+        return IngestResult.GONE
     except Exception as e:  # noqa: BLE001 - transcript parsers can raise provider-specific errors
         logger.warning("Session transcript parse error for %s: %s", path, e)
         return IngestResult.NO_PROGRESS
@@ -1455,6 +1470,11 @@ class SessionHandler(FileSystemEventHandler):
                 max_raw_bytes=self.max_raw_bytes,
                 boundary=job.boundary, force_flush=force_flush, state_lock=self._state_lock,
             )
+        if result is IngestResult.GONE:
+            # Deterministic failure class -> requeue dead-letters it at once, keeping the
+            # job payload in failed/ as a record. Never retried: the file is gone.
+            self.spool.requeue(job, failure_class="transcript_deleted")
+            return
         if result is IngestResult.TRANSIENT:
             # External failure class -> retried forever with persisted backoff, never
             # dead-lettered: an outage must not discard accepted work (ADR-0004 H1).
@@ -1495,6 +1515,15 @@ class SessionHandler(FileSystemEventHandler):
             # magnitude past the millisecond truncate-then-rewrite window the gate exists
             # to defend against, so the guarantee is worth more than the shorter gap.
             self.spool.requeue(job, failure_class="external")
+            return
+        if not path.exists():
+            # A transcript that vanished after _ingest_session returned still arrives here as
+            # NO_PROGRESS: _idle_with_unsafe_tail swallows the ENOENT in both its stat and its
+            # parse and returns False. Completing would erase the job with no record.
+            # Deliberately a guard on the FINAL disposition rather than a classifier inside the
+            # predicate: it catches ANY route that reaches complete() with the transcript gone,
+            # including interleavings nobody has enumerated yet.
+            self.spool.requeue(job, failure_class="transcript_deleted")
             return
         self.spool.complete(job)
 
