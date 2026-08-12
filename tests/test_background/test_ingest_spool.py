@@ -322,3 +322,40 @@ def test_requeue_deterministic_failure_dead_letters_with_original_bytes(tmp_path
     error_sidecar = spool.root / "failed" / f"{failed_files[0].name}.error"
     assert error_sidecar.exists()
     assert "path_not_watched" in error_sidecar.read_text()
+
+
+def test_requeue_external_backoff_saturates_instead_of_overflowing(tmp_path):
+    """H1: a long outage must keep retrying. The cap was applied to the PRODUCT, not the
+    exponent, so attempt 1025 raised OverflowError before _write_job persisted the retry --
+    stranding the job with neither progress nor a dead-letter record."""
+    spool = IngestSpool(tmp_path / "queue")
+    spool.enqueue(Path("/x/s.jsonl"), boundary=1, reason="nudge")
+    job = spool.claim_next()
+    assert job is not None
+    spool.requeue(job, failure_class="external")
+
+    # Fast-forward the PERSISTED state to attempt 1024 -- the last one whose backoff still
+    # computed -- instead of sleeping through 3.5 days of real retries.
+    pending_file = next((spool.root / "pending").glob("*.json"))
+    data = json.loads(pending_file.read_text())
+    data["attempts"] = 1024
+    data["not_before"] = 0.0
+    pending_file.write_text(json.dumps(data))
+
+    job2 = spool.claim_next()
+    assert job2 is not None and job2.attempts == 1024
+
+    before = time.time()
+    spool.requeue(job2, failure_class="external")   # attempt 1025 -- this used to raise
+
+    pending_files = list((spool.root / "pending").glob("*.json"))
+    assert len(pending_files) == 1, "the retry must be persisted, not lost to an exception"
+    data2 = json.loads(pending_files[0].read_text())
+    assert data2["attempts"] == 1025, "attempts must keep counting past the old break"
+    # not_before is stamped with a time.time() taken AFTER `before`, so the observed gap is
+    # 300.0 + epsilon -- never <= 300.0. Same tolerance shape as the ~2s assertion above.
+    assert 299.5 < data2["not_before"] - before <= 301.0, "delay saturates at the 300s cap"
+    assert list((spool.root / "failed").glob("*.json")) == [], (
+        "an external failure must never be dead-lettered, no matter how many attempts (H1)"
+    )
+    assert list((spool.root / "running").iterdir()) == []

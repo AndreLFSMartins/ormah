@@ -35,6 +35,12 @@ _PENDING, _RUNNING, _TMP, _FAILED = "pending", "running", "tmp", "failed"
 # work (ADR-0004 H1: an outage must never discard real data).
 _BACKOFF_BASE_SECONDS = 2.0
 _BACKOFF_MAX_SECONDS = 300.0
+# Clamp the SHIFT, not just the product: `2 ** (attempts - 1)` is an arbitrary-precision
+# int, so a long enough outage overflows the float multiplication before min() can cap it.
+# The delay already saturates at shift 8 (2.0 * 2**8 = 512 > 300), so any clamp at or above
+# that returns an identical delay for every attempt count that used to compute -- while
+# keeping the product far below the float ceiling. min() stays the authority on the value.
+_BACKOFF_MAX_SHIFT = 62
 
 
 def _utcnow_iso() -> str:
@@ -244,7 +250,8 @@ class IngestSpool:
         """
         if failure_class == "external":
             attempts = job.attempts + 1
-            delay = min(_BACKOFF_BASE_SECONDS * (2 ** (attempts - 1)), _BACKOFF_MAX_SECONDS)
+            shift = min(attempts - 1, _BACKOFF_MAX_SHIFT)
+            delay = min(_BACKOFF_BASE_SECONDS * (2 ** shift), _BACKOFF_MAX_SECONDS)
             name = f"{self._key(job.path)}.{int(job.boundary):020d}.json"
             # OR the force_flush of a pending TWIN (council-pr R3 F1): while this job was
             # claimed in running/, a nudge may have created pending/<name> with force_flush=True
