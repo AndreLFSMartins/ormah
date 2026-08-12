@@ -832,11 +832,16 @@ def _frozen_unchanged(entry: dict, st: os.stat_result) -> bool:
     shrink reset became unreachable through either producer. Any change — growth, shrink,
     replacement at the same byte count — re-selects.
 
-    Two explicit escapes:
+    Two explicit escapes, both defence-in-depth rather than load-bearing today:
     - ``shrink_pending``: the two-tick shrink gate is mid-confirmation; dropping the file from
       the sweep now would strand the marker, exactly as the arm above this one already guards.
     - a cursor above EOF: the file shrank relative to the stored cursor, which is the state the
-      shrink gate exists to resolve. It must be selected so that gate can run.
+      shrink gate exists to resolve, so it must not be suppressed here.
+
+    Neither escape is reachable as the producers stand: any size change makes the ceiling
+    conjunct below false first, and ``reconcile``'s own arm skips a cursor-above-EOF entry
+    before this predicate is consulted. They are kept so a future reordering of the arms
+    cannot silently turn suppression into a trap -- not because they fire today.
     """
     if entry.get("shrink_pending"):
         return False
@@ -1719,7 +1724,7 @@ class SessionHandler(FileSystemEventHandler):
                     continue  # catch-up disabled -> skip never-seen files
                 if cutoff > 0 and st.st_mtime < cutoff:
                     continue
-            elif (entry.get("end_offset") or 0) == st.st_size and not entry.get(
+            elif (entry.get("end_offset") or 0) >= st.st_size and not entry.get(
                 "shrink_pending"
             ):
                 # Fully consumed -> skip cheaply. EXCEPT a shrink_pending entry (task 4):
@@ -1727,10 +1732,13 @@ class SessionHandler(FileSystemEventHandler):
                 # here would drop the file from the sweep and tick 2 would never arrive,
                 # stranding the marker itself.
                 #
-                # `==`, never `>=`: a cursor ABOVE EOF means the file shrank, and skipping it
-                # here made the shrink gate reachable only through the Observer -- so a
-                # dropped FSEvent stranded the transcript, in the one component that exists to
-                # recover dropped FSEvents.
+                # `>=`, not `==`: a cursor ABOVE EOF is skipped here, so the shrink gate is
+                # reachable only through the Observer. That is a real defect -- and upstream
+                # uses `==` -- but flipping it needs a bound this codebase does not have
+                # (upstream pairs `==` with a `_reconcile_attempts` retry park; here nothing
+                # stops a cursor-above-EOF file whose content is unchanged). Measured on the
+                # live Beta 2026-08-12: 3 such entries would re-enqueue forever and 13 more
+                # would re-ingest 59 MB from offset 0. Tracked separately; not ADR-0004's.
                 continue
             elif _frozen_unchanged(entry, st):
                 # Frozen and byte-for-byte the file that was examined: re-selecting it would

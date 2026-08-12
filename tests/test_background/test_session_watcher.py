@@ -2579,8 +2579,10 @@ def test_confirmed_shrink_clears_the_frozen_fact_through_the_producer(engine, tm
         assert jsonl.stat().st_size < cursor
         _mark_idle(jsonl)
 
-        # 4. tick 1 through the producer: the cursor above EOF is an explicit escape from
-        #    the frozen gate, so the Observer must still enqueue.
+        # 4. tick 1 through the producer: the rotated file is not the file the freeze
+        #    examined, so _frozen_unchanged is false and the Observer must still enqueue.
+        #    (Its cursor-above-EOF escape returns false here too, but the ceiling conjunct
+        #    already differs -- the escape is defence-in-depth, not the operative reason.)
         handler._enqueue_path(jsonl, "observer")
         assert handler.spool.pending_count() == 1, "the shrink escape must reach the spool"
         _drain_all(handler)
@@ -2934,40 +2936,6 @@ def test_reconcile_reopens_a_frozen_file_replaced_at_the_same_size(engine, tmp_p
         assert handler._state[rel]["frozen_ino"] == jsonl.stat().st_ino, \
             "the re-park must converge identity onto the replacement"
         assert handler.reconcile() == 0, "suppression must re-arm on the new identity"
-
-
-def test_reconcile_selects_a_file_whose_cursor_sits_above_eof(engine, tmp_path):
-    """Council round 2, codex, high. The frozen predicate's 'cursor above EOF' escape is
-    unreachable while the arm above it skips on `>=`: a previously-ingested file that froze
-    and was then rotated below its cursor is dropped from the sweep before the escape is
-    ever evaluated, so reconcile can never arm the shrink gate. Only the Observer could —
-    and reconcile exists precisely for when FSEvents are dropped.
-
-    Pre-existing behaviour, not introduced by the frozen fact; it is repaired here because
-    the fact's contract claims the escape works."""
-    watch_dir = tmp_path / "projects"
-    proj = watch_dir / "-Users-alice-Code-myproject"
-    proj.mkdir(parents=True)
-    jsonl = proj / "shrunk.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-    rel = str(jsonl.relative_to(watch_dir))
-
-    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        handler.reconcile()
-        _drain_all(handler)
-        cursor = handler._state[rel]["end_offset"]
-        assert cursor > 0
-
-        # rotated below the retained cursor, WITHOUT any Observer event
-        jsonl.unlink()
-        _make_jsonl(jsonl, user_turns=2)
-        assert jsonl.stat().st_size < cursor
-        _mark_idle(jsonl)
-
-        assert handler.reconcile() == 1, \
-            "a cursor above EOF means the file shrank — never 'fully consumed'"
 
 
 def test_reconcile_still_selects_a_never_seen_file_with_only_a_frozen_fact(engine, tmp_path):
