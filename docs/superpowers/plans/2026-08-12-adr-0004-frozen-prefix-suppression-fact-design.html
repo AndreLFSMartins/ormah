@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Suppressing selection with a fact, not with the cursor</title>
+<title>Suppressing selection with a fact, not with the cursor (ADR-0004)</title>
 <style>
 /* rich-doc design system — Anthropic brand, document-oriented.
    Light paper/ink, Lora italic display, Poppins body, system mono.
@@ -139,31 +139,42 @@ summary:hover{color:var(--accent)}
 <body>
 <nav class="toc">
   <div class="eyebrow">[ SPEC ]</div>
-  <div class="doc-title">Suppressing selection with a fact, not with the cursor</div>
-  <a href="#problem">The problem, measured 2026-08-12</a>
-  <a href="#mechanism" class="lvl-3">The mechanism is a ratchet</a>
+  <div class="doc-title">Suppressing selection with a fact, not with the cursor (ADR-0004)</div>
+  <a href="#the-problem-measured-2026-08-12">The problem, measured 2026-08-12</a>
+  <a href="#the-mechanism-is-a-ratchet" class="lvl-3">The mechanism is a ratchet</a>
   <a href="#decision">Decision</a>
-  <a href="#naming" class="lvl-3">Naming: frozen_until, not parked_until</a>
-  <a href="#precedent" class="lvl-3">Precedent and atomic construction</a>
-  <a href="#rejected" class="lvl-3">Considered and rejected</a>
+  <a href="#identity-suppresses-ceiling-bounds" class="lvl-3">Identity suppresses; ceiling bounds</a>
+  <a href="#the-park-refuses-changed-files" class="lvl-3">The park refuses a file that changed under examination</a>
+  <a href="#monotonicity-within-identity" class="lvl-3">Monotonicity applies within one identity only</a>
+  <a href="#naming" class="lvl-3">Named frozen_until, not parked_until</a>
+  <a href="#precedent" class="lvl-3">Precedent: skipped_slices</a>
+  <a href="#considered-and-rejected" class="lvl-3">Considered and rejected</a>
   <a href="#selection-suppression">Selection suppression</a>
-  <a href="#reconcile" class="lvl-3">reconcile gains a second cheap-skip arm</a>
-  <a href="#enqueue-path" class="lvl-3">_enqueue_path gains the same gate</a>
-  <a href="#invariants" class="lvl-3">Invariants</a>
+  <a href="#reconcile-gains-second-skip" class="lvl-3">reconcile gains a second cheap-skip arm</a>
+  <a href="#greater-than-equals-becomes-equals" class="lvl-3">>= becomes ==</a>
+  <a href="#enqueue-path-consults-the-gate" class="lvl-3">_enqueue_path consults the gate</a>
+  <a href="#invariants">Invariants</a>
   <a href="#tests">Tests</a>
-  <a href="#verification">Verification in production</a>
+  <a href="#new-tests-by-finding" class="lvl-3">New tests, by the finding each one nets</a>
+  <a href="#rewritten-tests" class="lvl-3">Three existing tests are rewritten, not deleted</a>
+  <a href="#verification-in-production">Verification in production</a>
   <a href="#residual-risks">Residual risks</a>
 </nav>
 <main>
-<div class="eyebrow">Architecture Decision Record · Approved, not implemented · ADR-0004</div>
+<div class="meta">
+  <div class="eyebrow">Date: 2026-08-12 · Status: approved, not implemented · ADR: 0004</div>
+  <div class="eyebrow">Revised 2026-08-12 after Dev Council rounds 1–3 (cursor + codex)</div>
+</div>
 
-<p class="meta">2026-08-12 · Ormah ingest lane · frozen-prefix suppression</p>
+<p class="statement">Stop the ingest lane from losing transcript content. <em>Selection suppression</em> moves out of <code>end_offset</code> and into its own state field, so the cursor never claims bytes that were never ingested.</p>
 
-<p class="statement">Move selection suppression from cursor position into a dedicated state field, preventing the ingest lane from losing transcript content when unwindowed parses skip segments.</p>
+<div class="callout">
+  <strong>Out of scope:</strong> recovering the content already lost, draining dead-letter noise (ADR "Fix A", re-admit-on-growth), the 54 transcripts the parser cannot close even unwindowed, and the pre-existing identity blind spot in <code>reconcile</code> (see <a href="#residual-risks">Residual risks</a>).
+</div>
 
-<h2 id="problem">The problem, measured 2026-08-12</h2>
+<h2 id="the-problem-measured-2026-08-12">The problem, <em>measured</em> 2026-08-12</h2>
 
-<p>The ingest spool root holds dead-lettered jobs accumulated on the Beta instance. These measurements were taken read-only from the live system; they supersede the counts cited in the ADR's 2026-08-12 amendment.</p>
+<p>The spool root is <code>~/.local/share/ormah/memory/ingest_queue/{66b287858fdea3e3,91da4ace50312981}/</code>. All figures below were taken read-only from the live Beta on 2026-08-12; they supersede counts cited in the ADR's 2026-08-12 amendment, which named jobs that do not exist in the spool.</p>
 
 <table>
   <thead>
@@ -175,105 +186,237 @@ summary:hover{color:var(--accent)}
   <tbody>
     <tr>
       <td>Dead-lettered jobs / distinct transcripts</td>
-      <td>3,806 / 1,619 (payloads from 2026-07-24 onward)</td>
+      <td>3,806 / 1,619, payloads from 2026-07-24 to today</td>
     </tr>
     <tr>
-      <td>Dead-lettered transcripts with cursor at EOF</td>
-      <td><strong>98%</strong> (median 0 B, p90 0 B) — noise</td>
+      <td>Dead-lettered transcripts with cursor already at EOF</td>
+      <td><strong>98%</strong> (median 0 B, p90 0 B) — the dead-letter is noise</td>
     </tr>
     <tr>
-      <td>State entries holding only <code>end_offset</code></td>
-      <td><strong>75 of 1,791</strong> (was 48 on 2026-08-09)</td>
+      <td>State entries holding only <code>end_offset</code> (cursor advanced, nothing ingested)</td>
+      <td><strong>75 of 1,791</strong> — was 48 of 1,485 on 2026-08-09</td>
     </tr>
     <tr>
-      <td>Those entries still on disk</td>
-      <td>68 files totalling 8,029,774 B</td>
+      <td>Of those, transcript still on disk</td>
+      <td>68, totalling 8,029,774 B</td>
     </tr>
   </tbody>
 </table>
 
-<p>Parsing each of those 68 transcripts whole, unwindowed, with the project's own <code>parse_transcript</code> reveals two categories:</p>
+<p>Parsing each of those 68 transcripts whole, unwindowed, with the project's own <code>parse_transcript</code> splits them cleanly:</p>
 
 <ul>
   <li><strong>14 files / 5,923,567 B / 23 closed user turns</strong> — the parser closes content that the cursor skipped. <em>This is the defect.</em></li>
   <li>54 files / 2,106,207 B — the parser closes nothing even without a window (Codex rollouts with no <code>task_complete</code>, single-turn sessions). A parser-coverage problem, not this one.</li>
 </ul>
 
-<h3 id="mechanism">The mechanism is a ratchet</h3>
+<h3 id="the-mechanism-is-a-ratchet">The mechanism is a <em>ratchet</em></h3>
 
-<p>Boundary progression from a dead-lettered job, climbed without pause:</p>
+<p>Read from the boundaries recorded on the dead-lettered jobs themselves:</p>
 
-<pre><code>ab16af53-….jsonl — 24 dead-letters:
+<pre><code>ab16af53-….jsonl — 24 dead-letters, boundary climbing without pause:
   98,985 → 125,943 → 222,943 → 257,727 → 384,984 → 437,294 → 500,884
        → 676,978 → 694,301 → 877,060 → 971,222 → 1,017,779 → … → 1,435,339</code></pre>
 
-<p>Each job runs <code>_mark_frozen_prefix_consumed</code>, advancing the cursor to its boundary. A 1.43 MB session was pushed to EOF one slice at a time and never ingested, while a whole-file parse closes 1,434,322 of its 1,435,339 bytes. The same shape appears in <code>e238fed7</code> (5 jobs), <code>d66c054f</code> (4), <code>ebf4a5ff</code> (3).</p>
+<p>Each job runs <code>_mark_frozen_prefix_consumed</code>, which advances the cursor to its own boundary. A 1.43 MB session was pushed to EOF one slice at a time and never ingested, while a whole-file parse closes 1,434,322 of its 1,435,339 bytes. The same shape appears in <code>e238fed7</code> (5 jobs), <code>d66c054f</code> (4), <code>ebf4a5ff</code> (3).</p>
 
 <p>The trigger varies — the windowed-parse artefact identified on 2026-08-10, or a genuinely idle session with an unterminated tail. <strong>The damage does not: every path loses content at the same step, moving the cursor.</strong> With the cursor held still, all 24 ratchet steps lose nothing.</p>
 
 <h2 id="decision">Decision</h2>
 
-<p><code>_mark_frozen_prefix_consumed</code> stops writing <code>end_offset</code> and writes a suppression fact instead. Renamed to <code>_mark_frozen_prefix_parked</code> — the current name asserts the very thing that causes the loss.</p>
+<p><code>_mark_frozen_prefix_consumed</code> stops writing <code>end_offset</code> and writes a suppression fact instead. Renamed <code>_mark_frozen_prefix_parked</code> — the current name asserts the very thing that causes the loss.</p>
 
-<pre><code class="language-python"># session_watcher.py, ~L1552
-entry["frozen_until"] = max(entry.get("frozen_until") or 0, target)   # target = min(boundary, size)
-_commit_state(...)          # end_offset preserved, untouched</code></pre>
+<p>The fact is <strong>three</strong> keys, not one — a ceiling and the identity of the file that was examined:</p>
 
-<p><code>frozen_until</code> means: <em>the last examination of this file, up to byte N, closed nothing; do not re-select it until it grows past N.</em> It is not a progress offset.</p>
+<pre><code class="language-python"># session_watcher.py, ~L1553 -- abbreviated; the full body is in the plan, Task 1
+def _mark_frozen_prefix_parked(self, path, rel, boundary=None, *, examined: os.stat_result):
+    st = path.stat()
+    if (st.st_ino, st.st_mtime_ns, st.st_size) != (
+        examined.st_ino, examined.st_mtime_ns, examined.st_size
+    ):
+        return                        # changed under the examination -- never park it
+    target = min(boundary, st.st_size) if boundary is not None else st.st_size
+    entry = dict(self._state.get(rel, {}))
+    same_file = (entry.get("frozen_ino") == st.st_ino
+                 and entry.get("frozen_mtime_ns") == st.st_mtime_ns)
+    entry["frozen_until"] = max(target, entry.get("frozen_until") or 0) if same_file else target
+    entry["frozen_ino"] = st.st_ino
+    entry["frozen_mtime_ns"] = st.st_mtime_ns
+    _commit_state(...)                # end_offset preserved, untouched</code></pre>
 
-<h3 id="naming">Naming: frozen_until, not parked_until</h3>
+<p><code>frozen_until</code> means: <em>the last examination of this file, up to byte N, closed nothing; do not re-select it while the file is still exactly the one examined.</em> It is not a progress offset.</p>
 
-<p><code>parked_until</code> belongs to the force-close design retracted on 2026-08-09, and two live state entries still carry <code>parked_*</code> residue from that branch. Reusing the name would make this design unreadable against that history.</p>
+<h3 id="identity-suppresses-ceiling-bounds">Identity <em>suppresses</em>; ceiling <em>bounds</em></h3>
 
-<h3 id="precedent">Precedent and atomic construction</h3>
+<p>A ceiling alone cannot express "unchanged" (council round 1, both peers, critical/high, verified independently): a rotation to a size at or below the ceiling, or a replacement at exactly the same byte count, would be suppressed forever. <code>st_ino</code> and <code>st_mtime_ns</code> come from the <strong>same</strong> <code>stat()</code> that computes <code>target</code>, never a second one.</p>
 
-<p><code>skipped_slices</code> (<code>session_watcher.py:1069-1085</code>) already records a suppression fact inside the state entry, in the same <code>os.replace</code> as the cursor — atomic by construction, no parallel ledger. <code>frozen_until</code> follows it, a scalar because only the ceiling matters.</p>
+<h3 id="the-park-refuses-changed-files">The park <em>refuses</em> a file that changed under examination</h3>
 
-<h3 id="rejected">Considered and rejected</h3>
+<p>Council round 2, codex, high. <code>examined</code> is the stat <code>_idle_with_unsafe_tail</code> actually parsed — so that method now returns <code>os.stat_result | None</code> instead of <code>bool</code>. A rotation landing between the examination and the park would otherwise record the replacement's identity, and both producers would then classify a file nobody has ever parsed as frozen-and-unchanged. Writing no fact is always safe: the file is simply re-selected.</p>
 
-<ul>
-  <li><strong>Fix the predicate only</strong> — have the parser signal "refused by the ceiling" at the three <code>_exceeds_ceiling</code> breaks (<code>parser.py:350</code>, <code>:381</code>, <code>:406</code>), so <code>_idle_with_unsafe_tail</code> stops misclassifying. Smaller, and it addresses the cause named on 2026-08-10. Rejected as insufficient: it lowers the trigger rate and leaves the loss mechanism intact for the genuinely idle tail — which is what all six of today's dead-letters are.</li>
-  <li><strong>Both</strong> — full coverage of the 2026-08-10 cause. Rejected for now: two coupled mechanisms in one spec is the bundling that produced the 56-round cascade behind the retracted force-close. The predicate fix stays available as its own spec, on its own evidence.</li>
-</ul>
+<h3 id="monotonicity-within-identity">Monotonicity applies within one identity only</h3>
+
+<p>Two separate council findings converge here. Identity must always be written, even when the ceiling does not rise (round 2, cursor, high): after a same-size replacement the producers correctly re-open, the drain freezes again at the same <code>target</code>, and an early return would leave the stale identity in place forever — every sweep re-selecting and re-dead-lettering. And a ceiling belonging to a <em>different</em> file is not a ratchet guard but a lie (round 3, both peers, the single finding of that round): file A frozen at 1000, replaced by an unparseable B of size 500, would keep 1000 and could never re-arm. Guarding on identity also makes <code>ceiling ≤ st.st_size</code> provable rather than defensive.</p>
+
+<h3 id="naming">Named <code>frozen_until</code>, not <code>parked_until</code></h3>
+
+<p><code>parked_until</code> belongs to the force-close design retracted on 2026-08-09, and two live state entries still carry <code>parked_*</code> residue from the branch that once ran; reusing the name would make this design unreadable against that history.</p>
+
+<h3 id="precedent">Precedent: <code>skipped_slices</code></h3>
+
+<p><code>skipped_slices</code> (session_watcher.py:1069–1085) already records a suppression fact inside the state entry, in the same <code>os.replace</code> as the cursor — atomic by construction, no parallel ledger. The frozen fact follows it — three plain scalars in the same entry, no new file, no migration.</p>
+
+<h3 id="considered-and-rejected">Considered and rejected</h3>
+
+<dl>
+  <dt><strong>A size-only ceiling</strong></dt>
+  <dd><code>frozen_until >= st.st_size</code> as the whole gate, with no identity keys. This was the first draft. Rejected by council round 1 (cursor + codex, both needs-attention, verified against the code): it is not "re-open on growth", it also skips a file that <strong>shrank</strong>, so a rotated transcript would be suppressed forever and the shrink reset unreachable through either producer. The Observer lane is what catches rotation today precisely because it consults no state, so a size-only gate there was a straight regression. The cost of the repair is two extra keys per frozen entry.</dd>
+
+  <dt><strong>Fix the predicate only</strong></dt>
+  <dd>Have the parser signal "refused by the ceiling" at the three <code>_exceeds_ceiling</code> breaks (parser.py:350, :381, :406, which today set no flag at all — <code>capped</code> covers budgets only), so <code>_idle_with_unsafe_tail</code> stops misclassifying. Smaller, and it addresses the cause the ADR named on 2026-08-10. Rejected as insufficient: it lowers the trigger rate and leaves the loss mechanism intact for the genuinely idle tail — which is what all six of today's dead-letters are (<code>boundary == size</code> on each, so no window was in play).</dd>
+
+  <dt><strong>Both</strong></dt>
+  <dd>Full coverage of the 2026-08-10 cause. Rejected for now: two coupled mechanisms in one spec is the bundling that produced the 56-round cascade behind the retracted force-close. The predicate fix stays available as its own spec, on its own evidence.</dd>
+</dl>
 
 <h2 id="selection-suppression">Selection suppression</h2>
 
-<p>The cursor does two jobs today: record progress, and drop the file from the sweep (<code>(entry["end_offset"] or 0) >= st.st_size → continue</code>, <code>reconcile</code> at <code>session_watcher.py:1622</code>). Taking the second job away from it means giving it to <strong>both</strong> producers, not one.</p>
+<p>The cursor does two jobs today: record progress, and drop the file from the sweep (<code>(entry["end_offset"] or 0) >= st.st_size → continue</code>, <code>reconcile</code> at session_watcher.py:1622). Taking the second job away from it means giving it to <strong>both</strong> producers, not one.</p>
 
-<h3 id="reconcile">reconcile gains a second cheap-skip arm</h3>
+<p>The predicate lives in <strong>one</strong> module-level function, next to <code>_commit_state</code>, and both producers call it. There is deliberately no second copy: a divergent one is how the two lanes drift apart.</p>
 
-<pre><code class="language-python">elif (entry.get("end_offset") or 0) >= st.st_size and not entry.get("shrink_pending"):
+<pre><code class="language-python">def _frozen_unchanged(entry: dict, st: os.stat_result) -> bool:
+    """True when this file is still EXACTLY the one the freeze examined, so re-selecting it
+    would reproduce the same dead-letter and nothing else."""
+    if entry.get("shrink_pending"):
+        return False                        # the two-tick shrink gate is mid-confirmation
+    if (entry.get("end_offset") or 0) > st.st_size:
+        return False                        # cursor above EOF -> the file shrank
+    return (
+        (entry.get("frozen_until") or 0) == st.st_size
+        and entry.get("frozen_ino") == st.st_ino
+        and entry.get("frozen_mtime_ns") == st.st_mtime_ns
+    )</code></pre>
+
+<h3 id="reconcile-gains-second-skip"><code>reconcile</code> gains a second cheap-skip arm</h3>
+
+<p><code>reconcile</code> gains a second cheap-skip arm, and its first arm changes <code>>=</code> to <code>==</code>:</p>
+
+<pre><code class="language-python">elif (entry.get("end_offset") or 0) == st.st_size and not entry.get("shrink_pending"):
     continue
-elif (entry.get("frozen_until") or 0) >= st.st_size:
-    continue          # frozen, and not grown since the examination</code></pre>
+elif _frozen_unchanged(entry, st):
+    continue          # frozen, and byte-for-byte the file that was examined</code></pre>
 
 <p>A separate <code>elif</code> rather than an <code>or</code> on the first: that arm carries the <code>shrink_pending</code> exception, and folding an independent gate into the same expression ties them together.</p>
 
-<h3 id="enqueue-path">_enqueue_path gains the same gate</h3>
+<h3 id="greater-than-equals-becomes-equals"><code>>=</code> becomes <code>==</code></h3>
 
-<p><code>_enqueue_path</code> (<code>session_watcher.py:1361</code>) consults no state at all today — every FSEvent becomes an <code>enqueue</code>. It gains the same gate. Gating only the sweep does not fix the defect; it relocates it. The ADR already recorded this lesson in another form: <em>"the suppression is applied in both producer lanes, because gating only the sweep would trade a full <code>failed/</code> for a hot enqueue loop on the Observer lane."</em></p>
+<p>Council round 2, codex, high. A cursor <em>above</em> EOF means the file shrank, which is not "fully consumed". While the first arm skipped on <code>>=</code>, the frozen predicate's cursor-above-EOF escape was unreachable and the shrink gate could be armed only through the Observer — in the one component that exists to recover dropped FSEvents. This repairs <strong>pre-existing</strong> behaviour; it is in scope only because the frozen fact's contract claims that escape works.</p>
 
-<h3 id="invariants">Invariants</h3>
+<h3 id="enqueue-path-consults-the-gate"><code>_enqueue_path</code> consults the gate</h3>
+
+<p><code>_enqueue_path</code> (session_watcher.py:1361) consults no state at all today — every FSEvent becomes an <code>enqueue</code>. It gains the same call. Gating only the sweep does not fix the defect, it relocates it: the ADR already recorded this lesson in another form — <em>"the suppression is applied in both producer lanes, because gating only the sweep would trade a full <code>failed/</code> for a hot enqueue loop on the Observer lane."</em></p>
+
+<h2 id="invariants">Invariants</h2>
 
 <ol>
-  <li><strong>Growth always re-opens.</strong> <code>size > frozen_until</code> returns the file to selection, and the parse resumes from the <strong>untouched</strong> cursor — not from where the ratchet would have left it. This collapses <code>ab16af53</code>'s 24 dead-letters into a single ingestion.</li>
-  <li><strong>Never lowers.</strong> <code>max()</code> on write: an out-of-order job with a smaller boundary cannot lower the ceiling and re-open the ratchet.</li>
-  <li><strong><code>end_offset</code> leaves the write.</strong> The committed entry preserves the current cursor by construction. <code>_commit_state</code>'s monotonic clamp (<code>:800-808</code>) stays as the backstop, but must not be what enforces this — it clamps <code>end_offset</code> only, and this design does not touch that field.</li>
-  <li><strong>A never-seen file stays eligible.</strong> A new entry may be born as <code>{frozen_until: N}</code> with no <code>end_offset</code>. <code>reconcile</code> evaluates <code>(entry.get("end_offset") or 0) >= size</code> → <code>0 >= size</code> is false → it falls through to the new gate. Legacy entries lack the field, default 0, behaviour unchanged. No migration.</li>
-  <li><strong>A confirmed shrink clears it.</strong> The shrink reset (<code>session_watcher.py:955</code>) copies <code>dict(existing or {})</code> and updates only <code>hash</code>/<code>end_offset</code>. A <code>frozen_until</code> surviving that reset would sit above the rotated file's size and suppress its fresh content — the same defect with the sign flipped. The reset must <code>pop</code> the field.</li>
+  <li><strong>Any change re-opens.</strong> Growth, shrink, or replacement at the same byte count — all three break identity and return the file to selection, and the parse resumes from the <strong>untouched</strong> cursor, not from where the ratchet would have left it. This is what collapses <code>ab16af53</code>'s 24 dead-letters into a single ingestion. Suppression is never expressed by a size comparison alone (council round 1).</li>
+
+  <li><strong>Suppression re-arms.</strong> After a change re-opens the file and the drain freezes it again, the park writes the new identity even when the ceiling does not move. Without this the file re-selects and re-dead-letters on every tick — an unbounded <code>failed/</code>, the failure mode the fact exists to prevent (council round 2).</li>
+
+  <li><strong>Never lowers, within one identity.</strong> <code>max()</code> on write guards against an out-of-order job with a smaller boundary re-opening the ratchet. Across identities the new <code>target</code> simply replaces the old ceiling, or a large frozen file replaced by a smaller unparseable one could never re-arm (council round 3).</li>
+
+  <li><strong>Never past the accepted boundary.</strong> <code>target = min(boundary, size)</code>. Bytes above the boundary were never accepted by a nudge, so a later, higher nudge must still be able to examine them (council-pr F1, carried over). A consequence: while <code>frozen_until &lt; size</code> the predicate is false and the file stays selectable — suppression arms only when the whole file was examined.</li>
+
+  <li><strong><code>end_offset</code> leaves the write.</strong> The committed entry preserves the current cursor by construction. <code>_commit_state</code>'s monotonic clamp (:800–808) stays as the backstop, but must not be what enforces this — it clamps <code>end_offset</code> only, and this design does not touch that field.</li>
+
+  <li><strong>A never-seen file stays eligible.</strong> A new entry may be born with the three frozen keys and no <code>end_offset</code>. <code>reconcile</code> evaluates <code>(entry.get("end_offset") or 0) == size</code> → <code>0 == size</code> is false → it falls through to the new gate and is judged there. Legacy entries lack the fields, so <code>_frozen_unchanged</code> returns false, behaviour unchanged. No migration.</li>
+
+  <li><strong>A confirmed shrink clears it.</strong> The shrink reset (session_watcher.py:962–966) copies <code>dict(existing or {})</code> and updates only <code>hash</code>/<code>end_offset</code>. A frozen fact surviving that reset describes the file that was rotated away, and both producer gates would act on it. The reset must <code>pop</code> all three keys.</li>
+
+  <li><strong>A successful ingest clears it.</strong> The happy-path commit (:1284) carries the whole existing entry forward via <code>dict(existing) if carry else {}</code>. The fact described a parse that closed nothing; this one closed something. A stale ceiling on a healthy entry can only mislead a later comparison (council round 1, cursor, medium).</li>
 </ol>
 
-<p><span class="callout"><strong>Deliberately unchanged:</strong> <code>spool.requeue(job, failure_class="no_safe_boundary")</code>. The file still dead-letters on every freeze and the noise volume stays where it is (~110 jobs/day). That is Fix A, a separate spec.</span></p>
+<p>Deliberately unchanged: <code>spool.requeue(job, failure_class="no_safe_boundary")</code>. The file still dead-letters on every freeze and the noise volume stays where it is (~110 jobs/day). That is Fix A, a separate spec.</p>
 
 <h2 id="tests">Tests</h2>
 
-<p><em>Test-first.</em> The reproducing test is <code>ab16af53</code>'s ratchet in miniature: a transcript whose turn terminator lands past the job's <code>boundary</code>; job 1 freezes; job 2 arrives with a higher boundary.</p>
+<p><strong>Test-first.</strong> The reproducing test is <code>ab16af53</code>'s ratchet in miniature: a transcript whose turn terminator lands past the job's <code>boundary</code>; job 1 freezes; job 2 arrives with a higher boundary. Today the cursor jumps twice and nothing is ingested. After the change the cursor holds, <code>frozen_until</code> rises, and <strong>job 2 ingests the whole content</strong>. It fails against today's code — that is the done criterion.</p>
 
-<p>Today the cursor jumps twice and nothing is ingested. After the change the cursor holds, <code>frozen_until</code> rises, and <strong>job 2 ingests the whole content</strong>. It fails against today's code — that is the done criterion.</p>
+<p>Then one test per invariant above, and — critically — <strong>every re-open and re-arm case is proved through a producer</strong>, <code>reconcile</code> and <code>_enqueue_path</code> alike. Council round 1 rejected a version of the shrink test that called <code>spool.enqueue</code> directly: that bypasses the very gate the defect lives in. The same round found the shrink test could never reach tick 2 at all, because tick 1 requeues the job with a persisted backoff, a second <code>enqueue</code> is a no-op on the same <code>(path, boundary)</code> key, and <code>_drain_all</code> stops at the first job that is not due — so the test advances the spool's clock instead.</p>
 
-<p>Then one test per invariant above (growth re-opens; a lower boundary never lowers the ceiling; <code>end_offset</code> is not written; a never-seen file stays eligible; a confirmed shrink clears the field), and one suppression test per producer — <code>reconcile</code> and <code>_enqueue_path</code> — because gating one lane is the recorded failure mode.</p>
+<h3 id="new-tests-by-finding">New tests, by the finding each one nets</h3>
 
-<p>Three existing tests assert the old behaviour and are <strong>rewritten, not deleted</strong>: the invariant each one guards still holds, only the field carrying it changes.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Test</th>
+      <th>Guards</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>test_frozen_prefix_does_not_consume_bytes_the_next_job_can_ingest</code></td>
+      <td>The reproducing test: the ratchet in miniature</td>
+    </tr>
+    <tr>
+      <td><code>test_park_refuses_a_file_that_changed_under_the_examination</code></td>
+      <td>Round 2, codex — the park's own TOCTOU</td>
+    </tr>
+    <tr>
+      <td><code>test_park_converges_identity_when_the_ceiling_does_not_rise</code></td>
+      <td>Round 2, cursor — suppression re-arms</td>
+    </tr>
+    <tr>
+      <td><code>test_park_ceiling_is_monotonic_only_within_one_identity</code></td>
+      <td>Round 3, both peers</td>
+    </tr>
+    <tr>
+      <td><code>test_reconcile_skips_a_frozen_file_until_it_changes</code></td>
+      <td>Growth re-opens, through the sweep</td>
+    </tr>
+    <tr>
+      <td><code>test_reconcile_reopens_a_frozen_file_that_was_rotated_smaller</code></td>
+      <td>Round 1 — shrink re-opens</td>
+    </tr>
+    <tr>
+      <td><code>test_reconcile_reopens_a_frozen_file_replaced_at_the_same_size</code></td>
+      <td>Same-size replacement, then re-arm</td>
+    </tr>
+    <tr>
+      <td><code>test_reconcile_selects_a_file_whose_cursor_sits_above_eof</code></td>
+      <td>Round 2, codex — the <code>>=</code> → <code>==</code> repair</td>
+    </tr>
+    <tr>
+      <td><code>test_reconcile_still_selects_a_never_seen_file_with_only_a_frozen_fact</code></td>
+      <td>Invariant 6</td>
+    </tr>
+    <tr>
+      <td><code>test_enqueue_path_skips_a_frozen_file_until_it_changes</code></td>
+      <td>The Observer lane carries the gate</td>
+    </tr>
+    <tr>
+      <td><code>test_enqueue_path_reopens_a_frozen_file_that_was_rotated_smaller</code></td>
+      <td>Round 1 — the lane that catches rotation today</td>
+    </tr>
+    <tr>
+      <td><code>test_enqueue_path_re_arms_suppression_after_a_same_size_replacement</code></td>
+      <td>No hot enqueue loop</td>
+    </tr>
+    <tr>
+      <td><code>test_confirmed_shrink_clears_the_frozen_fact_through_the_producer</code></td>
+      <td>Invariant 7, via a producer</td>
+    </tr>
+    <tr>
+      <td><code>test_successful_ingest_clears_the_frozen_fact</code></td>
+      <td>Invariant 8</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="rewritten-tests">Three existing tests are rewritten, not deleted</h3>
+
+<p>The invariant each one guards still holds, only the field carrying it changes.</p>
 
 <table>
   <thead>
@@ -286,35 +429,42 @@ elif (entry.get("frozen_until") or 0) >= st.st_size:
   <tbody>
     <tr>
       <td><code>test_frozen_prefix_advance_never_passes_the_accepted_boundary</code> (:2692)</td>
-      <td>cursor stops at B, never raw EOF</td>
-      <td><code>frozen_until == B</code>, cursor untouched</td>
+      <td>Cursor stops at B, never raw EOF</td>
+      <td><code>frozen_until == B</code>, cursor untouched, and a second nudge at S is still claimable</td>
     </tr>
     <tr>
       <td><code>test_frozen_prefix_advance_never_moves_the_cursor_backward</code> (:2830)</td>
-      <td>a lower boundary never rewinds the cursor</td>
-      <td>a lower boundary never lowers <code>frozen_until</code></td>
+      <td>A lower boundary never rewinds the cursor</td>
+      <td>Renamed <code>test_frozen_prefix_park_is_monotonic</code>: a lower boundary never lowers <code>frozen_until</code>, on disk as well as in memory</td>
     </tr>
     <tr>
       <td><code>test_abandonment_with_unclosed_tail_composes_with_frozen_prefix</code> (:3850)</td>
       <td><code>end_offset == size</code></td>
-      <td>cursor at the abandoned range's end; <code>frozen_until == size</code></td>
+      <td>Cursor at the abandoned range's end; <code>frozen_until == size</code></td>
     </tr>
   </tbody>
 </table>
 
+<p>Two of those three go <strong>vacuous</strong> rather than red the moment the cursor stops moving — their assertions become trivially true. They are rewritten in the same task that makes them vacuous, never left green and meaningless.</p>
+
 <p><code>test_idle_file_with_no_safe_boundary_is_dead_lettered</code> (:2666) passes unchanged — the dead-letter behaviour is untouched.</p>
 
-<h2 id="verification">Verification in production</h2>
+<h2 id="verification-in-production">Verification in production</h2>
 
-<p>Beyond the test suite: 75 state entries hold only <code>end_offset</code> today (48 on 2026-08-09). After the merge that count stops rising, and entries carrying <code>frozen_until</code> with an intact cursor start appearing. Measurable with the same read-only census used to write this spec.</p>
+<p>Beyond the suite: 75 state entries hold only <code>end_offset</code> today (48 on 2026-08-09). After the merge that count stops rising, and entries carrying <code>frozen_until</code> with an intact cursor start appearing. Measurable with the same read-only census used to write this spec.</p>
 
 <h2 id="residual-risks">Residual risks</h2>
 
 <ol>
-  <li><strong>A frozen file that never grows again is never ingested.</strong> The deliberate trade: today it is marked consumed and its content is <em>lost</em>; after the change it stays out of memory but <strong>recoverable</strong>. The worst failure mode improves; it does not disappear. This is the one item here that exchanges one behaviour for another rather than only fixing, and the first thing to revisit if something looks wrong later.</li>
+  <li><strong>A frozen file that never changes again is never ingested.</strong> The deliberate trade: today it is marked consumed and its content is <em>lost</em>; after the change it stays out of memory but <strong>recoverable</strong>. The worst failure mode improves; it does not disappear. This is the one item here that exchanges one behaviour for another rather than only fixing, and the first thing to revisit if something looks wrong later.</li>
+
   <li><strong>The 75 already-damaged entries are untouched.</strong> Recovery is a separate spec — the ADR's own rule is cause before repair.</li>
+
   <li><strong>The dead-letter keeps growing</strong> at roughly 110 jobs/day. Fix A, separate spec.</li>
+
   <li><strong>Cross-process writers stay uncovered.</strong> <code>threading.Lock</code> is per-process; the pre-existing #150-class limitation is unchanged here.</li>
+
+  <li><strong><code>reconcile</code> still has no identity model for an <em>ingested</em> file.</strong> A same-size replacement of a file whose cursor already sits at EOF is skipped by the first cheap-skip arm (<code>end_offset == size</code>) exactly as it is today. Raised in council round 2 and <strong>rejected as out of scope on verified grounds</strong>: it is a real defect, it is pre-existing, and it is unchanged by this design. Folding it in here is the bundling that produced the 56-round cascade behind the retracted force-close. It needs its own issue and spec — currently unfiled.</li>
 </ol>
   <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
   <div class="signature">
@@ -324,4 +474,4 @@ elif (entry.get("frozen_until") or 0) >= st.st_size:
 </main>
 </body>
 </html>
-<!-- rich-doc-src-sha256:1020dfcfbaba2b644eb7ac6f0e88fd36d2c232ad4571b92846d5797af4274740 -->
+<!-- rich-doc-src-sha256:393f4f2e2c089796b774b443c9286a06f3aa17f8d484c82ef0db8910caa38023 -->
