@@ -823,6 +823,32 @@ def _commit_state(
         _clamp_and_save()
 
 
+def _frozen_unchanged(entry: dict, st: os.stat_result) -> bool:
+    """True when this file is still EXACTLY the one the freeze examined, so re-selecting it
+    would reproduce the same dead-letter and nothing else.
+
+    Identity, not a ceiling. Council round 1 killed the first draft (`frozen_until >= size`):
+    it also skipped a file that shrank, so a rotated transcript was suppressed forever and the
+    shrink reset became unreachable through either producer. Any change — growth, shrink,
+    replacement at the same byte count — re-selects.
+
+    Two explicit escapes:
+    - ``shrink_pending``: the two-tick shrink gate is mid-confirmation; dropping the file from
+      the sweep now would strand the marker, exactly as the arm above this one already guards.
+    - a cursor above EOF: the file shrank relative to the stored cursor, which is the state the
+      shrink gate exists to resolve. It must be selected so that gate can run.
+    """
+    if entry.get("shrink_pending"):
+        return False
+    if (entry.get("end_offset") or 0) > st.st_size:
+        return False
+    return (
+        (entry.get("frozen_until") or 0) == st.st_size
+        and entry.get("frozen_ino") == st.st_ino
+        and entry.get("frozen_mtime_ns") == st.st_mtime_ns
+    )
+
+
 def _should_flush(is_idle: bool, capped: bool) -> bool:
     """A Batch closes once idle, or once the parser filled a full batch.
 
@@ -1673,13 +1699,25 @@ class SessionHandler(FileSystemEventHandler):
                     continue  # catch-up disabled -> skip never-seen files
                 if cutoff > 0 and st.st_mtime < cutoff:
                     continue
-            elif (entry.get("end_offset") or 0) >= st.st_size and not entry.get(
+            elif (entry.get("end_offset") or 0) == st.st_size and not entry.get(
                 "shrink_pending"
             ):
                 # Fully consumed -> skip cheaply. EXCEPT a shrink_pending entry (task 4):
                 # between tick 1 and tick 2 the durable cursor is still above EOF -- skipping
                 # here would drop the file from the sweep and tick 2 would never arrive,
                 # stranding the marker itself.
+                #
+                # `==`, never `>=`: a cursor ABOVE EOF means the file shrank, and skipping it
+                # here made the shrink gate reachable only through the Observer -- so a
+                # dropped FSEvent stranded the transcript, in the one component that exists to
+                # recover dropped FSEvents.
+                continue
+            elif _frozen_unchanged(entry, st):
+                # Frozen and byte-for-byte the file that was examined: re-selecting it would
+                # reproduce the same dead-letter and nothing else (ADR-0004, 2026-08-12).
+                # A SEPARATE arm on purpose: the one above carries the shrink_pending
+                # exception, and folding two independent gates into one expression ties them
+                # together.
                 continue
             # else: seen with cursor behind EOF -> pending/failed tail (or a grown file).
             candidates.append((st.st_mtime, jsonl_file, st.st_size))

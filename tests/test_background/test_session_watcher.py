@@ -17,6 +17,7 @@ from ormah.background.session_watcher import (
     IngestResult,
     SessionHandler,
     _commit_state,
+    _frozen_unchanged,
     _ingest_session,
     _load_state,
     _record_whisper_usage_signals,
@@ -2663,6 +2664,177 @@ def test_reconcile_enqueues_at_most_the_per_tick_cap(engine, tmp_path):
         assert str(p.relative_to(watch_dir)) not in state
 
 
+def test_reconcile_skips_a_frozen_file_until_it_changes(engine, tmp_path):
+    """The cursor no longer drops a frozen file from the sweep — the frozen identity does.
+    Growth past the recorded ceiling re-opens it, with the parse resuming from the
+    UNTOUCHED cursor rather than wherever a ratchet would have left it."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "frozen.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    size = jsonl.stat().st_size
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1        # first sweep: never seen -> enqueued
+        _drain_all(handler)
+        assert handler._state[rel]["frozen_until"] == size
+        assert handler.reconcile() == 0, "an unchanged frozen file must be skipped"
+
+        # the session resumes and closes its turn: the file grows past the ceiling
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "user",
+                "message": {"content": "a second prompt long enough to parse here"},
+            }) + "\n")
+        _mark_idle(jsonl)
+        assert handler.reconcile() == 1, "growth must re-open the file"
+
+
+def test_reconcile_reopens_a_frozen_file_that_was_rotated_smaller(engine, tmp_path):
+    """Council round 1, critical (cursor + codex, verified): a ceiling-only gate
+    (frozen_until >= size) also skips a file that SHRANK, so a rotated transcript is
+    suppressed forever and no producer can ever arm the shrink reset. Any change to the
+    file's identity must re-select it."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "rotated.jsonl"
+    # A single unterminated turn, padded well past what a 6-turn complete conversation
+    # takes -- `_partial_unterminated`'s own ~220 bytes is smaller than ANY _make_jsonl
+    # output, which would make "rotated smaller" unreachable with these helpers combined.
+    padding = "x" * 4000
+    jsonl.write_text(
+        json.dumps({"type": "user", "message": {"content": f"a long prompt {padding}"}})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"an answer that never closed {padding}"}]}})
+        + "\n"
+    )
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler.reconcile()
+        _drain_all(handler)
+        frozen = handler._state[rel]["frozen_until"]
+        assert handler.reconcile() == 0
+
+        # rotated: same path, a NEW smaller file with a complete conversation
+        jsonl.unlink()
+        _make_jsonl(jsonl, user_turns=6)
+        assert jsonl.stat().st_size < frozen
+        _mark_idle(jsonl)
+
+        assert handler.reconcile() == 1, \
+            "a rotated file must be re-selected, not hidden behind the old ceiling"
+        _drain_all(handler)
+
+    assert handler._state[rel].get("node_ids"), "the rotated file's content must be ingested"
+
+
+def test_reconcile_reopens_a_frozen_file_replaced_at_the_same_size(engine, tmp_path):
+    """A replacement of exactly the same byte count is invisible to a size comparison. The
+    Observer lane catches it today because it consults no state at all, so a size-only gate
+    would be a regression. Identity (inode/mtime) is what makes it visible."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "samesize.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler.reconcile()
+        _drain_all(handler)
+        original = jsonl.read_bytes()
+        assert handler.reconcile() == 0
+
+        # a NEW file at the same path with the SAME byte count
+        replacement = proj / "tmp.jsonl"
+        replacement.write_bytes(original)
+        replacement.replace(jsonl)
+        assert jsonl.stat().st_size == len(original)
+        _mark_idle(jsonl)
+
+        stale_ino = handler._state[rel]["frozen_ino"]
+        assert stale_ino != jsonl.stat().st_ino, \
+            "the replacement must carry a different inode — otherwise this fixture proves nothing"
+        assert handler.reconcile() == 1, \
+            "a same-size replacement is a different file and must be re-selected"
+
+        # Council round 2, cursor, medium: stopping at the first re-open would ship a park
+        # that never refreshes identity. Suppression must RE-ARM on the new file, or every
+        # sweep re-selects and re-dead-letters it forever.
+        _drain_all(handler)
+        assert handler._state[rel]["frozen_ino"] == jsonl.stat().st_ino, \
+            "the re-park must converge identity onto the replacement"
+        assert handler.reconcile() == 0, "suppression must re-arm on the new identity"
+
+
+def test_reconcile_selects_a_file_whose_cursor_sits_above_eof(engine, tmp_path):
+    """Council round 2, codex, high. The frozen predicate's 'cursor above EOF' escape is
+    unreachable while the arm above it skips on `>=`: a previously-ingested file that froze
+    and was then rotated below its cursor is dropped from the sweep before the escape is
+    ever evaluated, so reconcile can never arm the shrink gate. Only the Observer could —
+    and reconcile exists precisely for when FSEvents are dropped.
+
+    Pre-existing behaviour, not introduced by the frozen fact; it is repaired here because
+    the fact's contract claims the escape works."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "shrunk.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler.reconcile()
+        _drain_all(handler)
+        cursor = handler._state[rel]["end_offset"]
+        assert cursor > 0
+
+        # rotated below the retained cursor, WITHOUT any Observer event
+        jsonl.unlink()
+        _make_jsonl(jsonl, user_turns=2)
+        assert jsonl.stat().st_size < cursor
+        _mark_idle(jsonl)
+
+        assert handler.reconcile() == 1, \
+            "a cursor above EOF means the file shrank — never 'fully consumed'"
+
+
+def test_reconcile_still_selects_a_never_seen_file_with_only_a_frozen_fact(engine, tmp_path):
+    """A file whose FIRST examination froze has an entry with no end_offset at all. The
+    cheap-skip arm evaluates (entry.get('end_offset') or 0) >= size -> 0 >= size is false,
+    so it must fall through to the frozen gate and be judged there."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "firstfreeze.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler.reconcile()
+        _drain_all(handler)
+
+    assert "end_offset" not in handler._state[rel], \
+        "the freeze must not create a cursor for a file that was never ingested"
+    assert handler._state[rel]["frozen_until"] == jsonl.stat().st_size
+    assert handler.reconcile() == 0
+
+
 def test_idle_file_with_no_safe_boundary_is_dead_lettered(engine, tmp_path):
     """T-N3: an idle transcript whose bytes never reach a safe boundary (a single unterminated
     turn) dead-letters with a distinct reason instead of silently completing."""
@@ -2877,7 +3049,8 @@ def test_frozen_prefix_park_is_monotonic(engine, tmp_path):
     """council-pr R2 F2: the park's CEILING must be monotonic. A stale or out-of-order job
     carrying a boundary lower than the current ``frozen_until`` must NEVER lower it -- that
     would re-open the ratchet this method exists to stop. The park never touches the cursor
-    (``end_offset``) at all, in either direction."""
+    (``end_offset``) at all, in either direction, and the refused, stale boundary must never
+    be persisted to disk either."""
     from ormah.background.ingest_spool import IngestSpool
     from ormah.background.session_watcher import _commit_state
 
@@ -2993,6 +3166,7 @@ def test_park_ceiling_is_monotonic_only_within_one_identity(engine, tmp_path):
     big = jsonl.stat().st_size
     handler._mark_frozen_prefix_parked(jsonl, rel, boundary=big, examined=jsonl.stat())
     assert handler._state[rel]["frozen_until"] == big
+    first_ino = handler._state[rel]["frozen_ino"]
 
     # replaced by a SMALLER file that is also unparseable
     jsonl.unlink()
@@ -3000,12 +3174,16 @@ def test_park_ceiling_is_monotonic_only_within_one_identity(engine, tmp_path):
     _mark_idle(jsonl)
     small = jsonl.stat().st_size
     assert small < big
+    assert jsonl.stat().st_ino != first_ino, \
+        "the replacement must carry a different inode — otherwise this fixture proves nothing"
 
     handler._mark_frozen_prefix_parked(jsonl, rel, boundary=small, examined=jsonl.stat())
     assert handler._state[rel]["frozen_until"] == small, (
         "a ceiling from a different file must be replaced, not maxed — otherwise the "
         "predicate can never re-arm and the file re-selects forever"
     )
+    assert _frozen_unchanged(handler._state[rel], jsonl.stat()), \
+        "suppression must re-arm on the new file"
 
 
 def test_capped_continuation_inherits_the_producer_force_flush(engine, tmp_path):
