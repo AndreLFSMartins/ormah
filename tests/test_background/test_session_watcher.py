@@ -17,6 +17,7 @@ from ormah.background.session_watcher import (
     IngestResult,
     SessionHandler,
     _commit_state,
+    _frozen_unchanged,
     _ingest_session,
     _load_state,
     _record_whisper_usage_signals,
@@ -52,6 +53,19 @@ _LLM_RESPONSE = json.dumps({"memories": [
         "type": "decision",
         "title": "Embedding model choice",
         "tags": ["embeddings"],
+    },
+]})
+
+# A second, content-distinct extraction result. The engine dedups a memory whose content
+# matches one already stored in the SAME store (_is_duplicate_memory), so a test that ingests
+# twice against one shared `engine` fixture needs two different memories or the second
+# ingest's node_ids comes back empty for a reason unrelated to what it is testing.
+_ROTATED_LLM_RESPONSE = json.dumps({"memories": [
+    {
+        "content": "The rotated transcript records a fresh decision distinct from the original.",
+        "type": "decision",
+        "title": "Rotated transcript decision",
+        "tags": ["rotated"],
     },
 ]})
 
@@ -2528,6 +2542,156 @@ def test_shrink_tick_one_requeues_without_reconcile(engine, tmp_path):
     assert not any(p.name.endswith(".json") for p in failed_dir.iterdir())
 
 
+def test_confirmed_shrink_clears_the_frozen_fact_through_the_producer(engine, tmp_path):
+    """A rotated file reuses its path at a smaller size. The frozen fact left over from the
+    PREVIOUS file must not survive the confirmed reset, and the whole route must run through
+    a real producer: council round 1 rejected a version of this test that called
+    spool.enqueue directly, because that is exactly the gate the defect lived in."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "rotated.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        # 1. a normal ingest: the entry gets a real cursor
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        cursor = handler._state[rel]["end_offset"]
+        assert cursor > 0
+
+        # 2. an unterminated turn is appended and the session dies -> the file freezes
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "user", "message": {"content": "a prompt that never got its answer"},
+            }) + "\n")
+        _mark_idle(jsonl)
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        assert handler._state[rel]["frozen_until"] > cursor
+
+        # 3. the path is rotated to a NEW, smaller file
+        jsonl.unlink()
+        _make_jsonl(jsonl, user_turns=2)
+        assert jsonl.stat().st_size < cursor
+        _mark_idle(jsonl)
+
+        # 4. tick 1 through the producer: the rotated file is not the file the freeze
+        #    examined, so _frozen_unchanged is false and the Observer must still enqueue.
+        #    (Its cursor-above-EOF escape returns false here too, but the ceiling conjunct
+        #    already differs -- the escape is defence-in-depth, not the operative reason.)
+        handler._enqueue_path(jsonl, "observer")
+        assert handler.spool.pending_count() == 1, "the shrink escape must reach the spool"
+        _drain_all(handler)
+        assert handler._state[rel]["shrink_pending"], "tick 1 must arm the marker"
+        assert "frozen_until" in handler._state[rel], "tick 1 does not reset anything yet"
+
+        # 5. tick 2 is the SAME job, returned to pending/ with a persisted backoff. Advancing
+        #    the spool's clock is what makes it due; enqueueing again would be a no-op on the
+        #    same (path, boundary) key and _drain_all would find nothing due.
+        #
+        #    This tick's extraction is made to fail (provider outage) ON PURPOSE. Measured: a
+        #    successful re-ingest immediately following the reset, in the SAME tick, always
+        #    rebuilds the entry from an empty dict regardless of the fix -- the reset zeroes
+        #    end_offset, so `carry = existing and prev_offset > 0` is false right after ANY
+        #    reset, which erases a stale frozen_until whether or not the reset commit itself
+        #    ever carried it forward. A version of this test that let tick 2 succeed passed
+        #    with BOTH fix sites reverted, proving nothing about the reset commit. Failing
+        #    the extraction keeps the reset's own commit as the LAST write this tick, so what
+        #    follows is actually checking the reset site, not the happy-path site.
+        with patch("ormah.background.ingest_spool.time.time",
+                   return_value=time.time() + 3600), \
+             patch(_LLM_PATCH, return_value=None):
+            _drain_all(handler)
+
+    reset_entry = handler._state[rel]
+    assert "shrink_pending" not in reset_entry, "tick 2 must have actually run and confirmed"
+    assert "frozen_until" not in reset_entry, \
+        "a confirmed shrink must drop the stale ceiling with the stale cursor"
+    assert "frozen_ino" not in reset_entry and "frozen_mtime_ns" not in reset_entry
+    assert "frozen_ctime_ns" not in reset_entry
+
+    # 6. the provider recovers on a later tick, past tick 2's own backoff: the rotated file's
+    #    real content still reaches the store -- the reset dropped the stale FACT, not the
+    #    file. A response distinct from step 1's avoids _is_duplicate_memory silently
+    #    skipping an identical memory already stored by step 1 in this same engine.
+    with patch("ormah.background.ingest_spool.time.time",
+               return_value=time.time() + 7200), \
+         patch(_LLM_PATCH, return_value=_ROTATED_LLM_RESPONSE):
+        _drain_all(handler)
+
+    entry = handler._state[rel]
+    assert entry.get("node_ids"), "the rotated file's content must reach the store"
+    assert "frozen_until" not in entry
+    assert "frozen_ino" not in entry and "frozen_mtime_ns" not in entry
+    assert "frozen_ctime_ns" not in entry
+
+
+def test_successful_ingest_clears_the_frozen_fact(engine, tmp_path):
+    """Council round 1, cursor, medium: the happy-path commit carries the whole existing
+    entry forward, so a frozen fact would outlive the freeze it described and could only
+    mislead a later comparison.
+
+    The freeze must land on an entry that ALREADY has a real cursor (`end_offset > 0`):
+    freezing a file's very first-ever examination leaves nothing to carry, so
+    `carry = existing and prev_offset > 0` stays false and the happy-path commit rebuilds
+    the entry from an empty dict regardless of the fix -- proving nothing. Measured: a
+    version of this test that froze on a brand-new unterminated file (never ingested
+    before) passed even with the fix reverted."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "thaws.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        # 1. a normal ingest: the entry gets a real cursor to carry forward
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        cursor = handler._state[rel]["end_offset"]
+        assert cursor > 0
+
+        # 2. an unterminated turn is appended and the session dies -> the file freezes
+        #    WITHOUT moving the cursor (ADR-0004): end_offset stays at `cursor`.
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "user", "message": {"content": "a prompt that never got its answer"},
+            }) + "\n")
+        _mark_idle(jsonl)
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        assert handler._state[rel]["frozen_until"] > cursor
+        assert handler._state[rel]["end_offset"] == cursor
+
+        # 3. the session comes back and closes the turn: the next parse ingests it
+        #    INCREMENTALLY from `cursor` (prev_offset > 0), so carry is true this time and
+        #    the happy-path commit under test actually runs. A response distinct from step
+        #    1's avoids _is_duplicate_memory silently skipping an identical memory already
+        #    stored by step 1 in this same engine.
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "assistant",
+                "message": {"role": "assistant", "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": "and a closing answer"}]},
+            }) + "\n")
+        _mark_idle(jsonl)
+        with patch(_LLM_PATCH, return_value=_ROTATED_LLM_RESPONSE):
+            handler._enqueue_path(jsonl, "observer")
+            _drain_all(handler)
+
+    entry = handler._state[rel]
+    assert entry.get("node_ids"), "the content must have been ingested"
+    assert "frozen_until" not in entry, "a successful ingest un-freezes the file"
+    assert "frozen_ino" not in entry and "frozen_mtime_ns" not in entry
+    assert "frozen_ctime_ns" not in entry
+
+
 def test_reconcile_while_live_ingesting_does_not_double_enqueue(engine, tmp_path):
     """reconcile no longer touches _ingesting; a path already queued at its current boundary
     is not double-enqueued (enqueue is idempotent per (path, boundary))."""
@@ -2663,6 +2827,143 @@ def test_reconcile_enqueues_at_most_the_per_tick_cap(engine, tmp_path):
         assert str(p.relative_to(watch_dir)) not in state
 
 
+def test_reconcile_skips_a_frozen_file_until_it_changes(engine, tmp_path):
+    """The cursor no longer drops a frozen file from the sweep — the frozen identity does.
+    Growth past the recorded ceiling re-opens it, with the parse resuming from the
+    UNTOUCHED cursor rather than wherever a ratchet would have left it."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "frozen.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    size = jsonl.stat().st_size
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        assert handler.reconcile() == 1        # first sweep: never seen -> enqueued
+        _drain_all(handler)
+        assert handler._state[rel]["frozen_until"] == size
+        assert handler.reconcile() == 0, "an unchanged frozen file must be skipped"
+
+        # the session resumes and closes its turn: the file grows past the ceiling
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "user",
+                "message": {"content": "a second prompt long enough to parse here"},
+            }) + "\n")
+        _mark_idle(jsonl)
+        assert handler.reconcile() == 1, "growth must re-open the file"
+
+
+def test_reconcile_reopens_a_frozen_file_that_was_rotated_smaller(engine, tmp_path):
+    """Council round 1, critical (cursor + codex, verified): a ceiling-only gate
+    (frozen_until >= size) also skips a file that SHRANK, so a rotated transcript is
+    suppressed forever and no producer can ever arm the shrink reset. Any change to the
+    file's identity must re-select it."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "rotated.jsonl"
+    # A single unterminated turn, padded well past what a 6-turn complete conversation
+    # takes -- `_partial_unterminated`'s own ~220 bytes is smaller than ANY _make_jsonl
+    # output, which would make "rotated smaller" unreachable with these helpers combined.
+    padding = "x" * 4000
+    jsonl.write_text(
+        json.dumps({"type": "user", "message": {"content": f"a long prompt {padding}"}})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"an answer that never closed {padding}"}]}})
+        + "\n"
+    )
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler.reconcile()
+        _drain_all(handler)
+        frozen = handler._state[rel]["frozen_until"]
+        assert handler.reconcile() == 0
+
+        # rotated: same path, a NEW smaller file with a complete conversation
+        jsonl.unlink()
+        _make_jsonl(jsonl, user_turns=6)
+        assert jsonl.stat().st_size < frozen
+        _mark_idle(jsonl)
+
+        assert handler.reconcile() == 1, \
+            "a rotated file must be re-selected, not hidden behind the old ceiling"
+        _drain_all(handler)
+
+    assert handler._state[rel].get("node_ids"), "the rotated file's content must be ingested"
+
+
+def test_reconcile_reopens_a_frozen_file_replaced_at_the_same_size(engine, tmp_path):
+    """A replacement of exactly the same byte count is invisible to a size comparison. The
+    Observer lane catches it today because it consults no state at all, so a size-only gate
+    would be a regression. Identity (inode/mtime) is what makes it visible."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "samesize.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler.reconcile()
+        _drain_all(handler)
+        original = jsonl.read_bytes()
+        assert handler.reconcile() == 0
+
+        # a NEW file at the same path with the SAME byte count
+        replacement = proj / "tmp.jsonl"
+        replacement.write_bytes(original)
+        replacement.replace(jsonl)
+        assert jsonl.stat().st_size == len(original)
+        _mark_idle(jsonl)
+
+        stale_ino = handler._state[rel]["frozen_ino"]
+        assert stale_ino != jsonl.stat().st_ino, \
+            "the replacement must carry a different inode — otherwise this fixture proves nothing"
+        assert handler.reconcile() == 1, \
+            "a same-size replacement is a different file and must be re-selected"
+
+        # Council round 2, cursor, medium: stopping at the first re-open would ship a park
+        # that never refreshes identity. Suppression must RE-ARM on the new file, or every
+        # sweep re-selects and re-dead-letters it forever.
+        _drain_all(handler)
+        assert handler._state[rel]["frozen_ino"] == jsonl.stat().st_ino, \
+            "the re-park must converge identity onto the replacement"
+        assert handler.reconcile() == 0, "suppression must re-arm on the new identity"
+
+
+def test_reconcile_still_selects_a_never_seen_file_with_only_a_frozen_fact(engine, tmp_path):
+    """A file whose FIRST examination froze has an entry with no end_offset at all. The
+    cheap-skip arm evaluates (entry.get('end_offset') or 0) >= size -> 0 >= size is false,
+    so it must fall through to the frozen gate and be judged there."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "firstfreeze.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler.reconcile()
+        _drain_all(handler)
+
+    assert "end_offset" not in handler._state[rel], \
+        "the freeze must not create a cursor for a file that was never ingested"
+    assert handler._state[rel]["frozen_until"] == jsonl.stat().st_size
+    assert handler.reconcile() == 0
+
+
 def test_idle_file_with_no_safe_boundary_is_dead_lettered(engine, tmp_path):
     """T-N3: an idle transcript whose bytes never reach a safe boundary (a single unterminated
     turn) dead-letters with a distinct reason instead of silently completing."""
@@ -2690,10 +2991,10 @@ def test_idle_file_with_no_safe_boundary_is_dead_lettered(engine, tmp_path):
 
 
 def test_frozen_prefix_advance_never_passes_the_accepted_boundary(engine, tmp_path):
-    """council-pr F1: a nudge accepted boundary B; the live file then grew to S>B, still an
-    unterminated single turn, and went idle. The frozen-prefix advance must stop the cursor
-    at B (the accepted boundary), NEVER at raw EOF S -- bytes [B,S] were never accepted nor
-    extracted, so a later nudge at S must still be able to re-examine them."""
+    """council-pr F1, carried onto the suppression fact: a nudge accepted boundary B; the
+    live file then grew to S>B, still an unterminated single turn, and went idle. The
+    freeze must record B, NEVER raw EOF S -- bytes [B,S] were never accepted, so a later
+    nudge at S must still be able to re-examine them."""
     from ormah.background.ingest_spool import IngestSpool
 
     watch_dir = tmp_path / "projects"
@@ -2730,14 +3031,61 @@ def test_frozen_prefix_advance_never_passes_the_accepted_boundary(engine, tmp_pa
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         _drain_all(handler)
 
-    cursor = _load_state(watch_dir).get(rel, {}).get("end_offset", 0)
-    assert cursor <= boundary, (
-        f"frozen-prefix advance jumped the cursor to {cursor} (S={size}); it must never "
-        f"pass the accepted boundary B={boundary}, or bytes [B,S] are skipped forever"
+    entry = _load_state(watch_dir).get(rel, {})
+    assert (entry.get("end_offset") or 0) == 0, "the freeze must not move the cursor at all"
+    assert entry.get("frozen_until") == boundary, (
+        f"the freeze recorded {entry.get('frozen_until')} (S={size}); it must never pass "
+        f"the accepted boundary B={boundary}, or bytes [B,S] are suppressed forever"
     )
     # [B,S] was not permanently consumed: a second nudge at S can still claim it for work.
     spool.enqueue(jsonl, boundary=size, reason="nudge")
     assert spool.claim_next() is not None, "the second nudge at S must be claimable"
+
+
+def test_frozen_prefix_does_not_consume_bytes_the_next_job_can_ingest(engine, tmp_path):
+    """ADR-0004 2026-08-12 — the ratchet. A job whose accepted boundary cuts the first
+    assistant record in half closes nothing, so the frozen-prefix path fires. It must NOT
+    advance the cursor: a second job at the file's real EOF has to ingest the WHOLE
+    transcript. With the cursor advanced (the pre-fix behaviour) the second job resumes
+    mid-record and the content is unreachable — that happened 24 times in a row on one
+    production transcript, boundary climbing 98,985 -> 1,435,339, nothing ever ingested."""
+    from ormah.background.ingest_spool import IngestSpool
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "ratchet.jsonl"
+    _make_jsonl(jsonl, user_turns=6)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    size = jsonl.stat().st_size
+
+    # A boundary strictly INSIDE the first assistant record: the parser reads that line
+    # (its start is below the ceiling) and _exceeds_ceiling refuses it at commit, so
+    # safe_end_offset == start_offset == 0 and _idle_with_unsafe_tail is True.
+    first_line = jsonl.read_bytes().split(b"\n")[0]
+    boundary = len(first_line) + 1 + 10
+    assert boundary < size
+
+    spool = IngestSpool(tmp_path / "spool")
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        spool.enqueue(jsonl, boundary=boundary, reason="observer", force_flush=False)
+        _drain_all(handler)
+
+        entry = handler._state.get(rel, {})
+        assert entry.get("frozen_until") == boundary, \
+            "the freeze must be recorded as a suppression fact"
+        assert (entry.get("end_offset") or 0) == 0, \
+            "the freeze must NOT move the cursor over bytes nothing ingested"
+
+        spool.enqueue(jsonl, boundary=size, reason="reconcile", force_flush=False)
+        _drain_all(handler)
+
+    entry = handler._state[rel]
+    assert entry["end_offset"] == size, \
+        "the second job, at the real EOF, must ingest the whole transcript"
+    assert entry.get("node_ids"), "the content must have reached the store"
 
 
 def test_unexpected_exception_requeues_instead_of_stranding_in_running(engine, tmp_path):
@@ -2826,11 +3174,12 @@ def test_observer_job_respects_min_turns_but_nudge_force_flushes(engine, tmp_pat
         "a nudge job must force-flush a short just-ended session past the min_turns gate"
 
 
-def test_frozen_prefix_advance_never_moves_the_cursor_backward(engine, tmp_path):
-    """council-pr R2 F2: _mark_frozen_prefix_consumed must be monotonic. A stale or
-    out-of-order boundary job (boundary < the current cursor) must NEVER rewind the cursor --
-    that would re-open already-consumed bytes for duplicate extraction. The prior
-    ``end_offset = min(boundary, size)`` wrote the lower boundary directly."""
+def test_frozen_prefix_park_is_monotonic(engine, tmp_path):
+    """council-pr R2 F2: the park's CEILING must be monotonic. A stale or out-of-order job
+    carrying a boundary lower than the current ``frozen_until`` must NEVER lower it -- that
+    would re-open the ratchet this method exists to stop. The park never touches the cursor
+    (``end_offset``) at all, in either direction, and the refused, stale boundary must never
+    be persisted to disk either."""
     from ormah.background.ingest_spool import IngestSpool
     from ormah.background.session_watcher import _commit_state
 
@@ -2846,12 +3195,224 @@ def test_frozen_prefix_advance_never_moves_the_cursor_backward(engine, tmp_path)
     # cursor already well past, persisted to BOTH memory and disk
     _commit_state(handler._state, rel, {"end_offset": 4000}, handler._state_lock, watch_dir)
 
-    handler._mark_frozen_prefix_consumed(jsonl, rel, boundary=1000)   # stale, LOWER boundary
-    assert handler._state[rel]["end_offset"] == 4000, (
-        "a boundary below the current cursor must never rewind it (duplicate re-ingestion)"
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=3000, examined=jsonl.stat())
+    assert handler._state[rel]["frozen_until"] == 3000
+    assert handler._state[rel]["end_offset"] == 4000, "the park must not touch the cursor"
+
+    handler._mark_frozen_prefix_parked(     # stale, LOWER boundary
+        jsonl, rel, boundary=1000, examined=jsonl.stat())
+    assert handler._state[rel]["frozen_until"] == 3000, (
+        "a boundary below the current ceiling must never lower it (re-opens the ratchet)"
     )
-    assert _load_state(watch_dir).get(rel, {}).get("end_offset") == 4000, (
-        "the rewind must not be persisted to disk either"
+    assert _load_state(watch_dir).get(rel, {}).get("frozen_until") == 3000, (
+        "the stale boundary must not be persisted to disk either"
+    )
+    assert _load_state(watch_dir).get(rel, {}).get("end_offset") == 4000
+
+
+def test_park_refuses_a_file_that_changed_under_the_examination(engine, tmp_path):
+    """Council round 2, codex, high. The park stats the file AFTER the examination. A
+    rotation landing in between would record the REPLACEMENT's identity, and both producers
+    would then treat a file nobody has ever parsed as frozen-and-unchanged. Writing no fact
+    is always safe: the file is simply re-selected."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "raced.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    examined = jsonl.stat()
+
+    # the path is replaced between the examination and the park
+    jsonl.unlink()
+    _make_jsonl(jsonl, user_turns=2)
+
+    handler._mark_frozen_prefix_parked(
+        jsonl, rel, boundary=jsonl.stat().st_size, examined=examined)
+    assert "frozen_until" not in handler._state.get(rel, {}), \
+        "a file that changed under the examination must never be parked"
+
+
+def test_park_converges_identity_when_the_ceiling_does_not_rise(engine, tmp_path):
+    """Council round 2, cursor, high. After a same-size replacement the producers correctly
+    re-open (identity differs). The re-park lands on the SAME ceiling; if it returned early
+    the stale identity would stay forever and every sweep would re-select and re-dead-letter
+    the file — an unbounded failed/, the failure mode ADR-0004 exists to avoid."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "samesize.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    size = jsonl.stat().st_size
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=size, examined=jsonl.stat())
+    first_ino = handler._state[rel]["frozen_ino"]
+
+    # a NEW file at the same path with the SAME byte count
+    original = jsonl.read_bytes()
+    replacement = proj / "tmp.jsonl"
+    replacement.write_bytes(original)
+    replacement.replace(jsonl)
+    _mark_idle(jsonl)
+    assert jsonl.stat().st_size == size
+
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=size, examined=jsonl.stat())
+    entry = handler._state[rel]
+    assert entry["frozen_until"] == size, "the ceiling must not move"
+    assert entry["frozen_ino"] != first_ino, \
+        "identity must converge even when the ceiling does not rise"
+    assert entry["frozen_ino"] == jsonl.stat().st_ino
+
+
+def test_park_ceiling_is_monotonic_only_within_one_identity(engine, tmp_path):
+    """Council round 3, both peers, the only finding of that round. A ceiling belonging to
+    a different file is not a ratchet guard, it is a lie: file A frozen at a large size,
+    replaced by a SMALLER file that is also unparseable, would keep A's ceiling, and
+    `frozen_until == st_size` could never be true again — every sweep re-selecting and
+    re-dead-lettering, an unbounded failed/."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "shrinking.jsonl"
+    proj_big = "x" * 4000
+    jsonl.write_text(
+        json.dumps({"type": "user", "message": {"content": f"a long prompt {proj_big}"}})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"an answer that never closed {proj_big}"}]}})
+        + "\n"
+    )
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    big = jsonl.stat().st_size
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=big, examined=jsonl.stat())
+    assert handler._state[rel]["frozen_until"] == big
+    first_ino = handler._state[rel]["frozen_ino"]
+
+    # replaced by a SMALLER file that is also unparseable
+    jsonl.unlink()
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    small = jsonl.stat().st_size
+    assert small < big
+    assert jsonl.stat().st_ino != first_ino, \
+        "the replacement must carry a different inode — otherwise this fixture proves nothing"
+
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=small, examined=jsonl.stat())
+    assert handler._state[rel]["frozen_until"] == small, (
+        "a ceiling from a different file must be replaced, not maxed — otherwise the "
+        "predicate can never re-arm and the file re-selects forever"
+    )
+    assert _frozen_unchanged(handler._state[rel], jsonl.stat()), \
+        "suppression must re-arm on the new file"
+
+
+def test_park_ceiling_does_not_survive_an_mtime_preserving_shrink(engine, tmp_path):
+    """council-pr round 1, codex. The identity above is (inode, mtime_ns) and omits the SIZE,
+    so the round-3 repair has a hole its own test cannot reach: that test replaces the file
+    (`unlink` + recreate), which changes the inode. An in-place `truncate` does NOT — it
+    keeps the inode — and a writer that restores the timestamp (utime, rsync --times, an
+    editor preserving mtime) keeps `st_mtime_ns` too. The park then calls a 500-byte file the
+    same file as the 4000-byte one it froze and keeps the LARGER ceiling, so
+    `frozen_until == st_size` can never hold again and every sweep re-selects and
+    re-dead-letters it — the unbounded failed/ this fact exists to prevent.
+
+    The guard is on the ceiling itself: a ceiling above the current size cannot belong to
+    this file, whatever the inode and mtime say."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "truncated-in-place.jsonl"
+    filler = "x" * 4000
+    jsonl.write_text(
+        json.dumps({"type": "user", "message": {"content": f"a long prompt {filler}"}})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"an answer that never closed {filler}"}]}})
+        + "\n"
+    )
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    before = jsonl.stat()
+    big = before.st_size
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=big, examined=before)
+    assert handler._state[rel]["frozen_until"] == big
+
+    # truncated IN PLACE -- same inode -- with the mtime restored to the nanosecond
+    with open(jsonl, "r+b") as fh:
+        fh.truncate(500)
+    os.utime(jsonl, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = jsonl.stat()
+    small = after.st_size
+    assert small < big
+    assert after.st_ino == before.st_ino, \
+        "fixture invalid: the inode changed, so this is a replacement and not an in-place edit"
+    assert after.st_mtime_ns == before.st_mtime_ns, \
+        "fixture invalid: the mtime was not restored, so the identity already differs"
+
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=small, examined=after)
+    assert handler._state[rel]["frozen_until"] == small, (
+        "a ceiling above the file's own size is not a ratchet guard, it is a lie -- the "
+        "park must replace it, not max against it"
+    )
+    assert _frozen_unchanged(handler._state[rel], jsonl.stat()), \
+        "suppression must re-arm after an in-place shrink, or the file re-selects forever"
+
+
+def test_frozen_identity_sees_an_in_place_rewrite_that_restored_its_mtime(engine, tmp_path):
+    """council-pr round 2, codex, high. (size, inode, mtime_ns) is not byte identity: an
+    in-place rewrite of the SAME length keeps the inode and size, and utime (or rsync
+    --times, or an editor preserving timestamps) puts mtime_ns back. Both producers share
+    this predicate, so newly closed turns would be suppressed forever.
+
+    st_ctime_ns closes it: the kernel bumps it on any inode change and userspace has no way
+    to set it, so it survives exactly the tampering mtime does not. Measured on this
+    filesystem for both shapes codex named — a same-size rewrite, and a shrink followed by a
+    regrow back to the original size — ctime differs in both while ino/size/mtime match.
+
+    Upstream documents the same hole and accepts it, on the grounds that closing it means
+    hashing every consumed file each tick. That is a false choice: this costs one more
+    stat field."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "rewritten-in-place.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    before = jsonl.stat()
+    size = before.st_size
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=size, examined=before)
+    assert _frozen_unchanged(handler._state[rel], jsonl.stat()), \
+        "the freeze must suppress the file it actually examined"
+
+    # rewritten IN PLACE at the SAME length, with the mtime put back to the nanosecond
+    original = jsonl.read_bytes()
+    with open(jsonl, "r+b") as fh:
+        fh.seek(0)
+        fh.write(bytes(b ^ 0x20 if b not in b'\r\n' else b for b in original))
+    os.utime(jsonl, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = jsonl.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_ino, before.st_size, before.st_mtime_ns
+    ), "fixture invalid: this must be invisible to (inode, size, mtime) or it proves nothing"
+    assert jsonl.read_bytes() != original, "fixture invalid: the bytes did not actually change"
+
+    assert not _frozen_unchanged(handler._state[rel], after), (
+        "the bytes changed under a restored mtime — suppressing this file strands every "
+        "turn the rewrite closed"
     )
 
 
@@ -3876,9 +4437,12 @@ class TestAboveCapOrphanRecovery:
         skipped = entry["skipped_slices"]
         assert skipped[0]["reason"] == "orphan_above_cap"
         assert skipped[0]["end"] < size            # == probe_safe_end, before the unclosed tail
-        # ...and the residual tail followed the standard frozen-prefix path (cursor at the
-        # accepted boundary, job dead-lettered as no_safe_boundary — pre-existing behavior).
-        assert entry["end_offset"] == size
+        # ...and the residual tail followed the standard frozen-prefix path (job
+        # dead-lettered as no_safe_boundary — pre-existing behavior).
+        # The residual unclosed tail is now PARKED, not consumed: the cursor stays at the
+        # abandoned range's end and the suppression fact carries the ceiling.
+        assert entry["end_offset"] == skipped[0]["end"]
+        assert entry["frozen_until"] == size
         assert list((handler.spool.root / "failed").glob("*.json")), \
             "residual unclosed tail must be dead-lettered, not silently completed"
         errs = list((handler.spool.root / "failed").glob("*.error"))
@@ -4281,4 +4845,110 @@ def test_transcript_deleted_after_ingest_returns_is_dead_lettered(engine, tmp_pa
     assert len(failed) == 1, "a transcript gone by decision time must leave a dead-letter record"
     errs = list((handler.spool.root / "failed").glob("*.error"))
     assert errs and "transcript_deleted" in errs[0].read_text()
+
+
+def test_enqueue_path_skips_a_frozen_file_until_it_changes(engine, tmp_path):
+    """The Observer lane must honour the same suppression fact as reconcile. Gating only
+    the sweep trades a growing failed/ for a hot enqueue loop on every FSEvent."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "frozen.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+    size = jsonl.stat().st_size
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        assert handler._state[rel]["frozen_until"] == size
+
+        handler._enqueue_path(jsonl, "observer")     # a second FSEvent, file unchanged
+        assert handler.spool.pending_count() == 0, \
+            "an unchanged frozen file must not be re-enqueued by the Observer"
+
+        with jsonl.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "user",
+                "message": {"content": "a second prompt long enough to parse here"},
+            }) + "\n")
+        handler._enqueue_path(jsonl, "observer")
+        assert handler.spool.pending_count() == 1, \
+            "growth must re-open the Observer lane too"
+
+
+def test_enqueue_path_reopens_a_frozen_file_that_was_rotated_smaller(engine, tmp_path):
+    """Council round 1, critical: this is the lane that catches rotation today, because it
+    consults no state at all. A ceiling-only gate here would suppress a rotated transcript
+    permanently — and with reconcile also gated, nothing else would ever find it."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "rotated.jsonl"
+    # A single unterminated turn, padded well past what a 6-turn complete conversation
+    # takes -- `_partial_unterminated`'s own ~220 bytes is smaller than ANY _make_jsonl
+    # output, which would make "rotated smaller" unreachable with these helpers combined.
+    padding = "x" * 4000
+    jsonl.write_text(
+        json.dumps({"type": "user", "message": {"content": f"a long prompt {padding}"}})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"an answer that never closed {padding}"}]}})
+        + "\n"
+    )
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        frozen = handler._state[rel]["frozen_until"]
+
+        jsonl.unlink()
+        _make_jsonl(jsonl, user_turns=6)
+        assert jsonl.stat().st_size < frozen
+        _mark_idle(jsonl)
+
+        handler._enqueue_path(jsonl, "observer")
+        assert handler.spool.pending_count() == 1, \
+            "a rotated file must be re-enqueued, not hidden behind the old ceiling"
+        _drain_all(handler)
+
+    assert handler._state[rel].get("node_ids"), "the rotated file's content must be ingested"
+
+
+def test_enqueue_path_re_arms_suppression_after_a_same_size_replacement(engine, tmp_path):
+    """Council round 2, cursor, medium: proving the re-open is half the story. If the re-park
+    does not converge identity, every FSEvent re-enqueues the same unparseable file forever
+    and failed/ grows without bound — the failure mode the frozen fact exists to prevent."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "samesize.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        handler._enqueue_path(jsonl, "observer")
+        _drain_all(handler)
+        original = jsonl.read_bytes()
+
+        replacement = proj / "tmp.jsonl"
+        replacement.write_bytes(original)
+        replacement.replace(jsonl)
+        _mark_idle(jsonl)
+
+        handler._enqueue_path(jsonl, "observer")
+        assert handler.spool.pending_count() == 1, "the replacement must re-open the lane"
+        _drain_all(handler)
+
+        assert handler._state[rel]["frozen_ino"] == jsonl.stat().st_ino
+        handler._enqueue_path(jsonl, "observer")
+        assert handler.spool.pending_count() == 0, \
+            "suppression must re-arm on the new identity, not loop forever"
 
