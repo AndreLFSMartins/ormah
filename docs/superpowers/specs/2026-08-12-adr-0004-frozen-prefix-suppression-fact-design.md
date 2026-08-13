@@ -18,15 +18,24 @@ described under *Residual risks* below.
 ## The problem, measured 2026-08-12
 
 The spool root is `~/.local/share/ormah/memory/ingest_queue/{66b287858fdea3e3,91da4ace50312981}/`.
-All figures below were taken read-only from the live Beta on 2026-08-12; they supersede the
-counts in the ADR's own 2026-08-12 amendment, which named two dead-letters and cited two jobs
-that do not exist in the spool.
+
+> **Provenance correction, 2026-08-13.** The two spool rows below were inherited from a session
+> handoff and written here as measurement without an independent route. They can no longer be
+> checked: `failed/` was destroyed externally some time between 2026-08-12 and 2026-08-13 08:50
+> (nothing in `ingest_spool.py` ever removes a file from `failed/`, and `backup.py` does not cover
+> the spool), and it now holds 2 jobs, both created 2026-08-13. Treat those two rows as
+> **unverifiable**, not as measurement. The claim they carried — that they superseded the ADR's own
+> 2026-08-12 amendment, which "cited two jobs that do not exist in the spool" — is **withdrawn**:
+> it can be neither substantiated nor refuted, so the ADR's amendment stands as written.
+>
+> The state rows are unaffected and one is confirmed: the `end_offset`-only count was re-measured
+> on 2026-08-13 by an independent route and is still exactly **75**, against 1815 entries.
 
 | quantity | value |
 |---|---|
-| dead-lettered jobs / distinct transcripts | 3806 / 1619, payloads from 2026-07-24 to today |
-| dead-lettered transcripts with cursor already at EOF | **98%** (median 0 B, p90 0 B) — the dead-letter is noise |
-| state entries holding only `end_offset` (cursor advanced, nothing ingested) | **75 of 1791** — was 48 of 1485 on 2026-08-09 |
+| dead-lettered jobs / distinct transcripts | ⚠️ unverifiable — inherited as 3806 / 1619, payloads from 2026-07-24 |
+| dead-lettered transcripts with cursor already at EOF | ⚠️ unverifiable — inherited as **98%** (median 0 B, p90 0 B) |
+| state entries holding only `end_offset` (cursor advanced, nothing ingested) | **75 of 1791** — was 48 of 1485 on 2026-08-09; still 75 of 1815 on 2026-08-13 |
 | of those, transcript still on disk | 68, totalling 8,029,774 B |
 
 Parsing each of those 68 transcripts whole, unwindowed, with the project's own
@@ -41,16 +50,27 @@ Parsing each of those 68 transcripts whole, unwindowed, with the project's own
 
 Read from the boundaries recorded on the dead-lettered jobs themselves:
 
-```
+```text
 ab16af53-….jsonl — 24 dead-letters, boundary climbing without pause:
   98,985 → 125,943 → 222,943 → 257,727 → 384,984 → 437,294 → 500,884
        → 676,978 → 694,301 → 877,060 → 971,222 → 1,017,779 → … → 1,435,339
 ```
 
-Each job runs `_mark_frozen_prefix_consumed`, which advances the cursor to its own boundary.
-A 1.43 MB session was pushed to EOF one slice at a time and never ingested, while a whole-file
-parse closes 1,434,322 of its 1,435,339 bytes. The same shape appears in `e238fed7` (5 jobs),
-`d66c054f` (4), `ebf4a5ff` (3).
+⚠️ The step *sequence* above came from the dead-lettered jobs and shares their fate — it cannot be
+re-derived now, and neither can the companion counts for `e238fed7` (5 jobs), `d66c054f` (4) and
+`ebf4a5ff` (3). **The damage it illustrates is independently verified**, re-measured 2026-08-13
+from the transcript and the state file, which are both still present:
+
+| | |
+|---|---|
+| transcript on disk | `-Users-andre-Documents-GitHub-davos-deck/ab16af53-….jsonl`, **1,435,339 B** |
+| whole-file `parse_transcript` | closes **1,434,322 B** in **66** turns |
+| its state entry | keys are `['end_offset']` and nothing else — `end_offset = 1,435,339` |
+
+The cursor sits at EOF, no `node_ids` were ever written, and a whole-file parse closes all but
+1,017 bytes. That is the defect, end to end, in one entry: `_mark_frozen_prefix_consumed` advanced
+the cursor to its own boundary until the file was "consumed" without a single turn reaching the
+store.
 
 The trigger varies — the windowed-parse artefact the ADR identified on 2026-08-10, or a
 genuinely idle session with an unterminated tail. **The damage does not: every path loses

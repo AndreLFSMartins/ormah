@@ -693,3 +693,140 @@ applies to these two starting today, 2026-08-12.**
 **No code change made.** Decided explicitly: further work on this ADR (implementing Fix A, Fix B, or a
 manual recovery of these two jobs) requires `superpowers:brainstorming` first, per this repo's standing
 rule that any behavior change starts there — not a continuation of this reproduction.
+
+## Amendment 2026-08-13 — Fix B ships: suppression is a fact about the file, not a cursor advance
+
+The mechanism the 08-09 and 08-10 amendments identified is repaired and merged into `local-main`
+(`d566478`). This amendment records what shipped, corrects one thing the 08-11 amendment leaves
+standing, and — deliberately — **withdraws** an errata this work had intended to write.
+
+### What shipped
+
+`_mark_frozen_prefix_consumed` is gone. It expressed "stop re-selecting this file" by advancing
+`end_offset`, which claims bytes nothing ingested — the loss this ADR has been circling since
+07-28. Its replacement, `_mark_frozen_prefix_parked`, writes a *suppression fact* and leaves the
+cursor alone:
+
+- `frozen_until` — the ceiling the examination reached, never past the accepted `boundary`.
+- `frozen_ino` / `frozen_mtime_ns` / `frozen_ctime_ns` — the identity of the file that was examined.
+
+Both producers skip through one shared predicate, `_frozen_unchanged`, which is true only while the
+file is byte-for-byte the one examined. Any change — growth, shrink, or replacement at the same
+byte count — re-selects it, and the parse resumes from the **untouched** cursor. The fact is
+cleared on a confirmed shrink and on a successful ingest.
+
+| commit | |
+|---|---|
+| `a0b8997` | the park writes the fact; the cursor is never moved |
+| `5aca3fd` | regression net for the plan review's rounds 2 and 3 |
+| `b2ff755` | `_frozen_unchanged` + `reconcile` uses it |
+| `33af30b` | the Observer lane uses the same predicate, not a copy |
+| `df9c751` | the fact is cleared at both commit sites |
+| `feecf20` | `reconcile`'s `>=` arm is left as found — see *Not shipped* |
+| `54550a1` | the ceiling must not survive an mtime-preserving in-place shrink |
+| `7e83d0c` | `ctime` joins the identity: `(size, inode, mtime_ns)` is not byte identity |
+
+Verified at merge: 140 passed in the watcher suite (125 before this work), 2477 passed in the full
+suite with only 7 pre-existing failures that also fail on `local-main` without any of this applied
+(`tests/test_setup.py`, `tests/test_cloud_settings.py` — none touches `session_watcher.py`), `ruff`
+clean on both touched files. `ingest_spool.py` is byte-identical: the `no_safe_boundary`
+dead-letter behaviour and its volume are untouched by design, as Fix A remains separate.
+
+The last two of those commits are worth naming, because both were found by the Dev Council
+**after** three rounds of plan review had signed the design off, and each is a defect the plan
+review's own regression tests could not reach:
+
+- `54550a1` — the park's identity was `(inode, mtime_ns)` and omitted the size. An in-place
+  `truncate` keeps the inode and `utime` restores the mtime, so a shrunk file kept the larger
+  ceiling and `frozen_until == st_size` could never hold again: every sweep re-selecting and
+  re-dead-lettering, unbounded `failed/`. This is precisely what plan round 3 claimed to have
+  closed; its test replaces the file, which changes the inode, so the in-place path was
+  unreachable by it.
+- `7e83d0c` — an in-place rewrite of the *same length* with the mtime restored stayed suppressed,
+  stranding every turn that rewrite closed. `st_ctime_ns` closes it: the kernel bumps it on any
+  inode change and userspace has no API to set it. Upstream documents the same hole and accepts it
+  *"[because] closing it means hashing every consumed file each tick"* — a false choice, as it
+  costs one `stat` field.
+
+### Correction to the 2026-08-11 amendment
+
+Both defects that amendment describes are **fixed and merged**, and it does not say so:
+
+- the backoff exponent clamp — `8438242`, with `_BACKOFF_MAX_SHIFT = 62` at `ingest_spool.py:43`
+  and the clamp applied *before* the exponentiation at `:253`;
+- the deleted transcript reaching the dead-letter as a deterministic failure — `9882872`, with
+  `requeue(job, failure_class="transcript_deleted")` at `session_watcher.py:1536` and `:1582`.
+
+Both are on `local-main` and both are present in the running code.
+
+### Not shipped, deliberately: `reconcile`'s `>=`
+
+`reconcile`'s cheap-skip arm still reads `(entry.get("end_offset") or 0) >= st.st_size`, so an entry
+whose cursor sits **above** EOF is treated as fully consumed and dropped from the sweep — and the
+two-tick shrink reset can then be armed only through the Observer, in the one component that exists
+to recover dropped FSEvents. Every peer review of this work raised it.
+
+It was in the branch as `>=` → `==` and was removed on measurement. Upstream has used `==` since
+`4d8de6d` (2026-07-17) and never had `>=`, so the `>=` is Beta-local drift — but upstream pairs
+`==` with an in-memory retry park (`_reconcile_attempts`, keyed on `(size, mtime_ns)`, bounded by
+`MAX_RECONCILE_RETRIES`) that this codebase does not have, at 0 occurrences. Measured 2026-08-12
+against the live state: 16 entries hold a cursor above EOF; **3** have an unchanged hash and would
+re-enqueue forever, because `_ingest_session`'s guard returns `NO_PROGRESS` before the shrink branch
+when the hash matches; the other **13** would reset to offset 0 and re-ingest **59.0 MB**, largest
+file 40 MB. Seven of those 13 sit at exactly **83 bytes** above EOF, across files from 392 KB to
+40 MB — a constant offset across unrelated files is not a shrink but an unexplained cursor
+overshoot.
+
+One consequence of this work runs the *other* way, and was checked rather than assumed: parking is
+possible only while `st_size > cursor`, and the new park never writes `end_offset`. The predecessor
+advanced the cursor toward the frozen boundary, giving a later shrink a *higher* cursor to fall
+below. Leaving the cursor still **shrinks** the cursor-above-EOF population rather than feeding it.
+
+Tracked, with the census and an ordering — find the 83-byte write path first — in
+`AndreLFSMartins/ormah#2`.
+
+### Withdrawn: the errata this amendment was going to carry
+
+This work set out to correct the 2026-08-12 amendment above, on the claim that its two cited jobs
+(`boundary=796621`, `boundary=379845`) did not exist in the spool and that the real population was
+3806 jobs over 1619 transcripts with payloads from 2026-07-24 onward. **That correction is
+withdrawn, because it cannot be substantiated.**
+
+Measured 2026-08-13: `failed/` holds **2** dead-lettered jobs, both `no_safe_boundary`, both created
+today at 08:52 and 08:54, both under `ingest_queue/66b287858fdea3e3/`, on transcripts in
+`-Users-andre-Documents-Obsidian-AndreMartins`. The other root is empty. Nothing in
+`ingest_spool.py` ever removes a file from `failed/` — it writes the job there with its original
+bytes and an `.error` sidecar, and never unlinks — so the population did not shrink by any action of
+the code. The spool is also not covered by `backup.py`, which never mentions `ingest_queue`.
+
+So the queue was destroyed externally a second time, some time between 2026-08-12 and 2026-08-13
+08:50, exactly as the 08-11 amendment records for the first occasion — and with the same result:
+**neither the figures in the 08-12 amendment nor the figures that would have corrected them can now
+be verified or refuted.** The 08-12 amendment therefore stands as written. Its numbers are not
+confirmed here; they are simply no longer falsifiable, which is a different thing and is recorded as
+such.
+
+*The lesson is the same one the 08-11 amendment drew and is worth restating, because it has now cost
+evidence twice:* manual destruction of the queue is the failure mode H1 forbids, arrived at from the
+opposite direction. A retention policy that prunes `failed/` deliberately — with a record of what it
+removed — would be strictly better than the current combination of never pruning and being wiped.
+
+### Verification in production — not yet done
+
+Recorded at merge time, 2026-08-13: **1815** state entries, **75** holding only `end_offset`, **0**
+holding `frozen_until`. The first count was also 75 when measured on 2026-08-12 against 1791
+entries, which is the one figure from that measurement reproduced by an independent route here.
+
+The claim this change makes is that the 75 stops rising and entries carrying `frozen_until` with an
+intact cursor begin to appear. The Beta was restarted onto the merged code at 09:14:34. **Until a
+second reading exists, this change is verified by its test suite and not by production.**
+
+### Still open
+
+- Fix A — the `no_safe_boundary` dead-letter noise, re-admit-on-growth. Untouched by design.
+- Recovery of the content already lost: 14 transcripts / 5.92 MB / 23 closed user turns, per the
+  2026-08-12 measurement. Its own spec, and the ~2-week rotation clock still applies.
+- The 54 transcripts the parser closes nothing in even unwindowed — parser coverage, its own spec.
+- `AndreLFSMartins/ormah#2` — the cursor-above-EOF class and the 83-byte overshoot.
+- A test hole, known and deferred: mutating `_frozen_unchanged`'s `== st.st_size` to `<=` leaves the
+  whole suite green while re-introducing the loss mode this amendment closes.
