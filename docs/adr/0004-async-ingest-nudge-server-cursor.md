@@ -829,6 +829,9 @@ for the first time. **The change is now verified by production, not only by its 
 
 ### Still open
 
+> **SUPERSEDED 2026-08-13** by the "Fix A ships" amendment below — item 1 (Fix A) is done;
+> read that amendment's own "Still open" list for the current state.
+
 - Fix A — the `no_safe_boundary` dead-letter noise, re-admit-on-growth. Untouched by design.
 - Recovery of the content already lost: 14 transcripts / 5.92 MB / 23 closed user turns, per the
   2026-08-12 measurement. Its own spec, and the ~2-week rotation clock still applies.
@@ -836,3 +839,91 @@ for the first time. **The change is now verified by production, not only by its 
 - `AndreLFSMartins/ormah#2` — the cursor-above-EOF class and the 83-byte overshoot.
 - A test hole, known and deferred: mutating `_frozen_unchanged`'s `== st.st_size` to `<=` leaves the
   whole suite green while re-introducing the loss mode this amendment closes.
+
+## Amendment 2026-08-13 — Fix A ships: the `no_safe_boundary` dead-letter is retired, not just re-admitted
+
+The design this amendment implements is `docs/superpowers/specs/2026-08-13-adr-0004-fix-a-no-safe-boundary-noise-design.md`,
+approved via `superpowers:brainstorming` per the 2026-08-12 amendment's explicit gate. Merged
+into `local-main` as `fix/adr-0004-fix-a-no-safe-boundary-noise` (commits `ac634a2`, `622445c`).
+
+### What shipped, and why it is not the design's original shape
+
+The approved design was a one-line disposition swap: when
+`_mark_frozen_prefix_parked` confirms the suppression fact, call `spool.complete(job)`
+instead of `spool.requeue(job, failure_class="no_safe_boundary")` — retiring the dead-letter
+entirely rather than re-admitting it on growth (the design supersedes the 2026-08-09
+amendment's "minimal re-drain policy" suggestion: Fix B's `frozen_until` fact already makes
+growth re-select the file through both producer lanes, so a *second*, redundant re-admission
+mechanism was never needed once Fix B shipped).
+
+Three rounds of adversarial `/council` review (Cursor + Codex, independently) found the design
+as written was unsafe, both times in the same direction — a park that is *not* confirmed must
+never reach `complete()`, or a job vanishes with neither a durable fact nor a spool record,
+which is exactly the loss class this whole ADR exists to close:
+
+- **R1 (codex):** `_mark_frozen_prefix_parked` returns `None` on refusal (file deleted, or
+  changed identity, between `_idle_with_unsafe_tail`'s examination and this method's own
+  re-stat) as well as on success — the original one-line swap could not tell the two apart.
+- **R2 (codex + cursor, independently, same defect):** the R1 fix (a `bool` return plus a
+  fresh `path.exists()` re-check at the call site) reopened a narrower version of the same
+  race: a delete-then-recreate between that re-check and the pre-existing lower guard could
+  still reach an unconditional `complete()`.
+- **R3 (codex):** a *different*, pre-existing race in `_idle_with_unsafe_tail`'s own `None`
+  return (any reason, including its own `stat()` failing) — verified independently to be
+  unmodified by this change and identical with or without it. Deliberately deferred; see
+  "Still open" below.
+
+**What shipped instead of the one-liner:** `_mark_frozen_prefix_parked` now returns a
+`ParkOutcome` enum (`PARKED` / `GONE` / `RETRY`), decided **inside** the method from the
+single `stat()` it already performs — `FileNotFoundError` → `GONE`, any other `OSError` or an
+identity mismatch → `RETRY`, a confirmed fact → `PARKED`. The call site dispatches once on
+that value with a `return` in every branch and never re-checks `path.exists()` — closing the
+race structurally rather than by ordering two checks correctly. `GONE` dead-letters as
+`transcript_deleted` (an existing class); `RETRY` gets the same persisted-backoff `external`
+requeue the neighboring `shrink_pending` race already gets, for the same acceptance-only-root
+reason. `IngestSpool` itself is untouched.
+
+Verified at merge (`622445c`, worktree-local venv — `Tools/ormah`'s shared `.venv` is
+editable-installed against the main checkout, not any worktree, and silently tests the wrong
+code if used from one; confirmed by the final review independently reproducing the exact
+false-negative): 10/10 targeted tests, 148/148 `test_session_watcher.py`, 2503/2503 full
+suite (2492 passed + 11 pre-existing deselected — 0 pre-existing failures at merge), `ruff`
+clean. The final whole-branch review (opus) re-verified the `PARKED`-without-a-write path is
+still durability-backed — `_commit_state` persists to disk before publishing to the in-memory
+`_state` dict, so a `PARKED` returned from the "already recorded" short-circuit still implies
+an on-disk fact, not merely an in-memory one — and confirmed the R3 deferral is accurate: the
+diff touches only lines inside the `if examined is not None:` block.
+
+### Operational signal, corrected before merge
+
+The design specified `logger.debug` for the park-confirmed log line, calling it "the cheap
+substitute" for the removed `grep no_safe_boundary failed/*.error`. The final review found
+that substitute does not exist under this project's default log level (`INFO`) — a default
+deployment gets neither the old `.error` sidecar nor the new log line. Promoted to
+`logger.info` before merge (park is per-idle-session frequency, not hot-path, so the volume is
+defensible). The log line was also found to print `job.boundary` rather than the ceiling
+actually persisted (`min(boundary, size)`, further ratcheted on a re-park) — now reads the
+value `_mark_frozen_prefix_parked` actually wrote to state.
+
+### Still open
+
+- Recovery of the content already lost: 14 transcripts / 5.92 MB / 23 closed user turns, per the
+  2026-08-12 measurement. Its own spec, and the ~2-week rotation clock still applies — now over
+  a month past the 2026-08-12 measurement date, so treat the recovery window as likely expired
+  rather than re-verify it optimistically.
+- The 54 transcripts the parser closes nothing in even unwindowed — parser coverage, its own spec.
+- `AndreLFSMartins/ormah#2` — the cursor-above-EOF class and the 83-byte overshoot.
+- A test hole, known and deferred: mutating `_frozen_unchanged`'s `== st.st_size` to `<=` leaves the
+  whole suite green while re-introducing the loss mode the Fix B amendment closes.
+- **New (R3, this amendment):** `_idle_with_unsafe_tail` returns `None` for any reason,
+  including its own `stat()` failing — a deleted-then-recreated file in that window is
+  indistinguishable, at the call site, from every other `None` cause (not-yet-idle,
+  unparseable, cursor already at EOF), and the *unchanged* `shrink_pending` /
+  `path.exists()` / final `complete()` fallthrough a few lines below can still reach an
+  unconditional `complete()` in that narrow window. Pre-existing, not introduced or widened by
+  Fix A — present identically with or without it. Closing it needs a tagged return from
+  `_idle_with_unsafe_tail` itself (`UNSAFE`/examined, `GONE`, `RETRY`, `NOT_APPLICABLE`, per
+  Codex's R3 recommendation) so the *entire* NO_PROGRESS branch can dispatch from one
+  atomically-captured result — every other NO_PROGRESS caller in this file depends on that
+  method's contract, so this is a larger, separate change needing its own design, not an
+  extension of Fix A's.
