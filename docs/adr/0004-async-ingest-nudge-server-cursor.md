@@ -888,11 +888,38 @@ editable-installed against the main checkout, not any worktree, and silently tes
 code if used from one; confirmed by the final review independently reproducing the exact
 false-negative): 10/10 targeted tests, 148/148 `test_session_watcher.py`, 2503/2503 full
 suite (2492 passed + 11 pre-existing deselected — 0 pre-existing failures at merge), `ruff`
-clean. The final whole-branch review (opus) re-verified the `PARKED`-without-a-write path is
-still durability-backed — `_commit_state` persists to disk before publishing to the in-memory
-`_state` dict, so a `PARKED` returned from the "already recorded" short-circuit still implies
-an on-disk fact, not merely an in-memory one — and confirmed the R3 deferral is accurate: the
-diff touches only lines inside the `if examined is not None:` block.
+clean. The final whole-branch review (opus) confirmed the R3 deferral is accurate:
+`_idle_with_unsafe_tail` and the `shrink_pending` / `path.exists()` / final-`complete()`
+fallthrough below the dispatch are untouched by this change.
+
+### The `PARKED` short-circuit: cleared by two reviews, and wrong — `468d38e`
+
+Worth recording as a review lesson, not only as a fix. `_mark_frozen_prefix_parked` had an
+"already recorded, identically" branch that returned `PARKED` **without writing**, on the
+argument that `_commit_state` persists to disk before publishing to the in-memory `_state`
+dict — so memory could never be ahead of disk. Both the final whole-branch review (opus) and
+the `/council-pr` R1 peer (cursor) examined that exact line and cleared it, each restating
+that same argument.
+
+The argument is true and does not prove what it was used for. It proves memory cannot lead
+disk **at the moment of writing**. It says nothing about disk falling **behind** memory
+*afterwards*: `self._state` is loaded once at handler construction (`_load_state`, ~`:1386`)
+and never re-read, so a state file destroyed, rolled back, or overwritten by another process
+leaves memory asserting a fact that no longer exists on disk. With Fix A, that stale `PARKED`
+reaches `spool.complete()` — the job unlinked with neither a fact nor a record. And it was
+**newly reachable**: before Fix A this path dead-lettered, so a record always survived.
+
+Found by Codex (`/council-pr` R1, 0.96), confirmed by reading, fixed in `468d38e` by deleting
+the short-circuit. `PARKED` now returns only after a successful `_commit_state` — durable **by
+construction**, verifiable by structure rather than by argument: exactly one
+`return ParkOutcome.PARKED` exists, immediately after the commit. A failed write raises,
+propagates to the drain's handler, and requeues as `external` (persisted backoff, never
+dead-lettered) — the H1-correct outcome. Cost is one state write per re-park of an unchanged
+file, a path both producer lanes already gate with `_frozen_unchanged`.
+
+*The lesson, since two independent reviews cleared this line:* a durability argument must name
+the window it covers. "Persist before publish" is a claim about one instant; the invariant
+needed here was about an interval.
 
 ### Operational signal, corrected before merge
 
@@ -915,6 +942,19 @@ value `_mark_frozen_prefix_parked` actually wrote to state.
 - `AndreLFSMartins/ormah#2` — the cursor-above-EOF class and the 83-byte overshoot.
 - A test hole, known and deferred: mutating `_frozen_unchanged`'s `== st.st_size` to `<=` leaves the
   whole suite green while re-introducing the loss mode the Fix B amendment closes.
+- **New (`/council-pr` R2, codex — lane-wide, NOT specific to Fix A):** `_commit_state`
+  returning and `spool.complete(job)` executing are two statements, not one transaction. State
+  destroyed or rolled back in that window leaves the job unlinked with no surviving fact. This
+  is a property of the **commit-then-complete protocol itself**, not of parking: the
+  `IngestResult.OK` path (`:1553-1563`) does the identical thing with the cursor advance, is
+  byte-identical on `local-main` pre-Fix-A, and is far more frequent than a park. Codex
+  conceded on R2 that it therefore does not block Fix A, and that closing it needs the
+  durable-receipt-or-transactional-store redesign the 2026-07-22 amendment already rejected
+  with measurements (`synchronous=NORMAL` does not survive power loss, so the transactional
+  argument does not hold; `busy_timeout=5000` would let a nudge block 5s in the one path whose
+  purpose is that nobody waits). Recorded here rather than fixed. Note the window is now
+  microseconds between two adjacent statements — before `468d38e` the equivalent exposure was
+  unbounded, since memory could assert an arbitrarily stale fact.
 - **New (R3, this amendment):** `_idle_with_unsafe_tail` returns `None` for any reason,
   including its own `stat()` failing — a deleted-then-recreated file in that window is
   indistinguishable, at the call site, from every other `None` cause (not-yet-idle,

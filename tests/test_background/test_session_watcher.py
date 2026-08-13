@@ -3035,8 +3035,17 @@ def test_mark_frozen_prefix_parked_returns_parked_when_already_identically_recor
 def test_mark_frozen_prefix_parked_rewrites_the_fact_after_external_state_loss(engine, tmp_path):
     """council-pr R1 (codex): the no-write "already recorded" short-circuit returned PARKED
     from self._state alone, which is loaded once at construction and never re-read. If the
-    state file is destroyed externally while the handler lives (measured twice in this ADR's
-    own history), that PARKED let the caller complete() the job with NO durable fact anywhere.
+    state file is destroyed or rolled back externally while the handler lives, that PARKED
+    let the caller complete() the job with NO durable fact anywhere.
+
+    On the evidence, precisely: what ADR-0004 measured being externally destroyed twice
+    (2026-08-11, 2026-08-13) was ingest_queue/ -- the SPOOL -- not .session_watcher_state.
+    So external destruction of ormah's own on-disk state is observed behaviour of this
+    deployment, but destruction of THIS file specifically is inferred, not measured. The
+    defect does not rest on that inference either way: self._state outliving its file is
+    reachable from any cause (rollback, restore from backup, a stale concurrent writer),
+    and the fix costs one write.
+
     PARKED must now mean the fact is on disk, so a park after external state loss must
     RE-WRITE it, not trust memory."""
     from ormah.background.session_watcher import ParkOutcome, _STATE_FILENAME
