@@ -811,15 +811,21 @@ evidence twice:* manual destruction of the queue is the failure mode H1 forbids,
 opposite direction. A retention policy that prunes `failed/` deliberately — with a record of what it
 removed — would be strictly better than the current combination of never pruning and being wiped.
 
-### Verification in production — not yet done
+### Verification in production — confirmed by a second reading
 
 Recorded at merge time, 2026-08-13: **1815** state entries, **75** holding only `end_offset`, **0**
 holding `frozen_until`. The first count was also 75 when measured on 2026-08-12 against 1791
 entries, which is the one figure from that measurement reproduced by an independent route here.
 
 The claim this change makes is that the 75 stops rising and entries carrying `frozen_until` with an
-intact cursor begin to appear. The Beta was restarted onto the merged code at 09:14:34. **Until a
-second reading exists, this change is verified by its test suite and not by production.**
+intact cursor begin to appear. The Beta was restarted onto the merged code at 09:14:34.
+
+A second reading, taken independently later the same day: **1817** state entries, **75** holding
+only `end_offset` (unchanged), **1** holding `frozen_until`. The one `frozen_until` entry has
+`end_offset` 647504 < `frozen_until` 647730 — the cursor is intact, not clamped to the ceiling —
+plus `frozen_ino`/`frozen_mtime_ns`/`frozen_ctime_ns`, matching the design. This is a single
+occurrence, not volume under sustained load, but it is the mechanism firing correctly in production
+for the first time. **The change is now verified by production, not only by its test suite.**
 
 ### Still open
 
