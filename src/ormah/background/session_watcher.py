@@ -1708,14 +1708,19 @@ class SessionHandler(FileSystemEventHandler):
         replaces the file, which changes the inode.
 
         Returns a ParkOutcome, decided from the single stat() this method takes (ADR-0004
-        Fix A, council R1/R2): PARKED when a durable frozen_until fact is confirmed present
-        when the call returns (freshly written, or already identically recorded); GONE when
-        the file did not exist at that stat (FileNotFoundError specifically); RETRY for any
-        other stat() failure or an identity mismatch against examined (the file changed
-        between the examination and this re-stat, but still exists). A caller must dispatch
-        on this value and return in every branch -- never re-derive disposition from a fresh
-        path.exists() afterward, which would reopen the exact race this return value exists
-        to close.
+        Fix A, council R1/R2): PARKED only after a successful ``_commit_state`` write, so the
+        frozen_until fact is durable on disk BY CONSTRUCTION when the call returns -- never
+        by trusting ``self._state`` alone. An earlier version short-circuited on an "already
+        recorded, identically" equality check against ``self._state`` and returned PARKED
+        without writing; that was removed (council-pr R1, codex) because in-memory state is
+        loaded once at handler construction and never re-read, so it can outlive an
+        externally destroyed or rolled-back state file, silently claiming a fact that no
+        longer exists on disk. GONE when the file did not exist at that stat
+        (FileNotFoundError specifically); RETRY for any other stat() failure or an identity
+        mismatch against examined (the file changed between the examination and this re-stat,
+        but still exists). A caller must dispatch on this value and return in every branch --
+        never re-derive disposition from a fresh path.exists() afterward, which would reopen
+        the exact race this return value exists to close.
         """
         try:
             st = path.stat()
@@ -1744,13 +1749,6 @@ class SessionHandler(FileSystemEventHandler):
         # Never lower the ceiling for the SAME file (an out-of-order job would re-open the
         # ratchet); always take the new one for a different file.
         ceiling = max(target, entry.get("frozen_until") or 0) if same_file else target
-        if (
-            entry.get("frozen_until") == ceiling
-            and entry.get("frozen_ino") == st.st_ino
-            and entry.get("frozen_mtime_ns") == st.st_mtime_ns
-            and entry.get("frozen_ctime_ns") == st.st_ctime_ns
-        ):
-            return ParkOutcome.PARKED  # already recorded, identically -- no write, fact holds
         entry["frozen_until"] = ceiling
         entry["frozen_ino"] = st.st_ino
         entry["frozen_mtime_ns"] = st.st_mtime_ns

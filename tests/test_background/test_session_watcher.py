@@ -3032,6 +3032,44 @@ def test_mark_frozen_prefix_parked_returns_parked_when_already_identically_recor
     ) is ParkOutcome.PARKED
 
 
+def test_mark_frozen_prefix_parked_rewrites_the_fact_after_external_state_loss(engine, tmp_path):
+    """council-pr R1 (codex): the no-write "already recorded" short-circuit returned PARKED
+    from self._state alone, which is loaded once at construction and never re-read. If the
+    state file is destroyed externally while the handler lives (measured twice in this ADR's
+    own history), that PARKED let the caller complete() the job with NO durable fact anywhere.
+    PARKED must now mean the fact is on disk, so a park after external state loss must
+    RE-WRITE it, not trust memory."""
+    from ormah.background.session_watcher import ParkOutcome, _STATE_FILENAME
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "stateloss.jsonl"
+    _partial_unterminated(jsonl)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    st = jsonl.stat()
+
+    assert handler._mark_frozen_prefix_parked(
+        jsonl, rel, st.st_size, examined=st
+    ) is ParkOutcome.PARKED
+    state_file = watch_dir / _STATE_FILENAME
+    assert state_file.exists()
+
+    # External destruction of the state file, handler (and its in-memory _state) still alive.
+    state_file.unlink()
+    assert handler._state[rel]["frozen_until"] == st.st_size   # memory still claims the fact
+
+    # A second, identical park must not trust memory: it must re-persist the fact.
+    assert handler._mark_frozen_prefix_parked(
+        jsonl, rel, st.st_size, examined=st
+    ) is ParkOutcome.PARKED
+    assert state_file.exists(), \
+        "PARKED must mean the fact is on disk — memory alone is not durability"
+    on_disk = json.loads(state_file.read_text())
+    assert on_disk[rel]["frozen_until"] == st.st_size
+
+
 def test_mark_frozen_prefix_parked_returns_gone_when_file_deleted(engine, tmp_path):
     """The race R1 found: deleted between _idle_with_unsafe_tail's examination and this
     re-stat. FileNotFoundError specifically -> GONE, distinct from a transient OSError, and
