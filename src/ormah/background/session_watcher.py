@@ -851,6 +851,15 @@ def _frozen_unchanged(entry: dict, st: os.stat_result) -> bool:
         (entry.get("frozen_until") or 0) == st.st_size
         and entry.get("frozen_ino") == st.st_ino
         and entry.get("frozen_mtime_ns") == st.st_mtime_ns
+        # ...and ctime, because the three above are not byte identity (council-pr R2, codex):
+        # an in-place rewrite of the SAME length keeps the inode and size, and utime puts
+        # mtime_ns back, so newly closed turns would be suppressed forever. The kernel bumps
+        # ctime on any inode change and userspace cannot set it, so it survives exactly the
+        # tampering mtime does not. Upstream accepts this hole on the grounds that closing it
+        # means hashing every consumed file each tick -- a false choice: this is one stat
+        # field. Where ctime is unreliable the predicate simply returns False more often,
+        # which costs one extra job and never suppresses a file it should not.
+        and entry.get("frozen_ctime_ns") == st.st_ctime_ns
     )
 
 
@@ -997,7 +1006,7 @@ def _ingest_session(
         # The frozen fact belongs to the file that was rotated away. Left in place it would
         # describe a file that no longer exists and the producer gates would act on it
         # (ADR-0004, 2026-08-12).
-        for _k in ("frozen_until", "frozen_ino", "frozen_mtime_ns"):
+        for _k in ("frozen_until", "frozen_ino", "frozen_mtime_ns", "frozen_ctime_ns"):
             reset_entry.pop(_k, None)
         _commit_state(state, rel, reset_entry, state_lock, watch_dir, allow_rewind=True)
         existing = state.get(rel)
@@ -1321,7 +1330,7 @@ def _ingest_session(
     entry.pop("extract_fail_count", None)
     # A successful ingest un-freezes the file: the fact described a parse that closed nothing,
     # and this one closed something. Keeping it would leave a stale ceiling on a healthy entry.
-    for _k in ("frozen_until", "frozen_ino", "frozen_mtime_ns"):
+    for _k in ("frozen_until", "frozen_ino", "frozen_mtime_ns", "frozen_ctime_ns"):
         entry.pop(_k, None)
     _commit_state(state, rel, entry, state_lock, watch_dir)
 
@@ -1623,7 +1632,11 @@ class SessionHandler(FileSystemEventHandler):
         exists to stop. NEVER past the accepted ``boundary`` (council-pr F1): bytes above it
         were never accepted, so a later, higher nudge must still be able to examine them.
 
-        ``frozen_ino``/``frozen_mtime_ns`` describe the file the examination actually read. A
+        ``frozen_ino``/``frozen_mtime_ns``/``frozen_ctime_ns`` describe the file the
+        examination actually read. ``ctime`` is there because the other two are not byte
+        identity (council-pr R2, codex): an in-place rewrite of the same length keeps the
+        inode and size, and ``utime`` puts ``mtime_ns`` back. The kernel bumps ``ctime`` on
+        any inode change and userspace cannot set it. A
         ceiling alone cannot express "unchanged": a rotation to a size at or below it, or a
         same-size replacement, would otherwise be suppressed forever (council round 1,
         both peers). Identity is what the producers compare; the ceiling only bounds it.
@@ -1658,8 +1671,8 @@ class SessionHandler(FileSystemEventHandler):
             st = path.stat()
         except OSError:
             return
-        if (st.st_ino, st.st_mtime_ns, st.st_size) != (
-            examined.st_ino, examined.st_mtime_ns, examined.st_size
+        if (st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size) != (
+            examined.st_ino, examined.st_mtime_ns, examined.st_ctime_ns, examined.st_size
         ):
             return  # changed under the examination -- never park a file nobody parsed
         target = min(boundary, st.st_size) if boundary is not None else st.st_size
@@ -1667,6 +1680,7 @@ class SessionHandler(FileSystemEventHandler):
         same_file = (
             entry.get("frozen_ino") == st.st_ino
             and entry.get("frozen_mtime_ns") == st.st_mtime_ns
+            and entry.get("frozen_ctime_ns") == st.st_ctime_ns
             # ...and the stored ceiling can actually belong to a file THIS size. An in-place
             # truncate keeps the inode, and a writer that restores the timestamp keeps
             # st_mtime_ns, so (ino, mtime) alone would call a shrunk file the same file and
@@ -1681,11 +1695,13 @@ class SessionHandler(FileSystemEventHandler):
             entry.get("frozen_until") == ceiling
             and entry.get("frozen_ino") == st.st_ino
             and entry.get("frozen_mtime_ns") == st.st_mtime_ns
+            and entry.get("frozen_ctime_ns") == st.st_ctime_ns
         ):
             return  # already recorded, identically -- no write
         entry["frozen_until"] = ceiling
         entry["frozen_ino"] = st.st_ino
         entry["frozen_mtime_ns"] = st.st_mtime_ns
+        entry["frozen_ctime_ns"] = st.st_ctime_ns
         _commit_state(self._state, rel, entry, self._state_lock, self.watch_dir)
 
     def cancel_pending_timers(self) -> None:

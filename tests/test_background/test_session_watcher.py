@@ -2612,6 +2612,7 @@ def test_confirmed_shrink_clears_the_frozen_fact_through_the_producer(engine, tm
     assert "frozen_until" not in reset_entry, \
         "a confirmed shrink must drop the stale ceiling with the stale cursor"
     assert "frozen_ino" not in reset_entry and "frozen_mtime_ns" not in reset_entry
+    assert "frozen_ctime_ns" not in reset_entry
 
     # 6. the provider recovers on a later tick, past tick 2's own backoff: the rotated file's
     #    real content still reaches the store -- the reset dropped the stale FACT, not the
@@ -2626,6 +2627,7 @@ def test_confirmed_shrink_clears_the_frozen_fact_through_the_producer(engine, tm
     assert entry.get("node_ids"), "the rotated file's content must reach the store"
     assert "frozen_until" not in entry
     assert "frozen_ino" not in entry and "frozen_mtime_ns" not in entry
+    assert "frozen_ctime_ns" not in entry
 
 
 def test_successful_ingest_clears_the_frozen_fact(engine, tmp_path):
@@ -2687,6 +2689,7 @@ def test_successful_ingest_clears_the_frozen_fact(engine, tmp_path):
     assert entry.get("node_ids"), "the content must have been ingested"
     assert "frozen_until" not in entry, "a successful ingest un-freezes the file"
     assert "frozen_ino" not in entry and "frozen_mtime_ns" not in entry
+    assert "frozen_ctime_ns" not in entry
 
 
 def test_reconcile_while_live_ingesting_does_not_double_enqueue(engine, tmp_path):
@@ -3364,6 +3367,53 @@ def test_park_ceiling_does_not_survive_an_mtime_preserving_shrink(engine, tmp_pa
     )
     assert _frozen_unchanged(handler._state[rel], jsonl.stat()), \
         "suppression must re-arm after an in-place shrink, or the file re-selects forever"
+
+
+def test_frozen_identity_sees_an_in_place_rewrite_that_restored_its_mtime(engine, tmp_path):
+    """council-pr round 2, codex, high. (size, inode, mtime_ns) is not byte identity: an
+    in-place rewrite of the SAME length keeps the inode and size, and utime (or rsync
+    --times, or an editor preserving timestamps) puts mtime_ns back. Both producers share
+    this predicate, so newly closed turns would be suppressed forever.
+
+    st_ctime_ns closes it: the kernel bumps it on any inode change and userspace has no way
+    to set it, so it survives exactly the tampering mtime does not. Measured on this
+    filesystem for both shapes codex named — a same-size rewrite, and a shrink followed by a
+    regrow back to the original size — ctime differs in both while ino/size/mtime match.
+
+    Upstream documents the same hole and accepts it, on the grounds that closing it means
+    hashing every consumed file each tick. That is a false choice: this costs one more
+    stat field."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "rewritten-in-place.jsonl"
+    _partial_unterminated(jsonl)
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    before = jsonl.stat()
+    size = before.st_size
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=size, examined=before)
+    assert _frozen_unchanged(handler._state[rel], jsonl.stat()), \
+        "the freeze must suppress the file it actually examined"
+
+    # rewritten IN PLACE at the SAME length, with the mtime put back to the nanosecond
+    original = jsonl.read_bytes()
+    with open(jsonl, "r+b") as fh:
+        fh.seek(0)
+        fh.write(bytes(b ^ 0x20 if b not in b'\r\n' else b for b in original))
+    os.utime(jsonl, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = jsonl.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_ino, before.st_size, before.st_mtime_ns
+    ), "fixture invalid: this must be invisible to (inode, size, mtime) or it proves nothing"
+    assert jsonl.read_bytes() != original, "fixture invalid: the bytes did not actually change"
+
+    assert not _frozen_unchanged(handler._state[rel], after), (
+        "the bytes changed under a restored mtime — suppressing this file strands every "
+        "turn the rewrite closed"
+    )
 
 
 def test_capped_continuation_inherits_the_producer_force_flush(engine, tmp_path):
