@@ -2964,9 +2964,12 @@ def test_reconcile_still_selects_a_never_seen_file_with_only_a_frozen_fact(engin
     assert handler.reconcile() == 0
 
 
-def test_idle_file_with_no_safe_boundary_is_dead_lettered(engine, tmp_path):
-    """T-N3: an idle transcript whose bytes never reach a safe boundary (a single unterminated
-    turn) dead-letters with a distinct reason instead of silently completing."""
+def test_idle_file_with_no_safe_boundary_completes_without_dead_letter(engine, tmp_path):
+    """ADR-0004 Fix A: an idle transcript whose bytes never reach a safe boundary (a single
+    unterminated turn) parks the suppression fact and completes the job — it must NOT
+    dead-letter. Fix B's frozen_until fact already prevents the hot re-enqueue loop and
+    already ensures reprocessing on growth, so recording this as a spool-level failure was
+    pure noise (superseded T-N3)."""
     from ormah.background.ingest_spool import IngestSpool
 
     watch_dir = tmp_path / "projects"
@@ -2982,12 +2985,124 @@ def test_idle_file_with_no_safe_boundary_is_dead_lettered(engine, tmp_path):
     with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
         _drain_all(handler)
 
-    assert list((spool.root / "failed").glob("*.json")), \
-        "an idle file with no safe boundary must be dead-lettered, not silently completed"
+    assert not list((spool.root / "failed").glob("*.json")), \
+        "a parked idle file must complete, not dead-letter (ADR-0004 Fix A)"
     assert spool.pending_count() == 0
     assert not any(p.name.endswith(".json") for p in (spool.root / "running").iterdir())
-    errs = list((spool.root / "failed").glob("*.error"))
-    assert errs and "no_safe_boundary" in errs[0].read_text()
+    rel = str(jsonl.relative_to(watch_dir))
+    assert handler._state[rel]["frozen_until"] == jsonl.stat().st_size
+
+
+def test_mark_frozen_prefix_parked_returns_parked_on_fresh_write(engine, tmp_path):
+    """ADR-0004 Fix A (council R1/R2): the call site now dispatches on this return value, so
+    its contract is pinned directly. A fresh, successful write returns PARKED."""
+    from ormah.background.session_watcher import ParkOutcome
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "fresh.jsonl"
+    _partial_unterminated(jsonl)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    st = jsonl.stat()
+    outcome = handler._mark_frozen_prefix_parked(jsonl, rel, st.st_size, examined=st)
+    assert outcome is ParkOutcome.PARKED
+    assert handler._state[rel]["frozen_until"] == st.st_size
+
+
+def test_mark_frozen_prefix_parked_returns_parked_when_already_identically_recorded(engine, tmp_path):
+    from ormah.background.session_watcher import ParkOutcome
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "twice.jsonl"
+    _partial_unterminated(jsonl)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    st = jsonl.stat()
+    assert handler._mark_frozen_prefix_parked(
+        jsonl, rel, st.st_size, examined=st
+    ) is ParkOutcome.PARKED
+    # Second call, same unchanged file, same examined stat: the no-op short-circuit
+    # (session_watcher.py:1694-1700) still means a durable fact exists — still PARKED.
+    assert handler._mark_frozen_prefix_parked(
+        jsonl, rel, st.st_size, examined=st
+    ) is ParkOutcome.PARKED
+
+
+def test_mark_frozen_prefix_parked_returns_gone_when_file_deleted(engine, tmp_path):
+    """The race R1 found: deleted between _idle_with_unsafe_tail's examination and this
+    re-stat. FileNotFoundError specifically -> GONE, distinct from a transient OSError, and
+    no fact written."""
+    from ormah.background.session_watcher import ParkOutcome
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "deleted.jsonl"
+    _partial_unterminated(jsonl)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    st = jsonl.stat()
+    jsonl.unlink()
+    outcome = handler._mark_frozen_prefix_parked(jsonl, rel, st.st_size, examined=st)
+    assert outcome is ParkOutcome.GONE
+    assert "frozen_until" not in handler._state.get(rel, {})
+
+
+def test_mark_frozen_prefix_parked_returns_retry_when_changed_under_examination(engine, tmp_path):
+    """The other race R1 found: the file grows (or is replaced) between the examination and
+    this re-stat. examined no longer matches reality -- RETRY (still exists, just not the
+    file that was parsed), not GONE, and no fact written."""
+    from ormah.background.session_watcher import ParkOutcome
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "changed.jsonl"
+    _partial_unterminated(jsonl)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    stale_st = jsonl.stat()
+    with jsonl.open("a") as fh:
+        fh.write(json.dumps({"type": "user", "message": {"content": "more"}}) + "\n")
+    outcome = handler._mark_frozen_prefix_parked(
+        jsonl, rel, stale_st.st_size, examined=stale_st
+    )
+    assert outcome is ParkOutcome.RETRY
+    assert "frozen_until" not in handler._state.get(rel, {})
+
+
+def test_mark_frozen_prefix_parked_returns_retry_on_transient_stat_error(engine, tmp_path, monkeypatch):
+    """Council R2 (codex): a transient stat() failure (e.g. EACCES from a permissions race,
+    not deletion) must be distinguishable from GONE -- it is RETRY, so the job gets a
+    persisted-backoff retry rather than a deterministic transcript_deleted dead-letter for a
+    file that never actually vanished."""
+    from pathlib import Path
+    from ormah.background.session_watcher import ParkOutcome
+
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "transient.jsonl"
+    _partial_unterminated(jsonl)
+    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999)
+    rel = str(jsonl.relative_to(watch_dir))
+    st = jsonl.stat()
+
+    real_stat = Path.stat
+
+    def _flaky_stat(self, *a, **kw):
+        if self == jsonl:
+            raise PermissionError("simulated transient EACCES")
+        return real_stat(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "stat", _flaky_stat)
+    outcome = handler._mark_frozen_prefix_parked(jsonl, rel, st.st_size, examined=st)
+    assert outcome is ParkOutcome.RETRY
+    assert "frozen_until" not in handler._state.get(rel, {})
 
 
 def test_frozen_prefix_advance_never_passes_the_accepted_boundary(engine, tmp_path):
@@ -4408,6 +4523,111 @@ class TestAboveCapOrphanRecovery:
         # (_mark_frozen_prefix_consumed) would have advanced the cursor WITHOUT it.
         assert entry["skipped_slices"][0]["reason"] == "orphan_above_cap"
 
+    def test_two_idle_ticks_on_unchanged_frozen_file_never_dead_letter(self, engine, tmp_path):
+        """ADR-0004 Fix A direct regression: parking the SAME unchanged file across two
+        consecutive idle ticks (no growth between them, no producer-level _frozen_unchanged
+        gate involved — this drives _ingest_session directly through the spool) must not
+        write anything to failed/ at all. Before Fix A, the second job's disposition was
+        identical to the first's: two dead-letters for a file examined twice with no growth.
+        After Fix A, both ticks complete."""
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "twotick.jsonl"
+        _partial_unterminated(jsonl)
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        rel = str(jsonl.relative_to(watch_dir))
+        handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool",
+                                      min_turns=5, idle_threshold=30.0)
+
+        # Tick 1: first examination parks and completes.
+        handler.spool.enqueue(jsonl, boundary=size, reason="nudge")
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _drain_all(handler)
+        assert not list((handler.spool.root / "failed").glob("*.json"))
+        assert handler._state[rel]["frozen_until"] == size
+
+        # Tick 2: the file is byte-for-byte unchanged (no growth); a second job for the SAME
+        # (path, boundary) re-examines it (enqueue is a no-op while the tick-1 job file still
+        # exists, so tick 1 must have fully completed -- i.e. unlinked its job -- for this
+        # enqueue to create a fresh one). Re-parking must be idempotent and must not dead-letter.
+        handler.spool.enqueue(jsonl, boundary=size, reason="nudge")
+        with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _drain_all(handler)
+        assert not list((handler.spool.root / "failed").glob("*.json")), \
+            "re-examining an unchanged parked file must not dead-letter, ever"
+        assert handler._state[rel]["frozen_until"] == size
+        assert handler.spool.pending_count() == 0
+
+    def test_park_refused_by_race_falls_back_to_external_retry_not_silent_complete(
+        self, engine, tmp_path
+    ):
+        """Council R1/R2 (codex): a RETRY disposition (changed-under-examination race) must
+        get the SAME persisted-backoff external retry the neighboring shrink_pending race
+        already gets -- an acceptance-only root has no Observer/reconcile to ever re-select
+        the file on its own, so silently completing would strand it forever."""
+        from ormah.background.session_watcher import ParkOutcome
+
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "race.jsonl"
+        _partial_unterminated(jsonl)
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        rel = str(jsonl.relative_to(watch_dir))
+        handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool",
+                                      min_turns=5, idle_threshold=30.0)
+        handler.spool.enqueue(jsonl, boundary=size, reason="nudge")
+        with patch.object(handler, "_mark_frozen_prefix_parked",
+                          return_value=ParkOutcome.RETRY), \
+             patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _drain_all(handler)
+        assert not list((handler.spool.root / "failed").glob("*.json")), \
+            "a RETRY disposition must retry, never dead-letter"
+        assert handler.spool.pending_count() == 1, \
+            "the job must stay queued with persisted backoff, not vanish"
+        assert "frozen_until" not in handler._state.get(rel, {})
+
+    def test_park_refused_by_deletion_dead_letters_even_if_the_path_is_later_recreated(
+        self, engine, tmp_path
+    ):
+        """Council R2 (codex + cursor, the defect that survived the R1 fix): the disposition
+        is decided ONCE, atomically, inside _mark_frozen_prefix_parked -- the call site must
+        NOT re-derive it from a fresh path.exists() afterward. Proven directly: recreate the
+        path in the mock's side effect, after the GONE disposition has already been returned,
+        and assert the dead-letter still happens -- a fresh existence check would flip this."""
+        from ormah.background.session_watcher import ParkOutcome
+
+        watch_dir = tmp_path / "projects"
+        proj = watch_dir / "-test-space"
+        proj.mkdir(parents=True)
+        jsonl = proj / "vanish.jsonl"
+        _partial_unterminated(jsonl)
+        _mark_idle(jsonl)
+        size = jsonl.stat().st_size
+        handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool",
+                                      min_turns=5, idle_threshold=30.0)
+        handler.spool.enqueue(jsonl, boundary=size, reason="nudge")
+
+        def _gone_then_recreate(path, rel, boundary, *, examined):
+            jsonl.unlink()
+            jsonl.write_text('{"type": "user", "message": {"content": "recreated"}}\n')
+            return ParkOutcome.GONE
+
+        with patch.object(handler, "_mark_frozen_prefix_parked",
+                          side_effect=_gone_then_recreate), \
+             patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+            _drain_all(handler)
+        assert handler.spool.pending_count() == 0
+        assert not any(
+            p.name.endswith(".json") for p in (handler.spool.root / "running").iterdir()
+        )
+        errs = list((handler.spool.root / "failed").glob("*.error"))
+        assert errs and "transcript_deleted" in errs[0].read_text(), \
+            "GONE must dead-letter regardless of what the path does afterward"
+
     def test_abandonment_with_unclosed_tail_composes_with_frozen_prefix(self, engine, tmp_path):
         watch_dir = tmp_path / "projects"
         proj = watch_dir / "-test-space"
@@ -4437,16 +4657,14 @@ class TestAboveCapOrphanRecovery:
         skipped = entry["skipped_slices"]
         assert skipped[0]["reason"] == "orphan_above_cap"
         assert skipped[0]["end"] < size            # == probe_safe_end, before the unclosed tail
-        # ...and the residual tail followed the standard frozen-prefix path (job
-        # dead-lettered as no_safe_boundary — pre-existing behavior).
-        # The residual unclosed tail is now PARKED, not consumed: the cursor stays at the
-        # abandoned range's end and the suppression fact carries the ceiling.
+        # ...and the residual tail followed the standard frozen-prefix path: PARKED, not
+        # consumed (ADR-0004 Fix B) — and completed without a dead-letter (ADR-0004 Fix A).
+        # The cursor stays at the abandoned range's end and the suppression fact carries the
+        # ceiling.
         assert entry["end_offset"] == skipped[0]["end"]
         assert entry["frozen_until"] == size
-        assert list((handler.spool.root / "failed").glob("*.json")), \
-            "residual unclosed tail must be dead-lettered, not silently completed"
-        errs = list((handler.spool.root / "failed").glob("*.error"))
-        assert errs and "no_safe_boundary" in errs[0].read_text()
+        assert not list((handler.spool.root / "failed").glob("*.json")), \
+            "a parked residual tail must complete, not dead-letter (ADR-0004 Fix A)"
 
     def test_abandoned_range_magnitude_is_pinned(self, engine, tmp_path):
         """Review follow-up: every OTHER fixture in this class places the trailing orphan

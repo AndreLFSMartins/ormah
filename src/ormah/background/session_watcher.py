@@ -49,6 +49,16 @@ class IngestResult(Enum):
     TRANSIENT = "transient"      # external failure (engine error) or defer -> retry, never park
     GONE = "gone"                # the transcript no longer exists -> deterministic, dead-letter
 
+
+class ParkOutcome(Enum):
+    """What _mark_frozen_prefix_parked actually did with a single stat(), decided INSIDE the
+    method so the caller never needs (and must never take) a second, separately-timed
+    path.exists() to classify the same moment (ADR-0004 Fix A, council R2)."""
+    PARKED = "parked"  # a durable frozen_until fact is confirmed present for this examination
+    GONE = "gone"       # FileNotFoundError at the re-stat -> deterministic, dead-letter
+    RETRY = "retry"     # any other stat() failure, or the file changed identity under
+                         # examination but still exists -> persisted-backoff retry
+
 _STATE_FILENAME = ".session_watcher_state"
 MAX_EXTRACT_FAILURES = 3  # per-slice extraction failures (provider present) before skipping it
 _HEURISTIC_SOURCE = "transcript_watcher_heuristic"
@@ -1555,8 +1565,37 @@ class SessionHandler(FileSystemEventHandler):
         # NO_PROGRESS: the closed delta at the safe boundary is empty.
         examined = self._idle_with_unsafe_tail(path, rel, job.boundary)
         if examined is not None:
-            self._mark_frozen_prefix_parked(path, rel, job.boundary, examined=examined)
-            self.spool.requeue(job, failure_class="no_safe_boundary")
+            outcome = self._mark_frozen_prefix_parked(
+                path, rel, job.boundary, examined=examined
+            )
+            # ADR-0004 Fix A (council R1/R2): dispatch on the ParkOutcome ALONE, return in
+            # every branch. Never re-check path.exists() here -- that reintroduced the race
+            # R2 found (a recreate between two separately-timed checks could still reach the
+            # unconditional complete() below this whole block).
+            if outcome is ParkOutcome.PARKED:
+                # The suppression fact IS the durable record now (Fix B). Treating a
+                # confirmed park as a spool-level failure was pure noise once frozen_until
+                # already stopped the hot re-enqueue loop and already guaranteed
+                # reprocessing on growth -- 96% of this dead-letter class was the normal
+                # end-of-session path, not a real loss (measured 2026-07-27). complete()
+                # removes the job; the log line is the cheap substitute for the operational
+                # signal `grep no_safe_boundary failed/*.error` used to give.
+                logger.debug(
+                    "Parked %s at frozen_until=%s (no safe boundary yet)", rel, job.boundary
+                )
+                self.spool.complete(job)
+                return
+            if outcome is ParkOutcome.GONE:
+                # Same disposition the existing `if not path.exists()` guard a few lines
+                # below already gives every other NO_PROGRESS path that finds the file
+                # missing -- reusing its failure class, not duplicating its call.
+                self.spool.requeue(job, failure_class="transcript_deleted")
+                return
+            # ParkOutcome.RETRY: transient stat() failure, or changed identity but still
+            # present. Persisted-backoff retry -- identical to the shrink_pending race a few
+            # lines below, for the identical acceptance-only-root reason: nothing else would
+            # ever re-select the file on its own.
+            self.spool.requeue(job, failure_class="external")
             return
         if self._state.get(rel, {}).get("shrink_pending"):
             # Task 4 review follow-up: tick 1 of the shrink gate returns NO_PROGRESS with
@@ -1615,7 +1654,7 @@ class SessionHandler(FileSystemEventHandler):
     def _mark_frozen_prefix_parked(
         self, path: Path, rel: str, boundary: int | None = None,
         *, examined: os.stat_result,
-    ) -> None:
+    ) -> "ParkOutcome":
         """Record that this file closed nothing up to ``boundary`` — WITHOUT moving the
         cursor (ADR-0004, 2026-08-12).
 
@@ -1666,15 +1705,28 @@ class SessionHandler(FileSystemEventHandler):
         its 4000 ceiling and could never re-arm. ``ceiling <= st.st_size`` is therefore a
         guard, not a consequence — the round-3 test could not reach this because it
         replaces the file, which changes the inode.
+
+        Returns a ParkOutcome, decided from the single stat() this method takes (ADR-0004
+        Fix A, council R1/R2): PARKED when a durable frozen_until fact is confirmed present
+        when the call returns (freshly written, or already identically recorded); GONE when
+        the file did not exist at that stat (FileNotFoundError specifically); RETRY for any
+        other stat() failure or an identity mismatch against examined (the file changed
+        between the examination and this re-stat, but still exists). A caller must dispatch
+        on this value and return in every branch -- never re-derive disposition from a fresh
+        path.exists() afterward, which would reopen the exact race this return value exists
+        to close.
         """
         try:
             st = path.stat()
+        except FileNotFoundError:
+            return ParkOutcome.GONE
         except OSError:
-            return
+            return ParkOutcome.RETRY
         if (st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size) != (
             examined.st_ino, examined.st_mtime_ns, examined.st_ctime_ns, examined.st_size
         ):
-            return  # changed under the examination -- never park a file nobody parsed
+            return ParkOutcome.RETRY  # changed under examination, still exists -- never park
+                                       # a file nobody parsed at this boundary
         target = min(boundary, st.st_size) if boundary is not None else st.st_size
         entry = dict(self._state.get(rel, {}))
         same_file = (
@@ -1697,12 +1749,13 @@ class SessionHandler(FileSystemEventHandler):
             and entry.get("frozen_mtime_ns") == st.st_mtime_ns
             and entry.get("frozen_ctime_ns") == st.st_ctime_ns
         ):
-            return  # already recorded, identically -- no write
+            return ParkOutcome.PARKED  # already recorded, identically -- no write, fact holds
         entry["frozen_until"] = ceiling
         entry["frozen_ino"] = st.st_ino
         entry["frozen_mtime_ns"] = st.st_mtime_ns
         entry["frozen_ctime_ns"] = st.st_ctime_ns
         _commit_state(self._state, rel, entry, self._state_lock, self.watch_dir)
+        return ParkOutcome.PARKED
 
     def cancel_pending_timers(self) -> None:
         """Cancel debounce/retry timers that have not fired yet (shutdown)."""
