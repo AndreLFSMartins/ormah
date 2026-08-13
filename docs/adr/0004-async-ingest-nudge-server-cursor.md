@@ -843,8 +843,40 @@ for the first time. **The change is now verified by production, not only by its 
 ## Amendment 2026-08-13 — Fix A ships: the `no_safe_boundary` dead-letter is retired, not just re-admitted
 
 The design this amendment implements is `docs/superpowers/specs/2026-08-13-adr-0004-fix-a-no-safe-boundary-noise-design.md`,
-approved via `superpowers:brainstorming` per the 2026-08-12 amendment's explicit gate. Merged
-into `local-main` as `fix/adr-0004-fix-a-no-safe-boundary-noise` (commits `ac634a2`, `622445c`).
+approved via `superpowers:brainstorming` per the 2026-08-12 amendment's explicit gate.
+
+**Merged and running.** Branch `fix/adr-0004-fix-a-no-safe-boundary-noise`, cut from
+`local-main` at `8887476`, fast-forwarded into `local-main` on 2026-08-13. Five commits:
+
+| commit | |
+|---|---|
+| `ac634a2` | the park completes instead of dead-lettering; 10 tests (TDD, RED→GREEN) |
+| `622445c` | the park log is `info`, not `debug`, and prints the ceiling actually persisted |
+| `a0d4c84` | this amendment's first draft |
+| `468d38e` | **`PARKED` must mean the fact is on disk** — see the section below |
+| `a5edead` | corrects the durability claim `468d38e` invalidated, plus two overstatements |
+
+The Beta was restarted onto the merged code at 14:15:51 (pid 42663) and verified by importing
+from the server's own interpreter: `ParkOutcome` present with its three members, exactly **one**
+`return ParkOutcome.PARKED` in `_mark_frozen_prefix_parked`, and the unsafe short-circuit
+absent.
+
+### What Fix A closes
+
+- **The `no_safe_boundary` dead-letter class is retired at its only production call site.** A
+  confirmed park is no longer a spool-level failure: it completes. `failed/` stops accruing the
+  96%-benign end-of-session path (measured 2026-07-27) — which was never a loss backlog, only
+  noise that masked real failures.
+- **The 2026-08-09 amendment's item A** ("the noise — 3166 jobs, 96% benign", whose suggested
+  remedy was re-admit-on-growth) is closed, and closed *differently* than suggested: Fix B's
+  `frozen_until` fact already re-selects on growth through both producer lanes, so a second
+  re-admission mechanism was never needed. Retiring the record beat re-draining it.
+- **A refused park can no longer discard a job.** This is new safety Fix A had to add rather
+  than inherit: the disposition is now explicit (`ParkOutcome`), so the two refusal paths reach
+  `transcript_deleted` or a persisted-backoff `external` retry instead of falling into
+  `complete()`.
+- **`IngestSpool` is unchanged.** The generic dead-letter mechanism still serves
+  `transcript_deleted` and any future deterministic class; only one caller stopped using it.
 
 ### What shipped, and why it is not the design's original shape
 
@@ -856,10 +888,11 @@ amendment's "minimal re-drain policy" suggestion: Fix B's `frozen_until` fact al
 growth re-select the file through both producer lanes, so a *second*, redundant re-admission
 mechanism was never needed once Fix B shipped).
 
-Three rounds of adversarial `/council` review (Cursor + Codex, independently) found the design
-as written was unsafe, both times in the same direction — a park that is *not* confirmed must
-never reach `complete()`, or a job vanishes with neither a durable fact nor a spool record,
-which is exactly the loss class this whole ADR exists to close:
+That one-liner never shipped. Five adversarial rounds across two phases — three on the plan
+(`/council`, before any code) and two on the diff (`/council-pr`, after) — each found the same
+failure in a new place: **a park that is not confirmed must never reach `complete()`**, or a job
+vanishes with neither a durable fact nor a spool record, which is exactly the loss class this
+whole ADR exists to close. The three plan rounds:
 
 - **R1 (codex):** `_mark_frozen_prefix_parked` returns `None` on refusal (file deleted, or
   changed identity, between `_idle_with_unsafe_tail`'s examination and this method's own
@@ -873,6 +906,25 @@ which is exactly the loss class this whole ADR exists to close:
   unmodified by this change and identical with or without it. Deliberately deferred; see
   "Still open" below.
 
+Then the code was written, reviewed per-task, reviewed whole-branch (opus), and only *then* put
+to the peers again as a diff. Both PR rounds still found something:
+
+- **PR-R1 (codex, 0.96):** the `PARKED`-without-a-write short-circuit — the one defect in this
+  whole sequence that had already been *cleared* by two prior reviews. Accepted and fixed
+  (`468d38e`); it has its own section below, because how it survived matters more than what it was.
+- **PR-R2 (codex):** escalated to the window between `_commit_state` returning and
+  `spool.complete()` executing. Rebutted on the ground that the untouched `IngestResult.OK` path
+  carries the identical window and is byte-identical pre-Fix-A, and that the remedy is the
+  transactional store the 2026-07-22 amendment already rejected with measurements. **Codex
+  conceded** it does not block Fix A; recorded under "Still open" as a lane-wide property.
+
+The pattern is worth naming, because it contradicts the lesson the 2026-08-09 amendment drew
+from the force-close cascade. There, non-convergence was evidence the *design* was wrong. Here
+each round found a defect in the *previous round's fix*, and the sequence converged on a shape
+that is smaller and more obviously correct than any intermediate one — the disposition decided
+once, at one site, verifiable by structure. The distinguishing signal is not "how many rounds"
+but whether the fixes are converging on fewer moving parts or accumulating more.
+
 **What shipped instead of the one-liner:** `_mark_frozen_prefix_parked` now returns a
 `ParkOutcome` enum (`PARKED` / `GONE` / `RETRY`), decided **inside** the method from the
 single `stat()` it already performs — `FileNotFoundError` → `GONE`, any other `OSError` or an
@@ -883,14 +935,30 @@ race structurally rather than by ordering two checks correctly. `GONE` dead-lett
 requeue the neighboring `shrink_pending` race already gets, for the same acceptance-only-root
 reason. `IngestSpool` itself is untouched.
 
-Verified at merge (`622445c`, worktree-local venv — `Tools/ormah`'s shared `.venv` is
-editable-installed against the main checkout, not any worktree, and silently tests the wrong
-code if used from one; confirmed by the final review independently reproducing the exact
-false-negative): 10/10 targeted tests, 148/148 `test_session_watcher.py`, 2503/2503 full
-suite (2492 passed + 11 pre-existing deselected — 0 pre-existing failures at merge), `ruff`
-clean. The final whole-branch review (opus) confirmed the R3 deferral is accurate:
+**Verified on the merged `local-main` (`a5edead`), not on an intermediate commit:** `make test`
+→ **2512 passed**, 12 deselected, 0 failures. That is the pre-Fix-A baseline of 2503 plus
+exactly the 9 tests this work added (8 with `ac634a2`, 1 with `468d38e`) — the arithmetic is
+stated because it is the check that the count moved for the reason claimed.
+`test_session_watcher.py` alone: 149 passed. `ruff` clean on both touched files.
+
+*A verification trap worth recording, since it produced a fully plausible false result before
+being caught:* `Tools/ormah`'s shared `.venv` is editable-installed against the **main**
+checkout, so running the suite from a worktree silently tests the main repo's source instead.
+The first run of this work's own `-k` selector "failed 10 tests" against code that had never
+been touched. Every figure above comes from an interpreter confirmed with
+`python -c "import ormah; print(ormah.__file__)"`. The final whole-branch review reproduced
+this trap independently.
+
+The final whole-branch review (opus) confirmed the R3 deferral is accurate:
 `_idle_with_unsafe_tail` and the `shrink_pending` / `path.exists()` / final-`complete()`
 fallthrough below the dispatch are untouched by this change.
+
+**Not yet verified: production.** Fix B earned a "verified by production" note by watching the
+live state file until entries carrying `frozen_until` appeared with intact cursors. Fix A has
+no equivalent reading yet — the Beta has only just been restarted onto it. The claim to test is
+that `failed/` stops accruing `no_safe_boundary` entries while parks continue to be recorded.
+Until someone takes that reading, this amendment is verified **by its test suite and by the
+running import**, not by production.
 
 ### The `PARKED` short-circuit: cleared by two reviews, and wrong — `468d38e`
 
