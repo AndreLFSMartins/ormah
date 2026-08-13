@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Suppressing selection with a fact, not with the cursor</title>
+<title>Suppressing selection with a fact, not with the cursor (ADR-0004)</title>
 <style>
 /* rich-doc design system — Anthropic brand, document-oriented.
    Light paper/ink, Lora italic display, Poppins body, system mono.
@@ -139,35 +139,33 @@ summary:hover{color:var(--accent)}
 <body>
 <nav class="toc">
   <div class="eyebrow">[ SPEC ]</div>
-  <div class="doc-title">Suppressing selection with a fact, not with the cursor</div>
-  <a href="#the-problem-measured">The problem, measured 2026-08-12</a>
+  <div class="doc-title">Suppressing selection with a fact, not with the cursor (ADR-0004)</div>
+  <a href="#the-problem-measured-2026-08-12">The problem, measured 2026-08-12</a>
   <a href="#the-mechanism-is-a-ratchet" class="lvl-3">The mechanism is a ratchet</a>
   <a href="#decision">Decision</a>
-  <a href="#three-design-anchors" class="lvl-3">Three design anchors</a>
-  <a href="#naming-and-precedent" class="lvl-3">Naming and precedent</a>
   <a href="#considered-and-rejected" class="lvl-3">Considered and rejected</a>
   <a href="#selection-suppression">Selection suppression</a>
-  <a href="#reconcile-and-the-cursor-question" class="lvl-3">Reconcile and the cursor question</a>
-  <a href="#enqueue-path" class="lvl-3">Enqueue path</a>
   <a href="#invariants" class="lvl-3">Invariants</a>
   <a href="#tests">Tests</a>
-  <a href="#new-tests" class="lvl-3">New tests by finding</a>
-  <a href="#rewritten-tests" class="lvl-3">Rewritten, not deleted</a>
   <a href="#verification-in-production">Verification in production</a>
   <a href="#residual-risks">Residual risks</a>
 </nav>
 <main>
-<div class="eyebrow">ADR-0004</div>
-<h1><em>Suppressing</em> selection with a fact, not with the cursor</h1>
-<p class="meta">Date: 2026-08-12 · Status: approved, not implemented · Revised after Dev Council rounds 1–3 (cursor + codex)</p>
+<section class="doc-preamble">
+  <div class="eyebrow">Architecture Decision Record · ADR-0004</div>
+  <p class="meta">Date: 2026-08-12 · Status: <span class="chip on">approved</span>, not implemented</p>
+  <p class="statement">Stop the ingest lane from losing transcript content. Selection suppression moves out of <code>end_offset</code> and into its own state field, so the cursor never claims bytes that were never ingested.</p>
+</section>
 
-<p class="statement">Stop the ingest lane from losing transcript content. Selection suppression moves out of <code>end_offset</code> and into its own state field, so the cursor never claims bytes that were never ingested.</p>
+<section class="doc-note">
+  <p><strong>Scope:</strong> This spec focuses on the identity-based design. Recovering already-lost content, draining dead-letter noise, fixing the parser's 54-transcript blind spot, and the pre-existing identity gap in <code>reconcile</code> are separate specs.</p>
+  <p><strong>Revision note (2026-08-12):</strong> After Dev Council rounds 1–3, the first draft's size-ceiling design was rejected. The section <em>Considered and rejected</em> documents that rationale.</p>
+  <p><strong>Provenance correction (2026-08-13):</strong> Two measurement rows became unverifiable after the spool's <code>failed/</code> folder was destroyed externally. The state-entry count and one transcript measurement remain confirmed; see the table note below.</p>
+</section>
 
-<p><strong>Out of scope, each its own spec:</strong> recovering the content already lost, draining the dead-letter noise (ADR "Fix A", re-admit-on-growth), the 54 transcripts the parser cannot close even unwindowed, and the pre-existing identity blind spot in <code>reconcile</code> (described under Residual risks below).</p>
+<h2 id="the-problem-measured-2026-08-12">The problem, measured 2026-08-12</h2>
 
-<h2 id="the-problem-measured">The problem, measured 2026-08-12</h2>
-
-<p>The spool root is <code>~/.local/share/ormah/memory/ingest_queue/{66b287858fdea3e3,91da4ace50312981}/</code>. All figures below were taken read-only from the live Beta on 2026-08-12; they supersede earlier counts that cited jobs no longer in the spool.</p>
+<p>The spool root is <code>~/.local/share/ormah/memory/ingest_queue/{66b287858fdea3e3,91da4ace50312981}/</code>.</p>
 
 <table>
   <thead>
@@ -179,15 +177,15 @@ summary:hover{color:var(--accent)}
   <tbody>
     <tr>
       <td>Dead-lettered jobs / distinct transcripts</td>
-      <td>3,806 / 1,619, payloads from 2026-07-24 to today</td>
+      <td>⚠️ Unverifiable — inherited as 3806 / 1619, payloads from 2026-07-24</td>
     </tr>
     <tr>
       <td>Dead-lettered transcripts with cursor already at EOF</td>
-      <td><strong>98%</strong> (median 0 B, p90 0 B) — the dead-letter is noise</td>
+      <td>⚠️ Unverifiable — inherited as <strong>98%</strong> (median 0 B, p90 0 B)</td>
     </tr>
     <tr>
       <td>State entries holding only <code>end_offset</code> (cursor advanced, nothing ingested)</td>
-      <td><strong>75 of 1,791</strong> — was 48 of 1,485 on 2026-08-09</td>
+      <td><strong>75 of 1791</strong> — was 48 of 1485 on 2026-08-09; still 75 of 1815 on 2026-08-13</td>
     </tr>
     <tr>
       <td>Of those, transcript still on disk</td>
@@ -199,7 +197,7 @@ summary:hover{color:var(--accent)}
 <p>Parsing each of those 68 transcripts whole, unwindowed, with the project's own <code>parse_transcript</code> splits them cleanly:</p>
 
 <ul>
-  <li><strong>14 files / 5,923,567 B / 23 closed user turns</strong> — the parser closes content that the cursor skipped. <em>This is the defect.</em></li>
+  <li><strong>14 files / 5,923,567 B / 23 closed user turns</strong> — the parser closes content that the cursor skipped. This is the defect.</li>
   <li>54 files / 2,106,207 B — the parser closes nothing even without a window (Codex rollouts with no <code>task_complete</code>, single-turn sessions). A parser-coverage problem, not this one.</li>
 </ul>
 
@@ -207,13 +205,32 @@ summary:hover{color:var(--accent)}
 
 <p>Read from the boundaries recorded on the dead-lettered jobs themselves:</p>
 
-<pre><code>ab16af53-….jsonl — 24 dead-letters, boundary climbing without pause:
+<pre><code class="language-text">ab16af53-….jsonl — 24 dead-letters, boundary climbing without pause:
   98,985 → 125,943 → 222,943 → 257,727 → 384,984 → 437,294 → 500,884
        → 676,978 → 694,301 → 877,060 → 971,222 → 1,017,779 → … → 1,435,339</code></pre>
 
-<p>Each job runs <code>_mark_frozen_prefix_consumed</code>, which advances the cursor to its own boundary. A 1.43 MB session was pushed to EOF one slice at a time and never ingested, while a whole-file parse closes 1,434,322 of its 1,435,339 bytes. The same shape appears in <code>e238fed7</code> (5 jobs), <code>d66c054f</code> (4), <code>ebf4a5ff</code> (3).</p>
+<p>The damage it illustrates is <em>independently verified</em>, re-measured 2026-08-13 from the transcript and the state file:</p>
 
-<p>The trigger varies — the windowed-parse artefact identified on 2026-08-10, or a genuinely idle session with an unterminated tail. <strong>The damage does not:</strong> every path loses content at the same step, moving the cursor. With the cursor held still, all 24 ratchet steps lose nothing.</p>
+<table>
+  <tbody>
+    <tr>
+      <td>Transcript on disk</td>
+      <td><code>-Users-andre-Documents-GitHub-davos-deck/ab16af53-….jsonl</code>, <strong>1,435,339 B</strong></td>
+    </tr>
+    <tr>
+      <td>Whole-file <code>parse_transcript</code></td>
+      <td>Closes <strong>1,434,322 B</strong> in <strong>66</strong> turns</td>
+    </tr>
+    <tr>
+      <td>Its state entry</td>
+      <td>Keys are <code>['end_offset']</code> and nothing else — <code>end_offset = 1,435,339</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The cursor sits at EOF, no <code>node_ids</code> were ever written, and a whole-file parse closes all but 1,017 bytes. That is the defect, end to end, in one entry: <code>_mark_frozen_prefix_consumed</code> advanced the cursor to its own boundary until the file was "consumed" without a single turn reaching the store.</p>
+
+<p>The trigger varies — the windowed-parse artefact the ADR identified on 2026-08-10, or a genuinely idle session with an unterminated tail. <strong>The damage does not: every path loses content at the same step, moving the cursor.</strong> With the cursor held still, all 24 ratchet steps lose nothing.</p>
 
 <h2 id="decision">Decision</h2>
 
@@ -221,8 +238,7 @@ summary:hover{color:var(--accent)}
 
 <p>The fact is <strong>three</strong> keys, not one — a ceiling and the identity of the file that was examined:</p>
 
-<figure>
-  <pre><code class="language-python"># session_watcher.py, ~L1553 -- abbreviated; the full body is in the plan, Task 1
+<pre><code class="language-python"># session_watcher.py, ~L1553 -- abbreviated; the full body is in the plan, Task 1
 def _mark_frozen_prefix_parked(self, path, rel, boundary=None, *, examined: os.stat_result):
     st = path.stat()
     if (st.st_ino, st.st_mtime_ns, st.st_size) != (
@@ -237,19 +253,16 @@ def _mark_frozen_prefix_parked(self, path, rel, boundary=None, *, examined: os.s
     entry["frozen_ino"] = st.st_ino
     entry["frozen_mtime_ns"] = st.st_mtime_ns
     _commit_state(...)                # end_offset preserved, untouched</code></pre>
-</figure>
 
 <p><code>frozen_until</code> means: <em>the last examination of this file, up to byte N, closed nothing; do not re-select it while the file is still exactly the one examined.</em> It is not a progress offset.</p>
 
-<h3 id="three-design-anchors">Three design anchors</h3>
+<p class="statement"><strong>Identity is what suppresses; the ceiling only bounds it.</strong></p>
 
-<p><strong>Identity is what suppresses; the ceiling only bounds it.</strong> A ceiling alone cannot express "unchanged" (council round 1, both peers, critical/high, verified independently): a rotation to a size at or below the ceiling, or a replacement at exactly the same byte count, would be suppressed forever. <code>st_ino</code> and <code>st_mtime_ns</code> come from the <strong>same</strong> <code>stat()</code> that computes <code>target</code>, never a second one.</p>
+<p>A ceiling alone cannot express "unchanged" (council round 1, both peers, critical/high, verified independently): a rotation to a size at or below the ceiling, or a replacement at exactly the same byte count, would be suppressed forever. <code>st_ino</code> and <code>st_mtime_ns</code> come from the <em>same</em> <code>stat()</code> that computes <code>target</code>, never a second one.</p>
 
 <p><strong>The park refuses a file that changed under the examination</strong> (council round 2, codex, high). <code>examined</code> is the stat <code>_idle_with_unsafe_tail</code> actually parsed — so that method now returns <code>os.stat_result | None</code> instead of <code>bool</code>. A rotation landing between the examination and the park would otherwise record the <em>replacement's</em> identity, and both producers would then classify a file nobody has ever parsed as frozen-and-unchanged. Writing no fact is always safe: the file is simply re-selected.</p>
 
 <p><strong>Monotonicity applies to the ceiling only, and only within one identity.</strong> Two separate council findings converge here. Identity must always be written, even when the ceiling does not rise (round 2, cursor, high): after a same-size replacement the producers correctly re-open, the drain freezes again at the same <code>target</code>, and an early return would leave the stale identity in place forever — every sweep re-selecting and re-dead-lettering. And a ceiling belonging to a <em>different</em> file is not a ratchet guard but a lie (round 3, both peers, the single finding of that round): file A frozen at 1000, replaced by an unparseable B of size 500, would keep 1000 and could never re-arm. Guarding on identity also makes <code>ceiling <= st.st_size</code> provable rather than defensive.</p>
-
-<h3 id="naming-and-precedent">Naming and precedent</h3>
 
 <p><strong>Named <code>frozen_until</code>, not <code>parked_until</code>.</strong> <code>parked_until</code> belongs to the force-close design retracted on 2026-08-09, and two live state entries still carry <code>parked_*</code> residue from the branch that once ran; reusing the name would make this design unreadable against that history.</p>
 
@@ -257,17 +270,17 @@ def _mark_frozen_prefix_parked(self, path, rel, boundary=None, *, examined: os.s
 
 <h3 id="considered-and-rejected">Considered and rejected</h3>
 
-<div class="callout">
-  <p><strong>A size-only ceiling</strong> — <code>frozen_until >= st.st_size</code> as the whole gate, with no identity keys. This was the first draft of this spec. Rejected by council round 1 (cursor + codex, both <code>needs-attention</code>, verified against the code before being accepted): it is not "re-open on growth", it also skips a file that <strong>shrank</strong>, so a rotated transcript would be suppressed forever and the shrink reset unreachable through either producer. The Observer lane is what catches rotation today precisely because it consults no state, so a size-only gate there was a straight regression. The cost of the repair is two extra keys per frozen entry.</p>
-</div>
-
-<div class="callout">
-  <p><strong>Fix the predicate only</strong> — have the parser signal "refused by the ceiling" at the three <code>_exceeds_ceiling</code> breaks (<code>parser.py:350</code>, <code>:381</code>, <code>:406</code>, which today set no flag at all — <code>capped</code> covers budgets only), so <code>_idle_with_unsafe_tail</code> stops misclassifying. Smaller, and it addresses the cause the ADR named on 2026-08-10. Rejected as insufficient: it lowers the trigger rate and leaves the loss mechanism intact for the genuinely idle tail — which is what all six of today's dead-letters are (<code>boundary == size</code> on each, so no window was in play).</p>
-</div>
-
-<div class="callout">
-  <p><strong>Both</strong> — full coverage of the 2026-08-10 cause. Rejected for now: two coupled mechanisms in one spec is the bundling that produced the 56-round cascade behind the retracted force-close. The predicate fix stays available as its own spec, on its own evidence.</p>
-</div>
+<ul>
+  <li>
+    <strong>A size-only ceiling</strong> — <code>frozen_until >= st.st_size</code> as the whole gate, with no identity keys. This was the first draft of this spec. Rejected by council round 1 (cursor + codex, both <code>needs-attention</code>, verified against the code before being accepted): it is not "re-open on growth", it also skips a file that <strong>shrank</strong>, so a rotated transcript would be suppressed forever and the shrink reset unreachable through either producer. The Observer lane is what catches rotation today precisely because it consults no state, so a size-only gate there was a straight regression. The cost of the repair is two extra keys per frozen entry.
+  </li>
+  <li>
+    <strong>Fix the predicate only</strong> — have the parser signal "refused by the ceiling" at the three <code>_exceeds_ceiling</code> breaks (<code>parser.py:350</code>, <code>:381</code>, <code>:406</code>, which today set no flag at all — <code>capped</code> covers budgets only), so <code>_idle_with_unsafe_tail</code> stops misclassifying. Smaller, and it addresses the cause the ADR named on 2026-08-10. Rejected as insufficient: it lowers the trigger rate and leaves the loss mechanism intact for the genuinely idle tail — which is what all six of today's dead-letters are (<code>boundary == size</code> on each, so no window was in play).
+  </li>
+  <li>
+    <strong>Both</strong> — full coverage of the 2026-08-10 cause. Rejected for now: two coupled mechanisms in one spec is the bundling that produced the 56-round cascade behind the retracted force-close. The predicate fix stays available as its own spec, on its own evidence.
+  </li>
+</ul>
 
 <h2 id="selection-suppression">Selection suppression</h2>
 
@@ -275,8 +288,7 @@ def _mark_frozen_prefix_parked(self, path, rel, boundary=None, *, examined: os.s
 
 <p>The predicate lives in <strong>one</strong> module-level function, next to <code>_commit_state</code>, and both producers call it. There is deliberately no second copy: a divergent one is how the two lanes drift apart.</p>
 
-<figure>
-  <pre><code class="language-python">def _frozen_unchanged(entry: dict, st: os.stat_result) -> bool:
+<pre><code class="language-python">def _frozen_unchanged(entry: dict, st: os.stat_result) -> bool:
     """True when this file is still EXACTLY the one the freeze examined, so re-selecting it
     would reproduce the same dead-letter and nothing else."""
     if entry.get("shrink_pending"):
@@ -288,22 +300,19 @@ def _mark_frozen_prefix_parked(self, path, rel, boundary=None, *, examined: os.s
         and entry.get("frozen_ino") == st.st_ino
         and entry.get("frozen_mtime_ns") == st.st_mtime_ns
     )</code></pre>
-</figure>
 
-<h3 id="reconcile-and-the-cursor-question">Reconcile and the cursor question</h3>
+<p><strong><code>reconcile</code></strong> gains a second cheap-skip arm; its first arm is left exactly as it is:</p>
 
-<p><strong><code>reconcile</code> gains a second cheap-skip arm;</strong> its first arm is left exactly as it is:</p>
-
-<figure>
-  <pre><code class="language-python">elif (entry.get("end_offset") or 0) >= st.st_size and not entry.get("shrink_pending"):
+<pre><code class="language-python">elif (entry.get("end_offset") or 0) >= st.st_size and not entry.get("shrink_pending"):
     continue
 elif _frozen_unchanged(entry, st):
     continue          # frozen, and byte-for-byte the file that was examined</code></pre>
-</figure>
 
 <p>A separate <code>elif</code> rather than an <code>or</code> on the first: that arm carries the <code>shrink_pending</code> exception, and folding an independent gate into the same expression ties them together.</p>
 
-<p><strong>The <code>>=</code> stays, and that is a change of decision.</strong> Council round 2 (codex, high) asked for <code>==</code>, on correct reasoning: a cursor <em>above</em> EOF means the file shrank, which is not "fully consumed", and while the arm skips on <code>>=</code> the shrink gate is armable only through the Observer — in the one component that exists to recover dropped FSEvents. The final whole-branch review then measured what <code>==</code> would do against the live store, and the change was pulled back out:</p>
+<p class="statement"><strong>The <code>>=</code> stays, and that is a change of decision.</strong></p>
+
+<p>Council round 2 (codex, high) asked for <code>==</code>, on correct reasoning: a cursor <em>above</em> EOF means the file shrank, which is not "fully consumed", and while the arm skips on <code>>=</code> the shrink gate is armable only through the Observer — in the one component that exists to recover dropped FSEvents. The final whole-branch review then measured what <code>==</code> would do against the live store, and the change was pulled back out:</p>
 
 <ul>
   <li>Upstream has used <code>==</code> since <code>4d8de6d</code> (2026-07-17) and never had <code>>=</code>, so the <code>>=</code> here is Beta-local drift. But upstream pairs <code>==</code> with an in-memory retry park (<code>_reconcile_attempts</code>, keyed on <code>(size, mtime_ns)</code>, bounded by <code>MAX_RECONCILE_RETRIES</code>) that this codebase does not have — 0 occurrences. Nothing here bounds a cursor-above-EOF file whose content is unchanged.</li>
@@ -312,8 +321,6 @@ elif _frozen_unchanged(entry, st):
 </ul>
 
 <p>So the repair is real but needs a bound this design does not provide, and it is tracked on its own evidence rather than carried here. The cost of leaving it: <code>_frozen_unchanged</code>'s cursor-above-EOF escape stays unreachable — which it already was, by the ceiling conjunct, so nothing is lost.</p>
-
-<h3 id="enqueue-path">Enqueue path</h3>
 
 <p><strong><code>_enqueue_path</code></strong> (<code>session_watcher.py:1361</code>) consults no state at all today — every FSEvent becomes an <code>enqueue</code>. It gains the same call. Gating only the sweep does not fix the defect, it relocates it: the ADR already recorded this lesson in another form — <em>"the suppression is applied in both producer lanes, because gating only the sweep would trade a full <code>failed/</code> for a hot enqueue loop on the Observer lane."</em></p>
 
@@ -324,21 +331,23 @@ elif _frozen_unchanged(entry, st):
   <li><strong>Suppression re-arms.</strong> After a change re-opens the file and the drain freezes it again, the park writes the new identity even when the ceiling does not move. Without this the file re-selects and re-dead-letters on every tick — an unbounded <code>failed/</code>, the failure mode the fact exists to prevent (council round 2).</li>
   <li><strong>Never lowers, within one identity.</strong> <code>max()</code> on write guards against an out-of-order job with a smaller boundary re-opening the ratchet. Across identities the new <code>target</code> simply replaces the old ceiling, or a large frozen file replaced by a smaller unparseable one could never re-arm (council round 3).</li>
   <li><strong>Never past the accepted boundary.</strong> <code>target = min(boundary, size)</code>. Bytes above the boundary were never accepted by a nudge, so a later, higher nudge must still be able to examine them (council-pr F1, carried over). A consequence: while <code>frozen_until < size</code> the predicate is false and the file stays selectable — suppression arms only when the whole file was examined.</li>
-  <li><strong><code>end_offset</code> leaves the write.</strong> The committed entry preserves the current cursor by construction. <code>_commit_state</code>'s monotonic clamp (<code>:800-808</code>) stays as the backstop, but must not be what enforces this — it clamps <code>end_offset</code> only, and this design does not touch that field.</li>
+  <li><strong><code>end_offset</code> leaves the write.</strong> The committed entry preserves the current cursor by construction. <code>_commit_state</code>'s monotonic clamp (`:800-808`) stays as the backstop, but must not be what enforces this — it clamps <code>end_offset</code> only, and this design does not touch that field.</li>
   <li><strong>A never-seen file stays eligible.</strong> A new entry may be born with the three frozen keys and no <code>end_offset</code>. <code>reconcile</code> evaluates <code>(entry.get("end_offset") or 0) >= size</code> → <code>0 >= size</code> is false for any non-empty file → it falls through to the new gate and is judged there. Legacy entries lack the fields, so <code>_frozen_unchanged</code> returns false, behaviour unchanged. No migration.</li>
   <li><strong>A confirmed shrink clears it.</strong> The shrink reset (<code>session_watcher.py:962-966</code>) copies <code>dict(existing or {})</code> and updates only <code>hash</code>/<code>end_offset</code>. A frozen fact surviving that reset describes the file that was rotated away, and both producer gates would act on it. The reset must <code>pop</code> all three keys.</li>
-  <li><strong>A successful ingest clears it.</strong> The happy-path commit (<code>:1284</code>) carries the whole existing entry forward via <code>dict(existing) if carry else {}</code>. The fact described a parse that closed nothing; this one closed something. A stale ceiling on a healthy entry can only mislead a later comparison (council round 1, cursor, medium).</li>
+  <li><strong>A successful ingest clears it.</strong> The happy-path commit (`:1284`) carries the whole existing entry forward via <code>dict(existing) if carry else {}</code>. The fact described a parse that closed nothing; this one closed something. A stale ceiling on a healthy entry can only mislead a later comparison (council round 1, cursor, medium).</li>
 </ol>
 
-<p><em>Deliberately unchanged:</em> <code>spool.requeue(job, failure_class="no_safe_boundary")</code>. The file still dead-letters on every freeze and the noise volume stays where it is (~110 jobs/day). That is <a href="#residual-risks">Fix A</a>, a separate spec.</p>
+<p><strong>Deliberately unchanged:</strong> <code>spool.requeue(job, failure_class="no_safe_boundary")</code>. The file still dead-letters on every freeze and the noise volume stays where it is (~110 jobs/day). That is Fix A, a separate spec.</p>
 
 <h2 id="tests">Tests</h2>
 
-<p><strong>Test-first.</strong> The reproducing test is <code>ab16af53</code>'s ratchet in miniature: a transcript whose turn terminator lands past the job's <code>boundary</code>; job 1 freezes; job 2 arrives with a higher boundary. Today the cursor jumps twice and nothing is ingested. After the change the cursor holds, <code>frozen_until</code> rises, and <strong>job 2 ingests the whole content</strong>. It fails against today's code — that is the done criterion.</p>
+<p class="statement">Test-first.</p>
 
-<p>Then one test per invariant above, and — <em>critically</em> — <strong>every re-open and re-arm case is proved through a producer</strong>, <code>reconcile</code> and <code>_enqueue_path</code> alike. Council round 1 rejected a version of the shrink test that called <code>spool.enqueue</code> directly: that bypasses the very gate the defect lives in. The same round found the shrink test could never reach tick 2 at all, because tick 1 requeues the job with a persisted backoff, a second <code>enqueue</code> is a no-op on the same <code>(path, boundary)</code> key, and <code>_drain_all</code> stops at the first job that is not due — so the test advances the spool's clock instead.</p>
+<p>The reproducing test is <code>ab16af53</code>'s ratchet in miniature: a transcript whose turn terminator lands past the job's <code>boundary</code>; job 1 freezes; job 2 arrives with a higher boundary. Today the cursor jumps twice and nothing is ingested. After the change the cursor holds, <code>frozen_until</code> rises, and <strong>job 2 ingests the whole content</strong>. It fails against today's code — that is the done criterion.</p>
 
-<h3 id="new-tests">New tests by finding</h3>
+<p>Then one test per invariant above, and — critically — <strong>every re-open and re-arm case is proved through a producer</strong>, <code>reconcile</code> and <code>_enqueue_path</code> alike. Council round 1 rejected a version of the shrink test that called <code>spool.enqueue</code> directly: that bypasses the very gate the defect lives in. The same round found the shrink test could never reach tick 2 at all, because tick 1 requeues the job with a persisted backoff, a second <code>enqueue</code> is a no-op on the same <code>(path, boundary)</code> key, and <code>_drain_all</code> stops at the first job that is not due — so the test advances the spool's clock instead.</p>
+
+<p><strong>New tests, by the finding each one nets:</strong></p>
 
 <table>
   <thead>
@@ -403,8 +412,6 @@ elif _frozen_unchanged(entry, st):
   </tbody>
 </table>
 
-<h3 id="rewritten-tests">Rewritten, not deleted</h3>
-
 <p>Three existing tests assert the old behaviour and are <strong>rewritten, not deleted</strong>: the invariant each one guards still holds, only the field carrying it changes.</p>
 
 <table>
@@ -417,17 +424,17 @@ elif _frozen_unchanged(entry, st):
   </thead>
   <tbody>
     <tr>
-      <td><code>test_frozen_prefix_advance_never_passes_the_accepted_boundary</code> (<code>:2692</code>)</td>
+      <td><code>test_frozen_prefix_advance_never_passes_the_accepted_boundary</code> (`:2692`)</td>
       <td>Cursor stops at B, never raw EOF</td>
       <td><code>frozen_until == B</code>, cursor untouched, and a second nudge at S is still claimable</td>
     </tr>
     <tr>
-      <td><code>test_frozen_prefix_advance_never_moves_the_cursor_backward</code> (<code>:2830</code>)</td>
+      <td><code>test_frozen_prefix_advance_never_moves_the_cursor_backward</code> (`:2830`)</td>
       <td>A lower boundary never rewinds the cursor</td>
       <td>Renamed <code>test_frozen_prefix_park_is_monotonic</code>: a lower boundary never lowers <code>frozen_until</code>, on disk as well as in memory</td>
     </tr>
     <tr>
-      <td><code>test_abandonment_with_unclosed_tail_composes_with_frozen_prefix</code> (<code>:3850</code>)</td>
+      <td><code>test_abandonment_with_unclosed_tail_composes_with_frozen_prefix</code> (`:3850`)</td>
       <td><code>end_offset == size</code></td>
       <td>Cursor at the abandoned range's end; <code>frozen_until == size</code></td>
     </tr>
@@ -436,7 +443,7 @@ elif _frozen_unchanged(entry, st):
 
 <p>Two of those three go <strong>vacuous</strong> rather than red the moment the cursor stops moving — their assertions become trivially true. They are rewritten in the same task that makes them vacuous, never left green and meaningless.</p>
 
-<p><code>test_idle_file_with_no_safe_boundary_is_dead_lettered</code> (<code>:2666</code>) passes unchanged — the dead-letter behaviour is untouched.</p>
+<p><code>test_idle_file_with_no_safe_boundary_is_dead_lettered</code> (`:2666`) passes unchanged — the dead-letter behaviour is untouched.</p>
 
 <h2 id="verification-in-production">Verification in production</h2>
 
@@ -444,17 +451,13 @@ elif _frozen_unchanged(entry, st):
 
 <h2 id="residual-risks">Residual risks</h2>
 
-<div class="callout warn">
-  <p><strong>A frozen file that never changes again is never ingested.</strong> The deliberate trade: today it is marked consumed and its content is <em>lost</em>; after the change it stays out of memory but <strong>recoverable</strong>. The worst failure mode improves; it does not disappear. This is the one item here that exchanges one behaviour for another rather than only fixing, and the first thing to revisit if something looks wrong later.</p>
-</div>
-
-<p><strong>The 75 already-damaged entries are untouched.</strong> Recovery is a separate spec — the ADR's own rule is cause before repair.</p>
-
-<p><strong>The dead-letter keeps growing</strong> at roughly 110 jobs/day. Fix A, separate spec.</p>
-
-<p><strong>Cross-process writers stay uncovered.</strong> <code>threading.Lock</code> is per-process; the pre-existing #150-class limitation is unchanged here.</p>
-
-<p><strong><code>reconcile</code> still has no identity model for an <em>ingested</em> file.</strong> A same-size replacement of a file whose cursor already sits at EOF is skipped by the first cheap-skip arm (<code>end_offset == size</code>) exactly as it is today. Raised in council round 2 and <strong>rejected as out of scope on verified grounds</strong>: it is a real defect, it is pre-existing, and it is unchanged by this design. Folding it in here is the bundling that produced the 56-round cascade behind the retracted force-close. It needs its own issue and spec — currently unfiled.</p>
+<ol>
+  <li><strong>A frozen file that never changes again is never ingested.</strong> The deliberate trade: today it is marked consumed and its content is <em>lost</em>; after the change it stays out of memory but <strong>recoverable</strong>. The worst failure mode improves; it does not disappear. This is the one item here that exchanges one behaviour for another rather than only fixing, and the first thing to revisit if something looks wrong later.</li>
+  <li><strong>The 75 already-damaged entries are untouched.</strong> Recovery is a separate spec — the ADR's own rule is cause before repair.</li>
+  <li><strong>The dead-letter keeps growing</strong> at roughly 110 jobs/day. Fix A, separate spec.</li>
+  <li><strong>Cross-process writers stay uncovered.</strong> <code>threading.Lock</code> is per-process; the pre-existing #150-class limitation is unchanged here.</li>
+  <li><strong><code>reconcile</code> still has no identity model for an <em>ingested</em> file.</strong> A same-size replacement of a file whose cursor already sits at EOF is skipped by the first cheap-skip arm (<code>end_offset == size</code>) exactly as it is today. Raised in council round 2 and <strong>rejected as out of scope on verified grounds</strong>: it is a real defect, it is pre-existing, and it is unchanged by this design. Folding it in here is the bundling that produced the 56-round cascade behind the retracted force-close. It needs its own issue and spec — currently unfiled.</li>
+</ol>
   <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
   <div class="signature">
     <div class="name">rich-doc</div>
@@ -463,4 +466,4 @@ elif _frozen_unchanged(entry, st):
 </main>
 </body>
 </html>
-<!-- rich-doc-src-sha256:19766c485a7d4e981b97ccd395ac510962ce0e8233f1c85461cca6e8693acf59 -->
+<!-- rich-doc-src-sha256:2c4928188cc1f548907baea132b5099ad5bc435f5fee9149314ba8676aef582a -->
