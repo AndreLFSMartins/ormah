@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 import threading
 import time
@@ -20,11 +21,26 @@ def env_path(tmp_path, monkeypatch):
     return path
 
 
-def test_cloud_setting_preserves_unrelated_env_lines_and_updates_runtime(env_path):
+def test_cloud_setting_preserves_unrelated_env_lines_and_updates_runtime(
+    env_path, monkeypatch
+):
     original = "# user setting\nMANUAL = spaced  # preserve\nORMAH_LLM_PROVIDER=none\n"
     env_path.parent.mkdir(parents=True)
     env_path.write_text(original, encoding="utf-8")
     settings = Settings(cloud_backup_enabled=False)
+
+    # filelock's UnixFileLock unlinks its lock file on release (verified: every
+    # release, not version-specific), so the file cannot be inspected after
+    # set_cloud_backup_enabled() returns. Spy on the chmod call instead, which
+    # is where update_settings_env() actually asserts the lock file's mode.
+    chmod_calls: list[tuple[str, int]] = []
+    real_chmod = os.chmod
+
+    def spy_chmod(path, mode, *args, **kwargs):
+        chmod_calls.append((str(path), mode))
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", spy_chmod)
 
     set_cloud_backup_enabled(settings, True)
 
@@ -33,7 +49,8 @@ def test_cloud_setting_preserves_unrelated_env_lines_and_updates_runtime(env_pat
     assert "ORMAH_CLOUD_BACKUP_ENABLED=true\n" in text
     assert settings.cloud_backup_enabled is True
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE((env_path.parent / ".env.lock").stat().st_mode) == 0o600
+    lock_calls = [(p, m) for p, m in chmod_calls if p.endswith(".env.lock")]
+    assert lock_calls == [(str(env_path.parent / ".env.lock"), 0o600)]
 
 
 def test_cloud_setting_does_not_change_runtime_when_persistence_fails(
