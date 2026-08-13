@@ -1580,8 +1580,9 @@ class SessionHandler(FileSystemEventHandler):
                 # end-of-session path, not a real loss (measured 2026-07-27). complete()
                 # removes the job; the log line is the cheap substitute for the operational
                 # signal `grep no_safe_boundary failed/*.error` used to give.
-                logger.debug(
-                    "Parked %s at frozen_until=%s (no safe boundary yet)", rel, job.boundary
+                logger.info(
+                    "Parked %s at frozen_until=%s (no safe boundary yet)",
+                    rel, self._state.get(rel, {}).get("frozen_until"),
                 )
                 self.spool.complete(job)
                 return
@@ -1654,7 +1655,7 @@ class SessionHandler(FileSystemEventHandler):
     def _mark_frozen_prefix_parked(
         self, path: Path, rel: str, boundary: int | None = None,
         *, examined: os.stat_result,
-    ) -> "ParkOutcome":
+    ) -> ParkOutcome:
         """Record that this file closed nothing up to ``boundary`` — WITHOUT moving the
         cursor (ADR-0004, 2026-08-12).
 
