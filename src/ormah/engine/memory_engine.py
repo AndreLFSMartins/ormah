@@ -76,13 +76,6 @@ def _generate_title(content: str, max_chars: int = 60) -> str:
     return truncated + "…" if truncated else first_line[:max_chars]
 
 
-def _embedding_text(title: str | None, content: str, max_content_chars: int = 512) -> str:
-    """Build text for embedding. Truncates content to avoid topic averaging in long docs."""
-    prefix = title or ""
-    truncated = content[:max_content_chars]
-    return f"{prefix} {truncated}".strip()
-
-
 def _split_for_extraction(content: str, chunk_chars: int, hard_cap: int) -> list[str]:
     """Split content into pieces at line (turn) boundaries; each piece is <=hard_cap.
 

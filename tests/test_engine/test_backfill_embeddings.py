@@ -218,7 +218,7 @@ def test_schema_mode_does_not_delete_when_interrupted(engine, monkeypatch):
     # Run backfill with stop_event already set → interrupted=True.
     stop = threading.Event()
     stop.set()
-    result = engine.backfill_embeddings(stop_event=stop)
+    engine.backfill_embeddings(stop_event=stop)
 
     # The stale vector must NOT have been deleted (interrupted guard applied).
     after_count = engine.db.conn.execute(
