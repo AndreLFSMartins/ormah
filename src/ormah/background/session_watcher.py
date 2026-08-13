@@ -1645,9 +1645,14 @@ class SessionHandler(FileSystemEventHandler):
         single finding of that round). A ceiling belonging to a different file is not a
         ratchet guard, it is a lie: file A frozen at 1000, replaced by an unparseable B of
         size 500, would keep 1000, and ``frozen_until == st_size`` could never be true again.
-        Guarding on identity also makes ``ceiling <= st.st_size`` provable rather than
-        defensive: same inode and same mtime means the same bytes, so the stored ceiling was
-        computed from this very size.
+        That identity is (inode, mtime_ns, **and a ceiling that fits this size**) —
+        council-pr R1 (codex) showed the first two are not enough. "Same inode and same
+        mtime means the same bytes" reads like a theorem and is not one: an in-place
+        ``truncate`` keeps the inode, and ``utime`` (or rsync --times, or an editor
+        preserving timestamps) restores the mtime, so a 4000-byte file shrunk to 500 kept
+        its 4000 ceiling and could never re-arm. ``ceiling <= st.st_size`` is therefore a
+        guard, not a consequence — the round-3 test could not reach this because it
+        replaces the file, which changes the inode.
         """
         try:
             st = path.stat()
@@ -1662,6 +1667,12 @@ class SessionHandler(FileSystemEventHandler):
         same_file = (
             entry.get("frozen_ino") == st.st_ino
             and entry.get("frozen_mtime_ns") == st.st_mtime_ns
+            # ...and the stored ceiling can actually belong to a file THIS size. An in-place
+            # truncate keeps the inode, and a writer that restores the timestamp keeps
+            # st_mtime_ns, so (ino, mtime) alone would call a shrunk file the same file and
+            # keep the larger ceiling -- after which `frozen_until == st_size` can never hold
+            # and every sweep re-selects it (council-pr R1, codex).
+            and (entry.get("frozen_until") or 0) <= st.st_size
         )
         # Never lower the ceiling for the SAME file (an out-of-order job would re-open the
         # ratchet); always take the new one for a different file.

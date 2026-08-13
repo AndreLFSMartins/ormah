@@ -3312,6 +3312,60 @@ def test_park_ceiling_is_monotonic_only_within_one_identity(engine, tmp_path):
         "suppression must re-arm on the new file"
 
 
+def test_park_ceiling_does_not_survive_an_mtime_preserving_shrink(engine, tmp_path):
+    """council-pr round 1, codex. The identity above is (inode, mtime_ns) and omits the SIZE,
+    so the round-3 repair has a hole its own test cannot reach: that test replaces the file
+    (`unlink` + recreate), which changes the inode. An in-place `truncate` does NOT — it
+    keeps the inode — and a writer that restores the timestamp (utime, rsync --times, an
+    editor preserving mtime) keeps `st_mtime_ns` too. The park then calls a 500-byte file the
+    same file as the 4000-byte one it froze and keeps the LARGER ceiling, so
+    `frozen_until == st_size` can never hold again and every sweep re-selects and
+    re-dead-letters it — the unbounded failed/ this fact exists to prevent.
+
+    The guard is on the ceiling itself: a ceiling above the current size cannot belong to
+    this file, whatever the inode and mtime say."""
+    watch_dir = tmp_path / "projects"
+    proj = watch_dir / "-Users-alice-Code-myproject"
+    proj.mkdir(parents=True)
+    jsonl = proj / "truncated-in-place.jsonl"
+    filler = "x" * 4000
+    jsonl.write_text(
+        json.dumps({"type": "user", "message": {"content": f"a long prompt {filler}"}})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"an answer that never closed {filler}"}]}})
+        + "\n"
+    )
+    _mark_idle(jsonl)
+    rel = str(jsonl.relative_to(watch_dir))
+
+    handler = _handler_with_spool(engine, watch_dir, tmp_path / "spool")
+    before = jsonl.stat()
+    big = before.st_size
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=big, examined=before)
+    assert handler._state[rel]["frozen_until"] == big
+
+    # truncated IN PLACE -- same inode -- with the mtime restored to the nanosecond
+    with open(jsonl, "r+b") as fh:
+        fh.truncate(500)
+    os.utime(jsonl, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = jsonl.stat()
+    small = after.st_size
+    assert small < big
+    assert after.st_ino == before.st_ino, \
+        "fixture invalid: the inode changed, so this is a replacement and not an in-place edit"
+    assert after.st_mtime_ns == before.st_mtime_ns, \
+        "fixture invalid: the mtime was not restored, so the identity already differs"
+
+    handler._mark_frozen_prefix_parked(jsonl, rel, boundary=small, examined=after)
+    assert handler._state[rel]["frozen_until"] == small, (
+        "a ceiling above the file's own size is not a ratchet guard, it is a lie -- the "
+        "park must replace it, not max against it"
+    )
+    assert _frozen_unchanged(handler._state[rel], jsonl.stat()), \
+        "suppression must re-arm after an in-place shrink, or the file re-selects forever"
+
+
 def test_capped_continuation_inherits_the_producer_force_flush(engine, tmp_path):
     """council-pr R2 F4: a capped batch's 'drain' continuation must inherit the ORIGINATING
     producer's force_flush, not force-flush unconditionally. An Observer's capped remainder
