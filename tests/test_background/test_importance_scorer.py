@@ -301,7 +301,7 @@ def test_confidence_affects_search_ranking(engine):
 
     # Search for the content — confidence_factor in search should differentiate
     results = engine.recall_search_structured(
-        "caching architecture", limit=10, touch_access=False,
+        "caching architecture", limit=10,
     )
 
     # Find both nodes in results
