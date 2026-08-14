@@ -101,6 +101,111 @@ def test_strong_edge_protects_both_nodes(engine):
     assert _exists(engine, a) is True and _exists(engine, b) is True
 
 
+# --- gate #6 counts only value-bearing edges (fork #1) -----------------------
+#
+# Peers are built with _make_archival_recent (recent last_accessed ⇒ never gate-stale ⇒ never a
+# Phase A candidate) and importance=0.9 (gate #4 ⇒ protected in the cap too). They therefore
+# survive every run, so the edges under test are still in place when the subject is evaluated.
+
+def test_contradicts_edge_does_not_protect(engine):
+    """gate #6, max_weight arm: a strong `contradicts` edge is not evidence of value."""
+    _enable(engine)
+    engine.settings.auto_link_similarity_threshold = 1.1   # no incidental edges
+    subject = _make_eligible(engine, content="contested claim")
+    peer = _make_archival_recent(engine, "peer keeper", archived_days=400, importance=0.9)
+    engine.connect(ConnectRequest(
+        source_id=subject, target_id=peer, edge=EdgeType.contradicts, weight=0.9))
+    run_forgetting(engine)
+    assert _exists(engine, subject) is False
+    assert _exists(engine, peer) is True
+
+
+def test_supports_edge_still_protects(engine):
+    """Non-regression: the legitimate strong-edge path is untouched."""
+    _enable(engine)
+    engine.settings.auto_link_similarity_threshold = 1.1
+    subject = _make_eligible(engine, content="supported claim")
+    peer = _make_archival_recent(engine, "peer keeper", archived_days=400, importance=0.9)
+    engine.connect(ConnectRequest(
+        source_id=subject, target_id=peer, edge=EdgeType.supports, weight=0.9))
+    run_forgetting(engine)
+    assert _exists(engine, subject) is True
+
+
+def test_contradicts_edges_do_not_count_toward_degree(engine):
+    """gate #6, degree arm: 3 weak `contradicts` edges must not make a node a hub.
+
+    deletion_max_degree defaults to 2, so degree=3 protects today; every weight is 0.1, well
+    under deletion_strong_edge_weight (0.7), so the max_weight arm cannot be what fires here.
+    """
+    _enable(engine)
+    engine.settings.auto_link_similarity_threshold = 1.1
+    subject = _make_eligible(engine, content="contested hub")
+    for i in range(3):
+        peer = _make_archival_recent(engine, f"hub peer {i}", archived_days=400, importance=0.9)
+        engine.connect(ConnectRequest(
+            source_id=subject, target_id=peer, edge=EdgeType.contradicts, weight=0.1))
+    run_forgetting(engine)
+    assert _exists(engine, subject) is False
+
+
+def test_mixed_edges_only_value_bearing_degree_protects(engine):
+    """gate #6, degree arm on a mixed graph: contradicts must not top up a thin real degree.
+
+    2 `related_to` + 3 `contradicts` ⇒ raw degree 5 (> deletion_max_degree 2 ⇒ protected today),
+    value-bearing degree 2 (NOT > 2 ⇒ deletable after the fix). Every weight is 0.1, well under
+    deletion_strong_edge_weight (0.7), so the max_weight arm cannot be what fires here.
+
+    Not hypothetical: measured read-only against the archived 36.7k-node store
+    (`~/.local/share/ormah_old/backups/pre-cleanup-2026-08-11/index.db`, 2026-08-13), 17 archival
+    nodes were held by this arm alone at threshold 0.7.
+    """
+    _enable(engine)
+    engine.settings.auto_link_similarity_threshold = 1.1
+    subject = _make_eligible(engine, content="mixed hub")
+    for i in range(2):
+        peer = _make_archival_recent(engine, f"real peer {i}", archived_days=400, importance=0.9)
+        engine.connect(ConnectRequest(
+            source_id=subject, target_id=peer, edge=EdgeType.related_to, weight=0.1))
+    for i in range(3):
+        peer = _make_archival_recent(engine, f"noise peer {i}", archived_days=400, importance=0.9)
+        engine.connect(ConnectRequest(
+            source_id=subject, target_id=peer, edge=EdgeType.contradicts, weight=0.1))
+    run_forgetting(engine)
+    assert _exists(engine, subject) is False
+
+
+def test_cap_ranking_ignores_contradictions(engine):
+    """The ripple that must NOT happen: _forget_score keeps the RAW degree (council C1).
+
+    Being contested is not evidence of dead weight — an unresolved contradiction is live
+    counterevidence recall surfaces as "Conflicting context". So a contested node must not be
+    evicted ahead of an older, equally unprotected node that nobody ever contested.
+
+    Both candidates share importance (0.1), stability and last_review, so the forget-score
+    reduces to `age_days / (1 + degree)`, with `degree` unfiltered in both states:
+        contested 300/(1+2) = 100  <  plain 200/(1+0) = 200  ⇒ plain evicted, before AND after
+    4 archival nodes with archival_soft_cap=3 ⇒ overflow of exactly 1, so precisely one of the
+    two unprotected candidates is evicted and the assertions are unambiguous.
+
+    This test is GREEN before and after the fix by design — it is the guard that the filter
+    stayed out of the scoring path. If it goes red, `_forget_score` is reading the filtered
+    degree and the implementation overreached.
+    """
+    _enable(engine)
+    engine.settings.auto_link_similarity_threshold = 1.1
+    engine.settings.archival_soft_cap = 3
+    contested = _make_archival_recent(engine, "contested old", archived_days=300)
+    plain = _make_archival_recent(engine, "plain mid", archived_days=200)
+    for i in range(2):   # degree 2 ⇒ NOT > deletion_max_degree (2) ⇒ not protected, only scored
+        peer = _make_archival_recent(engine, f"cap peer {i}", archived_days=400, importance=0.9)
+        engine.connect(ConnectRequest(
+            source_id=contested, target_id=peer, edge=EdgeType.contradicts, weight=0.1))
+    run_forgetting(engine)
+    assert _exists(engine, plain) is False
+    assert _exists(engine, contested) is True
+
+
 def test_user_node_never_deleted(engine):
     _enable(engine)
     uid = engine.user_node_id

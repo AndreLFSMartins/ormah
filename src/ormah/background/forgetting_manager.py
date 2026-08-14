@@ -113,10 +113,10 @@ def _evaluate_protection(engine, row, now: datetime) -> tuple[bool, int]:
         return True, 0                                # gate #4: high importance
     if _has_positive_feedback(engine, row["id"]):
         return True, 0                                # gate #5: ever positively useful
-    degree, max_weight = _connectivity(engine, row["id"])
-    if degree > s.deletion_max_degree or max_weight >= s.deletion_strong_edge_weight:
-        return True, degree                           # gate #6: hub / strong edge
-    return False, degree
+    degree_all, degree_value, max_weight = _connectivity(engine, row["id"])
+    if degree_value > s.deletion_max_degree or max_weight >= s.deletion_strong_edge_weight:
+        return True, degree_all                       # gate #6: hub / strong edge (value only)
+    return False, degree_all                          # raw degree ⇒ _forget_score unchanged
 
 
 def _is_protected(engine, row, now: datetime) -> bool:
@@ -154,13 +154,38 @@ def _has_positive_feedback(engine, node_id: str) -> bool:
     return row is not None
 
 
-def _connectivity(engine, node_id: str) -> tuple[int, float]:
+# Edge types that are not evidence of *value*: a contested memory is not a valuable one, so a
+# `contradicts` edge must not grant gate #6 immunity. Both endpoints are contested, so excluding
+# it symmetrically is correct. `evolved_from` is deliberately NOT here — its direction is decided
+# without creation dates (r-spade/ormah#194), so excluding it would strip protection from the
+# surviving node too.
+_NON_PROTECTIVE_EDGE_TYPES: tuple[str, ...] = ("contradicts",)
+
+
+def _connectivity(engine, node_id: str) -> tuple[int, int, float]:
+    """Raw degree, plus degree and max weight over *value-bearing* edges only.
+
+    Two answers from one query because the two callers ask different questions:
+
+    - gate #6 asks "is this a hub worth keeping?" and reads the value-bearing pair — an edge
+      that does not count toward the hub arm does not count toward the strong-edge arm either.
+    - `_forget_score` asks "how dead is this?" and keeps the RAW degree. Being contested is not
+      evidence of dead weight: `auto_linker` emits `contradicts` only when both claims are
+      believed true right now, and recall surfaces the neighbor as "Conflicting context"
+      (`engine/traversal.py`). Feeding the filtered degree into `1/(1+degree)` would promote
+      contested nodes to the front of the cap's eviction queue — out of scope for this fix.
+    """
+    placeholders = ",".join("?" * len(_NON_PROTECTIVE_EDGE_TYPES))
     row = engine.db.conn.execute(
-        "SELECT COUNT(*) AS degree, COALESCE(MAX(weight), 0) AS max_w "
+        "SELECT COUNT(*) AS degree_all, "
+        f"COALESCE(SUM(CASE WHEN edge_type NOT IN ({placeholders}) THEN 1 ELSE 0 END), 0) "
+        "AS degree_value, "
+        f"COALESCE(MAX(CASE WHEN edge_type NOT IN ({placeholders}) THEN weight END), 0) "
+        "AS max_w_value "
         "FROM edges WHERE source_id = ? OR target_id = ?",
-        (node_id, node_id),
+        (*_NON_PROTECTIVE_EDGE_TYPES, *_NON_PROTECTIVE_EDGE_TYPES, node_id, node_id),
     ).fetchone()
-    return row["degree"], row["max_w"]
+    return row["degree_all"], row["degree_value"], row["max_w_value"]
 
 
 def _parse_dt(value: str) -> datetime:
