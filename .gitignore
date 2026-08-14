@@ -157,3 +157,9 @@ Music/
 .council/.*-status.json
 .council/.*-stderr.log
 # <<< dev-council ephemerals <<<
+
+# Local agent/session tooling artifacts (local-only; never versioned).
+# docs/superpowers alone is >1 MiB and must never reach upstream.
+.superpowers/
+docs/superpowers/
+graphify-out/
