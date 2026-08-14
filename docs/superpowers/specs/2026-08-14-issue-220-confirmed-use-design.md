@@ -100,12 +100,43 @@ After this change `_record_confirmed_use` has exactly three callers:
 | Caller | Condition | Target |
 |---|---|---|
 | `recall_node(id)` | always (already present at `memory_engine.py:646`) | the requested node, never its neighbours |
-| `submit_feedback` | `signal == 1` **and** `source ∈ {explicit, implicit, auto_llm_judge}` | the resolved node |
+| `submit_feedback` | the event **becomes** a qualified positive: `signal == 1` **and** `source ∈ {explicit, implicit, auto_llm_judge}` **and** it was not already confirmed | the resolved node |
 | `session_watcher`, `auto_llm_judge` path | `polarity == 1` | each node in the batch |
 
 The source allowlist is **fail-closed**: any other source, and every negative signal, does not
 confirm. `auto_heuristic` stays excluded until #218 provides signal calibration. Negative
 feedback remains prompt-specific affinity evidence and never touches stability.
+
+**Confirmation is a property of the event, not of the request** (Dev Council, 2026-08-14). One
+whisper event confirms at most once. `submit_feedback` is replayable by construction — affinity
+and signals both write `ON CONFLICT DO NOTHING` and still return success — so reinforcing per
+request would let a retried tool call, a double-click, or a second source manufacture retention
+from a single confirmed use.
+
+The transition cannot be read off a rowcount. The unique key is
+`signals(whisper_log_id, signal_type, source)` (`schema.sql:189`), which **excludes `polarity`**,
+and `affinity` has no unique index in `schema.sql` at all — its indexes come from migration code,
+so a legacy database can hold duplicates. A rowcount gate therefore fails in both directions:
+explicit-negative followed by explicit-positive is a real confirmation that inserts no signals row,
+while implicit-positive followed by explicit-positive inserts one for an event already confirmed.
+The gate is instead the event's confirmed state read before and after the writes, inside the
+transaction: *not confirmed before, confirmed after*.
+
+### 4.2.1 Serializing the mutator
+
+`_record_confirmed_use` does `load` → modify → `save` → DB update. `FileStore` is constructed with
+the engine's `_memory_operation_lock` (`memory_engine.py:94`), so each file operation takes that
+lock individually while the read-modify-write across them stays unprotected. **Measured on
+`upstream/main`:** neither `_touch_access` (`:1936`) nor any of its five callers carries
+`@_serialized_memory_operation`. Two concurrent confirmations can collapse to one increment, and a
+confirmation can save a stale node over a concurrent edit.
+
+The race is pre-existing and this design already shrinks its surface from five callers to three,
+but the function is becoming the canonical confirmed-use operation, so it is closed here:
+`_record_confirmed_use` gains the decorator. The body is untouched; the lock is a reentrant
+`RLock`, so already-serialized callers are unaffected, and the `memory_lock → db_lock` order
+matches every other serialized writer. That order is precisely why §4.3's rule is mandatory rather
+than merely tidy.
 
 ### 4.3 Concurrency: the reinforcement runs outside the transaction
 
@@ -120,6 +151,11 @@ across N markdown saves in a loop.
 
 **Decision:** collect confirmed node IDs inside the transaction, reinforce after it commits.
 
+With the decorator from §4.2.1 in place this is no longer only a throughput argument: calling
+`_record_confirmed_use` inside an open transaction would take `db_lock` before `memory_lock`,
+inverting the order every serialized writer uses. Reinforcing after the commit is a correctness
+rule.
+
 ```python
 # session_watcher, auto_llm_judge path
 confirmed = []
@@ -132,21 +168,33 @@ with engine.db.transaction() as conn:
             confirmed.append(record["row"]["node_id"])
 # lock released here
 for node_id in confirmed:
-    engine._record_confirmed_use(node_id)
+    try:
+        engine._record_confirmed_use(node_id)
+    except Exception:
+        logger.exception("confirmed-use reinforcement failed for node %s", node_id)
 ```
+
+Each node is isolated, and the catch is broad on purpose. The signals are already committed when
+this loop runs, so an escaping exception would abort the ingest slice, skip every later node, and
+leave `has_llm_judge` set — the retry then filters the event out and those reinforcements are gone.
+`OSError` alone is too narrow: `MemoryNode.stability` is `Field(default=1.0, ge=0.0)`
+(`models/node.py:59`), so zero is legal and the mutator's `math.exp(-days_since / node.stability)`
+raises `ZeroDivisionError`; `sqlite3.Error` and markdown validation errors are equally reachable.
 
 ```python
 # submit_feedback
 with self.db.transaction():
-    resolved_node_id, result = self._submit_feedback_locked(...)
+    resolved_node_id, became_confirmed, result = self._submit_feedback_locked(...)
 # lock released here
-if signal == 1 and source in _CONFIRMED_USE_SOURCES:
+if became_confirmed:
     self._record_confirmed_use(resolved_node_id)
 return result
 ```
 
-This requires `_submit_feedback_locked` to return the `resolved_node_id` alongside its message —
-it already computes the value at `memory_engine.py:2529` and currently discards it.
+This requires `_submit_feedback_locked` to return the `resolved_node_id` and the transition flag
+alongside its message — it already computes the node ID at `memory_engine.py:2529` and currently
+discards it. `became_confirmed` is computed inside the existing transaction by reading the event's
+confirmed state before the first write and again after the last, per §4.2.
 
 Both transaction blocks live in one function, `_record_whisper_usage_signals`
 (`session_watcher.py:407`): the `auto_heuristic` path opens its own at `:498`, the
@@ -155,17 +203,35 @@ paths do not share a block, there is no route by which a heuristic record can re
 confirmed-use list — the separation is structural, and contract test 12 pins it.
 
 **Accepted cost:** the reinforcement is not atomic with the signal. A crash between the commit
-and the reinforcement leaves a recorded signal without its reinforcement — one memory misses one
-reinforcement, and the next confirmed use corrects it. **Rejected alternative:** holding the
-global write lock across disk I/O, which stalls every whisper and every ingest for the duration.
-**Also rejected:** a reconciliation job that sweeps positive signals lacking a reinforcement —
-new surface, new correctness criterion, and its own test suite, to repair an event whose damage
-is one lost reinforcement.
+and the reinforcement leaves a recorded signal without its reinforcement, and that loss is
+**permanent** — the watcher will not re-judge the event, because `has_llm_judge` is already set.
+
+An earlier draft of this section claimed the next confirmed use would correct it. That claim was
+**false**, and the Dev Council (2026-08-14) quantified the error: with `S = 1`,
+`fsrs_stability_growth = 1.5`, and confirmed uses on day 1 and day 2, dropping the day-1 update
+yields roughly **2.24** stability instead of **3.07**. The formula is multiplicative in the
+current stability and time-dependent through retrievability, so a skipped step does not wash out —
+the node stays permanently below its true trajectory. The cost is accepted with that understood,
+not because it self-heals.
+
+Two things bound it. The write is per node inside a loop that catches every exception per node
+(§4.3), so the realistic failure — one unreadable or malformed node — costs only that node's
+reinforcement, never the rest of the batch. What remains is a hard process kill in the window
+between `COMMIT` and the loop.
+
+**Rejected alternative:** holding the global write lock across disk I/O, which stalls every
+whisper and every ingest for the duration. **Also rejected:** a durable pending-confirmed-use
+table with a reconciliation loop that replays it until applied, including after restart — new
+surface, new correctness criterion, and its own test suite, to repair a window that only a hard
+kill can open. The council proposed this and, on the second round, agreed that the residual
+crash window alone does not justify it.
 
 ### 4.4 What does not change
 
 `_record_confirmed_use` keeps its body byte-identical, including the silent return when the node
-is missing. No new error handling. The stability formula
+is missing, and no error handling is added *inside* it — §4.3's isolation lives in the caller,
+which is a different thing. The only change to the function itself is the `@_serialized_memory_operation`
+decorator (§4.2.1). The stability formula
 (`stability * fsrs_stability_growth * (retrievability ** -0.2)`) is untouched — bounding,
 cooldown and saturation are #221.
 
@@ -197,11 +263,20 @@ written before the fix.
 | 8 | `submit_feedback(+1, explicit \| implicit \| auto_llm_judge)` | only the resolved node mutates |
 | 9 | `submit_feedback(+1, auto_heuristic)` | nothing mutates |
 | 10 | `submit_feedback(-1, any source)` | nothing mutates |
+| 10a | the same `submit_feedback(+1, explicit)` replayed | confirms **once** |
+| 10b | `submit_feedback(-1, explicit)` then `(+1, explicit)` | confirms — a real transition |
+| 10c | `submit_feedback(+1, implicit)` then `(+1, explicit)` | confirms **once** — one event, not one per source |
 | 11 | session watcher, `auto_llm_judge`, `polarity == 1` | confirms, and signals/affinity rows are still written |
 | 12 | session watcher, `auto_heuristic` | does not confirm |
+| 13 | the same transcript judged twice | confirms **once** (`has_llm_judge` excludes the replay) |
+| 14 | watcher batch where node 1's mutator raises `ZeroDivisionError` | node 2 is still reinforced; `recorded` is unaffected |
+| 15 | concurrent `_record_confirmed_use` on one node from N threads | `access_count` advances by exactly N, file and DB agree |
 
 Pairs 8/9 and 11/12 are what give the allowlist teeth: without the negative case, a loose
-condition passes.
+condition passes. Contracts 10a–10c are the trio that discriminates a correct transition gate from
+a rowcount: 10b fails a naive gate as a false negative and 10c as a false positive, so passing all
+three at once is the real assertion. Contract 15 is racy by nature and may pass on an unserialized
+mutator by luck; it is kept as a regression pin, with that limitation stated rather than hidden.
 
 ### Gate
 

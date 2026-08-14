@@ -4,7 +4,9 @@
 
 **Goal:** Stop Ormah from treating a memory's appearance in a search result as evidence it was used, and give confirmed use exactly three named callers.
 
-**Architecture:** The boundary is the entry point, not a flag. Search paths lose their lifecycle writes entirely — deleted, not guarded — and `_touch_access` is renamed `_record_confirmed_use` with a byte-identical body. Two tasks along a subtraction/addition seam. Regression is prevented by contract tests that read all four lifecycle fields from both the markdown file and the SQLite row.
+**Architecture:** The boundary is the entry point, not a flag. Search paths lose their lifecycle writes entirely — deleted, not guarded — and `_touch_access` is renamed `_record_confirmed_use` with a byte-identical body, now serialized by `@_serialized_memory_operation`. Two tasks along a subtraction/addition seam. Regression is prevented by contract tests that read all four lifecycle fields from both the markdown file and the SQLite row.
+
+**Reviewed by the Dev Council on 2026-08-14** (Cursor + Codex, two rounds). Five findings accepted and folded in; one rejected. The result, including what was rejected and why, is at `$COUNCIL_HOME/council-result.md`.
 
 **Tech Stack:** Python ≥3.11, pytest (`asyncio_mode = auto`), SQLite + sqlite-vec, FastAPI, ruff (line-length 100, target py311).
 
@@ -16,9 +18,11 @@
 - **Every line number in this plan was read from `upstream/main` (`a28837b`).** `local-main` is 623 commits ahead and its addresses do **not** apply. This is what broke the previous attempt. Line numbers shift as you edit — locate code by the quoted snippet, never by the number alone.
 - **Fork workflow is non-negotiable** (`FORK-WORKFLOW.md`): the branch is cut from `upstream/main`; work happens in the worktree at `../ormah-wt-220`, **never** via `git checkout` inside `Tools/ormah` (that directory is what the running Beta serves via launchd `com.ormah.server.dev`); push to `fork`, never `upstream`; do not rename remotes.
 - **The stability formula does not change.** `_record_confirmed_use` keeps `stability * fsrs_stability_growth * (retrievability ** -0.2)` byte-identical. Bounding, cooldown and saturation are #221.
-- **No new error handling** in `_record_confirmed_use`, including the silent return when the node is missing.
+- **No new error handling *inside* `_record_confirmed_use`**, including the silent return when the node is missing. Its *callers* isolate it — that is a different thing, and Task 2's watcher loop does exactly that.
+- **`_record_confirmed_use` is serialized** with `@_serialized_memory_operation` (council finding). Its load/modify/save/DB-update sequence was never atomic; the decorator is the whole fix and the body still does not change.
 - **Confirmed-use source allowlist is fail-closed:** exactly `{"explicit", "implicit", "auto_llm_judge"}` with `signal == 1`. `auto_heuristic` is excluded pending #218. Every other source, and every negative signal, does not confirm.
-- **The reinforcement runs outside the transaction**, on IDs collected inside it. `IndexDB.transaction()` holds a process-level lock for the whole block; `_record_confirmed_use` does disk I/O.
+- **Reinforcement fires on a state transition of the event, never on a request** (council finding). One whisper event confirms at most once, no matter how many times a request is replayed or how many sources report positively on it. A rowcount is not a valid transition test — see Task 2, Step 3b.
+- **The reinforcement runs outside the transaction**, on IDs collected inside it. `IndexDB.transaction()` holds a process-level lock for the whole block; `_record_confirmed_use` does disk I/O. With the decorator above, calling it inside an open transaction would also invert the `memory_lock → db_lock` order — so this constraint is now a correctness rule, not a performance preference.
 - **Lifecycle fields** — the four that must be asserted on both sides: `access_count`, `last_accessed`, `last_review`, `stability`.
 - **Do not open the PR** while draft PR [#229](https://github.com/r-spade/ormah/pull/229) still declares `Closes #220–#223`. Implementing and committing are free; only `gh pr create` is blocked.
 - Lint gate: `make lint` (`ruff check src/ tests/`) must pass before each commit.

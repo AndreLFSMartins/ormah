@@ -10,7 +10,7 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `MemoryEngine._record_confirmed_use(self, node_id: str) -> None` — the single lifecycle mutator, renamed from `_touch_access`, body unchanged. Task 2 calls this and nothing else.
+- Produces: `MemoryEngine._record_confirmed_use(self, node_id: str) -> None` — the single lifecycle mutator, renamed from `_touch_access`, **body unchanged** but now decorated with `@_serialized_memory_operation` (council finding, Step 5). Task 2 calls this and nothing else.
 - Produces: `MemoryEngine.recall_search_structured(self, query, limit=10, default_space=None, min_relevance=None, auto_temporal=True, spread_activation=True, query_vec=None, **filters) -> list[dict]` — note the removed `touch_access` parameter.
 
 All line numbers are from `upstream/main` (`a28837b`) and shift as you edit. Locate code by the quoted snippet.
@@ -257,14 +257,21 @@ Then delete this docstring paragraph (`:689-691`):
 
 ```
 
-- [ ] **Step 5: Rename the mutator**
+- [ ] **Step 5: Rename the mutator and serialize it**
 
-Rename `_touch_access` to `_record_confirmed_use` at its definition (`:1936`) and at its one remaining caller in `recall_node` (`:646`). The body does not change — not one character.
+Rename `_touch_access` to `_record_confirmed_use` at its definition (`:1936`) and at its one remaining caller in `recall_node` (`:646`). The body does not change — not one character. What changes is the decorator above it.
 
 ```python
+    @_serialized_memory_operation
     def _record_confirmed_use(self, node_id: str) -> None:
         """Record a confirmed use: update access stats and FSRS stability on disk and DB."""
 ```
+
+**Why the decorator (council finding, both peers, conceded as sufficient in round 2).** The mutator does `file_store.load` → modify → `file_store.save` → DB update. `FileStore` is constructed with the engine's `_memory_operation_lock` (`memory_engine.py:94`), so `load` and `save` each take that lock *individually* — but the read-modify-write across them is not atomic. **Measured on `upstream/main`:** neither `_touch_access` (`:1936`) nor any of its five current callers (`recall_node` `:646`; the search paths `:775`, `:811`, `:892`, `:938`) carries the decorator. Two concurrent confirmations can therefore collapse into one increment, and a confirmation can save a stale full node over a concurrent edit, reverting markdown content while SQLite keeps the newer copy.
+
+That race is **pre-existing**, not introduced here — this plan cuts the undecorated callers from five to three. But the plan is making this function the canonical confirmed-use operation, and the fix is one line: `_serialized_memory_operation` (`:79-85`) is a plain `threading.RLock`, so it is reentrant for any already-decorated caller, and it preserves the `memory_lock → db_lock` order every decorated method already uses.
+
+**This makes the plan's transaction invariant load-bearing, not merely tidy** (*inferred*): with the decorator, calling `_record_confirmed_use` from inside an open `db.transaction()` would take `db_lock` before `memory_lock` while decorated writers take them the other way round — a lock-order inversion. Tasks 1 and 2 both call it only after the enclosing transaction has committed, so the inversion never occurs; do not "optimize" any call site back inside a transaction.
 
 At `:645-646`, the comment goes with the name:
 
@@ -333,7 +340,7 @@ class TestSearchDoesNotTouchLifecycle:
     Direct matches are no longer touched either, so the distinction is gone.
     """
 
-    def test_direct_matches_and_activated_nodes_are_both_untouched(self, engine):
+    def test_direct_activated_and_conflict_results_are_all_untouched(self, engine):
         from ormah.models.node import CreateNodeRequest
 
         id_a, _ = engine.remember(CreateNodeRequest(
@@ -342,9 +349,13 @@ class TestSearchDoesNotTouchLifecycle:
         id_b, _ = engine.remember(CreateNodeRequest(
             content="Beta neighbor node", title="Beta", type="fact", tier="working",
         ))
+        id_c, _ = engine.remember(CreateNodeRequest(
+            content="Gamma conflicting node", title="Gamma", type="fact", tier="working",
+        ))
 
-        initial_a = engine.file_store.load(id_a).access_count
-        initial_b = engine.file_store.load(id_b).access_count
+        before = {
+            node_id: _lifecycle(engine, node_id) for node_id in (id_a, id_b, id_c)
+        }
 
         def mock_spread(results, limit):
             out = list(results)
@@ -354,6 +365,13 @@ class TestSearchDoesNotTouchLifecycle:
                 "source": "activated",
                 "activated_by": id_a,
                 "activation_edge": "related_to",
+            })
+            out.append({
+                "node": engine.graph.get_node(id_c),
+                "score": 0.4,
+                "source": "conflict",
+                "activated_by": id_a,
+                "activation_edge": "contradicts",
             })
             return out
 
@@ -370,11 +388,67 @@ class TestSearchDoesNotTouchLifecycle:
             with patch.object(engine, "_spread_activation", side_effect=mock_spread):
                 engine.recall_search_structured("test query", limit=10)
 
-        assert engine.file_store.load(id_a).access_count == initial_a, (
+        assert _lifecycle(engine, id_a) == before[id_a], (
             "the direct match was touched — search must not confirm use"
         )
-        assert engine.file_store.load(id_b).access_count == initial_b
+        assert _lifecycle(engine, id_b) == before[id_b], "an activated neighbour was touched"
+        assert _lifecycle(engine, id_c) == before[id_c], "a conflict neighbour was touched"
 ```
+
+Add the module-level helper this class uses, next to the other helpers in that file:
+
+```python
+def _lifecycle(engine, node_id):
+    """The four lifecycle fields, from the markdown file and the SQLite row."""
+    node = engine.file_store.load(node_id)
+    row = engine.db.conn.execute(
+        "SELECT access_count, last_accessed, stability, last_review FROM nodes WHERE id = ?",
+        (node_id,),
+    ).fetchone()
+    fields = ("access_count", "last_accessed", "stability", "last_review")
+    return {
+        "file": tuple(getattr(node, f) for f in fields),
+        "db": tuple(row[f] for f in fields),
+    }
+```
+
+**Two council findings are folded into this replacement.** The original class covered `activated` **and** `conflict`; injecting only `activated` while the docstring claims "any result source" would let a future guard that skips just `activated` slip through, so both sources are injected. And the assertion reads all four lifecycle fields from **both** stores rather than `access_count` from the file alone — a DB-only or file-only write would otherwise pass.
+
+- [ ] **Step 9b: Pin that concurrent confirmations do not lose an increment**
+
+The decorator added in Step 5 needs a test that fails without it. Append to `tests/test_engine/test_confirmed_use_contract.py`:
+
+```python
+def test_concurrent_confirmed_use_does_not_lose_increments(engine):
+    """Issue #220: _record_confirmed_use is atomic across its read-modify-write.
+
+    Without @_serialized_memory_operation, two threads can both load the same
+    access_count and both save count+1, collapsing two confirmations into one.
+    """
+    import threading
+
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    before = engine.file_store.load(target).access_count
+
+    threads = [threading.Thread(target=engine._record_confirmed_use, args=(target,))
+               for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    after = engine.file_store.load(target)
+    assert after.access_count == before + 8, (
+        f"lost increments: expected {before + 8}, got {after.access_count}"
+    )
+    row = engine.db.conn.execute(
+        "SELECT access_count FROM nodes WHERE id = ?", (target,)
+    ).fetchone()
+    assert row["access_count"] == after.access_count, "file and DB disagree after concurrency"
+```
+
+This test is **racy by nature**: it can pass on an unserialized mutator if the threads happen not to interleave. Run it before Step 5's decorator and confirm it fails at least once across a handful of runs (`pytest ... -k concurrent --count=10` if `pytest-repeat` is available, otherwise loop the command). If it never fails without the decorator on this machine, say so in the report and keep the test anyway — it is a regression pin, and a flaky-green is honest information, not a reason to delete it.
 
 - [ ] **Step 10: Follow the rename in the stamping test**
 
@@ -414,7 +488,10 @@ recall_search_structured defaulted touch_access=True, so the UI search route —
 which never passed the kwarg — reinforced every result it displayed.
 
 _touch_access becomes _record_confirmed_use with an unchanged body, leaving
-recall_node as its only caller. Retrieval and whisper event logging are
+recall_node as its only caller. It also gains @_serialized_memory_operation:
+FileStore takes the engine lock per operation, so the load/modify/save/update
+sequence was never atomic and concurrent confirmations could lose an increment
+or save a stale node over a newer edit. Retrieval and whisper event logging are
 untouched, so ignored appearances remain observable.
 
 Refs #220" )
