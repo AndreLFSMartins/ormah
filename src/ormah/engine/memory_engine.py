@@ -642,8 +642,8 @@ class MemoryEngine:
 
         resolved_node_id = node["id"]
 
-        # Touch access
-        self._touch_access(resolved_node_id)
+        # Record confirmed use: this is a deliberate single-node fetch
+        self._record_confirmed_use(resolved_node_id)
 
         edges = self.graph.get_edges_for(resolved_node_id)
         neighbors = self.graph.get_neighbors(resolved_node_id, depth=1)
@@ -678,7 +678,7 @@ class MemoryEngine:
 
     def recall_search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
-        touch_access: bool = True, min_relevance: float | None = None,
+        min_relevance: float | None = None,
         auto_temporal: bool = True, spread_activation: bool = True,
         query_vec: Any | None = None, **filters,
     ) -> list[dict]:
@@ -686,9 +686,6 @@ class MemoryEngine:
 
         Same logic as recall_search but returns raw dicts instead of formatted text.
         Used by the UI and any consumer that needs structured data.
-
-        When *touch_access* is False, access_count and last_accessed are not
-        updated — useful for context loading that shouldn't inflate access stats.
 
         *min_relevance* overrides the deliberate-recall floor
         (settings.recall_min_relevance_score). Whisper passes 0.0: it needs
@@ -769,10 +766,6 @@ class MemoryEngine:
 
             if spread_activation:
                 results = self._spread_activation(results, limit)
-            if touch_access:
-                for r in results:
-                    if r.get("source") not in ("activated", "conflict"):
-                        self._touch_access(r["node"]["id"])
             return results
 
         # Fallback to FTS only
@@ -805,10 +798,6 @@ class MemoryEngine:
 
         if spread_activation:
             enriched = self._spread_activation(enriched, limit)
-        if touch_access:
-            for r in enriched:
-                if r.get("source") not in ("activated", "conflict"):
-                    self._touch_access(r["node"]["id"])
 
         return enriched
 
@@ -887,9 +876,6 @@ class MemoryEngine:
                     )
 
             results = self._spread_activation(results, limit)
-            for r in results:
-                if r.get("source") not in ("activated", "conflict"):
-                    self._touch_access(r["node"]["id"])
             whisper_log_ids = self._log_feedback_candidates(
                 query_for_log,
                 [
@@ -933,9 +919,6 @@ class MemoryEngine:
             )
 
         enriched = self._spread_activation(enriched, limit)
-        for r in enriched:
-            if r.get("source") not in ("activated", "conflict"):
-                self._touch_access(r["node"]["id"])
         whisper_log_ids = self._log_feedback_candidates(
             query_for_log,
             [
@@ -1933,8 +1916,9 @@ class MemoryEngine:
             self_node.touch_updated()
             self.file_store.save(self_node)
 
-    def _touch_access(self, node_id: str) -> None:
-        """Update access stats and FSRS stability on both disk and DB."""
+    @_serialized_memory_operation
+    def _record_confirmed_use(self, node_id: str) -> None:
+        """Record a confirmed use: update access stats and FSRS stability on disk and DB."""
         node = self.file_store.load(node_id)
         if node is None:
             return
