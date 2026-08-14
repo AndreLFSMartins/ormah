@@ -90,13 +90,30 @@ In `src/ormah/index/schema.sql`, next to the other feedback tables:
 -- SET NULL because their columns are nullable. On a NOT NULL column SET NULL
 -- would make whisper_log_cleanup's DELETE fail with a constraint violation.
 -- CASCADE also keeps this table bounded by whisper_log's own retention.
+--
+-- node_id deliberately carries NO foreign key. It would buy nothing: the only
+-- writer is _claim_confirmed_use, which receives a node id submit_feedback has
+-- already resolved against the store, so the constraint would guard against a
+-- bug the code cannot commit. It would cost real scope, though — several
+-- existing feedback tests fabricate node ids that were never inserted into
+-- nodes, which is a legitimate pattern here, and a reference would force them
+-- all to change. A claim outliving its node is harmless: the latch only ever
+-- prevents a second reinforcement, and the whisper_log CASCADE above already
+-- bounds the table.
 CREATE TABLE IF NOT EXISTS confirmed_use_claims (
     whisper_log_id INTEGER NOT NULL REFERENCES whisper_log(id) ON DELETE CASCADE,
-    node_id        TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    node_id        TEXT NOT NULL,
     claimed_at     TEXT NOT NULL,
     PRIMARY KEY (whisper_log_id, node_id)
 );
 ```
+
+**No foreign key on `node_id` — measured, not assumed.** An earlier draft of this plan gave it
+`REFERENCES nodes(id) ON DELETE CASCADE` for symmetry. That broke 16 pre-existing tests in
+`tests/test_engine/test_submit_feedback.py` and `tests/test_whisper_health.py`, which fabricate
+node ids that never reach the `nodes` table — a legitimate pattern for exercising the feedback
+path without creating nodes. Rather than change fixtures in two files this issue has no business
+touching, the reference was dropped. It protected nothing the code could get wrong.
 
 **Why `schema.sql` and not a migration.** `Database.init_schema` (`db.py:84-89`) runs
 `executescript(schema.sql)` followed by `_migrate()`, and `MemoryEngine.__init__` calls it
@@ -163,7 +180,13 @@ def test_recall_node_confirms_only_the_requested_node(engine):
         content="caching architecture neighbour node", title="Neighbour", type="fact",
         tier="working",
     ))
-    engine.graph.add_edge(target, neighbour, "related_to")
+    # GraphIndex exposes no add_edge — only .conn plus read methods. This is the
+    # same raw-SQL idiom tests/test_engine/test_whisper_context.py already uses.
+    engine.graph.conn.execute(
+        "INSERT INTO edges (source_id, target_id, edge_type, weight, created) "
+        "VALUES (?, ?, 'related_to', 1.0, '2026-01-01T00:00:00Z')",
+        (target, neighbour),
+    )
 
     before_target = _snapshot(engine, target)
     before_neighbour = _snapshot(engine, neighbour)
@@ -403,10 +426,11 @@ point of the rewrite.
 Expected: contract 7 **PASSES** (`recall_node` already confirmed its node; this is a
 regression pin). Contract 8 **FAILS** for all three sources — feedback records affinity and
 signals but never reinforces. Contracts 10b and 10e **FAIL** for the same reason (nothing
-confirms, so nothing changes). Contract 10f **FAILS** — `_record_confirmed_use` is never
-called, so patching it proves nothing yet; it becomes meaningful after Step 5. Contracts
-9, 10, 10a, 10c and 10d **PASS** vacuously, because nothing confirms yet; they become
-discriminating once Steps 4 and 5 land, which is exactly why they are written now.
+confirms, so nothing changes). Contracts 9, 10, 10a, 10c, 10d and 10f **PASS** vacuously,
+because nothing confirms yet; they become discriminating once Steps 4 and 5 land, which is
+exactly why they are written now. 10f is vacuous for its own reason: before Step 5,
+`submit_feedback` never calls `_record_confirmed_use`, so patching it with a `side_effect`
+patches a method nothing invokes and every assertion already holds.
 
 Record the exact pass/fail split you observe. If 10a, 10c or 10d fails at this point,
 something already reinforces and the premise of Task 1 is wrong — stop and investigate
@@ -889,7 +913,10 @@ def test_one_failing_node_does_not_skip_the_rest_of_the_batch(engine, tmp_path):
          patch.object(engine, "_record_confirmed_use", side_effect=failing_for_first):
         recorded = _record_whisper_usage_signals(engine, transcript)
 
-    assert recorded == 2, "the signals themselves must still be recorded"
+    # Both nodes go through the heuristic pass unreferenced (the response text
+    # matches neither node's id/title/content), then both go to the judge pass:
+    # 2 heuristic signals + 2 judge signals.
+    assert recorded == 4, "the signals themselves must still be recorded"
     assert _lifecycle(engine, second_id) != before_second, (
         "the first node's failure skipped the second node's reinforcement"
     )
@@ -904,7 +931,8 @@ implementation rather than weakening the assertion.
 
 ```bash
 ( cd /Users/andre/Documents/GitHub/Tools/ormah-wt-220 && \
-  python -m pytest tests/test_background/test_session_watcher.py -v -k "confirmed_use or noop" )
+  python -m pytest tests/test_background/test_session_watcher.py -v \
+    -k "confirmed_use or noop or replaying_the_judge or one_failing_node" )
 ```
 
 Expected: `test_llm_judge_used_verdict_records_confirmed_use` **FAILS** (`access_count`

@@ -135,7 +135,7 @@ mutability answer a different question than "has this event ever been confirmed?
 ```sql
 CREATE TABLE IF NOT EXISTS confirmed_use_claims (
     whisper_log_id INTEGER NOT NULL REFERENCES whisper_log(id) ON DELETE CASCADE,
-    node_id        TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    node_id        TEXT NOT NULL,
     claimed_at     TEXT NOT NULL,
     PRIMARY KEY (whisper_log_id, node_id)
 );
@@ -154,6 +154,16 @@ would defeat the latch. The foreign key is `ON DELETE CASCADE`, not the `SET NUL
 column would make `whisper_log_cleanup`'s delete fail. CASCADE also bounds the table by
 `whisper_log`'s own retention, and `whisper_log.id` is `AUTOINCREMENT`, so a cascaded delete
 cannot resurrect a claimable event.
+
+`node_id` carries **no** foreign key, and that is deliberate. An earlier draft gave it
+`REFERENCES nodes(id)` for symmetry; implementation measured the cost. It broke 16 pre-existing
+tests in `tests/test_engine/test_submit_feedback.py` and `tests/test_whisper_health.py`, which
+fabricate node ids that never reach the `nodes` table — a legitimate way to exercise the feedback
+path without creating nodes. The constraint bought nothing in return: the only writer is
+`_claim_confirmed_use`, and it receives a node id `submit_feedback` has already resolved against
+the store, so the reference would guard against a bug the code cannot commit. A claim outliving
+its node is harmless — the latch only ever prevents a second reinforcement — and the
+`whisper_log` cascade already bounds the table.
 
 ### 4.2.1 Serializing the mutator
 
