@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design — separate surfaced results from confirmed memory use</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">Design — separate surfaced results from confirmed memory use</div>
+  <a href="#problem">Problem</a>
+  <a href="#measured-live-store" class="lvl-3">Measured, on a live store — 698 nodes, 2026-08-14</a>
+  <a href="#loop-closes-through-importance" class="lvl-3">The loop closes through importance, not through ranking</a>
+  <a href="#current-blast-radius" class="lvl-3">Current blast radius</a>
+  <a href="#design">Design</a>
+  <a href="#boundary-is-entry-point" class="lvl-3">1. The boundary is the entry point, not a parameter</a>
+  <a href="#rename-over-guard" class="lvl-3">2. Rename over guard</a>
+  <a href="#surfaces" class="lvl-3">3. Surfaces</a>
+  <a href="#transaction-placement" class="lvl-3">4. Transaction placement</a>
+  <a href="#testing">Testing</a>
+  <a href="#non-mutation-contract" class="lvl-3">Non-mutation (the contract)</a>
+  <a href="#mutation-exactly-where-intended" class="lvl-3">Mutation, exactly where intended</a>
+  <a href="#fail-closed" class="lvl-3">Fail-closed</a>
+  <a href="#delivery">Delivery</a>
+  <a href="#explicitly-not-in-this-change" class="lvl-3">Explicitly not in this change</a>
+  <a href="#risk-register">Risk register</a>
+</nav>
+<main>
+<div class="eyebrow">Issue #220 · Lifecycle mutation · design doc</div>
+
+<h1><em>Design</em> — separate surfaced results from confirmed memory use</h1>
+
+<p class="statement">
+  Surfacing a memory in a search result should not credit it as if the result was read.
+  `_touch_access` today mutates all nodes that appear in result lists; this splits it into
+  two paths: <em>surfacing</em> (logging only) and <em>confirmed use</em> (lifecycle mutation).
+</p>
+
+<div class="meta">
+  <span class="tag">Issue</span> <a href="https://github.com/r-spade/ormah/issues/220">#220</a>
+  <span class="tag">ADR</span> <a href="https://github.com/r-spade/ormah/issues/191">#191</a>
+  <span class="tag">Cluster</span> #220 → #222 → #221 → #223, one PR each (landing order agreed 2026-08-14)
+</div>
+
+<h2 id="problem">Problem</h2>
+
+<p>
+  <code>_touch_access</code> in <code>src/ormah/engine/memory_engine.py:2408</code> is one helper that performs four mutations at once — <code>access_count += 1</code>, <code>last_accessed</code>, <code>last_review</code>, and <code>stability *= fsrs_stability_growth</code> — on both the markdown file and the SQLite row. There is no way to ask for one without the others.
+</p>
+
+<p>
+  It has five call sites. One is legitimate: <code>recall_node(id)</code> at L783, a deliberate fetch of one node. The other four sit inside <code>for r in results</code> loops — L912 and L948 in <code>recall_search_structured</code>, L1029 and L1075 in <code>recall_search</code>. <strong>Every node that appears in a result list is credited as if it had been read.</strong>
+</p>
+
+<p>
+  A ten-result recall where the caller used one memory awards identical lifecycle credit to all ten.
+</p>
+
+<h3 id="measured-live-store">Measured, on a live store — 698 nodes, 2026-08-14</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: right;"><code>access_count</code></th>
+      <th style="text-align: right;">nodes</th>
+      <th style="text-align: right;"><code>stability</code></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: right;">0</td>
+      <td style="text-align: right;">657</td>
+      <td style="text-align: right;">1.00</td>
+    </tr>
+    <tr>
+      <td style="text-align: right;">1</td>
+      <td style="text-align: right;">31</td>
+      <td style="text-align: right;">1.52</td>
+    </tr>
+    <tr>
+      <td style="text-align: right;">2</td>
+      <td style="text-align: right;">4</td>
+      <td style="text-align: right;">2.28</td>
+    </tr>
+    <tr>
+      <td style="text-align: right;">3</td>
+      <td style="text-align: right;">6</td>
+      <td style="text-align: right;">3.41</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  Exactly <code>1.5^n</code>, matching <code>fsrs_stability_growth = 1.5</code> (<code>config.py:171</code>). Stability is multiplicative and uncapped below <code>fsrs_max_stability = 365</code>.
+</p>
+
+<p>
+  A node decays when <code>R = exp(-t / S)</code> falls below <code>fsrs_decay_threshold = 0.3</code>, i.e. after <code>t = 1.204 * S</code> days. So surfacing buys lifetime directly:
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th style="text-align: right;">appearances</th>
+      <th style="text-align: right;"><code>stability</code></th>
+      <th style="text-align: right;">survives</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: right;">0</td>
+      <td style="text-align: right;">1.00</td>
+      <td style="text-align: right;">1.2 days</td>
+    </tr>
+    <tr>
+      <td style="text-align: right;">3</td>
+      <td style="text-align: right;">3.38</td>
+      <td style="text-align: right;">4.1 days</td>
+    </tr>
+    <tr>
+      <td style="text-align: right;">10</td>
+      <td style="text-align: right;">57.7</td>
+      <td style="text-align: right;">69 days</td>
+    </tr>
+    <tr>
+      <td style="text-align: right;">15</td>
+      <td style="text-align: right;">365 (capped)</td>
+      <td style="text-align: right;">439 days</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  Fifteen appearances in result lists — with nobody ever reading the content — buy over a year of life. <code>fsrs_max_stability = 365</code> caps the <em>stability</em>, not the lifetime: at the cap a node survives <code>1.204 × 365 = 439</code> days.
+</p>
+
+<h3 id="loop-closes-through-importance">The loop closes through importance, not through ranking</h3>
+
+<p>
+  Neither <code>stability</code> nor <code>access_count</code> appears in <code>hybrid_search.py</code>; search ranking is not directly affected. The self-reinforcement runs through two independent channels in the importance scorer, and then through the decay gate:
+</p>
+
+<figure>
+  <svg aria-label="Feedback loop: memory appears in search, splits into access_count and stability paths, both feed into importance, which skips decay and survives, then appears again" style="max-width: 100%; height: auto;">
+    <style>
+      .mermaid-node { fill: #faf9f5; stroke: #141413; stroke-width: 2px; font-family: Arial, sans-serif; font-size: 13px; }
+      .mermaid-edge { stroke: #141413; stroke-width: 2px; fill: none; marker-end: url(#arrowhead); }
+      .mermaid-text { fill: #141413; font-family: Arial, sans-serif; font-size: 12px; text-anchor: middle; dominant-baseline: middle; }
+      .mermaid-label { fill: #b0aea5; font-family: Arial, sans-serif; font-size: 11px; text-anchor: middle; }
+    </style>
+    <defs>
+      <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+        <polygon points="0 0, 10 3, 0 6" fill="#141413" />
+      </marker>
+    </defs>
+    <text x="150" y="20" class="mermaid-text" font-weight="bold">memory appears in a search</text>
+
+    <!-- Left branch: access_count -->
+    <line x1="80" y1="40" x2="50" y2="80" class="mermaid-edge" stroke-dasharray="0" />
+    <rect x="10" y="80" width="80" height="40" class="mermaid-node" rx="5" />
+    <text x="50" y="105" class="mermaid-text">access_count++</text>
+    <line x1="50" y1="120" x2="50" y2="160" class="mermaid-edge" />
+    <rect x="10" y="160" width="80" height="50" class="mermaid-node" rx="5" />
+    <text x="50" y="185" class="mermaid-text">importance_scorer</text>
+    <text x="50" y="202" class="mermaid-label">access_signal ↑</text>
+
+    <!-- Right branch: stability -->
+    <line x1="220" y1="40" x2="250" y2="80" class="mermaid-edge" />
+    <rect x="210" y="80" width="80" height="40" class="mermaid-node" rx="5" />
+    <text x="250" y="105" class="mermaid-text">stability × 1.5</text>
+    <line x1="250" y1="120" x2="250" y2="160" class="mermaid-edge" />
+    <rect x="190" y="160" width="120" height="50" class="mermaid-node" rx="5" />
+    <text x="250" y="185" class="mermaid-text">recency_signal</text>
+    <text x="250" y="202" class="mermaid-label">exp(−days / stability) ↑</text>
+
+    <!-- Converge to importance -->
+    <line x1="50" y1="210" x2="150" y2="250" class="mermaid-edge" />
+    <line x1="250" y1="210" x2="150" y2="250" class="mermaid-edge" />
+    <rect x="110" y="250" width="80" height="40" class="mermaid-node" rx="5" />
+    <text x="150" y="275" class="mermaid-text">importance ↑</text>
+
+    <!-- Decay gate -->
+    <line x1="150" y1="290" x2="150" y2="330" class="mermaid-edge" />
+    <rect x="70" y="330" width="160" height="50" class="mermaid-node" rx="5" />
+    <text x="150" y="355" class="mermaid-text">decay_manager.py:45</text>
+    <text x="150" y="372" class="mermaid-label">high importance skips decay</text>
+
+    <!-- Survives and loops -->
+    <line x1="150" y1="380" x2="150" y2="420" class="mermaid-edge" />
+    <rect x="100" y="420" width="100" height="40" class="mermaid-node" rx="5" />
+    <text x="150" y="445" class="mermaid-text">survives in pool</text>
+
+    <line x1="150" y1="460" x2="150" y2="500" class="mermaid-edge" />
+    <rect x="100" y="500" width="100" height="40" class="mermaid-node" rx="5" />
+    <text x="150" y="525" class="mermaid-text">appears again</text>
+
+    <!-- Feedback loop back to top -->
+    <path d="M 200 520 Q 320 270 220 40" class="mermaid-edge" stroke-dasharray="5,5" />
+    <text x="280" y="280" class="mermaid-label">feedback loop</text>
+  </svg>
+  <figcaption>
+    Self-reinforcement runs through two independent channels: <code>access_count</code> affects access signal,
+    while <code>stability</code> (inflated via <code>fsrs_stability_growth = 1.5</code>) affects recency signal via the time constant in
+    <code>exp(-days / stability)</code>. Both feed importance, which blocks decay, creating a feedback loop.
+  </figcaption>
+</figure>
+
+<p>
+  The second channel is the subtle one: importance's <em>recency</em> signal uses <code>stability</code> as its time constant, so inflating stability also makes a node look more recent than it is.
+</p>
+
+<h3 id="current-blast-radius">Current blast radius</h3>
+
+<p>
+  41 of 698 nodes have <code>access_count > 0</code>. The damage is modest today for an accidental reason — whisper already passes <code>touch_access=False</code> (<code>context_builder.py:525</code> and <code>:892</code>), so only explicit <code>recall()</code> and UI search inflate. The mechanism, not the current damage, is what is unbounded.
+</p>
+
+<h2 id="design">Design</h2>
+
+<h3 id="boundary-is-entry-point">1. The boundary is the entry point, not a parameter</h3>
+
+<p>
+  Two operations, and which one runs is decided by <em>which function the caller entered through</em>.
+</p>
+
+<p class="callout">
+  <strong>Surfacing</strong> — the node appeared. Logging only, through the existing <code>_log_feedback_candidates</code>. No lifecycle write. Applies to <code>recall_search</code>, <code>recall_search_structured</code>, whisper, UI search, spreading activation, and conflict expansion.
+</p>
+
+<p class="callout">
+  <strong>Confirmed use</strong> — <code>_record_confirmed_use(node_id)</code>, the single lifecycle mutator. Exactly three callers:
+</p>
+
+<ol>
+  <li><code>recall_node(id)</code> — deliberate fetch of one node (already the case; only the name changes)</li>
+  <li><code>_submit_feedback_locked</code> — when <code>signal == 1</code> <strong>and</strong> <code>source ∈ {explicit, implicit, auto_llm_judge}</code></li>
+  <li><code>session_watcher</code>, <code>auto_llm_judge</code> positive path — which writes affinity directly and never passes through <code>submit_feedback</code></li>
+</ol>
+
+<p>
+  The source list is an explicit allowlist and <strong>fail-closed</strong>: an unrecognised <code>source</code> does not confirm. <code>auto_heuristic</code> is excluded pending <a href="https://github.com/r-spade/ormah/issues/218">#218</a>. Negative feedback never confirms, from any source — it is prompt-specific affinity evidence, not grounds to touch stability or tier.
+</p>
+
+<h3 id="rename-over-guard">2. Rename over guard</h3>
+
+<p>
+  <code>_touch_access</code> is renamed to <code>_record_confirmed_use</code> with its <strong>body byte-identical</strong>. The rename carries half the safety of this change: <code>_touch_access</code> reads like harmless bookkeeping, which is precisely why four call sites adopted it without thought. Nobody writes <code>_record_confirmed_use</code> inside a <code>for r in results</code> by accident.
+</p>
+
+<p>
+  The <code>touch_access</code> parameter of <code>recall_search_structured</code> is <strong>removed</strong>, along with the two <code>touch_access=False</code> arguments in <code>context_builder.py</code>. A flag that only ever takes one value is not configuration; leaving it in place would keep suggesting that a mutating mode exists.
+</p>
+
+<p>
+  A <code>UseKind</code> enum with a checked <code>SURFACED</code> no-op was considered and rejected. It preserves the exact coupling this issue exists to cut — search code would still call a lifecycle function — and its signature is wrong for the job: surfacing needs <code>prompt_text</code>, per-node scores, <code>session_id</code> and <code>surface</code>, which is the shape of <code>_log_feedback_candidates</code>, not of a single <code>node_id</code>. The regression guarantee comes from contract tests instead (see <a href="#testing">Testing</a>).
+</p>
+
+<h3 id="surfaces">3. Surfaces</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Surface</th>
+      <th>Today</th>
+      <th>After</th>
+      <th>Nature</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>recall_search</code> hybrid</td>
+      <td><strong>mutates</strong> N nodes</td>
+      <td>log only</td>
+      <td>removal</td>
+    </tr>
+    <tr>
+      <td><code>recall_search</code> FTS fallback</td>
+      <td><strong>mutates</strong> N nodes</td>
+      <td>log only</td>
+      <td>removal</td>
+    </tr>
+    <tr>
+      <td><code>recall_search_structured</code> hybrid</td>
+      <td>mutates when <code>touch_access</code></td>
+      <td>never mutates</td>
+      <td>removal</td>
+    </tr>
+    <tr>
+      <td><code>recall_search_structured</code> FTS fallback</td>
+      <td>mutates when <code>touch_access</code></td>
+      <td>never mutates</td>
+      <td>removal</td>
+    </tr>
+    <tr>
+      <td>UI search (<code>GET /api/search</code>)</td>
+      <td><strong>mutates</strong> (uses the default)</td>
+      <td>never mutates</td>
+      <td>removal</td>
+    </tr>
+    <tr>
+      <td>Whisper / context build</td>
+      <td>already clean</td>
+      <td>unchanged</td>
+      <td>regression test</td>
+    </tr>
+    <tr>
+      <td><code>activated</code> / <code>conflict</code> results</td>
+      <td>already excluded</td>
+      <td>unchanged</td>
+      <td>regression test</td>
+    </tr>
+    <tr>
+      <td><code>recall_node</code> neighbours</td>
+      <td>already clean</td>
+      <td>unchanged</td>
+      <td>regression test</td>
+    </tr>
+    <tr>
+      <td><code>recall_node(id)</code> itself</td>
+      <td>mutates the requested node</td>
+      <td>unchanged, renamed</td>
+      <td>unchanged</td>
+    </tr>
+    <tr>
+      <td><code>submit_feedback</code> qualified positive</td>
+      <td><strong>does nothing</strong></td>
+      <td>confirms use</td>
+      <td><strong>addition</strong></td>
+    </tr>
+    <tr>
+      <td><code>submit_feedback</code> negative</td>
+      <td>does nothing</td>
+      <td>unchanged</td>
+      <td>unchanged</td>
+    </tr>
+    <tr>
+      <td><code>session_watcher</code> <code>auto_llm_judge</code> positive</td>
+      <td>writes affinity only</td>
+      <td>+ confirms use</td>
+      <td><strong>addition</strong></td>
+    </tr>
+    <tr>
+      <td><code>session_watcher</code> <code>auto_heuristic</code> positive</td>
+      <td>writes affinity only</td>
+      <td>unchanged</td>
+      <td>unchanged</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  Half of this issue is an addition, not a rewire: <code>submit_feedback</code> never touched the lifecycle. Verified by reading <code>_submit_feedback_locked</code> (L3136–L3234) — there is no <code>_touch_access</code> call.
+</p>
+
+<p>
+  Two claims in the "already clean" rows were verified rather than assumed:
+</p>
+
+<ul>
+  <li>
+    <strong>Whisper.</strong> <code>context_builder</code> only ever calls <code>recall_search_structured</code>, never the ungated <code>recall_search</code>. L535 does <code>search_kwargs.update(intent.search_params)</code> <em>after</em> setting <code>touch_access: False</code>, so an override was possible in principle; <code>prompt_classifier.py:358-374</code> only ever produces <code>created_after</code>, <code>created_before</code> and <code>search_query</code>. No override exists.
+  </li>
+  <li>
+    <strong><code>activated</code> / <code>conflict</code>.</strong> <code>memory_engine.py:2604</code> assigns one of the two to every node <code>_spread_activation</code> adds, so the exclusion filter covers all of them.
+  </li>
+</ul>
+
+<p>
+  One case the current exclusion list does <strong>not</strong> cover: <code>_supplement_temporal</code> produces results with <code>source="temporal"</code>, which is absent from <code>("activated", "conflict")</code> — temporal supplements are mutated today. Deleting the loops removes this too, and it is evidence for deletion over any filter-based approach: the filter was already incomplete.
+</p>
+
+<h3 id="transaction-placement">4. Transaction placement</h3>
+
+<p>
+  <code>db.transaction()</code> is reentrant per thread (<code>index/db.py:72</code>), so nesting is safe. But <code>_record_confirmed_use</code> writes the markdown file <em>before</em> the DB row (the repository's Council R3 C5 mutation convention), so a rollback would leave the file stamped and the row not. Two consequences:
+</p>
+
+<ul>
+  <li>
+    <strong><code>submit_feedback</code></strong> — the call goes as the <strong>last statement</strong> of <code>_submit_feedback_locked</code>. It stays inside the outer transaction opened at L3128, which is desirable (feedback and its lifecycle effect should be atomic), and being last means nothing after it can fail and roll back a markdown write that already happened.
+  </li>
+  <li>
+    <strong><code>session_watcher</code></strong> — the <code>auto_llm_judge</code> loop runs inside <code>with engine.db.transaction() as conn</code> over a whole batch. Qualifying <code>node_id</code>s are collected during the loop and <code>_record_confirmed_use</code> is applied <strong>after</strong> the block closes, so per-node file I/O does not hold <code>BEGIN IMMEDIATE</code> across the batch.
+  </li>
+</ul>
+
+<p class="callout">
+  <strong>No new error handling.</strong> The body stays identical, including the existing early return when the node is missing. Adding a <code>try/except</code> here would change behaviour this issue must not change.
+</p>
+
+<h2 id="testing">Testing</h2>
+
+<p>
+  Every test asserts on the same four fields: <code>access_count</code>, <code>last_accessed</code>, <code>last_review</code>, <code>stability</code>.
+</p>
+
+<h3 id="non-mutation-contract">Non-mutation (the contract)</h3>
+
+<ul>
+  <li>broad recall, hybrid path — N results, zero fields changed on any of them</li>
+  <li>broad recall, FTS fallback path — same, with hybrid search forced unavailable</li>
+  <li><code>GET /api/search</code> — same</li>
+  <li>whisper / context build — same</li>
+  <li><code>activated</code> and <code>conflict</code> results — same</li>
+  <li><code>recall_node</code> neighbours — same</li>
+</ul>
+
+<h3 id="mutation-exactly-where-intended">Mutation, exactly where intended</h3>
+
+<ul>
+  <li><code>recall_node(id)</code> mutates the requested node and no other</li>
+  <li><code>submit_feedback(signal=1, source="explicit")</code> confirms use on the resolved node only</li>
+  <li><code>submit_feedback(signal=1, source="implicit")</code> — same</li>
+  <li><code>session_watcher</code> <code>auto_llm_judge</code> positive confirms use</li>
+</ul>
+
+<h3 id="fail-closed">Fail-closed</h3>
+
+<ul>
+  <li><code>signal=1, source="auto_heuristic"</code> does not confirm</li>
+  <li><code>signal=-1</code>, any source, does not confirm</li>
+  <li>unknown <code>source</code> string does not confirm</li>
+  <li><code>session_watcher</code> <code>auto_llm_judge</code> negative does not confirm</li>
+</ul>
+
+<p>
+  These contract tests, not a type, are the regression guarantee: they catch a reintroduced lifecycle write through any mechanism, including one nobody anticipated.
+</p>
+
+<p class="callout">
+  <strong>Baseline first.</strong> Run the suite on clean <code>upstream/main</code> and record the result before claiming anything green. PR <a href="https://github.com/r-spade/ormah/pull/229">#229</a> reported pre-existing failures (<code>A LIMIT or k = ? constraint is required on vec0 knn queries</code> in auto-link, conflict and worker-thread vector search, plus a setup binary-detection assumption). Without the baseline there is no way to separate what this change broke from what was already red.
+</p>
+
+<h2 id="delivery">Delivery</h2>
+
+<p>
+  Per <code>FORK-WORKFLOW.md</code>, non-negotiable:
+</p>
+
+<pre><code class="language-bash">git fetch upstream
+git worktree add -b fix/220-confirmed-use ../ormah-wt-220 upstream/main
+# work in ../ormah-wt-220 — Tools/ormah stays on local-main (it is what the running Beta serves)
+git push fork fix/220-confirmed-use
+/council-pr            # base r-spade:main, head fork:fix/220-confirmed-use
+</code></pre>
+
+<p>
+  Branch cut from <code>upstream/main</code>, never from <code>local-main</code>. Push to <code>fork</code>. Do not rename remotes.
+</p>
+
+<p class="callout">
+  <strong>Blocking pre-condition for opening the PR:</strong> draft PR <a href="https://github.com/r-spade/ormah/pull/229">#229</a> is still OPEN and its body carries <code>Closes #220–#223</code>. If it merges, it auto-closes all four issues. Raised with @r-spade at <a href="https://github.com/r-spade/ormah/pull/229#issuecomment-5296007628">#229#issuecomment-5296007628</a>; the PR should not be opened until he closes it or drops the <code>Closes</code> lines.
+</p>
+
+<p>
+  The PR body should carry one line of fact, not a debt: <em>UI search does not log retrieval events — it did not before this change either.</em> Tracked separately as <a href="https://github.com/r-spade/ormah/issues/231">#231</a>.
+</p>
+
+<h3 id="explicitly-not-in-this-change">Explicitly not in this change</h3>
+
+<ul>
+  <li>
+    <strong>The reinforcement formula.</strong> <code>stability × 1.5</code> stays uncapped and uncooled. It now compounds over rare real events instead of over appearances, which is the point of this issue, but the formula itself is <a href="https://github.com/r-spade/ormah/issues/221">#221</a>.
+  </li>
+  <li>
+    <strong>Importance blocking decay.</strong> The gate at <code>decay_manager.py:45</code> survives intact — <a href="https://github.com/r-spade/ormah/issues/222">#222</a>, which lands next.
+  </li>
+  <li>
+    <strong>Archival promotion.</strong> <code>_touch_access</code> does not touch <code>tier</code> today, so "surfacing must not promote an archival node" is already true and becomes a regression test. Adding reversible promotion is <a href="https://github.com/r-spade/ormah/issues/223">#223</a>.
+  </li>
+  <li>
+    <strong><code>auto_heuristic</code> admission.</strong> Waits on <a href="https://github.com/r-spade/ormah/issues/218">#218</a>. This is not a footnote: on the reference store, <code>auto_heuristic</code> accounts for 153 of the 184 positive affinity rows, so #218 gates off <strong>83% of all positive feedback</strong>. This change admits 31 events (25 <code>auto_llm_judge</code> + 6 <code>implicit</code>); <code>explicit</code> has never been used at all.
+  </li>
+  <li>
+    <strong>UI search retrieval logging.</strong> <a href="https://github.com/r-spade/ormah/issues/231">#231</a>, follow-up after #223.
+  </li>
+</ul>
+
+<h2 id="risk-register">Risk register</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Risk</th>
+      <th>Register</th>
+      <th>Mitigation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>PR #229 merges and auto-closes #220–#223</td>
+      <td><strong>verified</strong> — PR is OPEN, draft, body carries <code>Closes</code></td>
+      <td>comment posted; do not open the PR until resolved</td>
+    </tr>
+    <tr>
+      <td>A future call site reintroduces a lifecycle write in a search loop</td>
+      <td><strong>assumed</strong> — nothing structurally prevents it</td>
+      <td>contract tests fail loudly on any of the six non-mutation surfaces</td>
+    </tr>
+    <tr>
+      <td>Suite is red before the change and the cause is misattributed</td>
+      <td><strong>inferred</strong> — #229 reported pre-existing vec0 failures, not re-measured here</td>
+      <td>record the <code>upstream/main</code> baseline before running anything</td>
+    </tr>
+    <tr>
+      <td>Confirmed-use signal is starved after this change</td>
+      <td><strong>verified by measurement</strong> — 31 admitted vs 153 excluded</td>
+      <td>accepted deliberately; #218 is the fix, now assigned</td>
+    </tr>
+    <tr>
+      <td><code>auto_llm_judge</code> confirmed-use path untested on live data</td>
+      <td><strong>verified</strong> — session watcher is off on the reference store, so those 25 rows are historical</td>
+      <td>covered by unit tests; no live validation available on this machine</td>
+    </tr>
+    <tr>
+      <td>Markdown stamped but DB rolled back</td>
+      <td><strong>inferred</strong> from the write order in the existing helper</td>
+      <td>call placed last inside the feedback transaction; batched after the transaction in the session watcher</td>
+    </tr>
+  </tbody>
+</table>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:7e804cbba09cad85b48b6d75535d9fcf07e5922cedef7722ffd2fc502ff58cb6 -->
