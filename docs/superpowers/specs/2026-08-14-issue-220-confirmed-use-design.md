@@ -1,261 +1,239 @@
-# Design — separate surfaced results from confirmed memory use
+# Separate Surfaced Results from Confirmed Memory Use — Design
 
-- **Issue:** [#220](https://github.com/r-spade/ormah/issues/220) `bug(lifecycle)`
-- **Decision record:** [#191](https://github.com/r-spade/ormah/issues/191) (closed)
-- **Cluster:** #220 → #222 → #221 → #223, one PR each (landing order agreed with @r-spade, 2026-08-14)
-- **Date:** 2026-08-14
+**Issue:** [#220](https://github.com/r-spade/ormah/issues/220) · **Decision record:** [#191](https://github.com/r-spade/ormah/issues/191)
+**Date:** 2026-08-14
+**Supersedes:** the first version of this spec (commit `9859ccd`) and its plan (`19bb362`).
 
-## Problem
+> **Every file path and line number in this document was read from `upstream/main`
+> (`a28837b`), not from `local-main`.** This is not a formality. The previous attempt at this
+> issue failed because its spec and plan were written against `local-main` while the
+> implementation ran in a worktree cut from `upstream/main`. The two bases are 623 commits
+> apart; `memory_engine.py` differs by ~972 lines and `session_watcher.py` by ~1581. Every
+> address in that document was wrong by construction. Read `upstream/main` — via
+> `git show upstream/main:<path>` or from inside the worktree — for any address not listed here.
 
-`_touch_access` (`src/ormah/engine/memory_engine.py:2408`) is one helper that performs four
-mutations at once — `access_count += 1`, `last_accessed`, `last_review`, and
-`stability *= fsrs_stability_growth` — on both the markdown file and the SQLite row. There is no
-way to ask for one without the others.
+---
 
-It has five call sites. One is legitimate: `recall_node(id)` at L783, a deliberate fetch of one
-node. The other four sit inside `for r in results` loops — L912 and L948 in
-`recall_search_structured`, L1029 and L1075 in `recall_search`. **Every node that appears in a
-result list is credited as if it had been read.**
+## 1. Problem
 
-A ten-result recall where the caller used one memory awards identical lifecycle credit to all ten.
+Ormah treats a memory's appearance in a search result as evidence that the memory was used.
+Every direct result of a broad recall goes through `_touch_access`, one helper that updates
+`access_count`, `last_accessed`, `last_review` and `stability` together. A memory that is
+surfaced often accumulates lifetime even when the caller ignores it — a self-reinforcing loop
+in which visibility manufactures its own justification.
 
-### Measured, on a live store — 698 nodes, 2026-08-14
+Per #191, the rule is: **a memory stays active because of confirmed use** — not because Ormah
+surfaced it, not because it is historically popular, not because it is well connected.
 
-| `access_count` | nodes | `stability` |
-|---:|---:|---:|
-| 0 | 657 | 1.00 |
-| 1 | 31 | 1.52 |
-| 2 | 4 | 2.28 |
-| 3 | 6 | 3.41 |
+## 2. What is already correct on `upstream/main`
 
-Exactly `1.5^n`, matching `fsrs_stability_growth = 1.5` (`config.py:171`). Stability is
-multiplicative and uncapped below `fsrs_max_stability = 365`.
+Measured, not assumed. These acceptance criteria from #220 already hold and require **no work**:
 
-A node decays when `R = exp(-t / S)` falls below `fsrs_decay_threshold = 0.3`, i.e. after
-`t = 1.204 * S` days. So surfacing buys lifetime directly:
+| Criterion | Why it already holds |
+|---|---|
+| Graph activation does not change lifecycle fields | all four call sites are guarded by `if r.get("source") not in ("activated", "conflict")` |
+| Conflict expansion does not change lifecycle fields | same guard |
+| Bare whisper does not change lifecycle fields | `context_builder.py:523` and `:896` pass `touch_access=False` |
+| `recall_node(id)` confirms exactly the requested node, not its neighbours | `memory_engine.py:646` touches `resolved_node_id` only; neighbours are fetched for formatting |
+| Retrieval/whisper event logging stays intact | `_log_feedback_candidates` is a separate call from `_touch_access` on every path |
 
-| appearances | `stability` | survives |
-|---:|---:|---:|
-| 0 | 1.00 | 1.2 days |
-| 3 | 3.38 | 4.1 days |
-| 10 | 57.7 | 69 days |
-| 15 | 365 (capped) | 439 days |
+Stating this matters: the previous plan treated all six surfaces as equally broken and budgeted
+work for each. Four of them were already correct.
 
-Fifteen appearances in result lists — with nobody ever reading the content — buy over a year of
-life. `fsrs_max_stability = 365` caps the *stability*, not the lifetime: at the cap a node survives
-`1.204 × 365 = 439` days.
+## 3. The actual defect, in four points
 
-### The loop closes through importance, not through ranking
+| # | Where (`upstream/main`) | Defect |
+|---|---|---|
+| 1 | `memory_engine.py:892` — `recall_search`, hybrid path | writes lifecycle with **no guard at all** |
+| 2 | `memory_engine.py:938` — `recall_search`, FTS fallback | same, unguarded |
+| 3 | `memory_engine.py:679` — `recall_search_structured(touch_access=True)` | the default is `True`, and `api/routes_ui.py:60` calls it without the kwarg → **UI search reinforces memory** |
+| 4 | `memory_engine.py:2498` — `submit_feedback`; `background/session_watcher.py:561` — the `auto_llm_judge` block | qualified positive feedback records affinity and signals but **never records confirmed use** |
 
-Neither `stability` nor `access_count` appears in `hybrid_search.py`; search ranking is not
-directly affected. The self-reinforcement runs through two independent channels in the importance
-scorer, and then through the decay gate:
+Points 1–3 are **subtraction**: behaviour that must stop. Point 4 is **addition**: behaviour that
+must start. That seam is the design's organising principle, and it is where the previous plan —
+six tasks with interlocking dependencies — came apart.
 
+## 4. Architecture
+
+**The boundary is the entry point, not a flag.** Search paths do not get a lifecycle write that
+is switched off; they lose the capability entirely. A parameter that defaults to the wrong value
+is a loaded gun, and the next consumer that forgets to pass `False` re-opens the bug — which is
+precisely how `routes_ui.py` acquired it.
+
+**Lifecycle fields**, the concrete meaning of "must not mutate": `access_count`, `last_accessed`,
+`last_review`, `stability` — in the markdown file **and** in the SQLite `nodes` row. A contract
+test that checks only the database would pass while the file rots.
+
+### 4.1 Task A — subtraction
+
+| File (`upstream/main`) | Change |
+|---|---|
+| `src/ormah/engine/memory_engine.py:775, 811, 892, 938` | delete the four `_touch_access` call sites and the `if touch_access:` blocks guarding two of them |
+| `src/ormah/engine/memory_engine.py:679-694` | remove the `touch_access` parameter from `recall_search_structured` and its docstring paragraph |
+| `src/ormah/engine/memory_engine.py:1936` | rename `_touch_access` → `_record_confirmed_use`, **body byte-identical** |
+| `src/ormah/engine/context_builder.py:523` | remove the `"touch_access": False` dict key |
+| `src/ormah/engine/context_builder.py:896` | remove the `touch_access=False` kwarg |
+| `eval/recall/runner.py:74` | remove `touch_access=False` |
+| `docs/04 - Whisper - Involuntary Recall.md:101` | correct the reference to `touch_access = False` |
+
+`context_builder.py:523` is load-bearing: that dict is splatted as `**search_kwargs` at `:572`.
+Leaving the key behind turns every whisper into a `TypeError`.
+
+**Test call sites that lose the kwarg** (6): `test_background/test_importance_scorer.py:304`;
+`test_engine/test_memory_engine.py:546, 569, 584, 597, 619`.
+
+**Tests that become obsolete and are replaced, not deleted:**
+`test_engine/test_scoring_signals.py:368-495` is a class asserting that `_touch_access` *is*
+called for direct matches and skipped for `activated`/`conflict` nodes. After this change search
+calls nothing at all, so the class is rewritten to assert exactly that.
+`test_engine/test_mutation_stamping.py:146` follows the rename.
+
+**Deliberately untouched:** `FileStore.touch_access` (`src/ormah/store/file_store.py:145`) is a
+namesake with zero production callers and two tests of its own
+(`test_store/test_file_store.py:121`, `test_engine/test_mutation_stamping.py:95`). It is out of
+scope and must be named in the PR body so a reviewer does not read it as an oversight.
+
+### 4.2 Task B — addition
+
+After this change `_record_confirmed_use` has exactly three callers:
+
+| Caller | Condition | Target |
+|---|---|---|
+| `recall_node(id)` | always (already present at `memory_engine.py:646`) | the requested node, never its neighbours |
+| `submit_feedback` | `signal == 1` **and** `source ∈ {explicit, implicit, auto_llm_judge}` | the resolved node |
+| `session_watcher`, `auto_llm_judge` path | `polarity == 1` | each node in the batch |
+
+The source allowlist is **fail-closed**: any other source, and every negative signal, does not
+confirm. `auto_heuristic` stays excluded until #218 provides signal calibration. Negative
+feedback remains prompt-specific affinity evidence and never touches stability.
+
+### 4.3 Concurrency: the reinforcement runs outside the transaction
+
+`IndexDB.transaction()` (`src/ormah/index/db.py:62-82`) holds a process-level `self._lock` for
+the **entire body** of the block, not merely the `BEGIN`. It is reentrant per thread, which is
+why `submit_feedback` can already nest a transaction inside its own. The consequence: while any
+transaction is open, every write from every thread is blocked.
+
+`_record_confirmed_use` performs `file_store.load` and `file_store.save` — disk I/O. Calling it
+inside an open transaction holds the global write lock across that I/O; in the session watcher,
+across N markdown saves in a loop.
+
+**Decision:** collect confirmed node IDs inside the transaction, reinforce after it commits.
+
+```python
+# session_watcher, auto_llm_judge path
+confirmed = []
+with engine.db.transaction() as conn:
+    for record in judge_records:
+        recorded += _insert_usage_signal(conn, ...)
+        if record["polarity"] in (1, -1):
+            _insert_affinity(conn, ...)
+        if record["polarity"] == 1:
+            confirmed.append(record["row"]["node_id"])
+# lock released here
+for node_id in confirmed:
+    engine._record_confirmed_use(node_id)
 ```
-memory appears in a search
-    ├─→ access_count++ ──→ importance_scorer.py:72  access_signal ↑
-    └─→ stability × 1.5 ─→ importance_scorer.py:84  recency_signal = exp(-days / stability) ↑
-                                        │
-                                   importance ↑
-                                        │
-                         decay_manager.py:45  high importance skips decay
-                                        │
-                                survives in the pool
-                                        │
-                                appears again ──┐
-                                        ▲       │
-                                        └───────┘
+
+```python
+# submit_feedback
+with self.db.transaction():
+    resolved_node_id, result = self._submit_feedback_locked(...)
+# lock released here
+if signal == 1 and source in _CONFIRMED_USE_SOURCES:
+    self._record_confirmed_use(resolved_node_id)
+return result
 ```
 
-The second channel is the subtle one: importance's *recency* signal uses `stability` as its time
-constant, so inflating stability also makes a node look more recent than it is.
+This requires `_submit_feedback_locked` to return the `resolved_node_id` alongside its message —
+it already computes the value at `memory_engine.py:2529` and currently discards it.
 
-### Current blast radius
+Both transaction blocks live in one function, `_record_whisper_usage_signals`
+(`session_watcher.py:407`): the `auto_heuristic` path opens its own at `:498`, the
+`auto_llm_judge` path a separate one at `:561`. Only the second is modified. Because the two
+paths do not share a block, there is no route by which a heuristic record can reach the
+confirmed-use list — the separation is structural, and contract test 12 pins it.
 
-41 of 698 nodes have `access_count > 0`. The damage is modest today for an accidental reason —
-whisper already passes `touch_access=False` (`context_builder.py:525` and `:892`), so only explicit
-`recall()` and UI search inflate. The mechanism, not the current damage, is what is unbounded.
+**Accepted cost:** the reinforcement is not atomic with the signal. A crash between the commit
+and the reinforcement leaves a recorded signal without its reinforcement — one memory misses one
+reinforcement, and the next confirmed use corrects it. **Rejected alternative:** holding the
+global write lock across disk I/O, which stalls every whisper and every ingest for the duration.
+**Also rejected:** a reconciliation job that sweeps positive signals lacking a reinforcement —
+new surface, new correctness criterion, and its own test suite, to repair an event whose damage
+is one lost reinforcement.
 
-## Design
+### 4.4 What does not change
 
-### 1. The boundary is the entry point, not a parameter
+`_record_confirmed_use` keeps its body byte-identical, including the silent return when the node
+is missing. No new error handling. The stability formula
+(`stability * fsrs_stability_growth * (retrievability ** -0.2)`) is untouched — bounding,
+cooldown and saturation are #221.
 
-Two operations, and which one runs is decided by *which function the caller entered through*.
+## 5. Verification
 
-**Surfacing** — the node appeared. Logging only, through the existing
-`_log_feedback_candidates`. No lifecycle write. Applies to `recall_search`,
-`recall_search_structured`, whisper, UI search, spreading activation, and conflict expansion.
+Regression is prevented by contract tests on the surfaces, not by a type or a naming convention.
+Each test captures all four lifecycle fields before and after, in **both** the markdown and the
+SQLite row.
 
-**Confirmed use** — `_record_confirmed_use(node_id)`, the single lifecycle mutator. Exactly three
-callers:
+### Non-mutation contracts (Task A)
 
-1. `recall_node(id)` — deliberate fetch of one node (already the case; only the name changes)
-2. `_submit_feedback_locked` — when `signal == 1` **and** `source ∈ {explicit, implicit, auto_llm_judge}`
-3. `session_watcher`, `auto_llm_judge` positive path — which writes affinity directly and never
-   passes through `submit_feedback`
+| # | Surface | Note |
+|---|---|---|
+| 1 | `recall_search`, hybrid | real search over N nodes |
+| 2 | `recall_search`, FTS fallback | hybrid disabled |
+| 3 | `recall_search_structured`, hybrid | called with **no** lifecycle kwarg — the default was the bug |
+| 4 | `recall_search_structured`, FTS fallback | idem |
+| 5 | UI search through `api/routes_ui.py:60` | exercised through the route, not the engine |
+| 6 | whisper through `context_builder` | still non-mutating after losing the flag |
 
-The source list is an explicit allowlist and **fail-closed**: an unrecognised `source` does not
-confirm. `auto_heuristic` is excluded pending [#218](https://github.com/r-spade/ormah/issues/218).
-Negative feedback never confirms, from any source — it is prompt-specific affinity evidence, not
-grounds to touch stability or tier.
+**Test 5 fails on clean `upstream/main`.** It is the proof that the defect exists, and it is
+written before the fix.
 
-### 2. Rename over guard
+### Confirmed-use contracts (Task B)
 
-`_touch_access` is renamed to `_record_confirmed_use` with its **body byte-identical**. The rename
-carries half the safety of this change: `_touch_access` reads like harmless bookkeeping, which is
-precisely why four call sites adopted it without thought. Nobody writes `_record_confirmed_use`
-inside a `for r in results` by accident.
+| # | Event | Expected |
+|---|---|---|
+| 7 | `recall_node(id)` | the requested node mutates; **each neighbour** is asserted unchanged |
+| 8 | `submit_feedback(+1, explicit \| implicit \| auto_llm_judge)` | only the resolved node mutates |
+| 9 | `submit_feedback(+1, auto_heuristic)` | nothing mutates |
+| 10 | `submit_feedback(-1, any source)` | nothing mutates |
+| 11 | session watcher, `auto_llm_judge`, `polarity == 1` | confirms, and signals/affinity rows are still written |
+| 12 | session watcher, `auto_heuristic` | does not confirm |
 
-The `touch_access` parameter of `recall_search_structured` is **removed**, along with the two
-`touch_access=False` arguments in `context_builder.py`. A flag that only ever takes one value is
-not configuration; leaving it in place would keep suggesting that a mutating mode exists.
+Pairs 8/9 and 11/12 are what give the allowlist teeth: without the negative case, a loose
+condition passes.
 
-A `UseKind` enum with a checked `SURFACED` no-op was considered and rejected. It preserves the
-exact coupling this issue exists to cut — search code would still call a lifecycle function — and
-its signature is wrong for the job: surfacing needs `prompt_text`, per-node scores, `session_id`
-and `surface`, which is the shape of `_log_feedback_candidates`, not of a single `node_id`. The
-regression guarantee comes from contract tests instead (§Testing).
+### Gate
 
-### 3. Surfaces
+The baseline — the list of test IDs that already fail on clean `upstream/main` — is measured
+**once in the worktree, at the start**, and is shared input to both tasks rather than a task of
+its own. "Tests pass" means *no test ID outside that list fails*. `make lint`
+(`ruff check src/ tests/`) must pass before each commit.
 
-| Surface | Today | After | Nature |
-|---|---|---|---|
-| `recall_search` hybrid | **mutates** N nodes | log only | removal |
-| `recall_search` FTS fallback | **mutates** N nodes | log only | removal |
-| `recall_search_structured` hybrid | mutates when `touch_access` | never mutates | removal |
-| `recall_search_structured` FTS fallback | mutates when `touch_access` | never mutates | removal |
-| UI search (`GET /api/search`) | **mutates** (uses the default) | never mutates | removal |
-| Whisper / context build | already clean | unchanged | regression test |
-| `activated` / `conflict` results | already excluded | unchanged | regression test |
-| `recall_node` neighbours | already clean | unchanged | regression test |
-| `recall_node(id)` itself | mutates the requested node | unchanged, renamed | unchanged |
-| `submit_feedback` qualified positive | **does nothing** | confirms use | **addition** |
-| `submit_feedback` negative | does nothing | unchanged | unchanged |
-| `session_watcher` `auto_llm_judge` positive | writes affinity only | + confirms use | **addition** |
-| `session_watcher` `auto_heuristic` positive | writes affinity only | unchanged | unchanged |
+PR #229's description claims a pre-existing `A LIMIT or k = ? constraint is required on vec0 knn
+queries` failure in auto-link, conflict and worker-thread vector search. **That is a claim from a
+PR description, not a measurement.** The baseline step measures it. If the suite is green, that
+contradicts #229 and is itself worth reporting.
 
-Half of this issue is an addition, not a rewire: `submit_feedback` never touched the lifecycle.
-Verified by reading `_submit_feedback_locked` (L3136–L3234) — there is no `_touch_access` call.
-
-Two claims in the "already clean" rows were verified rather than assumed:
-
-- **Whisper.** `context_builder` only ever calls `recall_search_structured`, never the ungated
-  `recall_search`. L535 does `search_kwargs.update(intent.search_params)` *after* setting
-  `touch_access: False`, so an override was possible in principle;
-  `prompt_classifier.py:358-374` only ever produces `created_after`, `created_before` and
-  `search_query`. No override exists.
-- **`activated` / `conflict`.** `memory_engine.py:2604` assigns one of the two to every node
-  `_spread_activation` adds, so the exclusion filter covers all of them.
-
-One case the current exclusion list does **not** cover: `_supplement_temporal` produces results
-with `source="temporal"`, which is absent from `("activated", "conflict")` — temporal supplements
-are mutated today. Deleting the loops removes this too, and it is evidence for deletion over any
-filter-based approach: the filter was already incomplete.
-
-### 4. Transaction placement
-
-`db.transaction()` is reentrant per thread (`index/db.py:72`), so nesting is safe. But
-`_record_confirmed_use` writes the markdown file *before* the DB row (the repository's
-Council R3 C5 mutation convention), so a rollback would leave the file stamped and the row not.
-Two consequences:
-
-- **`submit_feedback`** — the call goes as the **last statement** of `_submit_feedback_locked`.
-  It stays inside the outer transaction opened at L3128, which is desirable (feedback and its
-  lifecycle effect should be atomic), and being last means nothing after it can fail and roll back
-  a markdown write that already happened.
-- **`session_watcher`** — the `auto_llm_judge` loop runs inside
-  `with engine.db.transaction() as conn` over a whole batch. Qualifying `node_id`s are collected
-  during the loop and `_record_confirmed_use` is applied **after** the block closes, so per-node
-  file I/O does not hold `BEGIN IMMEDIATE` across the batch.
-
-**No new error handling.** The body stays identical, including the existing early return when the
-node is missing. Adding a `try/except` here would change behaviour this issue must not change.
-
-## Testing
-
-Every test asserts on the same four fields: `access_count`, `last_accessed`, `last_review`,
-`stability`.
-
-**Non-mutation (the contract)**
-
-- broad recall, hybrid path — N results, zero fields changed on any of them
-- broad recall, FTS fallback path — same, with hybrid search forced unavailable
-- `GET /api/search` — same
-- whisper / context build — same
-- `activated` and `conflict` results — same
-- `recall_node` neighbours — same
-
-**Mutation, exactly where intended**
-
-- `recall_node(id)` mutates the requested node and no other
-- `submit_feedback(signal=1, source="explicit")` confirms use on the resolved node only
-- `submit_feedback(signal=1, source="implicit")` — same
-- `session_watcher` `auto_llm_judge` positive confirms use
-
-**Fail-closed**
-
-- `signal=1, source="auto_heuristic"` does not confirm
-- `signal=-1`, any source, does not confirm
-- unknown `source` string does not confirm
-- `session_watcher` `auto_llm_judge` negative does not confirm
-
-These contract tests, not a type, are the regression guarantee: they catch a reintroduced
-lifecycle write through any mechanism, including one nobody anticipated.
-
-**Baseline first.** Run the suite on clean `upstream/main` and record the result before claiming
-anything green. PR #229 reported pre-existing failures
-(`A LIMIT or k = ? constraint is required on vec0 knn queries` in auto-link, conflict and
-worker-thread vector search, plus a setup binary-detection assumption). Without the baseline there
-is no way to separate what this change broke from what was already red.
-
-## Delivery
+## 6. Where the work happens
 
 Per `FORK-WORKFLOW.md`, non-negotiable:
 
-```bash
-git fetch upstream
-git worktree add -b fix/220-confirmed-use ../ormah-wt-220 upstream/main
-# work in ../ormah-wt-220 — Tools/ormah stays on local-main (it is what the running Beta serves)
-git push fork fix/220-confirmed-use
-/council-pr            # base r-spade:main, head fork:fix/220-confirmed-use
-```
+- worktree at `../ormah-wt-220` on branch `fix/220-confirmed-use`, cut from `upstream/main`
+- **never** `git checkout` a contribution branch inside `Tools/ormah` — that directory is what
+  the running Beta serves via launchd `com.ormah.server.dev`
+- push to `fork`, never `upstream`; do not rename remotes
+- the spec and the plan are written by reading `upstream/main` — the process correction of this round
 
-Branch cut from `upstream/main`, never from `local-main`. Push to `fork`. Do not rename remotes.
+**Blocked, and only this:** the PR must not be opened while draft PR
+[#229](https://github.com/r-spade/ormah/pull/229) still declares `Closes #220–#223`. Implementing
+and committing are free; `gh pr create` waits for that PR to be closed as superseded, or for its
+`Closes` lines to be dropped.
 
-**Blocking pre-condition for opening the PR:** draft PR
-[#229](https://github.com/r-spade/ormah/pull/229) is still OPEN and its body carries
-`Closes #220–#223`. If it merges, it auto-closes all four issues. Raised with @r-spade at
-[#229#issuecomment-5296007628](https://github.com/r-spade/ormah/pull/229#issuecomment-5296007628);
-the PR should not be opened until he closes it or drops the `Closes` lines.
+Landing order for the cluster is #220 → #222 → #221 → #223, as four separate PRs.
 
-The PR body should carry one line of fact, not a debt: *UI search does not log retrieval events —
-it did not before this change either.* Tracked separately as
-[#231](https://github.com/r-spade/ormah/issues/231).
+## 7. Out of scope
 
-### Explicitly not in this change
-
-- **The reinforcement formula.** `stability × 1.5` stays uncapped and uncooled. It now compounds
-  over rare real events instead of over appearances, which is the point of this issue, but the
-  formula itself is [#221](https://github.com/r-spade/ormah/issues/221).
-- **Importance blocking decay.** The gate at `decay_manager.py:45` survives intact —
-  [#222](https://github.com/r-spade/ormah/issues/222), which lands next.
-- **Archival promotion.** `_touch_access` does not touch `tier` today, so "surfacing must not
-  promote an archival node" is already true and becomes a regression test. Adding reversible
-  promotion is [#223](https://github.com/r-spade/ormah/issues/223).
-- **`auto_heuristic` admission.** Waits on [#218](https://github.com/r-spade/ormah/issues/218).
-  This is not a footnote: on the reference store, `auto_heuristic` accounts for 153 of the 184
-  positive affinity rows, so #218 gates off **83% of all positive feedback**. This change admits
-  31 events (25 `auto_llm_judge` + 6 `implicit`); `explicit` has never been used at all.
-- **UI search retrieval logging.** [#231](https://github.com/r-spade/ormah/issues/231), follow-up
-  after #223.
-
-## Risk register
-
-| Risk | Register | Mitigation |
-|---|---|---|
-| PR #229 merges and auto-closes #220–#223 | **verified** — PR is OPEN, draft, body carries `Closes` | comment posted; do not open the PR until resolved |
-| A future call site reintroduces a lifecycle write in a search loop | **assumed** — nothing structurally prevents it | contract tests fail loudly on any of the six non-mutation surfaces |
-| Suite is red before the change and the cause is misattributed | **inferred** — #229 reported pre-existing vec0 failures, not re-measured here | record the `upstream/main` baseline before running anything |
-| Confirmed-use signal is starved after this change | **verified by measurement** — 31 admitted vs 153 excluded | accepted deliberately; #218 is the fix, now assigned |
-| `auto_llm_judge` confirmed-use path untested on live data | **verified** — session watcher is off on the reference store, so those 25 rows are historical | covered by unit tests; no live validation available on this machine |
-| Markdown stamped but DB rolled back | **inferred** from the write order in the existing helper | call placed last inside the feedback transaction; batched after the transaction in the session watcher |
+The reinforcement formula (#221) · importance blocking decay (#222) · archival promotion (#223) ·
+`auto_heuristic` admission (#218) · UI search retrieval logging (#231) ·
+`FileStore.touch_access` · any change to the stability formula.
