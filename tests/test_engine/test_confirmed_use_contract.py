@@ -179,3 +179,242 @@ def test_concurrent_confirmed_use_does_not_lose_increments(engine):
         "SELECT access_count FROM nodes WHERE id = ?", (target,)
     ).fetchone()
     assert row["access_count"] == after.access_count, "file and DB disagree after concurrency"
+
+
+# --- Confirmed-use contracts ----------------------------------------------
+
+def _seed_whisper_log(engine, node_id, prompt="what about caching?"):
+    """Insert a whisper_log row so submit_feedback can resolve one.
+
+    submit_feedback attaches feedback to a whisper/recall event; without a row
+    it returns an error string instead of recording anything.
+    """
+    engine.recall_search(prompt, limit=10)
+    row = engine.db.conn.execute(
+        "SELECT id FROM whisper_log WHERE node_id = ? ORDER BY id DESC LIMIT 1",
+        (node_id,),
+    ).fetchone()
+    assert row is not None, "no whisper_log row was created — check the surface used"
+    return row["id"]
+
+
+def test_recall_node_confirms_only_the_requested_node(engine):
+    """Contract 7: recall_node confirms the node asked for, never its neighbours."""
+    from ormah.models.node import CreateNodeRequest
+
+    target, _ = engine.remember(CreateNodeRequest(
+        content="caching architecture target node", title="Target", type="fact", tier="working",
+    ))
+    neighbour, _ = engine.remember(CreateNodeRequest(
+        content="caching architecture neighbour node", title="Neighbour", type="fact",
+        tier="working",
+    ))
+    engine.graph.conn.execute(
+        "INSERT INTO edges (source_id, target_id, edge_type, weight, created) "
+        "VALUES (?, ?, 'related_to', 1.0, '2026-01-01T00:00:00Z')",
+        (target, neighbour),
+    )
+
+    before_target = _snapshot(engine, target)
+    before_neighbour = _snapshot(engine, neighbour)
+
+    engine.recall_node(target)
+
+    assert _snapshot(engine, target) != before_target, "recall_node did not confirm its node"
+    assert _snapshot(engine, neighbour) == before_neighbour, (
+        "recall_node confirmed a neighbour — only the requested node counts"
+    )
+
+
+@pytest.mark.parametrize("source", ["explicit", "implicit", "auto_llm_judge"])
+def test_qualified_positive_feedback_confirms_use(engine, source):
+    """Contract 8: the three allowlisted sources confirm, with signal == 1."""
+    ids = _make_nodes(engine, count=2)
+    target, other = ids[0], ids[1]
+    log_id = _seed_whisper_log(engine, target)
+
+    before_target = _snapshot(engine, target)
+    before_other = _snapshot(engine, other)
+
+    engine.submit_feedback(target, signal=1, source=source, whisper_log_id=log_id)
+
+    assert _snapshot(engine, target) != before_target, (
+        f"positive {source} feedback did not confirm use"
+    )
+    assert _snapshot(engine, other) == before_other, "an unrelated node was confirmed"
+
+
+def test_auto_heuristic_positive_does_not_confirm(engine):
+    """Contract 9: auto_heuristic is excluded pending #218 — fail-closed."""
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    before = _snapshot(engine, target)
+    engine.submit_feedback(target, signal=1, source="auto_heuristic", whisper_log_id=log_id)
+
+    assert _snapshot(engine, target) == before, "auto_heuristic must not confirm use"
+
+
+@pytest.mark.parametrize("source", ["explicit", "implicit", "auto_llm_judge", "auto_heuristic"])
+def test_negative_feedback_never_confirms(engine, source):
+    """Contract 10: -1 is evidence about the prompt/node pair, never a confirmed use."""
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    before = _snapshot(engine, target)
+    engine.submit_feedback(target, signal=-1, source=source, whisper_log_id=log_id)
+
+    assert _snapshot(engine, target) == before, (
+        f"negative {source} feedback changed lifecycle fields"
+    )
+
+
+# --- Idempotency contracts (second council round: the latch, not affinity) ---
+
+def test_replaying_the_same_positive_feedback_confirms_once(engine):
+    """Contract 10a: one confirmed-use event reinforces at most once.
+
+    affinity and signals both use ON CONFLICT DO NOTHING, so a replayed request
+    records no new evidence yet still returns success. Reinforcing on every call
+    would let a retried tool call or a double-click manufacture retention.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    engine.submit_feedback(target, signal=1, source="explicit", whisper_log_id=log_id)
+    after_first = _snapshot(engine, target)
+
+    engine.submit_feedback(target, signal=1, source="explicit", whisper_log_id=log_id)
+
+    assert _snapshot(engine, target) == after_first, (
+        "replaying the same positive feedback reinforced twice"
+    )
+
+
+def test_negative_then_positive_feedback_confirms(engine):
+    """Contract 10b: a first-time positive confirms even after a negative.
+
+    The negative claims nothing (it does not qualify), so the later positive is
+    still the event's first confirmation. This is the case a naive 'did the
+    signals INSERT add a row?' gate gets wrong: the unique key is
+    (whisper_log_id, signal_type, source) with no polarity, so the second call
+    hits ON CONFLICT DO NOTHING even though it is a genuine first confirmation.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    engine.submit_feedback(target, signal=-1, source="explicit", whisper_log_id=log_id)
+    after_negative = _snapshot(engine, target)
+
+    engine.submit_feedback(target, signal=1, source="explicit", whisper_log_id=log_id)
+
+    assert _snapshot(engine, target) != after_negative, (
+        "the event's first qualified positive did not confirm use"
+    )
+
+
+def test_second_source_on_an_already_confirmed_event_does_not_reconfirm(engine):
+    """Contract 10c: the event is confirmed once, not once per source.
+
+    This is the mirror failure: source is part of the signals unique key, so an
+    implicit-positive followed by an explicit-positive DOES insert a second
+    signals row. The event was already claimed; it must not reinforce again.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    engine.submit_feedback(target, signal=1, source="implicit", whisper_log_id=log_id)
+    after_first = _snapshot(engine, target)
+
+    engine.submit_feedback(target, signal=1, source="explicit", whisper_log_id=log_id)
+
+    assert _snapshot(engine, target) == after_first, (
+        "a second positive source reconfirmed an already-confirmed event"
+    )
+
+
+def test_polarity_cycle_confirms_once(engine):
+    """Contract 10d: +1 / -1 / +1 reinforces at most once — not twice.
+
+    This is the false positive that killed the affinity-derived gate. affinity
+    has one row per (node_id, whisper_log_id) and explicit feedback UPDATEs its
+    signal in place, so reading affinity would see false->true twice and
+    reinforce twice. The claim latch is never deleted, so the third call takes
+    nothing.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    engine.submit_feedback(target, signal=1, source="explicit", whisper_log_id=log_id)
+    after_first_positive = _snapshot(engine, target)
+
+    engine.submit_feedback(target, signal=-1, source="explicit", whisper_log_id=log_id)
+    engine.submit_feedback(target, signal=1, source="explicit", whisper_log_id=log_id)
+
+    assert _snapshot(engine, target) == after_first_positive, (
+        "a polarity cycle reinforced the same event twice"
+    )
+
+
+def test_unqualified_affinity_does_not_block_a_later_qualified_positive(engine):
+    """Contract 10e: a pre-existing auto_heuristic row must not swallow a real use.
+
+    This is the false negative that killed the affinity-derived gate. The
+    affinity unique key is (node_id, whisper_log_id) and only explicit feedback
+    UPDATEs the row, so an auto_heuristic positive makes a later implicit
+    positive a no-op INSERT that leaves source = auto_heuristic. Reading
+    affinity would keep the gate false forever and lose the reinforcement in
+    silence. The claim latch does not consult affinity at all.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    engine.submit_feedback(target, signal=1, source="auto_heuristic", whisper_log_id=log_id)
+    after_heuristic = _snapshot(engine, target)
+
+    engine.submit_feedback(target, signal=1, source="implicit", whisper_log_id=log_id)
+
+    assert _snapshot(engine, target) != after_heuristic, (
+        "a prior auto_heuristic affinity row blocked a genuine confirmed use"
+    )
+
+
+def test_reinforcement_failure_does_not_fail_the_feedback_call(engine):
+    """Contract 10f: a raising mutator is logged, not propagated.
+
+    The route returns submit_feedback's value directly, so an exception after
+    COMMIT would 500 a call whose affinity and signals rows are already durably
+    written. ZeroDivisionError is the realistic case, not a contrived one:
+    stability is Field(default=1.0, ge=0.0), so zero is legal, and the mutator
+    divides by it. Under the at-most-once contract this reinforcement is lost —
+    that is the accepted cost, but it must be a logged miss, not an API error.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    before = _snapshot(engine, target)
+
+    with patch.object(
+        engine, "_record_confirmed_use", side_effect=ZeroDivisionError("float division by zero")
+    ):
+        message = engine.submit_feedback(
+            target, signal=1, source="explicit", whisper_log_id=log_id
+        )
+
+    assert "Feedback recorded" in message, "a failed reinforcement broke the feedback contract"
+    assert _snapshot(engine, target) == before, "lifecycle advanced despite the failure"
+
+    # The evidence itself is committed — this is about lifecycle, not observability.
+    affinity = engine.db.conn.execute(
+        "SELECT * FROM affinity WHERE whisper_log_id = ? AND node_id = ?",
+        (log_id, target),
+    ).fetchone()
+    assert affinity is not None, "the feedback evidence was rolled back"

@@ -50,6 +50,11 @@ logger = logging.getLogger(__name__)
 # Higher factor = tighter structural link = more activation propagated.
 _EMBEDDING_SCHEMA_VERSION = 2
 
+# Issue #220: the only feedback sources that count as confirmed use. Fail-closed —
+# anything not listed here, and every negative signal, does not reinforce.
+# auto_heuristic is excluded pending #218 signal calibration.
+_CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge"})
+
 
 def _generate_title(content: str, max_chars: int = 60) -> str:
     """Generate a short title from the first line/sentence of content."""
@@ -2479,6 +2484,49 @@ class MemoryEngine:
             return None, None, f"No whisper_log entry found for node {node_id}"
         return resolved_node_id, row, None
 
+    def _claim_confirmed_use(
+        self,
+        conn,
+        whisper_log_id: int | None,
+        node_id: str,
+        *,
+        signal: int,
+        source: str,
+    ) -> bool:
+        """Take the at-most-once confirmed-use claim for one (event, node) pair.
+
+        Returns True only for the caller that actually inserts the claim, so a
+        whisper event reinforces at most once no matter how many qualified
+        positives arrive, from how many sources, in what order.
+
+        The claim is a durable monotonic latch, deliberately independent of
+        affinity and signals. affinity is mutable — explicit feedback UPDATEs the
+        single row per (node_id, whisper_log_id) — so deriving confirmation from
+        it makes a +1/-1/+1 cycle confirm twice, and makes a pre-existing
+        auto_heuristic row swallow a later qualified positive. The signals unique
+        key omits polarity and is never updated, so deriving it from there makes
+        -1 followed by +1 never confirm at all.
+
+        Fail-closed: an unqualified signal, a source outside the allowlist, or a
+        missing whisper_log_id claims nothing.
+
+        MUST be called inside the caller's transaction. Claiming after the
+        mutator instead would let two concurrent confirmations both pass and
+        both reinforce; @_serialized_memory_operation keeps the read-modify-write
+        correct but cannot enforce once-per-event.
+        """
+        if whisper_log_id is None or signal != 1 or source not in _CONFIRMED_USE_SOURCES:
+            return False
+        conn.execute(
+            """
+            INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT DO NOTHING
+            """,
+            (whisper_log_id, node_id),
+        )
+        return conn.execute("SELECT changes()").fetchone()[0] == 1
+
     def submit_feedback(
         self,
         node_id: str,
@@ -2488,12 +2536,30 @@ class MemoryEngine:
     ) -> str:
         """Record feedback while preventing retention from deleting its event."""
         with self.db.transaction():
-            return self._submit_feedback_locked(
+            resolved_node_id, became_confirmed, message = self._submit_feedback_locked(
                 node_id=node_id,
                 signal=signal,
                 source=source,
                 whisper_log_id=whisper_log_id,
             )
+        # Reinforcement runs after the transaction commits: db.transaction() holds a
+        # process-level lock for its whole body, and _record_confirmed_use does file
+        # I/O. Calling it inside would also take db_lock before memory_lock, inverting
+        # the order every serialized writer uses.
+        #
+        # Isolated, and never propagated. The affinity and signals rows are already
+        # durably committed and the route returns this value straight to the caller,
+        # so raising here would report a failure for evidence that was recorded. The
+        # contract is at-most-once (see 00-overview.md): the claim stays taken and
+        # this reinforcement is simply lost, as a logged miss.
+        if became_confirmed:
+            try:
+                self._record_confirmed_use(resolved_node_id)
+            except Exception:
+                logger.exception(
+                    "confirmed-use reinforcement failed for node %s", resolved_node_id
+                )
+        return message
 
     def _submit_feedback_locked(
         self,
@@ -2501,7 +2567,7 @@ class MemoryEngine:
         signal: int,
         source: str = "explicit",
         whisper_log_id: int | None = None,
-    ) -> str:
+    ) -> tuple[str | None, bool, str]:
         """Record explicit or implicit feedback signal for a whisper candidate.
 
         When *whisper_log_id* is supplied, feedback attaches to that exact
@@ -2514,7 +2580,7 @@ class MemoryEngine:
             node_id, whisper_log_id,
         )
         if error is not None:
-            return error
+            return None, False, error
         assert resolved_node_id is not None
         assert row is not None
 
@@ -2526,6 +2592,13 @@ class MemoryEngine:
         whisper_log_id = row["id"]
 
         with self.db.transaction() as conn:
+            became_confirmed = self._claim_confirmed_use(
+                conn,
+                whisper_log_id,
+                resolved_node_id,
+                signal=signal,
+                source=source,
+            )
             conn.execute(
                 """
                 INSERT INTO affinity
@@ -2593,7 +2666,11 @@ class MemoryEngine:
                     (resolved_node_id,),
                 )
 
-        return f"Feedback recorded for node {resolved_node_id[:8]}..."
+        return (
+            resolved_node_id,
+            became_confirmed,
+            f"Feedback recorded for node {resolved_node_id[:8]}...",
+        )
 
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""
