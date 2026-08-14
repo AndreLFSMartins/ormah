@@ -4,9 +4,9 @@
 
 **Goal:** Stop Ormah from treating a memory's appearance in a search result as evidence it was used, and give confirmed use exactly three named callers.
 
-**Architecture:** The boundary is the entry point, not a flag. Search paths lose their lifecycle writes entirely — deleted, not guarded — and `_touch_access` is renamed `_record_confirmed_use` with a byte-identical body, now serialized by `@_serialized_memory_operation`. Two tasks along a subtraction/addition seam. Regression is prevented by contract tests that read all four lifecycle fields from both the markdown file and the SQLite row.
+**Architecture:** The boundary is the entry point, not a flag. Search paths lose their lifecycle writes entirely — deleted, not guarded — and `_touch_access` is renamed `_record_confirmed_use` with a byte-identical body, now serialized by `@_serialized_memory_operation`. Confirmed use is gated by one shared at-most-once claim on a new `confirmed_use_claims` table, taken inside the caller's transaction. Two tasks along a subtraction/addition seam. Regression is prevented by contract tests that read all four lifecycle fields from both the markdown file and the SQLite row.
 
-**Reviewed by the Dev Council on 2026-08-14** (Cursor + Codex, two rounds). Five findings accepted and folded in; one rejected. The result, including what was rejected and why, is at `$COUNCIL_HOME/council-result.md`.
+**Reviewed by the Dev Council twice on 2026-08-14** (Cursor + Codex, two rounds each). The first review accepted five findings and rejected one. The second review **refuted the central fix of the first**: the event-transition gate read from `affinity` cannot work, because `affinity` is mutable. Task 1 passed both reviews untouched; Task 2 was rewritten around the claim table. Six findings accepted, two rejected. Both results are at `$COUNCIL_HOME/council-result.md` (the second overwrote the first; the raw peer outputs of both runs are under `$COUNCIL_HOME/runs/`).
 
 **Tech Stack:** Python ≥3.11, pytest (`asyncio_mode = auto`), SQLite + sqlite-vec, FastAPI, ruff (line-length 100, target py311).
 
@@ -21,7 +21,9 @@
 - **No new error handling *inside* `_record_confirmed_use`**, including the silent return when the node is missing. Its *callers* isolate it — that is a different thing, and Task 2's watcher loop does exactly that.
 - **`_record_confirmed_use` is serialized** with `@_serialized_memory_operation` (council finding). Its load/modify/save/DB-update sequence was never atomic; the decorator is the whole fix and the body still does not change.
 - **Confirmed-use source allowlist is fail-closed:** exactly `{"explicit", "implicit", "auto_llm_judge"}` with `signal == 1`. `auto_heuristic` is excluded pending #218. Every other source, and every negative signal, does not confirm.
-- **Reinforcement fires on a state transition of the event, never on a request** (council finding). One whisper event confirms at most once, no matter how many times a request is replayed or how many sources report positively on it. A rowcount is not a valid transition test — see Task 2, Step 3b.
+- **Reinforcement fires on an at-most-once claim, never on a request and never on derived state** (second council round). One whisper event reinforces at most once, no matter how many times a request is replayed, how many sources report positively on it, or which caller gets there first. The gate is a claim row on the new `confirmed_use_claims` table, taken with `INSERT ... ON CONFLICT DO NOTHING` **inside the caller's transaction**; only the caller that inserts reinforces. Both `submit_feedback` and the watcher use the same claim — see Task 2, Steps 4, 5 and 9.
+- **Do not derive confirmation from `affinity` or `signals`.** Both were tried and both fail, in opposite directions. `affinity` is mutable (unique `(node_id, whisper_log_id)`, and explicit feedback `UPDATE`s that single row), so a `+1/-1/+1` cycle confirms twice and a pre-existing `auto_heuristic` row swallows a later qualified positive. The `signals` unique key omits `polarity` and its rows are never updated, so an explicit `-1` followed by `+1` never confirms at all. The claim table consults neither.
+- **The delivery contract is at-most-once, not exactly-once.** `_record_confirmed_use` writes markdown before updating SQLite, and that write cannot join the transaction or be rolled back — so no ordering of claim and mutator yields exactly-once. A crash or exception after `COMMIT` loses that event's reinforcement permanently. This is a decision, not a gap: `#220` exists to stop Ormah manufacturing retention, so reinforcing twice is worse than missing once. A durable pending/applied protocol with a reconciliation loop was rejected in both council rounds. Misses are logged; **the claim is never deleted on failure**, because the mutator saves the markdown before the DB update and a delete-and-retry would increment the file twice.
 - **The reinforcement runs outside the transaction**, on IDs collected inside it. `IndexDB.transaction()` holds a process-level lock for the whole block; `_record_confirmed_use` does disk I/O. With the decorator above, calling it inside an open transaction would also invert the `memory_lock → db_lock` order — so this constraint is now a correctness rule, not a performance preference.
 - **Lifecycle fields** — the four that must be asserted on both sides: `access_count`, `last_accessed`, `last_review`, `stability`.
 - **Do not open the PR** while draft PR [#229](https://github.com/r-spade/ormah/pull/229) still declares `Closes #220–#223`. Implementing and committing are free; only `gh pr create` is blocked.
@@ -76,7 +78,7 @@ PR #229 claims a pre-existing `A LIMIT or k = ? constraint is required on vec0 k
 | Task | File | Deliverable |
 |---|---|---|
 | 1 | `01-stop-surfacing-writes.md` | No search path writes lifecycle fields; the `touch_access` parameter is gone; `_touch_access` is renamed |
-| 2 | `02-confirmed-use-callers.md` | Qualified positive feedback and the `auto_llm_judge` path record confirmed use |
+| 2 | `02-confirmed-use-callers.md` | The `confirmed_use_claims` latch; qualified positive feedback and the `auto_llm_judge` path record confirmed use through it |
 
 Task 2 consumes exactly one thing from Task 1 — the name `_record_confirmed_use` — and nothing else. There is no other interface between them.
 

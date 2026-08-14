@@ -100,27 +100,60 @@ After this change `_record_confirmed_use` has exactly three callers:
 | Caller | Condition | Target |
 |---|---|---|
 | `recall_node(id)` | always (already present at `memory_engine.py:646`) | the requested node, never its neighbours |
-| `submit_feedback` | the event **becomes** a qualified positive: `signal == 1` **and** `source ∈ {explicit, implicit, auto_llm_judge}` **and** it was not already confirmed | the resolved node |
-| `session_watcher`, `auto_llm_judge` path | `polarity == 1` | each node in the batch |
+| `submit_feedback` | it **takes the claim** for this `(whisper event, node)` pair: `signal == 1` **and** `source ∈ {explicit, implicit, auto_llm_judge}` **and** no claim existed | the resolved node |
+| `session_watcher`, `auto_llm_judge` path | it takes the claim, on the same conditions — **not** `polarity == 1` | each node in the batch that claimed |
 
 The source allowlist is **fail-closed**: any other source, and every negative signal, does not
 confirm. `auto_heuristic` stays excluded until #218 provides signal calibration. Negative
 feedback remains prompt-specific affinity evidence and never touches stability.
 
 **Confirmation is a property of the event, not of the request** (Dev Council, 2026-08-14). One
-whisper event confirms at most once. `submit_feedback` is replayable by construction — affinity
+whisper event reinforces at most once. `submit_feedback` is replayable by construction — affinity
 and signals both write `ON CONFLICT DO NOTHING` and still return success — so reinforcing per
 request would let a retried tool call, a double-click, or a second source manufacture retention
 from a single confirmed use.
 
-The transition cannot be read off a rowcount. The unique key is
-`signals(whisper_log_id, signal_type, source)` (`schema.sql:189`), which **excludes `polarity`**,
-and `affinity` has no unique index in `schema.sql` at all — its indexes come from migration code,
-so a legacy database can hold duplicates. A rowcount gate therefore fails in both directions:
-explicit-negative followed by explicit-positive is a real confirmation that inserts no signals row,
-while implicit-positive followed by explicit-positive inserts one for an event already confirmed.
-The gate is instead the event's confirmed state read before and after the writes, inside the
-transaction: *not confirmed before, confirmed after*.
+**The gate cannot be derived from existing rows.** The second council round (2026-08-14) refuted
+the first round's answer — reading the event's confirmed state off `affinity` before and after the
+writes — and the code confirms the refutation. Two candidates, two opposite failures:
+
+- **`affinity` is mutable.** Its unique key is `(node_id, whisper_log_id) WHERE whisper_log_id IS
+  NOT NULL` (`db.py:389`), the insert is `ON CONFLICT DO NOTHING` (`memory_engine.py:2547`), and
+  only `source == "explicit"` follows with `UPDATE affinity SET signal = ?, source = ?` (`:2569`).
+  So explicit `+1 → -1 → +1` reads false→true **twice** and reinforces twice; and a pre-existing
+  `auto_heuristic` row makes a later qualified `implicit +1` a no-op insert with no update, leaving
+  the gate false forever and losing a legitimate reinforcement in silence.
+- **`signals` omits polarity.** Its unique key is `(whisper_log_id, signal_type, source)`
+  (`schema.sql:189`) and the row is never updated (`:2575`), so explicit `-1` followed by explicit
+  `+1` collides, the stored polarity stays `-1`, and a real confirmation **never** fires.
+
+A rowcount over either table inherits the same defect, for the same reason: their keys and their
+mutability answer a different question than "has this event ever been confirmed?"
+
+**The gate is a dedicated latch.** A new table holds one row per `(whisper event, node)` pair:
+
+```sql
+CREATE TABLE IF NOT EXISTS confirmed_use_claims (
+    whisper_log_id INTEGER NOT NULL REFERENCES whisper_log(id) ON DELETE CASCADE,
+    node_id        TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    claimed_at     TEXT NOT NULL,
+    PRIMARY KEY (whisper_log_id, node_id)
+);
+```
+
+`became_confirmed` is the row count of a single `INSERT ... ON CONFLICT DO NOTHING` into it,
+executed **inside the caller's transaction** and only when the incoming signal qualifies. Both
+callers share the helper, so the invariant holds across them — which matters because
+`has_llm_judge` only sees the watcher's own signal source and is blind to feedback submitted
+through MCP. The latch is monotonic: nothing deletes it, so a polarity cycle cannot re-arm it, and
+it consults neither `affinity` nor `signals`.
+
+`whisper_log_id` is `NOT NULL` because SQLite permits repeated `NULL`s in a primary key, which
+would defeat the latch. The foreign key is `ON DELETE CASCADE`, not the `SET NULL` the other
+`whisper_log_id` references use — those columns are nullable, and `SET NULL` on a `NOT NULL`
+column would make `whisper_log_cleanup`'s delete fail. CASCADE also bounds the table by
+`whisper_log`'s own retention, and `whisper_log.id` is `AUTOINCREMENT`, so a cascaded delete
+cannot resurrect a claimable event.
 
 ### 4.2.1 Serializing the mutator
 
@@ -164,7 +197,10 @@ with engine.db.transaction() as conn:
         recorded += _insert_usage_signal(conn, ...)
         if record["polarity"] in (1, -1):
             _insert_affinity(conn, ...)
-        if record["polarity"] == 1:
+        if engine._claim_confirmed_use(
+            conn, record["row"]["id"], record["row"]["node_id"],
+            signal=record["polarity"], source=_LLM_JUDGE_AFFINITY_SOURCE,
+        ):
             confirmed.append(record["row"]["node_id"])
 # lock released here
 for node_id in confirmed:
@@ -187,14 +223,53 @@ with self.db.transaction():
     resolved_node_id, became_confirmed, result = self._submit_feedback_locked(...)
 # lock released here
 if became_confirmed:
-    self._record_confirmed_use(resolved_node_id)
+    try:
+        self._record_confirmed_use(resolved_node_id)
+    except Exception:
+        logger.exception("confirmed-use reinforcement failed for node %s", resolved_node_id)
 return result
 ```
 
-This requires `_submit_feedback_locked` to return the `resolved_node_id` and the transition flag
+This requires `_submit_feedback_locked` to return the `resolved_node_id` and the claim flag
 alongside its message — it already computes the node ID at `memory_engine.py:2529` and currently
-discards it. `became_confirmed` is computed inside the existing transaction by reading the event's
-confirmed state before the first write and again after the last, per §4.2.
+discards it. `became_confirmed` is the claim taken inside the existing transaction, per §4.2.
+
+**`submit_feedback` isolates the mutator too** (second council round). The first version isolated
+only the watcher. But the API route returns `submit_feedback`'s value directly, so an exception
+after `COMMIT` turns a call whose affinity and signals rows are already durably written into a 500 —
+and, because the claim is taken, the client's retry returns success without reinforcing. Both
+callers therefore catch, log, and return normally.
+
+### 4.3.1 The delivery contract is at-most-once
+
+Stated plainly, because it is a decision and not an oversight. `_record_confirmed_use` saves the
+markdown file **before** updating SQLite, and that file write cannot join the transaction or be
+rolled back. Both peers in the second council round confirmed that **no ordering of claim and
+mutator delivers exactly-once**:
+
+| Arrangement | Concurrent double reinforcement | Recoverable after a post-commit failure |
+|---|---|---|
+| Claim inside the transaction, mutator after `COMMIT` (**chosen**) | impossible | no — the claim is taken, the retry skips |
+| Mutator first, claim after | possible — both callers pass the check | yes |
+| Lock + file I/O inside the transaction | impossible | no — the file save still escapes `ROLLBACK` |
+
+The first row is chosen. A crash or exception between `COMMIT` and the mutator loses that event's
+reinforcement permanently, and a DB failure after the file save can leave markdown and SQLite
+disagreeing on the lifecycle fields until the next successful write to that node.
+
+The cost is real and was quantified in the first council round: with `S = 1` and `growth = 1.5`,
+uses on day 1 and day 2, dropping the day-1 update yields about **2.24** stability instead of
+**3.07**. The node stays permanently below its true trajectory. The earlier claim that "the next
+confirmed use recovers it" was **false**.
+
+It is accepted anyway, on the issue's own terms: `#220` exists because Ormah was manufacturing
+retention from mere surfacing, so **a double reinforcement is worse than a missed one**. Exactly-once
+would need a durable pending/applied protocol plus a reconciliation loop — rejected in both council
+rounds, the second time over an explicit counter-argument from Codex, because a recovery loop that
+re-applies missed reinforcements would invert the purpose of the issue. Misses are logged.
+
+The claim is **never deleted on failure**, for the same file-write reason: the markdown may already
+carry the increment, so a delete-and-retry would increment it a second time.
 
 Both transaction blocks live in one function, `_record_whisper_usage_signals`
 (`session_watcher.py:407`): the `auto_heuristic` path opens its own at `:498`, the
@@ -235,6 +310,13 @@ decorator (§4.2.1). The stability formula
 (`stability * fsrs_stability_growth * (retrievability ** -0.2)`) is untouched — bounding,
 cooldown and saturation are #221.
 
+The only schema change is the new `confirmed_use_claims` table (§4.2), added to `schema.sql` as
+`CREATE TABLE IF NOT EXISTS`. `Database.init_schema` (`db.py:84-89`) runs `executescript` on every
+startup, so a purely additive table needs no `_migrate` step — unlike the `affinity` migration,
+which had to alter an existing table's unique constraint. No existing table, column, or index is
+touched. This does widen Task B beyond the pure "addition" the original design promised; it is the
+smallest change that makes the gate correct, and the gate is the point of the issue.
+
 ## 5. Verification
 
 Regression is prevented by contract tests on the surfaces, not by a type or a naming convention.
@@ -264,19 +346,32 @@ written before the fix.
 | 9 | `submit_feedback(+1, auto_heuristic)` | nothing mutates |
 | 10 | `submit_feedback(-1, any source)` | nothing mutates |
 | 10a | the same `submit_feedback(+1, explicit)` replayed | confirms **once** |
-| 10b | `submit_feedback(-1, explicit)` then `(+1, explicit)` | confirms — a real transition |
+| 10b | `submit_feedback(-1, explicit)` then `(+1, explicit)` | confirms — the negative claimed nothing, so this is the event's first confirmation |
 | 10c | `submit_feedback(+1, implicit)` then `(+1, explicit)` | confirms **once** — one event, not one per source |
-| 11 | session watcher, `auto_llm_judge`, `polarity == 1` | confirms, and signals/affinity rows are still written |
-| 12 | session watcher, `auto_heuristic` | does not confirm |
-| 13 | the same transcript judged twice | confirms **once** (`has_llm_judge` excludes the replay) |
+| 10d | `submit_feedback(+1, explicit)`, then `(-1)`, then `(+1)` | confirms **once** — the polarity cycle cannot re-arm the latch |
+| 10e | `submit_feedback(+1, auto_heuristic)` then `(+1, implicit)` | confirms — an unqualified affinity row must not swallow a real use |
+| 10f | `submit_feedback(+1, explicit)` with the mutator raising `ZeroDivisionError` | returns the recorded-feedback message, no exception escapes, lifecycle unchanged, affinity row still committed |
+| 11 | session watcher, `auto_llm_judge`, positive verdict | confirms, and signals/affinity rows are still written |
+| 12 | session watcher, `auto_heuristic` | does not confirm, **and takes no claim** |
+| 13 | the same transcript judged twice | confirms **once** (`has_llm_judge` and the claim, two independent guards) |
+| 13a | `submit_feedback(+1, implicit)` then a positive judge verdict on the same event | confirms **once** — the cross-caller case `has_llm_judge` cannot see |
 | 14 | watcher batch where node 1's mutator raises `ZeroDivisionError` | node 2 is still reinforced; `recorded` is unaffected |
 | 15 | concurrent `_record_confirmed_use` on one node from N threads | `access_count` advances by exactly N, file and DB agree |
 
 Pairs 8/9 and 11/12 are what give the allowlist teeth: without the negative case, a loose
-condition passes. Contracts 10a–10c are the trio that discriminates a correct transition gate from
-a rowcount: 10b fails a naive gate as a false negative and 10c as a false positive, so passing all
-three at once is the real assertion. Contract 15 is racy by nature and may pass on an unserialized
-mutator by luck; it is kept as a regression pin, with that limitation stated rather than hidden.
+condition passes.
+
+**Contracts 10d, 10e and 13a are the three that killed the previous design**, and each one maps to
+a specific defect the second council round found. 10d is the false positive from `affinity`'s
+in-place `UPDATE`. 10e is the false negative from `auto_heuristic` occupying the single affinity row
+per event. 13a is the cross-caller double reinforcement that `has_llm_judge` cannot prevent, because
+it only recognises the watcher's own signal source. A gate derived from `affinity` passes 10a–10c
+and fails all three of these — which is exactly why 10a–10c alone were not enough evidence the first
+time.
+
+Contract 10f pins the at-most-once contract at the API boundary: the miss is acceptable, a 500 is
+not. Contract 15 is racy by nature and may pass on an unserialized mutator by luck; it is kept as a
+regression pin, with that limitation stated rather than hidden.
 
 ### Gate
 
