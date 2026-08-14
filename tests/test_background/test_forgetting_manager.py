@@ -132,6 +132,22 @@ def test_supports_edge_still_protects(engine):
     assert _exists(engine, subject) is True
 
 
+def test_evolved_from_edge_still_protects(engine):
+    """Non-regression: `evolved_from` is deliberately excluded from the filter (r-spade/ormah#194).
+
+    Its direction is decided without creation dates, so filtering it out symmetrically would
+    strip protection from the surviving node too — only `contradicts` is excluded.
+    """
+    _enable(engine)
+    engine.settings.auto_link_similarity_threshold = 1.1
+    subject = _make_eligible(engine, content="evolved claim")
+    peer = _make_archival_recent(engine, "peer keeper", archived_days=400, importance=0.9)
+    engine.connect(ConnectRequest(
+        source_id=subject, target_id=peer, edge=EdgeType.evolved_from, weight=0.9))
+    run_forgetting(engine)
+    assert _exists(engine, subject) is True
+
+
 def test_contradicts_edges_do_not_count_toward_degree(engine):
     """gate #6, degree arm: 3 weak `contradicts` edges must not make a node a hub.
 
@@ -173,6 +189,28 @@ def test_mixed_edges_only_value_bearing_degree_protects(engine):
             source_id=subject, target_id=peer, edge=EdgeType.contradicts, weight=0.1))
     run_forgetting(engine)
     assert _exists(engine, subject) is False
+
+
+def test_degree_arm_still_protects_via_value_bearing_edges(engine):
+    """gate #6, degree arm: 3 real `related_to` edges at a weak weight must still protect.
+
+    Every existing hub test in this file uses weight 0.9, so protection always fires through the
+    max_weight arm — nothing exercises the degree arm's *protective* direction. Weight 0.1 is far
+    below deletion_strong_edge_weight (0.7), so the max_weight arm cannot be what protects here;
+    degree 3 is above deletion_max_degree (2), so only the degree arm can. Regression this test
+    catches: an implementation that over-filters `degree_value` to 0 (e.g. reading the wrong
+    column, or never counting value-bearing edges at all) would leave every other test in this
+    file green while silently deleting every real hub.
+    """
+    _enable(engine)
+    engine.settings.auto_link_similarity_threshold = 1.1
+    subject = _make_eligible(engine, content="real hub")
+    for i in range(3):
+        peer = _make_archival_recent(engine, f"real hub peer {i}", archived_days=400, importance=0.9)
+        engine.connect(ConnectRequest(
+            source_id=subject, target_id=peer, edge=EdgeType.related_to, weight=0.1))
+    run_forgetting(engine)
+    assert _exists(engine, subject) is True
 
 
 def test_cap_ranking_ignores_contradictions(engine):

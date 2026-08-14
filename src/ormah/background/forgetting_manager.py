@@ -165,7 +165,7 @@ _NON_PROTECTIVE_EDGE_TYPES: tuple[str, ...] = ("contradicts",)
 def _connectivity(engine, node_id: str) -> tuple[int, int, float]:
     """Raw degree, plus degree and max weight over *value-bearing* edges only.
 
-    Two answers from one query because the two callers ask different questions:
+    Two answers from one query because the two consumers ask different questions:
 
     - gate #6 asks "is this a hub worth keeping?" and reads the value-bearing pair — an edge
       that does not count toward the hub arm does not count toward the strong-edge arm either.
