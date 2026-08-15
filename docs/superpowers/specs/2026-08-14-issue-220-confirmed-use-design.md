@@ -99,7 +99,7 @@ After this change `_record_confirmed_use` has exactly three callers:
 
 | Caller | Condition | Target |
 |---|---|---|
-| `recall_node(id)` | always (already present at `memory_engine.py:646`) | the requested node, never its neighbours |
+| `recall_node(id)` | always — and it **claims its own event** so later feedback on it cannot reinforce again | the requested node, never its neighbours |
 | `submit_feedback` | it **takes the claim** for this `(whisper event, node)` pair: `signal == 1` **and** `source ∈ {explicit, implicit, auto_llm_judge}` **and** no claim existed | the resolved node |
 | `session_watcher`, `auto_llm_judge` path | it takes the claim, on the same conditions — **not** `polarity == 1` | each node in the batch that claimed |
 
@@ -361,6 +361,7 @@ written before the fix.
 | 10d | `submit_feedback(+1, explicit)`, then `(-1)`, then `(+1)` | confirms **once** — the polarity cycle cannot re-arm the latch |
 | 10e | `submit_feedback(+1, auto_heuristic)` then `(+1, implicit)` | confirms — an unqualified affinity row must not swallow a real use |
 | 10f | `submit_feedback(+1, explicit)` with the mutator raising `ZeroDivisionError` | returns the recorded-feedback message, no exception escapes, lifecycle unchanged, affinity row still committed |
+| 7a | `recall_node(id)`, then `submit_feedback(+1, explicit)` on the `whisper_log_id` recall_node itself surfaced | confirms **once** — the fetch already claimed its own event |
 | 11 | session watcher, `auto_llm_judge`, positive verdict | confirms, and signals/affinity rows are still written |
 | 12 | session watcher, `auto_heuristic` | does not confirm, **and takes no claim** |
 | 13 | the same transcript judged twice | confirms **once** (`has_llm_judge` and the claim, two independent guards) |
@@ -382,6 +383,17 @@ time.
 Contract 10f pins the at-most-once contract at the API boundary: the miss is acceptable, a 500 is
 not. Contract 15 is racy by nature and may pass on an unserialized mutator by luck; it is kept as a
 regression pin, with that limitation stated rather than hidden.
+
+**Contract 7a came from the whole-branch review, and it caught a regression this design
+introduced.** `recall_node` reinforces unconditionally, then calls `_log_feedback_candidates`,
+which creates a `whisper_log` row for that same node and hands its id to the agent — and the agent
+instructions tell the model to `submit_feedback(+1)` with that id when it draws on the memory. On
+`upstream/main` that sequence reinforced once, because feedback did not reinforce at all. With
+§4.2's callers in place and no claim taken by `recall_node`, it reinforced **twice**: measured
+`access_count` 0 → 1 → 2 and `stability` 1.0 → 1.5 → 2.25. Inflating retention on the most
+deliberate surface in the system is precisely what this issue exists to stop, so `recall_node` now
+claims its own event before reinforcing. Neither the per-task reviews nor either council round could
+have caught this: it only exists once both halves are in place, and only running the code shows it.
 
 ### Gate
 
