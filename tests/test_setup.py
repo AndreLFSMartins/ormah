@@ -808,7 +808,7 @@ class TestConfigureClaudeDesktop:
 class TestConfigureCodexMcp:
     def test_writes_mcp_config_to_codex_toml(self, tmp_path):
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
@@ -832,7 +832,7 @@ class TestConfigureCodexMcp:
         )
 
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
@@ -857,7 +857,7 @@ class TestConfigureCodexMcp:
         )
 
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
