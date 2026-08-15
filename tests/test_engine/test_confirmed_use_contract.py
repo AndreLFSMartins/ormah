@@ -451,3 +451,65 @@ def test_recall_node_claims_its_own_event(engine):
     assert _snapshot(engine, target) == after_recall, (
         "feedback on the event recall_node itself surfaced reinforced it a second time"
     )
+
+
+def test_recall_node_does_not_reinforce_when_it_loses_the_claim(engine):
+    """Contract 7b: recall_node reinforces only if it actually took the claim.
+
+    _log_feedback_candidates commits the new whisper_log row in its own
+    transaction, and only afterwards does recall_node open the claim
+    transaction. In that gap the event is committed but unclaimed, so a
+    concurrent submit_feedback using the supported no-whisper_log_id fallback
+    resolves that very row — it is the newest one for the node — and claims it
+    first. recall_node discards its own claim result and reinforces regardless,
+    so one fetch counts twice and the at-most-once latch is violated by the
+    caller that introduced it.
+
+    The barrier is deterministic rather than timed: the competing feedback runs
+    inside a wrapper around _log_feedback_candidates, which is exactly the
+    committed-but-unclaimed window, with no transaction open and no lock held.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+
+    before = _snapshot(engine, target)
+    real_log_candidates = engine._log_feedback_candidates
+
+    def claim_the_event_first(*args, **kwargs):
+        logged = real_log_candidates(*args, **kwargs)
+        engine.submit_feedback(target, signal=1, source="explicit")
+        return logged
+
+    with patch.object(engine, "_log_feedback_candidates", side_effect=claim_the_event_first):
+        engine.recall_node(target)
+
+    after = _snapshot(engine, target)
+    assert after["file"][0] == before["file"][0] + 1, (
+        "one whisper event reinforced twice: access_count "
+        f"{before['file'][0]} -> {after['file'][0]}"
+    )
+    assert after["db"][0] == after["file"][0], "file and DB disagree on access_count"
+
+
+def test_recall_node_does_not_reinforce_without_an_event_to_claim(engine):
+    """Contract 7c: no claim, no reinforcement — not even on the deliberate surface.
+
+    _log_feedback_candidates swallows its own failures and returns {}, leaving
+    recall_node with no whisper_log row to latch on. Reinforcing anyway would be
+    the request-driven path this issue removes: the plan's constraint is that
+    reinforcement fires on the claim, never on the request. Pins the deliberate
+    side of the fix for contract 7b, which would otherwise look like an oversight
+    and invite a `claimed or target_log_id is None` regression.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+
+    before = _snapshot(engine, target)
+
+    with patch.object(engine, "_log_feedback_candidates", return_value={}):
+        engine.recall_node(target)
+
+    assert _snapshot(engine, target) == before, (
+        "recall_node reinforced with no event to claim — reinforcement followed the "
+        "request instead of the claim"
+    )
