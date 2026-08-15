@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -69,6 +70,39 @@ def prevent_tests_mutating_real_ormah_install(monkeypatch):
 
     monkeypatch.setattr(Path, "unlink", guarded_unlink)
     monkeypatch.setattr(shutil, "rmtree", guarded_rmtree)
+
+
+@pytest.fixture(scope="session")
+def _pristine_settings(tmp_path_factory):
+    """A Settings built as a clean machine would build it — no global .env, no ORMAH_* vars."""
+    empty_env = tmp_path_factory.mktemp("pristine_settings_env") / "empty.env"
+    empty_env.write_text("")
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setitem(Settings.model_config, "env_file", str(empty_env))
+        for key in list(os.environ):
+            if key.startswith("ORMAH_"):
+                monkeypatch.delenv(key, raising=False)
+        return Settings()
+
+
+@pytest.fixture(autouse=True)
+def _reset_settings_singleton(monkeypatch, _pristine_settings):
+    """Point the module-level ``settings`` singleton back at unpolluted values.
+
+    A sibling fixture can only protect a ``Settings()`` built during a test.
+    This protects the instance built at import of ``ormah.config``, which no
+    fixture can retroactively construct differently.
+
+    Mutates in place rather than rebinding ``ormah.config.settings``: five
+    modules bind the singleton at import time and would never see a rebind.
+    """
+    from ormah.config import settings as singleton
+
+    for name in Settings.model_fields:
+        clean = getattr(_pristine_settings, name)
+        if getattr(singleton, name) != clean:
+            monkeypatch.setattr(singleton, name, clean)
 
 
 @pytest.fixture(scope="session", autouse=True)
