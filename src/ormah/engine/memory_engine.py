@@ -647,9 +647,6 @@ class MemoryEngine:
 
         resolved_node_id = node["id"]
 
-        # Record confirmed use: this is a deliberate single-node fetch
-        self._record_confirmed_use(resolved_node_id)
-
         edges = self.graph.get_edges_for(resolved_node_id)
         neighbors = self.graph.get_neighbors(resolved_node_id, depth=1)
         whisper_log_ids = self._log_feedback_candidates(
@@ -661,6 +658,31 @@ class MemoryEngine:
             space=node.get("space"),
             surface="recall_node",
         )
+
+        # Record confirmed use: this is a deliberate single-node fetch.
+        #
+        # Issue #220: claim this node's own event first. _log_feedback_candidates
+        # above created a whisper_log row for it and the formatter hands that id to
+        # the agent, whose instructions say to submit_feedback(+1) with it when the
+        # memory is drawn on. Without the claim, that feedback finds the event
+        # unclaimed and reinforces a second time — one fetch counting twice, on the
+        # most deliberate surface there is. Claiming here makes the later feedback a
+        # no-op and leaves this reinforcement untouched.
+        #
+        # The mutator stays outside the transaction: it does file I/O, and with
+        # @_serialized_memory_operation calling it inside would take db_lock before
+        # memory_lock, inverting the order every serialized writer uses.
+        target_log_id = whisper_log_ids.get(resolved_node_id)
+        if target_log_id is not None:
+            with self.db.transaction() as conn:
+                self._claim_confirmed_use(
+                    conn,
+                    target_log_id,
+                    resolved_node_id,
+                    signal=1,
+                    source="explicit",
+                )
+        self._record_confirmed_use(resolved_node_id)
         node_for_format = dict(node)
         if resolved_node_id in whisper_log_ids:
             node_for_format["_whisper_log_id"] = whisper_log_ids[resolved_node_id]

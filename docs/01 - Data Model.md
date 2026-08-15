@@ -35,7 +35,7 @@ access_count: int           # Times this node has been accessed/recalled
 # Temporal
 created: datetime           # When first stored (UTC)
 updated: datetime           # Last modification (UTC)
-last_accessed: datetime     # Last recall/search hit (UTC)
+last_accessed: datetime     # Last confirmed use (UTC) — not a search hit
 last_review: datetime | None # Last FSRS review (spaced repetition)
 valid_until: datetime | None # Expiry date (set by mark_outdated)
 
