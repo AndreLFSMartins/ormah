@@ -418,3 +418,36 @@ def test_reinforcement_failure_does_not_fail_the_feedback_call(engine):
         (log_id, target),
     ).fetchone()
     assert affinity is not None, "the feedback evidence was rolled back"
+
+
+def test_recall_node_claims_its_own_event(engine):
+    """Contract 7a: one deliberate fetch reinforces once, even when the agent
+    then submits feedback on the event recall_node handed it.
+
+    recall_node calls _log_feedback_candidates, which creates a whisper_log row
+    for the very node it just confirmed and returns its id — the formatter
+    attaches it as _whisper_log_id, and the agent instructions tell the model to
+    submit_feedback(+1) with that id when it draws on the memory. Without a claim
+    taken by recall_node itself, that feedback finds the event unclaimed and
+    reinforces a second time, so one fetch counts twice. Found by whole-branch
+    review, reproduced before the fix as access_count 0 -> 1 -> 2.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+
+    before = _snapshot(engine, target)
+    engine.recall_node(target)
+    after_recall = _snapshot(engine, target)
+    assert after_recall != before, "recall_node did not confirm its own node"
+
+    row = engine.db.conn.execute(
+        "SELECT id FROM whisper_log WHERE node_id = ? ORDER BY id DESC LIMIT 1",
+        (target,),
+    ).fetchone()
+    assert row is not None, "recall_node logged no feedback candidate for its own node"
+
+    engine.submit_feedback(target, signal=1, source="explicit", whisper_log_id=row["id"])
+
+    assert _snapshot(engine, target) == after_recall, (
+        "feedback on the event recall_node itself surfaced reinforced it a second time"
+    )

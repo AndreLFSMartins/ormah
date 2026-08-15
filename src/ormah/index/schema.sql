@@ -224,7 +224,13 @@ CREATE INDEX IF NOT EXISTS idx_whisper_decisions_logged  ON whisper_decisions(lo
 -- ON DELETE CASCADE, not SET NULL: the other whisper_log_id foreign keys use
 -- SET NULL because their columns are nullable. On a NOT NULL column SET NULL
 -- would make whisper_log_cleanup's DELETE fail with a constraint violation.
--- CASCADE also keeps this table bounded by whisper_log's own retention.
+--
+-- Note the CASCADE does not, in practice, bound this table. whisper_log_cleanup
+-- only deletes rows with was_injected = 0 and no affinity or signals, while
+-- _log_feedback_candidates hardcodes was_injected = 1 and both claiming callers
+-- write an affinity row in the same transaction — so no claimable parent is ever
+-- collected. The table grows one small row per confirmed use. That is not a
+-- capacity concern, but do not rely on the cascade for retention.
 --
 -- node_id deliberately carries NO foreign key. It would buy nothing: the only
 -- writer is _claim_confirmed_use, which receives a node id submit_feedback has
@@ -233,8 +239,7 @@ CREATE INDEX IF NOT EXISTS idx_whisper_decisions_logged  ON whisper_decisions(lo
 -- existing feedback tests fabricate node ids that were never inserted into
 -- nodes, which is a legitimate pattern here, and a reference would force them
 -- all to change. A claim outliving its node is harmless: the latch only ever
--- prevents a second reinforcement, and the whisper_log CASCADE above already
--- bounds the table.
+-- prevents a second reinforcement.
 CREATE TABLE IF NOT EXISTS confirmed_use_claims (
     whisper_log_id INTEGER NOT NULL REFERENCES whisper_log(id) ON DELETE CASCADE,
     node_id        TEXT NOT NULL,
