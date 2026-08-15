@@ -35,7 +35,7 @@ If fewer than 6 fail, the machine's `~/.config/ormah/.env` no longer carries the
 ```bash
 $PY -m pytest tests/ -q > /tmp/setup-iso-baseline.txt 2>&1; echo "exit=$?"
 grep -c 'Fatal Python error' /tmp/setup-iso-baseline.txt
-grep '^FAILED' /tmp/setup-iso-baseline.txt | cut -d' ' -f1 | sort > /tmp/setup-iso-baseline-ids.txt
+grep '^FAILED' /tmp/setup-iso-baseline.txt | awk '{print $2}' | sort > /tmp/setup-iso-baseline-ids.txt
 wc -l < /tmp/setup-iso-baseline-ids.txt
 cat /tmp/setup-iso-baseline-ids.txt
 ```

@@ -103,7 +103,11 @@ Expected: `6 passed` — the new test plus the 5 in `TestRemoveFastembedCache`, 
 
 - [ ] **Step 5: Prove the fixture is load-bearing**
 
-Rename `_reset_settings_singleton` to `_reset_settings_singleton_DISABLED` — an autouse fixture only applies under its own name — then:
+Flip its decorator to `@pytest.fixture(autouse=False)` and run again. **Do not try to disable it by renaming the function** — `autouse=True` applies to every test in scope regardless of the fixture's name, so a rename leaves it fully active and the check silently passes for the wrong reason.
+
+```bash
+$PY -m pytest tests/test_settings_isolation.py tests/test_setup.py::TestRemoveFastembedCache -p no:randomly
+```
 
 ```bash
 $PY -m pytest tests/test_settings_isolation.py tests/test_setup.py::TestRemoveFastembedCache -p no:randomly
@@ -118,7 +122,7 @@ A fixture whose removal breaks nothing proves nothing: without this check, a fut
 ```bash
 $PY -m pytest tests/ -q > /tmp/setup-iso-task2.txt 2>&1; echo "exit=$?"
 grep -c 'Fatal Python error' /tmp/setup-iso-task2.txt
-grep '^FAILED' /tmp/setup-iso-task2.txt | cut -d' ' -f1 | sort > /tmp/setup-iso-task2-ids.txt
+grep '^FAILED' /tmp/setup-iso-task2.txt | awk '{print $2}' | sort > /tmp/setup-iso-task2-ids.txt
 diff /tmp/setup-iso-baseline-ids.txt /tmp/setup-iso-task2-ids.txt
 ```
 

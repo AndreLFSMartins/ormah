@@ -17,7 +17,7 @@ PY="/Users/andre/Documents/GitHub/Tools/ormah-wt-220/.venv/bin/python"
 export PYTHONPATH="$PWD/src"
 $PY -m pytest tests/ -q > /tmp/setup-iso-final.txt 2>&1; echo "exit=$?"
 grep -c 'Fatal Python error' /tmp/setup-iso-final.txt
-grep '^FAILED' /tmp/setup-iso-final.txt | cut -d' ' -f1 | sort > /tmp/setup-iso-final-ids.txt
+grep '^FAILED' /tmp/setup-iso-final.txt | awk '{print $2}' | sort > /tmp/setup-iso-final-ids.txt
 diff /tmp/setup-iso-baseline-ids.txt /tmp/setup-iso-final-ids.txt
 ```
 

@@ -38,9 +38,17 @@ with:
             patch("ormah.setup._find_binary", return_value=None),
 ```
 
-All three occurrences sit inside `class TestConfigureCodexMcp` and are byte-identical, so an editor's "replace all" within that class is safe.
+**A naive "replace all" on that line is wrong — the string appears 5 times in the file**, not 3. Lines 326 and 344 also patch `shutil.which` to `None`, in unrelated passing tests, using a different syntax (`with patch(...), \`). Anchor the replacement on the three-line block instead, which is unique to this class:
+
+```python
+            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup.subprocess.run") as mock_run,
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+```
 
 **Do not touch line 877.** That one belongs to `test_uses_codex_cli_when_available`, which patches `shutil.which` to *return* a path, passes today, and legitimately covers the PATH-hit route. Changing it would delete real coverage.
+
+Verify the edit landed on exactly 3 lines before moving on: `git diff --stat tests/test_setup.py` must read `3 insertions(+), 3 deletions(-)`.
 
 - [ ] **Step 3: Confirm green**
 
