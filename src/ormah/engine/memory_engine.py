@@ -669,20 +669,34 @@ class MemoryEngine:
         # most deliberate surface there is. Claiming here makes the later feedback a
         # no-op and leaves this reinforcement untouched.
         #
+        # The claim result gates the mutator, and is not merely taken. The row above
+        # is committed by _log_feedback_candidates before this transaction opens, so
+        # in that window a concurrent submit_feedback using the no-whisper_log_id
+        # fallback resolves the same newest row and can claim it first. Reinforcing
+        # regardless would make one fetch count twice — the exact invariant the claim
+        # exists to hold. A lost claim means the winner already reinforced.
+        #
+        # No claim, no reinforcement: reinforcement fires on the claim, never on the
+        # request. When _log_feedback_candidates fails it returns {}, leaving no event
+        # to latch on, and an unlatched reinforcement here would be the request-driven
+        # path this issue removes.
+        #
         # The mutator stays outside the transaction: it does file I/O, and with
         # @_serialized_memory_operation calling it inside would take db_lock before
         # memory_lock, inverting the order every serialized writer uses.
         target_log_id = whisper_log_ids.get(resolved_node_id)
+        claimed = False
         if target_log_id is not None:
             with self.db.transaction() as conn:
-                self._claim_confirmed_use(
+                claimed = self._claim_confirmed_use(
                     conn,
                     target_log_id,
                     resolved_node_id,
                     signal=1,
                     source="explicit",
                 )
-        self._record_confirmed_use(resolved_node_id)
+        if claimed:
+            self._record_confirmed_use(resolved_node_id)
         node_for_format = dict(node)
         if resolved_node_id in whisper_log_ids:
             node_for_format["_whisper_log_id"] = whisper_log_ids[resolved_node_id]
