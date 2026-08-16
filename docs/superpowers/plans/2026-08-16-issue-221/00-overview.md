@@ -1,0 +1,80 @@
+# Bounded Stability Reinforcement (#221) — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Replace the unbounded FSRS stability update with a bounded, diminishing one, allow at most one numeric stability increase per node per day, and centralize the lifecycle math in a single module.
+
+**Architecture:** A new pure module `src/ormah/lifecycle.py` owns every formula (retrievability, spacing, reinforced stability, cooldown). `memory_engine._touch_access` and `background/decay_manager.run_decay` become thin callers. Four new config knobs replace `fsrs_stability_growth`. The boolean `meta.fsrs_migrated` flag becomes an integer `meta.lifecycle_model_version`.
+
+**Tech Stack:** Python ≥3.11, pydantic-settings, pytest (`asyncio_mode = auto`), SQLite, ruff (line-length 100, py311).
+
+**Spec:** `docs/superpowers/specs/2026-08-16-issue-221-bounded-reinforcement-design.md`
+**Issue:** [r-spade/ormah#221](https://github.com/r-spade/ormah/issues/221)
+
+## Global Constraints
+
+- **Work only inside `/Users/andre/Documents/GitHub/Tools/ormah-wt-221`** (branch `fix/221-bounded-reinforcement`, cut from `upstream/main` @ `a28837b`). Never edit `Tools/ormah` — it serves the running Beta.
+- **Verification command:** `./.venv/bin/python -m pytest <path> -v` from the worktree root. A bare `python -m pytest` imports the `ormah` installed from `local-main` and reports a false green.
+- **Never commit** anything under `docs/superpowers/`, `.council/`, `graphify-out/`, `CLAUDE.md`, `INSTRUCTIONS.md`, `SESSION_LOG.md`, `FORK-WORKFLOW.md` in this branch — the pre-push hook blocks the push.
+- **The formula is fixed by #191** — do not tune it: `spacing = min(R^-0.2, cap)`, `S' = min(S × (1 + g × S^-w × spacing), max)`, with `g = 0.5`, `w = 0.5`, `cap = 2.0`, spacing exponent `0.2`.
+- **Verified target numbers** (recompute if you change anything): `S=1` + 30 days → exactly `2.0`; `S=1` → `365.0` in exactly **74** closely spaced updates.
+- Line length 100, `ruff check src/ tests/` must pass.
+- Do not touch `src/ormah/background/importance_scorer.py` — out of scope (owned by #222/PR 235).
+- Do not rescale existing `stability` values anywhere.
+
+## Setup (once, before Task 1)
+
+```bash
+cd /Users/andre/Documents/GitHub/Tools/ormah-wt-221
+python3 -m venv .venv
+./.venv/bin/pip install -q -e ".[dev]"
+./.venv/bin/python -m pytest tests/test_background/test_decay_manager.py -v
+```
+
+Expected: the decay suite passes on unmodified `upstream/main`. That green is the baseline every later task compares against.
+
+## File Structure
+
+| File | Responsibility | Task |
+|---|---|---|
+| `src/ormah/lifecycle.py` (create) | All lifecycle math; no I/O, no DB, no settings object | 1 |
+| `tests/test_lifecycle.py` (create) | Unit tests for the math (AC1, AC2, AC3) | 1 |
+| `src/ormah/config.py` (modify) | Remove `fsrs_stability_growth`; add 4 knobs + validators | 2 |
+| `tests/test_config_fsrs.py` (create) | Validator coverage (AC7) | 2 |
+| `src/ormah/engine/memory_engine.py:1936` (modify) | `_touch_access` → cooldown + helper call (AC4) | 3 |
+| `tests/test_engine/test_reinforcement_cooldown.py` (create) | Cooldown behavior | 3 |
+| `src/ormah/background/decay_manager.py` (modify) | Shared retrievability + inverted anchor (AC5) | 4 |
+| `src/ormah/engine/memory_engine.py:159` (modify) | Integer lifecycle-model version (AC6) | 5 |
+| `docs/12 - Configuration Reference.md`, `docs/05`, `docs/01` (modify) | Config + behavior docs (AC7) | 6 |
+
+## Task Order
+
+1. **Task 1** — `lifecycle.py` + its unit tests. No dependencies.
+2. **Task 2** — config knobs. No dependencies.
+3. **Task 3** — `_touch_access`. Needs Tasks 1 and 2.
+4. **Task 4** — `decay_manager`. Needs Task 1.
+5. **Task 5** — lifecycle-model version. Independent, but land after 3 so the version marks a store that already runs the new curve.
+6. **Task 6** — docs. Needs Tasks 2–5.
+
+## Acceptance Criteria → Task Map
+
+| AC | Task |
+|---|---|
+| `S=1` after 30 days → `1 → 2` | 1 |
+| Spacing finite for extremely old nodes, no underflow failure | 1 |
+| Diminishing growth; ~74 updates from `S=1` to the cap | 1 |
+| Ten uses in one day → one numeric update, latest use time recorded | 3 |
+| Decay manager and reinforcement share one retrievability implementation | 1, 4 |
+| Lifecycle-model versioning represents more than migrated/not-migrated | 5 |
+| Config validation, tests, and configuration docs cover every new knob/state | 2, 6 |
+
+## Final Gate (after Task 6)
+
+```bash
+cd /Users/andre/Documents/GitHub/Tools/ormah-wt-221
+./.venv/bin/python -m pytest tests/ -v
+./.venv/bin/python -m ruff check src/ tests/
+git log --oneline upstream/main..HEAD
+```
+
+The `git log` must show only the commits from this plan. Anything else means the island was cut from the wrong base — rebuild it before pushing.
