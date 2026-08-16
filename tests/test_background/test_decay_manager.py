@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 
 from ormah.background.decay_manager import run_decay
+from ormah.background.importance_scorer import run_importance_scoring
 from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, NodeType, Tier
 
 
@@ -51,9 +52,18 @@ def test_high_importance_stale_node_is_decayed(engine):
 
 
 def test_accumulated_access_and_edges_do_not_pin_a_node_to_working(engine):
-    """The reported case: 50 accesses + 4 edges produce a permanent non-recency
-    importance contribution of ~0.514, above the old 0.5 gate. That node must
-    still decay once it goes stale."""
+    """The reported case, driven end-to-end: 50 accesses + 4 edges on a stale
+    hub node make the real importance_scorer compute importance ~= 0.5892
+    (measured), above the old decay_importance_threshold gate of 0.5, and the
+    node must still decay once run_decay sees it — proving retrievability
+    alone, not importance, now controls the working->archival demotion.
+
+    `engine.remember()`/`engine.connect()` never touch `last_review`, so it
+    stays None on this node; `run_importance_scoring`'s recency anchor is
+    `last_review or last_accessed`, so making the node stale via
+    `_make_stale` (which only rewrites `last_accessed`) is enough for the
+    scorer to see a genuinely 30-day-old node.
+    """
     node_id, _ = engine.remember(CreateNodeRequest(
         content="Hub node with long access history",
         type=NodeType.concept,
@@ -74,11 +84,22 @@ def test_accumulated_access_and_edges_do_not_pin_a_node_to_working(engine):
         ))
 
     engine.db.conn.execute(
-        "UPDATE nodes SET access_count = 50, importance = 0.5145 WHERE id = ?",
-        (node_id,),
+        "UPDATE nodes SET access_count = 50 WHERE id = ?", (node_id,)
     )
     engine.db.conn.commit()
     _make_stale(engine, node_id)
+
+    run_importance_scoring(engine)
+
+    row = engine.db.conn.execute(
+        "SELECT importance FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+    computed_importance = row["importance"]
+    assert computed_importance >= 0.5, (
+        f"expected the reported profile (50 accesses + 4 edges, stale) to "
+        f"score >= the old decay_importance_threshold of 0.5, got "
+        f"{computed_importance}"
+    )
 
     run_decay(engine)
 
