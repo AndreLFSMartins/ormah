@@ -729,7 +729,7 @@ class MemoryEngine:
 
     def recall_search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
-        min_relevance: float | None = None,
+        *, min_relevance: float | None = None,
         auto_temporal: bool = True, spread_activation: bool = True,
         query_vec: Any | None = None, **filters,
     ) -> list[dict]:

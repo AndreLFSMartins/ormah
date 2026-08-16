@@ -675,3 +675,34 @@ def test_recall_node_returns_the_node_when_reinforcement_fails(engine):
         "SELECT COUNT(*) FROM confirmed_use_claims WHERE node_id = ?", (target,)
     ).fetchone()[0]
     assert claims == 1, "the claim was rolled back — at-most-once no longer holds"
+
+
+def test_recall_search_structured_rejects_positional_tuning_args(engine):
+    """Contract 14: tuning parameters are keyword-only, so a stale positional
+    call cannot silently redefine itself.
+
+    #220 removed the `touch_access` parameter, which held the 4th positional
+    slot. `min_relevance` inherited that slot, so a pre-existing positional
+    call passing False in position 4 would mean min_relevance=0 — silently
+    dropping the deliberate-recall relevance floor and admitting results below
+    it. The bare `*` turns that silent redefinition into an immediate TypeError.
+    """
+    _make_nodes(engine, count=1)
+
+    with pytest.raises(TypeError) as excinfo:
+        # The exact shape of a stale caller: `False` where touch_access used to be.
+        engine.recall_search_structured("caching architecture", 10, None, False)
+
+    assert "positional" in str(excinfo.value), (
+        f"raised for the wrong reason: {excinfo.value}"
+    )
+
+    # The supported shapes must keep working — this is the other half of the
+    # contract. `isinstance(..., list)` rather than `is not None`: the point is
+    # that the call completes and still returns the documented type.
+    assert isinstance(engine.recall_search_structured("caching architecture"), list)
+    assert isinstance(engine.recall_search_structured("caching architecture", limit=4), list)
+    assert isinstance(engine.recall_search_structured("caching architecture", 4, None), list)
+    assert isinstance(engine.recall_search_structured(
+        "caching architecture", limit=4, min_relevance=0.0, spread_activation=False,
+    ), list)
