@@ -1000,13 +1000,65 @@ defensible). The log line was also found to print `job.boundary` rather than the
 actually persisted (`min(boundary, size)`, further ratcheted on a re-park) — now reads the
 value `_mark_frozen_prefix_parked` actually wrote to state.
 
+### The 2026-08-12 census, re-measured 2026-08-13
+
+The 2026-08-12 census (in the Fix B design spec) is what the two remaining content items are
+built on, and both were about to be acted on from a month-old reading. Re-measured on
+2026-08-13 by the same route — for every `.session_watcher_state` entry across **both** watch
+roots whose only key is `end_offset` (cursor advanced, nothing ingested), with the transcript
+still on disk, run the project's own `parse_transcript` over the **whole file, unwindowed**, and
+count `len(result.safe_turns)` plus its `role == "user"` subset:
+
+| quantity | 2026-08-12 | 2026-08-13 |
+|---|---|---|
+| `end_offset`-only state entries | 75 | **75** — unchanged |
+| of those, transcript still on disk | 68 (8,029,774 B) | **62** (8,028,919 B) |
+| parser closes content the cursor skipped | 14 files / 5,923,567 B / 23 closed user turns | **identical — 14 / 5,923,567 B / 23** |
+| parser closes nothing even unwindowed | 54 files / 2,106,207 B | **48 files / 2,105,352 B** |
+
+Three things this reading establishes, none of which were true-by-assumption before it:
+
+- **The route is the same route.** The 14-file set reproduces to the byte *and* to the turn
+  (5,923,567 B, 23 user turns, 255 turns total). A re-measurement that lands on the same two
+  independent figures a month later is the check that this is the census's own method, not a
+  near-miss reimplementation of it.
+- **The recovery window did not expire.** The 2026-08-09 amendment closes with "the recovery
+  window is the item with a clock on it" (§ *What is unaffected*), and an earlier draft of the
+  list below extrapolated from it that the window was by now "likely expired" — reasoning from
+  a measured two-week rotation to a month-old census. That extrapolation was **wrong for this
+  set**: all 14 files were still on disk, unrotated, a month on. The 2026-08-09 finding stands
+  exactly as it was measured; it simply does not generalize to the files this census pinned, and
+  no reading had ever been taken to check whether it did.
+- **Attrition hit only the other set.** 68 → 62 on disk, and every one of the 6 lost came from
+  the closes-nothing side (54 → 48) — the defect set lost nothing. Both totals fell by exactly
+  855 B, so on the assumption that the surviving files did not change size, the 6 that rotated
+  away were tiny (~142 B each) — consistent with the census's "single-turn sessions" cause, but
+  inferred from the arithmetic, not read off the missing files themselves.
+
+### Recovery of the lost content — retired by decision, not by repair
+
+**Dropped 2026-08-13 by the ADR owner's explicit decision.** The 14 transcripts the census
+found unrecovered will not be recovered; this is no longer an open item and should not be
+reopened as one.
+
+The reason is recorded because it is not the reason the text above would have predicted: the
+content was **still on disk, byte-for-byte**, when the decision was taken. This closes as a
+choice not to spend the effort — *not* as a rotation window that closed the option. The census
+itself stays on the record in
+`docs/superpowers/specs/2026-08-12-adr-0004-frozen-prefix-suppression-fact-design.md`, because
+it is the evidence the defect existed at all; only the work item is retired.
+
 ### Still open
 
-- Recovery of the content already lost: 14 transcripts / 5.92 MB / 23 closed user turns, per the
-  2026-08-12 measurement. Its own spec, and the ~2-week rotation clock still applies — now over
-  a month past the 2026-08-12 measurement date, so treat the recovery window as likely expired
-  rather than re-verify it optimistically.
-- The 54 transcripts the parser closes nothing in even unwindowed — parser coverage, its own spec.
+- **Parser coverage — 48 transcripts / 2,105,352 B the parser closes nothing in even
+  unwindowed** (re-measured 2026-08-13; the census's own figure was 54 / 2,106,207 B, and the
+  6-file difference is rotation, not a code change — nothing in Fix A or Fix B touches the
+  parser). This is *not* a cursor-loss item: the cursor skipped nothing a parser could have
+  closed, so it is out of ADR-0004's own defect class and needs its own spec. Its shape is
+  lopsided and worth carrying into that spec: **4 Codex `rollout-*.jsonl` files carry 1,623,823 B
+  — 77% of the bytes** — against 44 Claude Code sessions holding the remaining 481,529 B. The
+  causes named by the census (Codex rollouts with no `task_complete`; single-turn sessions) map
+  onto exactly that split, so per-byte the item is mostly one missing Codex terminator.
 - `AndreLFSMartins/ormah#2` — the cursor-above-EOF class and the 83-byte overshoot.
 - A test hole, known and deferred: mutating `_frozen_unchanged`'s `== st.st_size` to `<=` leaves the
   whole suite green while re-introducing the loss mode the Fix B amendment closes.

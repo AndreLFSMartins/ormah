@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>frozen_until Implementation Plan</title>
+<title>frozen_until Implementation Plan — ADR-0004</title>
 <style>
 /* rich-doc design system — Anthropic brand, document-oriented.
    Light paper/ink, Lora italic display, Poppins body, system mono.
@@ -139,283 +139,313 @@ summary:hover{color:var(--accent)}
 <body>
 <nav class="toc">
   <div class="eyebrow">[ PLAN ]</div>
-  <div class="doc-title">frozen_until Implementation Plan</div>
-  <a href="#goal-and-architecture">Goal and Architecture</a>
+  <div class="doc-title">frozen_until Implementation Plan — ADR-0004</div>
+  <a href="#overview-and-architecture">Overview and Architecture</a>
+  <a href="#council-review-findings">Council Review Findings</a>
   <a href="#global-constraints">Global Constraints</a>
-  <a href="#setup">Setup</a>
-  <a href="#task-overview">Task Overview</a>
-  <a href="#line-numbers">Line Numbers</a>
-  <a href="#task-1-steps" class="lvl-3">Steps 2-9</a>
-  <a href="#task-2-steps" class="lvl-3">Steps 1-7</a>
-  <a href="#task-3-steps" class="lvl-3">Steps 1-7</a>
-  <a href="#task-4-steps" class="lvl-3">Steps 1-7</a>
-  <a href="#task-5-steps" class="lvl-3">Steps 1-9</a>
+  <a href="#setup">Setup (do this once, before Task 1)</a>
+  <a href="#tasks-summary">Tasks Summary</a>
+  <a href="#line-numbers">Line Numbers (pinned at 7667420, 2026-08-12)</a>
+  <a href="#task-1-suppression-fact">Task 1: The suppression fact replaces the cursor advance</a>
+  <a href="#task-2-reconcile-gate">Task 2: The "unchanged since the examination" predicate, and reconcile uses it</a>
+  <a href="#task-3-observer-lane">Task 3: The Observer lane uses the same predicate</a>
+  <a href="#task-4-shrink-reset">Task 4: The frozen fact is cleared whenever it stops being true</a>
+  <a href="#task-5-verify-merge">Task 5: Verify the whole change, then land it in the Beta</a>
 </nav>
 <main>
-<article>
-
-<div class="eyebrow">ADR-0004 Implementation</div>
-
-<h1><em>frozen_until</em> Implementation Plan</h1>
-
+<div class="intro">
+<h1 id="title"><em>frozen_until</em> Implementation Plan — ADR-0004</h1>
 <p class="statement">Stop the ingest lane from losing transcript content by moving selection suppression out of the cursor and into its own state field.</p>
+</div>
 
 <div class="metrics">
-  <div class="metric">
-    <div class="big">5</div>
-    <div class="label">Tasks</div>
-  </div>
-  <div class="metric">
-    <div class="big">39</div>
-    <div class="label">Steps</div>
-  </div>
-  <div class="metric">
-    <div class="big">Python 3.11</div>
-    <div class="label">Tech stack</div>
-  </div>
+<div class="metric">
+<div class="big">5</div>
+<div class="label">Tasks</div>
+</div>
+<div class="metric">
+<div class="big">39</div>
+<div class="label">Steps</div>
+</div>
+<div class="metric">
+<div class="big">3</div>
+<div class="label">Council rounds</div>
+</div>
 </div>
 
 <div class="progress">
-  <div class="fill" style="width: 0%"></div>
+<div class="fill" style="width: 0%"></div>
 </div>
 
-<div class="chips">
-  <span class="schip">0 done</span>
-  <span class="schip active">39 to do</span>
+<div style="display: flex; gap: 0.5rem; margin-bottom: 1.5rem;">
+<span class="schip todo">Not started</span>
+<span class="schip active">Ready to begin</span>
 </div>
 
-<section>
-<h2 id="goal-and-architecture">Goal and Architecture</h2>
+<h2 id="overview-and-architecture"><em>Overview</em> and Architecture</h2>
 
-<p><code>SessionHandler._mark_frozen_prefix_consumed</code> currently advances the cursor to mean "stop re-selecting this file", which marks never-ingested bytes as consumed. It is renamed <code>_mark_frozen_prefix_parked</code> and writes <code>frozen_until</code> instead, leaving <code>end_offset</code> untouched.</p>
+<p><strong>Goal:</strong> Stop the ingest lane from losing transcript content by moving selection suppression out of the cursor (<code>end_offset</code>) and into its own state field (<code>frozen_until</code>).</p>
 
-<p>Both producers — <code>reconcile</code> and <code>_enqueue_path</code> — gain a gate that skips a file while <code>size <= frozen_until</code>, so growth is what re-opens it. A confirmed shrink clears the field.</p>
+<p><strong>Architecture:</strong> <code>SessionHandler._mark_frozen_prefix_consumed</code> currently advances the cursor to mean "stop re-selecting this file", which marks never-ingested bytes as consumed. It is renamed <code>_mark_frozen_prefix_parked</code> and writes a <em>frozen fact</em> instead — <code>frozen_until</code> plus the examined file's <code>frozen_ino</code>/<code>frozen_mtime_ns</code> — leaving <code>end_offset</code> untouched. Both producers, <code>reconcile</code> and <code>_enqueue_path</code>, skip through one shared predicate, <code>_frozen_unchanged</code>, which fires only while the file is byte-for-byte the one examined. Any change re-selects. The fact is cleared on a confirmed shrink and on a successful ingest.</p>
+
+<p><strong>Tech Stack:</strong> Python 3.11, pytest (<code>asyncio_mode = auto</code>), ruff (line-length 100).</p>
 
 <p><strong>Spec:</strong> <a href="../../specs/2026-08-12-adr-0004-frozen-prefix-suppression-fact-design.md"><code>docs/superpowers/specs/2026-08-12-adr-0004-frozen-prefix-suppression-fact-design.md</code></a></p>
-</section>
 
-<section>
-<h2 id="global-constraints">Global Constraints</h2>
+<h2 id="council-review-findings"><em>Council</em> Review Findings</h2>
+
+<p class="callout"><strong>Round 1 (2026-08-12, cursor + codex, both critical):</strong> Rejected the first draft on findings verified independently: the gate was <code>frozen_until >= size</code>, which also skips a file that <strong>shrank</strong> — a rotated transcript would be suppressed forever. The Observer lane is the one that catches rotation today precisely because it consults no state, so a size-only gate there was a straight regression. Identity-based suppression, one shared predicate, and producer-path tests are the answer to all three.</p>
+
+<p class="callout"><strong>Round 2:</strong> Accepted the core and found four more, all verified and all fixed: the park's stat could record the identity of a <em>replacement that was never examined</em>; the monotonic early return never refreshed identity; <code>reconcile</code>'s <code>end_offset >= size</code> arm decided before the frozen predicate's cursor-above-EOF escape; and the same-size tests stopped at the first re-open without proving suppression re-arms.</p>
+
+<p class="callout"><strong>Round 3:</strong> Produced a single finding, raised by both peers with the same root and the same fix: the ceiling's <code>max()</code> had no identity guard, so a file frozen at a large size and replaced by a smaller still-unparseable one kept the old ceiling and could never re-arm — an unbounded re-select loop.</p>
+
+<p class="callout warn"><strong>Out of scope (verified):</strong> A same-size replacement of a <em>successfully ingested</em> file is skipped by <code>reconcile</code> today exactly as it would be after this change. It is a real defect in the watcher's model of file identity, it is pre-existing, and it gets its own spec.</p>
+
+<h2 id="global-constraints"><em>Global</em> Constraints</h2>
 
 <ul>
-  <li>All work happens in a <strong>git worktree cut from <code>local-main</code></strong>, never in <code>Tools/ormah</code> itself: that working tree is what the running Beta serves (launchd <code>com.ormah.server.dev</code>), and switching its branch crashes every whisper hook (FORK-WORKFLOW golden rule 1).</li>
-  <li><strong>Not an upstream contribution.</strong> Verified 2026-08-12: <code>src/ormah/background/ingest_spool.py</code> does not exist on <code>upstream/main</code> and <code>_mark_frozen_prefix_consumed</code> has 0 occurrences there. So the branch is cut from <code>local-main</code>, not <code>upstream/main</code>, and never pushed to <code>upstream</code>.</li>
-  <li>Test command: <code>python -m pytest tests/test_background/test_session_watcher.py -v</code></li>
-  <li>Lint command: <code>ruff check src/ tests/</code></li>
-  <li>Never use <code>git commit --no-verify</code>.</li>
-  <li>The field is named <code>frozen_until</code>. Never <code>parked_until</code> — that name belongs to the force-close design retracted on 2026-08-09, and live state entries still carry <code>parked_*</code> residue from it.</li>
-  <li><code>spool.requeue(job, failure_class="no_safe_boundary")</code> is <strong>not</strong> touched by any task. The dead-letter behaviour and its volume stay exactly as they are (ADR "Fix A", separate spec).</li>
+<li>All work happens in a <strong>git worktree cut from <code>local-main</code></strong>, never in <code>Tools/ormah</code> itself — the running Beta serves that working tree.</li>
+<li><strong>Not an upstream contribution.</strong> Verified 2026-08-12: <code>src/ormah/background/ingest_spool.py</code> does not exist on <code>upstream/main</code> and <code>_mark_frozen_prefix_consumed</code> has 0 occurrences there.</li>
+<li>Test command: <code>python -m pytest tests/test_background/test_session_watcher.py -v</code></li>
+<li>Lint command: <code>ruff check src/ tests/</code></li>
+<li>Never use <code>git commit --no-verify</code>.</li>
+<li>The field is named <code>frozen_until</code>. Never <code>parked_until</code> — that name belongs to the retracted force-close design.</li>
+<li><code>spool.requeue(job, failure_class="no_safe_boundary")</code> is <strong>not</strong> touched by any task — the dead-letter behaviour stays exactly as it is.</li>
 </ul>
-</section>
 
-<section>
-<h2 id="setup">Setup</h2>
+<h2 id="setup"><em>Setup</em> (do this once, before Task 1)</h2>
 
-<p>Do this once, before Task 1:</p>
-
-<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+<pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah
 git worktree add -b fix/adr-0004-frozen-until ../ormah-wt-frozen-until local-main
 cd ../ormah-wt-frozen-until
 pip install -e ".[dev]"
 </code></pre>
 
 <p>All file paths in the task files are relative to <code>../ormah-wt-frozen-until</code>.</p>
-</section>
 
-<section>
-<h2 id="task-overview">Task Overview</h2>
+<h2 id="tasks-summary"><em>Tasks</em> Summary</h2>
 
 <table>
-  <thead>
-    <tr>
-      <th>#</th>
-      <th>File</th>
-      <th>Deliverable</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>1</td>
-      <td><a href="#task-1-the-suppression-fact"><code>01-suppression-fact.md</code></a></td>
-      <td><code>_mark_frozen_prefix_parked</code> writes <code>frozen_until</code>, cursor untouched; the reproducing test; three existing tests rewritten</td>
-    </tr>
-    <tr>
-      <td>2</td>
-      <td><a href="#task-2-reconcile-skips-frozen"><code>02-reconcile-gate.md</code></a></td>
-      <td><code>reconcile</code> skips a frozen file that has not grown; growth re-opens it</td>
-    </tr>
-    <tr>
-      <td>3</td>
-      <td><a href="#task-3-observer-lane"><code>03-enqueue-path-gate.md</code></a></td>
-      <td><code>_enqueue_path</code> (Observer lane) gets the same gate</td>
-    </tr>
-    <tr>
-      <td>4</td>
-      <td><a href="#task-4-shrink-reset"><code>04-shrink-reset-clears.md</code></a></td>
-      <td>A confirmed shrink pops <code>frozen_until</code></td>
-    </tr>
-    <tr>
-      <td>5</td>
-      <td><a href="#task-5-verify-and-merge"><code>05-verify-and-merge.md</code></a></td>
-      <td>Full suite, lint, merge into <code>local-main</code>, prune the worktree</td>
-    </tr>
-  </tbody>
+<thead>
+<tr>
+<th>#</th>
+<th>File</th>
+<th>Deliverable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><a href="#task-1-suppression-fact">01-suppression-fact.md</a></td>
+<td><code>_mark_frozen_prefix_parked</code> writes the frozen fact, cursor untouched; the reproducing test; three existing tests rewritten</td>
+</tr>
+<tr>
+<td>2</td>
+<td><a href="#task-2-reconcile-gate">02-reconcile-gate.md</a></td>
+<td><code>_frozen_unchanged</code> predicate + <code>reconcile</code> uses it; growth, shrink and same-size replacement all re-open</td>
+</tr>
+<tr>
+<td>3</td>
+<td><a href="#task-3-observer-lane">03-enqueue-path-gate.md</a></td>
+<td><code>_enqueue_path</code> (Observer lane) calls the same predicate</td>
+</tr>
+<tr>
+<td>4</td>
+<td><a href="#task-4-shrink-reset">04-shrink-reset-clears.md</a></td>
+<td>The fact is cleared on a confirmed shrink and on a successful ingest, both proved through a producer</td>
+</tr>
+<tr>
+<td>5</td>
+<td><a href="#task-5-verify-merge">05-verify-and-merge.md</a></td>
+<td>Full suite, lint, merge into <code>local-main</code>, prune the worktree</td>
+</tr>
+</tbody>
 </table>
 
-<p>Tasks are strictly ordered: Task 2's test relies on the field Task 1 introduces, Task 3 mirrors Task 2, Task 4 depends on the field existing.</p>
-</section>
+<p><strong>Task ordering:</strong> Task 2's test relies on the field Task 1 introduces; Task 3 mirrors Task 2; Task 4 depends on the field existing.</p>
 
-<section>
-<h2 id="line-numbers">Line Numbers</h2>
-
-<p>Pinned at <code>7667420</code> (<code>local-main</code>, 2026-08-12). If they have moved, locate the symbol by name — the code is what counts, the numbers are a convenience.</p>
+<h2 id="line-numbers"><em>Line</em> Numbers (pinned at <code>7667420</code>, 2026-08-12)</h2>
 
 <ul>
-  <li><code>session_watcher.py:1502</code> — the call site inside <code>_run_job</code></li>
-  <li><code>session_watcher.py:1553</code> — <code>_mark_frozen_prefix_consumed</code> definition</li>
-  <li><code>session_watcher.py:1622-1629</code> — <code>reconcile</code>'s cheap-skip arm</li>
-  <li><code>session_watcher.py:1361</code> — <code>_enqueue_path</code></li>
-  <li><code>session_watcher.py:962-966</code> — the confirmed-shrink reset</li>
+<li><code>session_watcher.py:1502</code> — the call site inside <code>_run_job</code></li>
+<li><code>session_watcher.py:1553</code> — <code>_mark_frozen_prefix_consumed</code> definition</li>
+<li><code>session_watcher.py:1622-1629</code> — <code>reconcile</code>'s cheap-skip arm</li>
+<li><code>session_watcher.py:1361</code> — <code>_enqueue_path</code></li>
+<li><code>session_watcher.py:962-966</code> — the confirmed-shrink reset</li>
 </ul>
-</section>
 
-<section>
-<div class="phase p-o"><span class="pn">1</span> Task 1: the suppression fact replaces the cursor advance</div>
+<h2 id="task-1-suppression-fact"><em>Task 1:</em> The suppression fact replaces the cursor advance</h2>
 
-<p class="eyebrow">Files:</p>
+<p class="eyebrow">9 steps · core implementation</p>
+
+<p><strong>Files:</strong></p>
 <ul>
-  <li>Modify: <code>src/ormah/background/session_watcher.py:1502</code> (call site), <code>:1553-1575</code> (the method)</li>
-  <li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
+<li>Modify: <code>src/ormah/background/session_watcher.py:1502</code> (call site), <code>:1553-1575</code> (the method)</li>
+<li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
 </ul>
 
-<p class="eyebrow">Interfaces:</p>
-<p><strong>Produces:</strong> <code>SessionHandler._mark_frozen_prefix_parked(self, path: Path, rel: str, boundary: int | None = None) -> None</code> — replaces <code>_mark_frozen_prefix_consumed</code>, same signature. Writes the state key <code>frozen_until: int</code> and never writes <code>end_offset</code>. Tasks 2, 3 and 4 read that key.</p>
+<p><strong>Produces:</strong> <code>SessionHandler._mark_frozen_prefix_parked(self, path: Path, rel: str, boundary: int | None = None) -> None</code> — replaces <code>_mark_frozen_prefix_consumed</code>, same signature. Writes three state keys and never writes <code>end_offset</code>: <code>frozen_until: int</code>, <code>frozen_ino: int</code>, <code>frozen_mtime_ns: int</code>.</p>
 
-<details>
-<summary><strong>Step 1: Write the failing test</strong></summary>
-<p>Append to <code>tests/test_background/test_session_watcher.py</code>, next to the other frozen-prefix tests (after <code>test_frozen_prefix_advance_never_passes_the_accepted_boundary</code>):</p>
-<pre><code>def test_frozen_prefix_does_not_consume_bytes_the_next_job_can_ingest(engine, tmp_path):
-    """ADR-0004 2026-08-12 — the ratchet. A job whose accepted boundary cuts the first
-    assistant record in half closes nothing, so the frozen-prefix path fires. It must NOT
-    advance the cursor: a second job at the file's real EOF has to ingest the WHOLE
-    transcript. With the cursor advanced (the pre-fix behaviour) the second job resumes
-    mid-record and the content is unreachable — that happened 24 times in a row on one
-    production transcript, boundary climbing 98,985 -> 1,435,339, nothing ever ingested."""
-    from ormah.background.ingest_spool import IngestSpool
+<p><strong>Key insight:</strong> The two identity keys exist because a size ceiling alone cannot say "unchanged". Council round 1 (cursor + codex, both critical/high, verified independently): a rotated or replaced transcript whose new size is <strong>at or below</strong> the ceiling would be suppressed forever, and a same-size replacement is invisible to a size-only comparison. Today the Observer lane consults no state at all, so it catches both cases on the FSEvent — a size-only gate would be a regression there. <code>st_ino</code> and <code>st_mtime_ns</code> come from the <strong>same</strong> <code>stat()</code> that computes <code>target</code>, never a second one.</p>
 
-    watch_dir = tmp_path / "projects"
-    proj = watch_dir / "-Users-alice-Code-myproject"
-    proj.mkdir(parents=True)
-    jsonl = proj / "ratchet.jsonl"
-    _make_jsonl(jsonl, user_turns=6)
-    _mark_idle(jsonl)
-    rel = str(jsonl.relative_to(watch_dir))
-    size = jsonl.stat().st_size
+<p><strong>Production evidence:</strong> Measured on the live Beta 2026-08-12: 75 state entries with the cursor advanced and nothing ingested; one transcript ratcheted through 24 dead-letters, boundary climbing 98,985 → 1,435,339, never ingested, while a whole-file parse closes 1,434,322 of its 1,435,339 bytes.</p>
 
-    # A boundary strictly INSIDE the first assistant record: the parser reads that line
-    # (its start is below the ceiling) and _exceeds_ceiling refuses it at commit, so
-    # safe_end_offset == start_offset == 0 and _idle_with_unsafe_tail is True.
-    first_line = jsonl.read_bytes().split(b"\n")[0]
-    boundary = len(first_line) + 1 + 10
-    assert boundary < size
+<ul>
+<li class="task-step">[ ] Step 1: Write the failing test</li>
+<li class="task-step">[ ] Step 2: Run test to verify it fails</li>
+<li class="task-step">[ ] Step 3: Rename the method and write the fact instead of the cursor</li>
+<li class="task-step">[ ] Step 4: Run the new test to verify it passes</li>
+<li class="task-step">[ ] Step 5: Run the whole watcher suite and read what moved</li>
+<li class="task-step">[ ] Step 6: Rewrite the three affected tests</li>
+<li class="task-step">[ ] Step 6b: Add the two council round-2 regression tests</li>
+<li class="task-step">[ ] Step 7: Run the whole watcher suite again</li>
+<li class="task-step">[ ] Step 8: Lint</li>
+<li class="task-step">[ ] Step 9: Commit</li>
+</ul>
 
-    spool = IngestSpool(tmp_path / "spool")
-    handler = SessionHandler(engine, watch_dir, 60.0, 5, 30.0, 9999, spool=spool)
-    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
-        spool.enqueue(jsonl, boundary=boundary, reason="observer", force_flush=False)
-        _drain_all(handler)
+<p><strong>Expected commit:</strong></p>
+<pre><code class="language-bash">git add src/ormah/background/session_watcher.py tests/test_background/test_session_watcher.py
+git commit -m "fix(watcher): park a frozen prefix with a fact, never by moving the cursor"</code></pre>
 
-        entry = handler._state.get(rel, {})
-        assert entry.get("frozen_until") == boundary, \
-            "the freeze must be recorded as a suppression fact"
-        assert (entry.get("end_offset") or 0) == 0, \
-            "the freeze must NOT move the cursor over bytes nothing ingested"
+<h2 id="task-2-reconcile-gate"><em>Task 2:</em> The "unchanged since the examination" predicate, and <code>reconcile</code> uses it</h2>
 
-        spool.enqueue(jsonl, boundary=size, reason="reconcile", force_flush=False)
-        _drain_all(handler)
+<p class="eyebrow">7 steps · predicate implementation</p>
 
-    entry = handler._state[rel]
-    assert entry["end_offset"] == size, \
-        "the second job, at the real EOF, must ingest the whole transcript"
-    assert entry.get("node_ids"), "the content must have reached the store"
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>src/ormah/background/session_watcher.py</code> — new module-level function next to <code>_commit_state</code> (~<code>:823</code>), and the cheap-skip arm of <code>reconcile</code> (<code>:1622-1631</code>)</li>
+<li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
+</ul>
+
+<p><strong>Consumes:</strong> <code>frozen_until</code> / <code>frozen_ino</code> / <code>frozen_mtime_ns</code> from <a href="#task-1-suppression-fact">Task 1</a>.</p>
+
+<p><strong>Produces:</strong> <code>_frozen_unchanged(entry: dict, st: os.stat_result) -> bool</code> — module-level, the single definition of "this file is still exactly the one the freeze examined". Task 3 calls the same function; there is deliberately <strong>no second copy</strong> of the predicate.</p>
+
+<p><strong>Why it matters:</strong> Without this task the cursor no longer drops the file from the sweep, so <code>reconcile</code> re-enqueues a frozen transcript on every tick. <a href="#task-1-suppression-fact">Task 1</a> is not shippable alone.</p>
+
+<p><strong>Council round 1 finding (critical/high):</strong> The first draft of this gate was <code>frozen_until >= st.st_size</code>. That is not "reopen on growth" — it also skips when the file <strong>shrank</strong>, so a rotated transcript is suppressed forever and the <a href="#task-4-shrink-reset">Task 4</a> reset becomes unreachable through either producer. The predicate skips only on <em>identity</em>, so any change at all — growth, shrink, replacement — re-selects.</p>
+
+<ul>
+<li class="task-step">[ ] Step 1: Write the failing tests</li>
+<li class="task-step">[ ] Step 2: Run the tests to verify they fail</li>
+<li class="task-step">[ ] Step 3: Add the predicate and use it in <code>reconcile</code></li>
+<li class="task-step">[ ] Step 4: Run the tests to verify they pass</li>
+<li class="task-step">[ ] Step 5: Run the whole watcher suite</li>
+<li class="task-step">[ ] Step 6: Lint</li>
+<li class="task-step">[ ] Step 7: Commit</li>
+</ul>
+
+<p><strong>Expected commit:</strong></p>
+<pre><code class="language-bash">git add src/ormah/background/session_watcher.py tests/test_background/test_session_watcher.py
+git commit -m "fix(watcher): reconcile skips a frozen transcript only while it is unchanged"</code></pre>
+
+<h2 id="task-3-observer-lane"><em>Task 3:</em> The Observer lane uses the same predicate</h2>
+
+<p class="eyebrow">7 steps · producer gate</p>
+
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>src/ormah/background/session_watcher.py:1361-1375</code> (<code>_enqueue_path</code>)</li>
+<li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
+</ul>
+
+<p><strong>Consumes:</strong> <code>_frozen_unchanged(entry, st)</code> from <a href="#task-2-reconcile-gate">Task 2</a> — the same function, not a copy.</p>
+
+<p><strong>Why both lanes:</strong> <code>_enqueue_path</code> consults no state at all today: every FSEvent becomes an <code>enqueue</code>. Gating only the sweep (<a href="#task-2-reconcile-gate">Task 2</a>) does not fix the defect, it relocates it — the ADR already recorded this: <em>"the suppression is applied in both producer lanes, because gating only the sweep would trade a full <code>failed/</code> for a hot enqueue loop on the Observer lane."</em></p>
+
+<p><strong>Council round 1 insight (critical):</strong> Because this lane consults nothing today, it is the one that currently catches a rotated or same-size-replaced transcript. A size-only gate here would be a straight regression, which is why the predicate is identity-based and lives in one place.</p>
+
+<ul>
+<li class="task-step">[ ] Step 1: Write the failing tests</li>
+<li class="task-step">[ ] Step 2: Run the tests to verify they fail</li>
+<li class="task-step">[ ] Step 3: Add the gate</li>
+<li class="task-step">[ ] Step 4: Run the tests to verify they pass</li>
+<li class="task-step">[ ] Step 5: Run the whole watcher suite</li>
+<li class="task-step">[ ] Step 6: Lint</li>
+<li class="task-step">[ ] Step 7: Commit</li>
+</ul>
+
+<p><strong>Expected commit:</strong></p>
+<pre><code class="language-bash">git add src/ormah/background/session_watcher.py tests/test_background/test_session_watcher.py
+git commit -m "fix(watcher): the Observer lane honours the frozen identity too"</code></pre>
+
+<h2 id="task-4-shrink-reset"><em>Task 4:</em> The frozen fact is cleared whenever it stops being true</h2>
+
+<p class="eyebrow">7 steps · state cleanup</p>
+
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>src/ormah/background/session_watcher.py:962-966</code> (the confirmed-shrink reset) and <code>:1284-1285</code> (the successful-ingest commit)</li>
+<li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
+</ul>
+
+<p><strong>Consumes:</strong> The three frozen keys from <a href="#task-1-suppression-fact">Task 1</a>, <code>_frozen_unchanged</code> from <a href="#task-2-reconcile-gate">Task 2</a>, and both producer gates.</p>
+
+<p><strong>Why two writers:</strong> The frozen fact describes a file, and once that file is gone or has been ingested, keeping it around is a lie the gates will act on.</p>
+
+<ol>
+<li><strong>The confirmed shrink reset</strong> builds its entry with <code>dict(existing or {})</code> and updates only <code>hash</code>/<code>end_offset</code>. A frozen fact surviving it belongs to the file that was rotated away.</li>
+<li><strong>The successful ingest commit</strong> does the same via <code>entry = dict(existing) if carry else {}</code>. A stale ceiling left on a healthy entry can only mislead a later comparison.</li>
+</ol>
+
+<p><strong>Council round 1 note (verified):</strong> The first draft of this task's test reached the reset by calling <code>spool.enqueue</code> directly — bypassing the very producer gate that was broken — and it could never have run tick 2 at all, because tick 1 requeues the job with a persisted backoff. The test below goes through <code>_enqueue_path</code> and advances the spool's clock.</p>
+
+<ul>
+<li class="task-step">[ ] Step 1: Write the failing test</li>
+<li class="task-step">[ ] Step 2: Run the tests to verify they fail</li>
+<li class="task-step">[ ] Step 3: Clear the fact at both commit sites</li>
+<li class="task-step">[ ] Step 4: Run the tests to verify they pass</li>
+<li class="task-step">[ ] Step 5: Run the whole watcher suite</li>
+<li class="task-step">[ ] Step 6: Lint</li>
+<li class="task-step">[ ] Step 7: Commit</li>
+</ul>
+
+<p><strong>Expected commit:</strong></p>
+<pre><code class="language-bash">git add src/ormah/background/session_watcher.py tests/test_background/test_session_watcher.py
+git commit -m "fix(watcher): drop the frozen fact on a confirmed shrink and on a successful ingest"</code></pre>
+
+<h2 id="task-5-verify-merge"><em>Task 5:</em> Verify the whole change, then land it in the Beta</h2>
+
+<p class="eyebrow">9 steps · integration & verification</p>
+
+<p><strong>Files:</strong> Verification and integration only — no source changes.</p>
+
+<p><strong>Consumes:</strong> Everything <a href="#task-1-suppression-fact">Tasks 1</a>–<a href="#task-4-shrink-reset">4</a> produced.</p>
+
+<ul>
+<li class="task-step">[ ] Step 1: Run the full test suite, not just the watcher file</li>
+<li class="task-step">[ ] Step 2: Lint the whole tree</li>
+<li class="task-step">[ ] Step 3: Confirm no caller of the old name survives</li>
+<li class="task-step">[ ] Step 4: Confirm the dead-letter behaviour is untouched</li>
+<li class="task-step">[ ] Step 5: Read the whole diff once, deliberately</li>
+<li class="task-step">[ ] Step 6: Merge into the running Beta</li>
+<li class="task-step">[ ] Step 7: Establish the production baseline for the verification claim</li>
+<li class="task-step">[ ] Step 8: Prune the worktree</li>
+<li class="task-step">[ ] Step 9: Amend ADR-0004</li>
+</ul>
+
+<p><strong>Production verification:</strong> The spec's production check is that the count of state entries holding only <code>end_offset</code> stops rising. It is 75 today (was 48 on 2026-08-09). Record the count right after the restart and re-run after a few days of normal use: the count must be <strong>flat</strong>, and entries carrying <code>frozen_until</code> with an intact cursor must have appeared. <strong>This is the only claim in the plan that cannot be verified at merge time.</strong></p>
+
+<p><strong>Expected scope in the diff:</strong></p>
+<ol>
+<li><code>_mark_frozen_prefix_parked</code> — the renamed method with its new body</li>
+<li><code>_idle_with_unsafe_tail</code> — returns <code>os.stat_result | None</code> instead of <code>bool</code></li>
+<li>The <code>_run_job</code> call site that threads the examined stat into the park</li>
+<li>The new module-level <code>_frozen_unchanged</code></li>
+<li><code>reconcile</code> — <code>>=</code> becomes <code>==</code> on the fully-consumed arm, plus the new frozen arm</li>
+<li><code>_enqueue_path</code> — the gate</li>
+<li>Two <code>pop</code> loops: the confirmed-shrink reset and the successful-ingest commit</li>
+</ol>
+
+<p class="callout"><strong>Note on hunk 5:</strong> The <code>>=</code> → <code>==</code> change repairs <strong>pre-existing</strong> behaviour rather than behaviour this plan introduced: a cursor above EOF meant "fully consumed", so a shrunk transcript was dropped from the sweep and the shrink gate was reachable only through the Observer. It is included because the frozen fact's contract claims that escape works. If a tighter diff is wanted, this hunk and its test are the separable piece.</p>
+
+<p><strong>Expected final steps:</strong></p>
+<pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah
+git merge fix/adr-0004-frozen-until
+make restart
+git worktree remove ../ormah-wt-frozen-until
 </code></pre>
-</details>
-
-<h3 id="task-1-steps">Steps 2-9</h3>
-<p>Follow the detailed steps in task file 01-suppression-fact.md for completing the implementation, tests, and commit.</p>
-</section>
-
-<section>
-<div class="phase p-b"><span class="pn">2</span> Task 2: reconcile skips a frozen file until it grows</div>
-
-<p class="eyebrow">Files:</p>
-<ul>
-  <li>Modify: <code>src/ormah/background/session_watcher.py:1622-1631</code> (the cheap-skip arm of <code>reconcile</code>)</li>
-  <li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
-</ul>
-
-<p class="eyebrow">Interfaces:</p>
-<p><strong>Consumes:</strong> the state key <code>frozen_until: int</code> written by <a href="#task-1-the-suppression-fact">Task 1</a>.</p>
-<p><strong>Produces:</strong> nothing new. <code>SessionHandler.reconcile() -> int</code> keeps its signature and meaning (number of transcripts enqueued).</p>
-
-<p class="callout">Without this task the cursor no longer drops the file from the sweep, so <code>reconcile</code> re-enqueues a frozen transcript on every tick. <a href="#task-1-the-suppression-fact">Task 1</a> is not shippable alone.</p>
-
-<h3 id="task-2-steps">Steps 1-7</h3>
-<p>Write and run two failing tests (<code>test_reconcile_skips_a_frozen_file_until_it_grows</code> and <code>test_reconcile_still_selects_a_never_seen_file_with_only_a_frozen_fact</code>), then add a third <code>elif</code> gate in <code>reconcile</code> that checks <code>frozen_until</code>. See task file 02-reconcile-gate.md for complete details.</p>
-</section>
-
-<section>
-<div class="phase p-g"><span class="pn">3</span> Task 3: the Observer lane gets the same gate</div>
-
-<p class="eyebrow">Files:</p>
-<ul>
-  <li>Modify: <code>src/ormah/background/session_watcher.py:1361-1375</code> (<code>_enqueue_path</code>)</li>
-  <li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
-</ul>
-
-<p class="eyebrow">Interfaces:</p>
-<p><strong>Consumes:</strong> the state key <code>frozen_until: int</code> written by <a href="#task-1-the-suppression-fact">Task 1</a>.</p>
-<p><strong>Produces:</strong> nothing new. <code>SessionHandler._enqueue_path(self, path: Path, reason: str) -> None</code> keeps its signature.</p>
-
-<p class="callout"><code>_enqueue_path</code> consults no state at all today: every FSEvent becomes an <code>enqueue</code>. Gating only the sweep does not fix the defect, it relocates it — the ADR already recorded this: <em>"the suppression is applied in both producer lanes, because gating only the sweep would trade a full <code>failed/</code> for a hot enqueue loop on the Observer lane."</em></p>
-
-<h3 id="task-3-steps">Steps 1-7</h3>
-<p>Write the failing test <code>test_enqueue_path_skips_a_frozen_file_until_it_grows</code>, then update <code>_enqueue_path</code> to check <code>frozen_until</code> before enqueueing. Mirror the approach from Task 2. See task file 03-enqueue-path-gate.md for complete implementation details.</p>
-</section>
-
-<section>
-<div class="phase p-o"><span class="pn">4</span> Task 4: a confirmed shrink clears the suppression fact</div>
-
-<p class="eyebrow">Files:</p>
-<ul>
-  <li>Modify: <code>src/ormah/background/session_watcher.py:962-966</code> (the confirmed-shrink reset inside <code>_ingest_session</code>)</li>
-  <li>Test: <code>tests/test_background/test_session_watcher.py</code></li>
-</ul>
-
-<p class="eyebrow">Interfaces:</p>
-<p><strong>Consumes:</strong> the state key <code>frozen_until: int</code> written by <a href="#task-1-the-suppression-fact">Task 1</a>, and the gates from <a href="#task-2-reconcile-skips-frozen">Tasks 2</a> & <a href="#task-3-observer-lane">3</a>.</p>
-<p><strong>Produces:</strong> nothing new.</p>
-
-<p class="callout warn">The reset builds its entry with <code>dict(existing or {})</code> and updates only <code>hash</code>/<code>end_offset</code>. A <code>frozen_until</code> surviving it would sit <strong>above</strong> the rotated file's size and suppress the fresh content — the same defect with the sign flipped: the cursor stops claiming bytes it never ingested, and the ceiling starts hiding bytes nobody ever examined.</p>
-
-<h3 id="task-4-steps">Steps 1-7</h3>
-<p>Write the failing test <code>test_confirmed_shrink_clears_the_frozen_fact</code>, then add a single <code>pop("frozen_until", None)</code> to the shrink reset at line 962-966. The stale ceiling belongs to the rotated file and must not carry over. See task file 04-shrink-reset-clears.md for complete details.</p>
-</section>
-
-<section>
-<div class="phase p-b"><span class="pn">5</span> Task 5: verify the whole change, then land it in the Beta</div>
-
-<p class="eyebrow">Files:</p>
-<p>Modify: none (verification and integration only)</p>
-
-<p class="eyebrow">Interfaces:</p>
-<p><strong>Consumes:</strong> everything <a href="#task-1-the-suppression-fact">Tasks 1</a>–<a href="#task-4-shrink-reset">4</a> produced.</p>
-
-<h3 id="task-5-steps">Steps 1-9</h3>
-<p>Run the full test suite and lint check. Verify the old method name is completely gone. Confirm <code>ingest_spool.py</code> is untouched and the diff contains only the four changes (renamed method, two gates, one pop). Merge to <code>local-main</code>, restart the server, record the production baseline count, prune the worktree, and amend ADR-0004 with errata and findings. See task file 05-verify-and-merge.md for full verification and merge procedures.</p>
-</section>
-
-</article>
   <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
   <div class="signature">
     <div class="name">rich-doc</div>
@@ -424,4 +454,4 @@ pip install -e ".[dev]"
 </main>
 </body>
 </html>
-<!-- rich-doc-src-sha256:46ac801e24d8acaf2cc25405662f2571d0b480b519a1160ebde7c040363b7d85 -->
+<!-- rich-doc-src-sha256:45fa7e8e0bb6ffba30c003f8025f6eddb3be3229f8af9da136f4c9774b7579ef -->
