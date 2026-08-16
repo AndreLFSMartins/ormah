@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 
 from ormah.background.decay_manager import run_decay
-from ormah.models.node import CreateNodeRequest, NodeType, Tier
+from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, NodeType, Tier
 
 
 def _make_stale(engine, node_id: str, days: int = 30) -> None:
@@ -26,8 +26,12 @@ def _get_tier(engine, node_id: str) -> str:
     return row["tier"] if row else None
 
 
-def test_high_importance_node_not_decayed(engine):
-    """A stale node with high importance should not be demoted."""
+def test_high_importance_stale_node_is_decayed(engine):
+    """#222: importance is no longer a pre-gate — a stale node decays regardless.
+
+    Before #222 a node with importance >= decay_importance_threshold (0.5) could
+    never leave working, however stale it became.
+    """
     node_id, _ = engine.remember(CreateNodeRequest(
         content="Important stale node",
         type=NodeType.fact,
@@ -43,7 +47,106 @@ def test_high_importance_node_not_decayed(engine):
 
     run_decay(engine)
 
+    assert _get_tier(engine, node_id) == "archival"
+
+
+def test_accumulated_access_and_edges_do_not_pin_a_node_to_working(engine):
+    """The reported case: 50 accesses + 4 edges produce a permanent non-recency
+    importance contribution of ~0.514, above the old 0.5 gate. That node must
+    still decay once it goes stale."""
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Hub node with long access history",
+        type=NodeType.concept,
+        tier=Tier.working,
+        title="Hub",
+    ))
+
+    for i in range(4):
+        sat_id, _ = engine.remember(CreateNodeRequest(
+            content=f"Satellite of the hub number {i}",
+            type=NodeType.fact,
+            tier=Tier.working,
+        ))
+        engine.connect(ConnectRequest(
+            source_id=node_id,
+            target_id=sat_id,
+            edge=EdgeType.related_to,
+        ))
+
+    engine.db.conn.execute(
+        "UPDATE nodes SET access_count = 50, importance = 0.5145 WHERE id = ?",
+        (node_id,),
+    )
+    engine.db.conn.commit()
+    _make_stale(engine, node_id)
+
+    run_decay(engine)
+
+    assert _get_tier(engine, node_id) == "archival"
+
+
+def test_fresh_high_importance_node_stays_working(engine):
+    """The negative case (council I2): retrievability still decides.
+
+    Removing the importance gate must not turn decay into "demote everything".
+    A fresh node has R ~= 1.0 and stays working whatever its importance. Without
+    this test, deleting the retrievability check would leave the suite green.
+    """
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Fresh node that must not decay",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Fresh",
+    ))
+
+    # Deliberately NOT made stale.
+    engine.db.conn.execute(
+        "UPDATE nodes SET importance = 0.9 WHERE id = ?", (node_id,)
+    )
+    engine.db.conn.commit()
+
+    run_decay(engine)
+
     assert _get_tier(engine, node_id) == "working"
+
+
+def test_fresh_low_importance_node_stays_working(engine):
+    """Same guard from the other side: low importance alone never demotes."""
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Fresh unimportant node that must not decay",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Fresh unimportant",
+    ))
+
+    engine.db.conn.execute(
+        "UPDATE nodes SET importance = 0.05 WHERE id = ?", (node_id,)
+    )
+    engine.db.conn.commit()
+
+    run_decay(engine)
+
+    assert _get_tier(engine, node_id) == "working"
+
+
+def test_self_node_is_never_decayed(engine):
+    """Identity protection survives the removal of the importance gate."""
+    user_node_id = getattr(engine, "user_node_id", None)
+    # Fail closed, not skip (council I2): MemoryEngine.startup() calls
+    # _ensure_self_node(), which creates the self node if absent, so a missing
+    # one means the fixture broke — silently skipping would hide that.
+    assert user_node_id is not None, "engine fixture must provide a self node"
+
+    _make_stale(engine, user_node_id)
+    engine.db.conn.execute(
+        "UPDATE nodes SET tier = 'working', importance = 0.1 WHERE id = ?",
+        (user_node_id,),
+    )
+    engine.db.conn.commit()
+
+    run_decay(engine)
+
+    assert _get_tier(engine, user_node_id) == "working"
 
 
 def test_low_importance_stale_node_decayed(engine):

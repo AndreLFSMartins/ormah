@@ -14,7 +14,13 @@ logger = logging.getLogger(__name__)
 
 @serialized_memory_job
 def run_decay(engine) -> None:
-    """Auto-demote working nodes whose FSRS retrievability drops below threshold."""
+    """Auto-demote working nodes whose FSRS retrievability drops below threshold.
+
+    Retrievability alone decides (#222/#191). Importance is deliberately not a
+    pre-gate: cumulative access and edge counts could push it permanently above
+    any threshold, pinning a stale node to working forever. Identity (the self
+    node) and core stay protected — core never enters this query.
+    """
     try:
         settings = engine.settings
         now = datetime.now(timezone.utc)
@@ -26,7 +32,7 @@ def run_decay(engine) -> None:
             )
 
         rows = engine.db.conn.execute(
-            "SELECT id, importance, stability, last_review, last_accessed "
+            "SELECT id, stability, last_review, last_accessed "
             "FROM nodes WHERE tier = 'working'"
         ).fetchall()
 
@@ -34,16 +40,11 @@ def run_decay(engine) -> None:
             return
 
         user_node_id = getattr(engine, "user_node_id", None)
-        importance_threshold = settings.decay_importance_threshold
         r_threshold = settings.fsrs_decay_threshold
 
         demoted = 0
         for row in rows:
             if row["id"] == user_node_id:
-                continue
-            # Skip high-importance nodes
-            node_importance = row["importance"] if row["importance"] is not None else 0.5
-            if node_importance >= importance_threshold:
                 continue
 
             # Compute FSRS retrievability
