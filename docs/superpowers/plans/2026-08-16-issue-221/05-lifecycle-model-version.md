@@ -16,11 +16,37 @@
 
 | Store state | `_lifecycle_model_version()` | Action |
 |---|---|---|
-| No `lifecycle_model_version`, no `fsrs_migrated` | `0` | seed from `access_count`, then write `2` |
-| No `lifecycle_model_version`, `fsrs_migrated = '1'` | `1` | skip the seed, write `2` |
+| No `lifecycle_model_version`, no `fsrs_migrated`, no node carries `last_review` | `0` | seed from `access_count`, then write `2` + `fsrs_migrated` |
+| No `lifecycle_model_version`, no `fsrs_migrated`, but some node carries `last_review` | `1` | **skip the seed**, write `2` + `fsrs_migrated` |
+| No `lifecycle_model_version`, `fsrs_migrated = '1'` | `1` | skip the seed, write `2` + `fsrs_migrated` |
+| `lifecycle_model_version` present but unreadable | `1` | **skip the seed** (fail closed), rewrite both keys |
 | `lifecycle_model_version = 2` | `2` | nothing |
 
 Version `2` records *which model produced the stored stabilities*. It does not rescale them: #191 rules that a future curve migration must preserve each node's archival deadline rather than apply a constant factor, and this issue introduces no curve change to migrate.
+
+**Two council findings shaped the table above — do not simplify it back.**
+
+*C3 (high, Codex).* The version lives only in SQLite `meta`, and `backup.py:331-334` excludes
+`index.db`, `index.db-shm` and `index.db-wal` from every backup. A fresh-device restore brings
+back Markdown carrying valid `stability`, but the index is rebuilt empty — no version key. Mapping
+that to `0` runs the seed, which overwrites every stability with `min(30, access_count * 2)` **and
+rewrites the Markdown**, the actual source of truth. That violates this plan's own "do not rescale
+existing stability" constraint, through a supported recovery path rather than manual corruption.
+A "some stability != 1.0" guard is not enough: `fsrs_growth_factor = 0.001` with 2-decimal
+rounding, or `fsrs_max_stability = 1.0`, both leave every node at exactly `1.0` under model v2.
+
+The durable signal already exists and was simply never consulted: `last_review` is written to the
+Markdown frontmatter (`markdown.py:72-73`) and restored into SQLite on rebuild (`builder.py:161`).
+Any store that ever ran the seed or a reinforcement carries it, and it survives backup, restore and
+`full_rebuild`. The residual case is harmless: `access_count > 0` implies a reinforcement happened,
+hence `last_review` is set; and with `access_count = 0` the seed returns `1.0` anyway.
+
+*I1 (medium, Cursor).* A store created under #221 would carry only `lifecycle_model_version`. A
+binary from before `a28837b` does not know that key, sees `fsrs_migrated` absent, and reseeds. Both
+keys are therefore written together, so rolling back stays safe.
+
+An unreadable version is now treated as **already migrated** rather than `0` — the original plan had
+this backwards. Skipping a seed is inert; running one is destructive.
 
 ---
 
@@ -98,6 +124,10 @@ def test_an_unmigrated_store_still_gets_seeded(engine):
     engine.db.conn.execute(
         "UPDATE nodes SET stability = 1.0, access_count = 5 WHERE id = ?", (node_id,)
     )
+    # A genuinely pre-FSRS store: no node has ever been seeded or reinforced.
+    # Stated explicitly rather than assumed — this is what separates it from the
+    # rebuilt-index case below, and the whole seed decision now rests on it.
+    engine.db.conn.execute("UPDATE nodes SET last_review = NULL")
     engine.db.conn.commit()
 
     engine._migrate_fsrs()
@@ -106,14 +136,49 @@ def test_an_unmigrated_store_still_gets_seeded(engine):
     assert _stability(engine, node_id) == 10.0, "min(30, access_count * 2) was not applied"
 
 
-def test_the_version_read_survives_a_corrupt_value(engine):
+def test_a_corrupt_version_fails_closed_as_migrated(engine):
+    """Skipping a seed is inert; running one overwrites stability. Fail closed."""
     engine.db.conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('lifecycle_model_version', 'banana')"
     )
     engine.db.conn.commit()
 
-    assert engine._lifecycle_model_version() == 0
+    assert engine._lifecycle_model_version() == 1
+
+
+def test_a_rebuilt_index_does_not_reseed_earned_stability(engine):
+    """C3: SQLite is excluded from backups, so a restore arrives with no meta.
+
+    The Markdown still carries stability and last_review, so the store is not a
+    pre-FSRS one and must not be reseeded.
+    """
+    node_id = _make_node(engine)
+    now = datetime.now(timezone.utc)
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 1.0, access_count = 7, last_review = ? WHERE id = ?",
+        (now.isoformat(), node_id),
+    )
+    # Exactly what a fresh-device restore or a deleted index looks like.
+    engine.db.conn.execute("DELETE FROM meta WHERE key = 'lifecycle_model_version'")
+    engine.db.conn.execute("DELETE FROM meta WHERE key = 'fsrs_migrated'")
+    engine.db.conn.commit()
+
+    engine._migrate_fsrs()
+
+    # Without the last_review guard the seed would write min(30, 7*2) = 14.0.
+    assert _stability(engine, node_id) == 1.0
+    assert _version(engine) == "2"
+
+
+def test_the_legacy_flag_is_written_alongside_the_version(engine):
+    """I1: a rollback to a binary that only knows fsrs_migrated must not reseed."""
+    row = engine.db.conn.execute(
+        "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
+    ).fetchone()
+    assert row is not None and row["value"] == "1"
 ```
+
+Add `from datetime import datetime, timezone` to the test file's imports.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -151,14 +216,23 @@ Replace lines 159-197 entirely:
                 "('lifecycle_model_version', ?)",
                 (str(LIFECYCLE_MODEL_VERSION),),
             )
+            # Keep the legacy flag in sync so rolling back to a binary that only
+            # knows 'fsrs_migrated' does not reseed a store built under #221.
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
+            )
 
     def _lifecycle_model_version(self) -> int:
         """Read the store's lifecycle-model version, upgrading the legacy flag.
 
         Stores written before #221 only carry the boolean 'fsrs_migrated' key,
         which could say migrated/not-migrated and nothing else; it maps to
-        version 1. An unreadable value is treated as 0 so the seed re-runs
-        rather than being silently skipped.
+        version 1.
+
+        Every fallback here fails closed at 1 (already migrated), because the
+        only action version 0 unlocks is a destructive one: the seed overwrites
+        stability and rewrites the Markdown. Skipping a needed seed leaves
+        defaults in place; running an unneeded one destroys real values.
         """
         row = self.db.conn.execute(
             "SELECT value FROM meta WHERE key = 'lifecycle_model_version'"
@@ -167,12 +241,25 @@ Replace lines 159-197 entirely:
             try:
                 return int(row["value"])
             except (TypeError, ValueError):
-                return 0
+                return 1
 
         legacy = self.db.conn.execute(
             "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
         ).fetchone()
-        return 1 if legacy else 0
+        if legacy:
+            return 1
+
+        # No meta at all. SQLite is derived and excluded from backups
+        # (backup.py:331-334), so this is also what a fresh-device restore or a
+        # deleted index looks like — not only a genuinely pre-FSRS store. Ask
+        # the durable source instead: last_review lives in the Markdown
+        # frontmatter (markdown.py:72-73) and is restored on rebuild
+        # (builder.py:161), so any store that ever seeded or reinforced carries
+        # it. Seeding over that would overwrite stability the user actually earned.
+        reviewed = self.db.conn.execute(
+            "SELECT 1 FROM nodes WHERE last_review IS NOT NULL LIMIT 1"
+        ).fetchone()
+        return 1 if reviewed else 0
 
     def _seed_stability_from_access_count(self) -> None:
         """Seed FSRS stability from access_count, updating both DB and markdown."""
@@ -211,7 +298,12 @@ The seeding body is unchanged apart from losing the `fsrs_migrated` write — th
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `./.venv/bin/python -m pytest tests/test_engine/test_lifecycle_model_version.py -v`
-Expected: 5 passed.
+Expected: 7 passed.
+
+`test_a_rebuilt_index_does_not_reseed_earned_stability` is the one that matters most: drop the
+`last_review` guard from `_lifecycle_model_version` and it must report `stability == 14.0`
+instead of `1.0`. Verify that by hand once before moving on — a guard nobody ever saw fail is
+a guard nobody knows works.
 
 - [ ] **Step 6: Run the engine suite**
 

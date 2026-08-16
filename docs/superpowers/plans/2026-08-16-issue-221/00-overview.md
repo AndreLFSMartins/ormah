@@ -19,8 +19,14 @@
 - **The formula is fixed by #191** — do not tune it: `spacing = min(R^-0.2, cap)`, `S' = min(S × (1 + g × S^-w × spacing), max)`, with `g = 0.5`, `w = 0.5`, `cap = 2.0`, spacing exponent `0.2`.
 - **Verified target numbers** (recompute if you change anything): `S=1` + 30 days → exactly `2.0`; `S=1` → `365.0` in exactly **74** closely spaced updates.
 - Line length 100, `ruff check src/ tests/` must pass.
-- Do not touch `src/ormah/background/importance_scorer.py` — out of scope (owned by #222/PR 235).
 - Do not rescale existing `stability` values anywhere.
+- **Merge prerequisites, not just a preferred order:** #220 (PR #234) and #222 (PR #235) must
+  land before this one. Without #220 the branch does not literally implement "confirmed use";
+  #222 rewrites the same `recency_signal` line Task 4 now touches. Implement and review freely
+  against `upstream/main`, but hold the merge.
+- **Any new decay test must lower `importance` below `decay_importance_threshold`.** Both the
+  node default and the threshold are `0.5` and the gate is `>=`, so a test left at the default
+  never reaches the retrievability code it claims to exercise. See Task 4.
 
 ## Setup (once, before Task 1)
 
@@ -44,6 +50,8 @@ Expected: the decay suite passes on unmodified `upstream/main`. That green is th
 | `src/ormah/engine/memory_engine.py:1936` (modify) | `_touch_access` → cooldown + helper call (AC4) | 3 |
 | `tests/test_engine/test_reinforcement_cooldown.py` (create) | Cooldown behavior | 3 |
 | `src/ormah/background/decay_manager.py` (modify) | Shared retrievability + inverted anchor (AC5) | 4 |
+| `src/ormah/background/importance_scorer.py` (modify) | Same anchor flip + shared helper (council C2) | 4 |
+| `tests/test_background/test_importance_scorer.py` (modify) | Recency ignores a lagging `last_review` | 4 |
 | `src/ormah/engine/memory_engine.py:159` (modify) | Integer lifecycle-model version (AC6) | 5 |
 | `docs/12 - Configuration Reference.md`, `docs/05`, `docs/01` (modify) | Config + behavior docs (AC7) | 6 |
 

@@ -105,6 +105,9 @@ Anchoring decay on it would let an actively used node look stale — the AC "eve
 still advances its recency/decay anchor" requires the use timestamp. The two-way fallback is
 kept so a row missing either column still decays instead of being skipped.
 
+`importance_scorer.py:81-84` receives the identical change, for the identical reason — see
+*Out of scope* for why it was originally excluded and what the council review found.
+
 ### 4. `src/ormah/config.py`
 
 Removed: `fsrs_stability_growth` (today `1.5`, a *base multiplier*). The new `g` is an
@@ -116,13 +119,17 @@ Added, with validators:
 
 | Field | Default | Validation |
 |---|---|---|
-| `fsrs_growth_factor` | `0.5` | `> 0` |
-| `fsrs_growth_exponent` | `0.5` | `> 0` |
-| `fsrs_spacing_cap` | `2.0` | `>= 1.0` |
-| `fsrs_reinforcement_cooldown_days` | `1.0` | `>= 0` |
+| `fsrs_growth_factor` | `0.5` | finite, `> 0` |
+| `fsrs_growth_exponent` | `0.5` | finite, `> 0` |
+| `fsrs_spacing_cap` | `2.0` | finite, `>= 1.0` |
+| `fsrs_reinforcement_cooldown_days` | `1.0` | finite, `>= 0` |
 
 `fsrs_growth_factor` and `fsrs_growth_exponent` join the existing `_fsrs_positive` validator;
-the other two get their own.
+the other two get their own. A new `_fsrs_finite` validator covers all four plus the
+pre-existing `fsrs_initial_stability` and `fsrs_max_stability` — council finding I2: none of the
+bounds checks reject NaN (`v <= 0` is False for it) and infinity satisfies them outright, so
+`ORMAH_FSRS_GROWTH_FACTOR=nan` would propagate NaN into `stability` and into the Markdown
+frontmatter.
 
 ### 5. Lifecycle-model version
 
@@ -132,7 +139,22 @@ stored store-wide in the existing `meta` table (`src/ormah/index/schema.sql:67`)
 `_migrate_fsrs` in `memory_engine.py:159` becomes version-aware:
 
 - New key absent, `fsrs_migrated = '1'` present → backfill version `1`, skip the seed.
-- New key absent, `fsrs_migrated` absent → run the `access_count` seed once, as today.
+- New key absent, `fsrs_migrated` absent, but some node carries `last_review` → version `1`,
+  skip the seed.
+- New key absent, `fsrs_migrated` absent, no node carries `last_review` → run the
+  `access_count` seed once, as today.
+- Key present but unreadable → version `1` (fail closed), skip the seed.
+
+Both keys are written together, so a rollback to a binary that only knows `fsrs_migrated` does
+not reseed a store built under #221.
+
+The `last_review` condition comes from council finding C3: `backup.py:331-334` excludes
+`index.db` from every backup, so a fresh-device restore or a deleted index arrives with an
+empty `meta` table and would otherwise be mistaken for a pre-FSRS store — running the seed over
+valid stabilities and rewriting the Markdown that holds them. `last_review` is the durable
+signal that survives this: it is written to the frontmatter (`markdown.py:72-73`) and restored
+on rebuild (`builder.py:161`). Treating an unreadable version as `0` was the same mistake in
+miniature — skipping a needed seed is inert, running an unneeded one is destructive.
 - Version `< 2` → write `2` (bounded reinforcement).
 
 Version `2` records *which model produced the stored stabilities*; it does not rescale them.
@@ -159,9 +181,16 @@ inflation. That is the desired direction, but it changes real-node numbers befor
 
 ### Out of scope
 
-- `importance_scorer.py` — the AC names only the decay manager and the reinforcement path, and
-  #222 (PR #235) already decouples that job from stability. Editing it here would guarantee a
-  conflict with an open PR of mine.
+- ~~`importance_scorer.py`~~ — **moved into scope by the council review (2026-08-16, finding
+  C2).** The original reasoning was that the AC names only the decay manager and the
+  reinforcement path, and that #222 already decouples that job from stability. That missed a
+  defect this issue creates: the scorer reads `last_review or last_accessed` with weight `0.33`
+  (`importance_scorer.py:81-84`, `config.py:144`), and the cooldown introduced here is exactly
+  what makes `last_review` lag. An `S=1` node used today but reinforced yesterday sees its
+  recency term fall from `~1.0` to `~0.37` — about `0.21` off importance, enough to cross the
+  `0.5` gate and demote a memory in active use. The fix is the same anchor flip applied to the
+  decay manager, which is orthogonal to #222 (that PR rewrites the `recency_signal` line and
+  leaves the anchor alone).
 - `tier_manager.py`, promotion floors, and the initial-lease work — #223.
 - Any rescale or backfill of existing `stability` values.
 - Splitting surfacing from confirmed use — #220.
@@ -188,7 +217,11 @@ edits to the existing decay and engine suites.
 - `tests/test_engine/test_mutation_stamping.py:95` (`test_touch_access_does_not_advance_updated`)
   must still pass unchanged.
 
-**Decay tests**
+**Decay tests** — every one of these must set `importance = 0.2` first. Council finding C1:
+`run_decay` skips a node when `importance >= decay_importance_threshold`, and both the node
+default and the threshold are `0.5` with a `>=` gate, so a test at the default never reaches the
+retrievability code. The anchor test in particular must be observed **failing** on `a28837b`
+before the flip, or it proves nothing.
 
 - Same `(days_since, stability)` input produces the same `R` through `run_decay`'s path and
   through `lifecycle.retrievability` — one implementation, asserted numerically (AC5).
@@ -201,10 +234,19 @@ edits to the existing decay and engine suites.
 - Store with `fsrs_migrated='1'` and no new key → backfills `lifecycle_model_version = 1`, does
   not re-seed, then advances to `2` (AC6).
 - Fresh store → seed runs once, version ends at `2`.
+- Store with no `meta` at all but a node carrying `last_review` (the rebuilt-index case) →
+  stability untouched, version ends at `2`. Removing the guard must make this test report the
+  seeded value instead.
+- Unreadable version → treated as migrated, seed does not run.
+- `fsrs_migrated` is present after any migration path (rollback safety).
 
 **Config tests**
 
 - Each new knob rejects its invalid range (AC7).
+- Every lifecycle float rejects `nan`, `inf` and `-inf`, from the constructor and from the
+  environment (council finding I2). Verified against the current code: `Settings` accepts both
+  `nan` and `inf` today, because `v <= 0`, `v < 1` and `v < 0` are all False for NaN and
+  infinity satisfies them outright.
 - An `.env` carrying the removed `fsrs_stability_growth` still loads (`extra: "ignore"`).
 
 **Verification command.** Run inside the worktree with its own venv:
