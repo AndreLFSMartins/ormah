@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from pydantic import field_validator
@@ -566,6 +567,15 @@ class Settings(BaseSettings):
     def _fsrs_positive(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"FSRS parameter must be > 0, got {v}")
+        return v
+
+    @field_validator("importance_recency_half_life_days")
+    @classmethod
+    def _importance_half_life_positive(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError(f"importance_recency_half_life_days must be finite, got {v}")
+        if v <= 0:
+            raise ValueError(f"importance_recency_half_life_days must be > 0, got {v}")
         return v
 
     @field_validator("fsrs_max_stability")
