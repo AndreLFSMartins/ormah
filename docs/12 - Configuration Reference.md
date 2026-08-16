@@ -184,8 +184,8 @@ Important note: current search applies tier as a multiplicative factor after con
 | `decay_importance_threshold` | `0.5` |
 
 `decay_importance_threshold` no longer affects `working -> archival` decay, which
-depends on retrievability alone (#222). It is retained for configuration
-compatibility and currently has no effect.
+depends on retrievability alone (#222). It remains a documented setting with no
+effect in this version; bounded forgetting reintroduces a consumer.
 
 ## Whisper-Out and Nudge
 

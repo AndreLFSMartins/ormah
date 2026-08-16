@@ -154,8 +154,8 @@ class Settings(BaseSettings):
 
     # Decay gate removed in #222: working->archival now depends on retrievability
     # alone, because cumulative access and edge counts could push importance
-    # permanently above any threshold. Kept for config compatibility with existing
-    # .env files; the next consumer is bounded forgetting (#28/#31, gated on #223).
+    # permanently above any threshold. Kept because it is a documented setting;
+    # bounded forgetting (#28/#31) reintroduces a reader as the deletion protection gate.
     decay_importance_threshold: float = 0.5
 
     # Whisper-out (involuntary storage on compaction / session end)
