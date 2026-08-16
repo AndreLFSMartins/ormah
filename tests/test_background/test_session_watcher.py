@@ -5217,3 +5217,296 @@ def test_enqueue_path_re_arms_suppression_after_a_same_size_replacement(engine, 
         assert handler.spool.pending_count() == 0, \
             "suppression must re-arm on the new identity, not loop forever"
 
+
+# --- Issue #220: confirmed use from the auto_llm_judge path -----------------
+
+_LIFECYCLE_FIELDS = ("access_count", "last_accessed", "stability", "last_review")
+
+
+def _lifecycle(engine, node_id):
+    """The four lifecycle fields, from the markdown file and the SQLite row."""
+    node = engine.file_store.load(node_id)
+    row = engine.db.conn.execute(
+        "SELECT access_count, last_accessed, stability, last_review FROM nodes WHERE id = ?",
+        (node_id,),
+    ).fetchone()
+    return {
+        "file": tuple(getattr(node, f) for f in _LIFECYCLE_FIELDS),
+        "db": tuple(row[f] for f in _LIFECYCLE_FIELDS),
+    }
+
+
+def test_llm_judge_used_verdict_records_confirmed_use(engine, tmp_path):
+    """Issue #220: a positive auto_llm_judge verdict confirms use for its node."""
+    prompt = "What deployment marker should we use?"
+    response = "That guidance is the right one for the rollout."
+    transcript_path = tmp_path / "judge-confirms-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Use blue deployment markers when rollback plans need quick visual checks.",
+        type="fact",
+        title="Blue deployment rollback marker",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="judge-confirms-session", prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    before = _lifecycle(engine, node_id)
+
+    llm_response = json.dumps({
+        "verdicts": [{
+            "whisper_log_id": whisper_log_id,
+            "verdict": "used",
+            "confidence": 0.88,
+            "reason": "The answer endorses the injected deployment guidance.",
+        }]
+    })
+    with patch(_JUDGE_PATCH, return_value=llm_response):
+        _record_whisper_usage_signals(engine, transcript)
+
+    after = _lifecycle(engine, node_id)
+    assert after != before, "the judged-used node was not confirmed"
+    assert after["file"][0] == before["file"][0] + 1, "access_count did not advance by one"
+    assert after["db"][0] == after["file"][0], "file and DB disagree on access_count"
+
+    # The signal and affinity rows must still be written — confirmed use is
+    # additional behaviour, not a replacement for observability.
+    affinity = engine.db.conn.execute(
+        "SELECT * FROM affinity WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert affinity is not None
+    assert affinity["source"] == "auto_llm_judge"
+
+
+def test_llm_judge_unused_verdict_does_not_record_confirmed_use(engine, tmp_path):
+    """A negative verdict is affinity evidence only — it never reinforces."""
+    prompt = "What deployment marker should we use?"
+    response = "Ignore that; we are switching to a completely different scheme."
+    transcript_path = tmp_path / "judge-unused-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Use blue deployment markers when rollback plans need quick visual checks.",
+        type="fact",
+        title="Blue deployment rollback marker",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="judge-unused-session", prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    before = _lifecycle(engine, node_id)
+
+    llm_response = json.dumps({
+        "verdicts": [{
+            "whisper_log_id": whisper_log_id,
+            "verdict": "unused",
+            "confidence": 0.9,
+            "reason": "The answer rejects the injected guidance.",
+        }]
+    })
+    with patch(_JUDGE_PATCH, return_value=llm_response):
+        _record_whisper_usage_signals(engine, transcript)
+
+    assert _lifecycle(engine, node_id) == before, "an unused verdict changed lifecycle fields"
+
+
+def test_heuristic_positive_does_not_record_confirmed_use(engine, tmp_path):
+    """Issue #220: auto_heuristic yields polarity 1 but never confirms use.
+
+    The heuristic path is excluded pending #218 signal calibration. This is the
+    case that matters: it is positive, so only the source keeps it out.
+    """
+    prompt = "How should we solve feedback collection?"
+    response = "The right fix is the transcript watcher mines feedback usage approach."
+    transcript_path = tmp_path / "heuristic-no-confirm-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="The transcript watcher mines feedback usage from completed transcripts.",
+        type="fact",
+        title="Transcript watcher mines feedback usage",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="heuristic-no-confirm-session", prompt=prompt,
+    )
+
+    before = _lifecycle(engine, node_id)
+
+    recorded = _record_whisper_usage_signals(engine, transcript)
+
+    # The heuristic signal is still recorded — this is about lifecycle, not observability.
+    assert recorded == 1
+    signal = engine.db.conn.execute(
+        "SELECT * FROM signals WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert signal["polarity"] == 1
+
+    assert _lifecycle(engine, node_id) == before, "auto_heuristic confirmed use — it must not"
+
+    # And it claimed nothing, so a later qualified positive can still confirm.
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert claim is None, "the heuristic path took a confirmed-use claim"
+
+
+def test_replaying_the_judge_does_not_reconfirm(engine, tmp_path):
+    """Issue #220: a second pass over the same transcript reinforces nothing.
+
+    has_llm_judge already excludes an event that was judged before, so the
+    replay should not even reach the confirm loop — and the claim latch stops it
+    a second time if it does. Two independent guards, deliberately.
+    """
+    prompt = "What deployment marker should we use?"
+    response = "That guidance is the right one for the rollout."
+    transcript_path = tmp_path / "judge-replay-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Use blue deployment markers when rollback plans need quick visual checks.",
+        type="fact",
+        title="Blue deployment rollback marker",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="judge-replay-session", prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    llm_response = json.dumps({
+        "verdicts": [{
+            "whisper_log_id": whisper_log_id,
+            "verdict": "used",
+            "confidence": 0.88,
+            "reason": "The answer endorses the injected deployment guidance.",
+        }]
+    })
+    with patch(_JUDGE_PATCH, return_value=llm_response):
+        _record_whisper_usage_signals(engine, transcript)
+    after_first = _lifecycle(engine, node_id)
+
+    with patch(_JUDGE_PATCH, return_value=llm_response):
+        _record_whisper_usage_signals(engine, transcript)
+
+    assert _lifecycle(engine, node_id) == after_first, (
+        "replaying the judge reinforced the same event twice"
+    )
+
+
+def test_feedback_claim_makes_the_judge_a_noop(engine, tmp_path):
+    """Issue #220 cross-caller contract: one event, one reinforcement, two callers.
+
+    This is the case has_llm_judge cannot cover: it only looks at signals whose
+    source is transcript_watcher_llm_judge, so it is blind to feedback submitted
+    through MCP. Before the claim latch, an implicit +1 followed by a positive
+    judge verdict on the same whisper event reinforced it twice.
+    """
+    prompt = "What deployment marker should we use?"
+    response = "That guidance is the right one for the rollout."
+    transcript_path = tmp_path / "judge-cross-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Use blue deployment markers when rollback plans need quick visual checks.",
+        type="fact",
+        title="Blue deployment rollback marker",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="judge-cross-session", prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    engine.submit_feedback(node_id, signal=1, source="implicit", whisper_log_id=whisper_log_id)
+    after_feedback = _lifecycle(engine, node_id)
+
+    llm_response = json.dumps({
+        "verdicts": [{
+            "whisper_log_id": whisper_log_id,
+            "verdict": "used",
+            "confidence": 0.88,
+            "reason": "The answer endorses the injected deployment guidance.",
+        }]
+    })
+    with patch(_JUDGE_PATCH, return_value=llm_response):
+        recorded = _record_whisper_usage_signals(engine, transcript)
+
+    # The judge's own signal and affinity rows are still written — observability
+    # is not what the claim gates.
+    assert recorded >= 1, "the judge signal was not recorded"
+    assert _lifecycle(engine, node_id) == after_feedback, (
+        "the judge reinforced an event already confirmed through submit_feedback"
+    )
+
+
+def test_one_failing_node_does_not_skip_the_rest_of_the_batch(engine, tmp_path):
+    """Issue #220: reinforcement is isolated per node, for any exception.
+
+    The judge signals and the claims are already committed when this loop runs,
+    so an escaping exception would abort the slice and — because has_llm_judge is
+    now set and the claims are taken — the retry would never reinforce these
+    events. The later nodes would lose their only chance at confirmation.
+
+    ZeroDivisionError is the realistic case, not a contrived one: stability is
+    Field(default=1.0, ge=0.0), so zero is legal, and the mutator divides by it.
+    """
+    prompt = "What deployment marker should we use?"
+    response = "Both of those notes are exactly right."
+    transcript_path = tmp_path / "judge-batch-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    first_id, _ = engine.remember(CreateNodeRequest(
+        content="Use blue deployment markers when rollback plans need quick visual checks.",
+        type="fact", title="Blue deployment rollback marker",
+    ))
+    second_id, _ = engine.remember(CreateNodeRequest(
+        content="Roll back within one minute when the marker check fails.",
+        type="fact", title="Rollback timing",
+    ))
+    log_ids = [
+        _insert_injected_whisper_log(
+            engine, node_id=node_id, session_id="judge-batch-session", prompt=prompt,
+        )
+        for node_id in (first_id, second_id)
+    ]
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    before_second = _lifecycle(engine, second_id)
+
+    real_mutator = engine._record_confirmed_use
+
+    def failing_for_first(node_id):
+        if node_id == first_id:
+            raise ZeroDivisionError("float division by zero")
+        return real_mutator(node_id)
+
+    llm_response = json.dumps({
+        "verdicts": [
+            {"whisper_log_id": log_id, "verdict": "used", "confidence": 0.9,
+             "reason": "endorsed"}
+            for log_id in log_ids
+        ]
+    })
+    with patch(_JUDGE_PATCH, return_value=llm_response), \
+         patch.object(engine, "_record_confirmed_use", side_effect=failing_for_first):
+        recorded = _record_whisper_usage_signals(engine, transcript)
+
+    # Both nodes go through the heuristic pass unreferenced (the response text
+    # matches neither node's id/title/content), then both go to the judge pass:
+    # 2 heuristic signals + 2 judge signals.
+    assert recorded == 4, "the signals themselves must still be recorded"
+    assert _lifecycle(engine, second_id) != before_second, (
+        "the first node's failure skipped the second node's reinforcement"
+    )

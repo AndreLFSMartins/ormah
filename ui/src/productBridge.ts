@@ -187,6 +187,53 @@ export interface BillingHandoff {
   opened: boolean;
 }
 
+export const CHECKOUT_CONFIRMATION_INTERVAL_MS = 3_000;
+export const CHECKOUT_CONFIRMATION_MAX_CHECKS = 40;
+export type CheckoutConfirmation = "idle" | "waiting" | "delayed";
+
+export function checkoutConfirmationIsDelayed(completedChecks: number): boolean {
+  return completedChecks >= CHECKOUT_CONFIRMATION_MAX_CHECKS;
+}
+
+export function checkoutConfirmationAfterCheck(
+  subscriptionActive: boolean,
+  explicitCheck: boolean,
+): CheckoutConfirmation {
+  if (subscriptionActive) return "idle";
+  return explicitCheck ? "delayed" : "waiting";
+}
+
+export function protectionIntentNeedsReplacement(
+  operation: ProtectionOperation | null | undefined,
+  status?: ProtectionStatus | null,
+): boolean {
+  return operation?.reason_code === "intent_expired"
+    || operation?.reason_code === "intent_canceled"
+    || status?.protection_intent_status === "expired"
+    || status?.protection_intent_status === "canceled";
+}
+
+export interface CheckoutIntentResolution {
+  intentId: string;
+  created: ProtectionOperation | null;
+}
+
+export async function resolveCheckoutIntent(
+  existingIntentId: string | null | undefined,
+  createIntent: () => Promise<ProtectionOperation>,
+): Promise<CheckoutIntentResolution> {
+  if (existingIntentId) return { intentId: existingIntentId, created: null };
+
+  const created = await createIntent();
+  if (created.reason_code) {
+    throw new Error(created.message || "Protection could not prepare Checkout.");
+  }
+  if (!created.protection_intent_id) {
+    throw new Error("Protection could not create a durable request for Checkout.");
+  }
+  return { intentId: created.protection_intent_id, created };
+}
+
 export interface LogoutResult {
   signed_in: false;
   revoked_remotely: boolean;

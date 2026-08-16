@@ -71,7 +71,6 @@ def _eval_case(case: dict, engine, k: int, min_score: float, injection_gate: flo
                 # default_space) — mirror it so space scoring is measured.
                 default_space=case.get("space"),
                 tiers=["core", "working"],
-                touch_access=False,
             )
         except Exception as e:
             logger.warning("recall_search_structured failed for case %s: %s", case["id"], e)

@@ -543,7 +543,7 @@ class TestRecallFloorAndSpaceOrdering:
         ctx, mock_search = self._search_mock(engine, results)
         with ctx:
             out = engine.recall_search_structured(
-                "project question", limit=4, default_space="proj", touch_access=False,
+                "project question", limit=4, default_space="proj",
                 query_vec=query_vec,
             )
 
@@ -566,7 +566,7 @@ class TestRecallFloorAndSpaceOrdering:
         ctx, _ = self._search_mock(engine, results)
         with ctx:
             out = engine.recall_search_structured(
-                "project question", limit=2, default_space="proj", touch_access=False,
+                "project question", limit=2, default_space="proj",
             )
 
         ids = [r["node"]["id"] for r in out if r.get("source") == "hybrid"]
@@ -581,7 +581,7 @@ class TestRecallFloorAndSpaceOrdering:
         ctx, _ = self._search_mock(engine, results)
         with ctx:
             out = engine.recall_search_structured(
-                "project question", limit=4, default_space="proj", touch_access=False,
+                "project question", limit=4, default_space="proj",
             )
 
         assert any(r["node"]["id"] == "recent-1" for r in out)
@@ -594,7 +594,6 @@ class TestRecallFloorAndSpaceOrdering:
             engine.recall_search_structured(
                 "auth changes yesterday",
                 limit=4,
-                touch_access=False,
                 query_vec=query_vec,
             )
 
@@ -616,7 +615,7 @@ class TestRecallFloorAndSpaceOrdering:
             return_value=[newer_other, older_current],
         ):
             out = engine.recall_search_structured(
-                "yesterday", limit=4, default_space="proj", touch_access=False,
+                "yesterday", limit=4, default_space="proj",
                 created_after="2026-01-01T00:00:00Z",
             )
 

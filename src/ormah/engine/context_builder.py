@@ -522,7 +522,6 @@ class ContextBuilder:
             "limit": max_nodes * max(candidate_pool_multiplier, 1),
             "default_space": space,
             "tiers": ["core", "working"],
-            "touch_access": False,
             # Whisper needs the raw pool — it applies its own floors and an
             # absolute-signal gate; the deliberate-recall floor would drop
             # length-penalized long docs before the reranker can rescue them.
@@ -895,7 +894,6 @@ class ContextBuilder:
                     default_space=space,
                     types=["preference"],
                     tiers=["core", "working"],
-                    touch_access=False,
                     min_relevance=0.0,
                     auto_temporal=False,
                     spread_activation=False,
