@@ -611,3 +611,67 @@ def test_legacy_fallback_on_a_held_back_event_does_not_confirm(engine):
         "SELECT whisper_log_id FROM affinity WHERE node_id = ?", (target,)
     ).fetchone()
     assert affinity["whisper_log_id"] == held_back_id
+
+
+# --- Reinforcement must survive its own hazards (2026-08-16 council R1) -----
+
+def test_confirmed_use_reinforces_a_node_whose_stability_is_zero(engine):
+    """Contract 12: stability = 0 must not silently swallow the reinforcement.
+
+    Node.stability is Field(ge=0.0), so 0 is a valid persisted value, and
+    _record_confirmed_use divides by it (retrievability = exp(-days / stability)).
+    The resulting ZeroDivisionError is caught by submit_feedback's isolating
+    except, which by design never propagates — so the caller is told "Feedback
+    recorded" while the lifecycle stays frozen. The claim is already committed,
+    so the retry hits ON CONFLICT and the reinforcement is lost for good.
+
+    decay_manager.py:50 and importance_scorer.py:80 already guard this exact
+    division; _record_confirmed_use is the one consumer that does not.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+
+    node = engine.file_store.load(target)
+    node.stability = 0.0
+    engine.file_store.save(node)
+    engine.db.conn.execute("UPDATE nodes SET stability = 0.0 WHERE id = ?", (target,))
+    engine.db.conn.commit()
+
+    injected_id = _seed_whisper_log(engine, target)
+    before = _snapshot(engine, target)
+    assert before["file"][2] == 0.0, "the fixture failed to persist stability = 0"
+
+    engine.submit_feedback(target, signal=1, source="implicit", whisper_log_id=injected_id)
+
+    after = _snapshot(engine, target)
+    assert after["file"][0] == before["file"][0] + 1, (
+        "a zero-stability node took the claim but was never reinforced"
+    )
+    assert after["db"][0] == before["db"][0] + 1, "file advanced but the DB row did not"
+    assert after["file"][2] > 0.0, "stability stayed at zero — the node can never recover"
+
+
+def test_recall_node_returns_the_node_when_reinforcement_fails(engine):
+    """Contract 13: a reinforcement failure must not cost the agent its answer.
+
+    submit_feedback (2604-2610) and the session watcher (611-615) both isolate
+    _record_confirmed_use behind try/except: the claim is already committed and
+    the evidence durably recorded, so a mutator failure is a logged miss, never
+    the caller's problem. recall_node called it bare, so the same failure threw
+    the fetch away — the agent gets nothing, the event stays claimed, and the
+    retry logs a second event that can never confirm the first.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+
+    with patch.object(engine, "_record_confirmed_use", side_effect=RuntimeError("disk gone")):
+        formatted = engine.recall_node(target)
+
+    assert formatted, "recall_node propagated a reinforcement failure instead of the node"
+    assert "Caching 0" in formatted, "recall_node returned something other than the node"
+
+    # The claim is still taken: at-most-once holds, the miss is only the mutator's.
+    claims = engine.db.conn.execute(
+        "SELECT COUNT(*) FROM confirmed_use_claims WHERE node_id = ?", (target,)
+    ).fetchone()[0]
+    assert claims == 1, "the claim was rolled back — at-most-once no longer holds"

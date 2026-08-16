@@ -696,7 +696,17 @@ class MemoryEngine:
                     source="explicit",
                 )
         if claimed:
-            self._record_confirmed_use(resolved_node_id)
+            # Isolated, and never propagated — the same contract submit_feedback and the
+            # session watcher already implement. The claim is committed and the fetch has
+            # already succeeded, so raising here would cost the agent its answer over a
+            # lifecycle write. At-most-once means the claim stays taken and this
+            # reinforcement is simply a logged miss; a retry would only log a second event.
+            try:
+                self._record_confirmed_use(resolved_node_id)
+            except Exception:
+                logger.exception(
+                    "confirmed-use reinforcement failed for node %s", resolved_node_id
+                )
         node_for_format = dict(node)
         if resolved_node_id in whisper_log_ids:
             node_for_format["_whisper_log_id"] = whisper_log_ids[resolved_node_id]
@@ -1965,11 +1975,17 @@ class MemoryEngine:
             return
         now = datetime.now(timezone.utc)
 
-        # FSRS stability update
+        # FSRS stability update. Node.stability is Field(ge=0.0), so 0 is a valid
+        # persisted value that would divide by zero here — and, once past that, keep
+        # new_stability pinned at 0 forever. decay_manager and importance_scorer already
+        # guard this same division; this was the one consumer that did not, and the
+        # ZeroDivisionError landed in the caller's isolating except as a silent lost
+        # reinforcement on a claim that had already been committed.
         review_anchor = node.last_review or node.last_accessed
         days_since = max((now - review_anchor).total_seconds() / 86400, 0.001)
-        retrievability = math.exp(-days_since / node.stability)
-        new_stability = node.stability * self.settings.fsrs_stability_growth * (retrievability ** -0.2)
+        stability = node.stability if node.stability else self.settings.fsrs_initial_stability
+        retrievability = math.exp(-days_since / stability)
+        new_stability = stability * self.settings.fsrs_stability_growth * (retrievability ** -0.2)
         node.stability = round(min(new_stability, self.settings.fsrs_max_stability), 2)
         node.last_review = now
 
