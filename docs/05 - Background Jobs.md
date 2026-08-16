@@ -129,7 +129,9 @@ It does not do embedding clustering or hierarchical clustering despite the name.
 Importance does not protect a node from decay. Cumulative signals such as access
 and edge counts could otherwise push a stale node permanently above any threshold.
 Archival is reversible dormancy, not deletion — a demoted node stays reachable by
-deliberate recall. Use the `core` tier for permanent whisper eligibility.
+deliberate recall. Use the `core` tier for permanent whisper eligibility. Importance
+still decides which nodes survive when `core` is over its cap — see
+[01 - Data Model](<./01 - Data Model.md>) for how `enforce_core_cap()` uses it.
 
 ### Importance Scorer
 

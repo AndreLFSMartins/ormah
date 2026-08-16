@@ -171,7 +171,9 @@ def test_self_node_is_never_decayed(engine):
 
 
 def test_low_importance_stale_node_decayed(engine):
-    """A stale node with low importance should be demoted to archival."""
+    """Low importance is deliberately irrelevant to decay now: pairs with
+    test_high_importance_stale_node_is_decayed (importance=0.9) to show a
+    stale node decays the same way at either end of the importance range."""
     node_id, _ = engine.remember(CreateNodeRequest(
         content="Unimportant stale node",
         type=NodeType.fact,
@@ -191,7 +193,8 @@ def test_low_importance_stale_node_decayed(engine):
 
 
 def test_decay_still_works_without_importance(engine):
-    """Low importance (0.3) + stale should trigger decay (0.3 < 0.5 threshold)."""
+    """Decay does not require importance to be set at all: a stale node with
+    its importance left untouched still decays on retrievability alone."""
     node_id, _ = engine.remember(CreateNodeRequest(
         content="Default importance stale node",
         type=NodeType.fact,
@@ -200,10 +203,6 @@ def test_decay_still_works_without_importance(engine):
     ))
 
     _make_stale(engine, node_id)
-    engine.db.conn.execute(
-        "UPDATE nodes SET importance = 0.3 WHERE id = ?", (node_id,)
-    )
-    engine.db.conn.commit()
 
     run_decay(engine)
 
@@ -220,10 +219,6 @@ def test_decay_is_idempotent(engine):
     ))
 
     _make_stale(engine, node_id)
-    engine.db.conn.execute(
-        "UPDATE nodes SET importance = 0.2 WHERE id = ?", (node_id,)
-    )
-    engine.db.conn.commit()
 
     run_decay(engine)
     assert _get_tier(engine, node_id) == "archival"
@@ -243,10 +238,6 @@ def test_decay_writes_audit_log(engine):
     ))
 
     _make_stale(engine, node_id)
-    engine.db.conn.execute(
-        "UPDATE nodes SET importance = 0.35 WHERE id = ?", (node_id,)
-    )
-    engine.db.conn.commit()
 
     run_decay(engine)
 
