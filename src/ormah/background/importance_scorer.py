@@ -18,11 +18,13 @@ def _recency_signal(days_ago: float, half_life_days: float) -> float:
     touched", not "how retrievable is it". Coupling the two let a high-stability
     node read as permanently recent.
 
-    A non-positive half-life is rejected by config validation; the guard here is
-    defence in depth, because a ZeroDivisionError would abort the whole scoring
-    job rather than skipping one node (council I1).
+    A non-finite or non-positive half-life is rejected by config validation; the
+    guard here is defence in depth, because letting one through would either
+    raise (ZeroDivisionError, aborting the whole scoring job rather than
+    skipping one node) or silently saturate/flatten the signal for NaN/inf
+    (council I1).
     """
-    if half_life_days <= 0:
+    if not math.isfinite(half_life_days) or half_life_days <= 0:
         return 0.0
     return math.exp(-math.log(2) * days_ago / half_life_days)
 

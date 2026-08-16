@@ -399,13 +399,21 @@ def test_recency_signal_follows_configured_half_life():
     assert _recency_signal(7.0, 7.0) == pytest.approx(0.5)
 
 
-def test_recency_signal_survives_a_non_positive_half_life():
-    """Defence in depth (council I1): the validator should make this unreachable,
-    but a zero half-life must never raise ZeroDivisionError and kill the job."""
+def test_recency_signal_survives_an_invalid_half_life():
+    """Defence in depth (council I1): the validator should make these unreachable,
+    but the guard must hold anyway. A zero or negative half-life must never raise
+    ZeroDivisionError and kill the job. A NaN half-life skips the '<= 0' check
+    (nan <= 0 is False) and would otherwise reach math.exp, returning NaN — which
+    the caller's clamp, max(0.0, min(1.0, x)), turns into 1.0 rather than
+    propagating, silently saturating importance at maximum. An infinite half-life
+    also skips the check and would make every node read as perfectly fresh
+    (recency_signal == 1.0) regardless of age."""
     from ormah.background.importance_scorer import _recency_signal
 
     assert _recency_signal(10.0, 0.0) == 0.0
     assert _recency_signal(10.0, -14.0) == 0.0
+    assert _recency_signal(10.0, float("nan")) == 0.0
+    assert _recency_signal(10.0, float("inf")) == 0.0
 
 
 def test_importance_recency_is_independent_of_stability(engine):
