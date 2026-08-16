@@ -578,3 +578,36 @@ def test_review_relevance_feedback_does_not_confirm_use(engine):
         (held_back_id, target),
     ).fetchone()
     assert affinity is not None, "review feedback stopped recording affinity"
+
+
+def test_legacy_fallback_on_a_held_back_event_does_not_confirm(engine):
+    """Contract 11a: the fallback's accepted loss, pinned deliberately.
+
+    submit_feedback without whisper_log_id resolves to the node's newest
+    whisper row, injected or not. When that row is a held-back review
+    candidate, no claim is taken even though an older injected event exists —
+    a legitimate reinforcement is lost in silence. Accepted: failing closed is
+    the right side to err on under the at-most-once contract, and the fallback
+    already documents itself as not exact. Fixing the fallback's selection
+    would also move which event affinity and signals attach to, which is a
+    different defect. This test exists so that loss stays a decision rather
+    than becoming a surprise.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    injected_id = _seed_whisper_log(engine, target)
+    held_back_id = _seed_held_back_whisper_log(engine, target)
+    assert held_back_id > injected_id, "the held-back event must be the newer row"
+
+    before = _snapshot(engine, target)
+
+    engine.submit_feedback(target, signal=1, source="implicit")
+
+    assert _snapshot(engine, target) == before, (
+        "the legacy fallback reinforced through a held-back event"
+    )
+    # The fallback still attaches its evidence to the newest event — unchanged.
+    affinity = engine.db.conn.execute(
+        "SELECT whisper_log_id FROM affinity WHERE node_id = ?", (target,)
+    ).fetchone()
+    assert affinity["whisper_log_id"] == held_back_id
