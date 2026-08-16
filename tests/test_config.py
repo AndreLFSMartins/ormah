@@ -436,3 +436,23 @@ def test_settings_construction_with_bad_pair_still_succeeds():
     imports the eager singleton and is the user's only repair path."""
     settings = Settings(llm_provider="ollama")   # inherits the Claude default
     assert settings.llm_model.startswith("claude-")
+
+
+# --- Importance recency half-life ---
+
+def test_importance_recency_half_life_must_be_positive():
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be > 0"):
+        _settings(importance_recency_half_life_days=0.0)
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be > 0"):
+        _settings(importance_recency_half_life_days=-14.0)
+
+
+def test_importance_recency_half_life_must_be_finite():
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be finite"):
+        _settings(importance_recency_half_life_days=float("inf"))
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be finite"):
+        _settings(importance_recency_half_life_days=float("nan"))
+
+
+def test_importance_recency_half_life_accepts_the_default():
+    assert _settings().importance_recency_half_life_days == 14.0

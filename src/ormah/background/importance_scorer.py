@@ -11,6 +11,24 @@ from ormah.background.memory_lock import serialized_memory_job
 logger = logging.getLogger(__name__)
 
 
+def _recency_signal(days_ago: float, half_life_days: float) -> float:
+    """Importance recency: half-life decay on its own clock (#222).
+
+    Independent of FSRS stability — importance answers "how recently was this
+    touched", not "how retrievable is it". Coupling the two let a high-stability
+    node read as permanently recent.
+
+    A non-finite or non-positive half-life is rejected by config validation; the
+    guard here is defence in depth, because letting one through would either
+    raise (ZeroDivisionError, aborting the whole scoring job rather than
+    skipping one node) or silently saturate/flatten the signal for NaN/inf
+    (council I1).
+    """
+    if not math.isfinite(half_life_days) or half_life_days <= 0:
+        return 0.0
+    return math.exp(-math.log(2) * days_ago / half_life_days)
+
+
 def _commit_updates_chunked(db, updates, chunk_size: int = 100) -> None:
     """Apply (importance, node_id) updates in bounded write transactions so a
     full-store batch never holds the write lock long enough to stall foreground writes."""
@@ -32,7 +50,7 @@ def run_importance_scoring(engine) -> None:
     # Fetch everything upfront — avoids N+1 queries for importance lookups
     rows = conn.execute(
         "SELECT id, access_count, last_accessed, "
-        "importance, stability, last_review FROM nodes"
+        "importance, last_review FROM nodes"
     ).fetchall()
     if not rows:
         return
@@ -58,6 +76,7 @@ def run_importance_scoring(engine) -> None:
     # Absolute normalization references
     ref_access = settings.importance_access_reference
     ref_edge = settings.importance_edge_reference
+    half_life = settings.importance_recency_half_life_days
 
     # Weight normalization — ensures custom configs that don't sum to 1.0 still work
     total_weight = w_access + w_edge + w_recency
@@ -75,13 +94,12 @@ def run_importance_scoring(engine) -> None:
         ec = edge_counts.get(nid, 0)
         edge_signal = min(1.0, math.log1p(ec) / math.log1p(ref_edge))
 
-        # Recency signal: FSRS retrievability (exp(-t/S))
+        # Recency signal: importance's own half-life, not FSRS stability (#222)
         try:
-            stability = r["stability"] if r["stability"] else 1.0
             anchor_str = r["last_review"] or r["last_accessed"]
             anchor = datetime.fromisoformat(anchor_str)
             days_ago = max((now - anchor).total_seconds() / 86400, 0)
-            recency_signal = math.exp(-days_ago / stability)
+            recency_signal = _recency_signal(days_ago, half_life)
         except (ValueError, TypeError):
             recency_signal = 0.0
 

@@ -318,7 +318,10 @@ def test_confidence_affects_search_ranking(engine):
 
 
 def test_importance_range_with_new_signals(engine):
-    """Verify score range: fresh node ~0.33, hub >0.7, stale disconnected <0.2."""
+    """Verify score range: fresh node ~0.33, hub >0.7, stale disconnected <0.3.
+
+    Stale expected value: 0.34·ln(6)/ln(51) + 0.33·exp(-ln2·30/14) ≈ 0.23.
+    """
     from datetime import timedelta
 
     # Fresh node — no access, no edges, just created
@@ -359,6 +362,12 @@ def test_importance_range_with_new_signals(engine):
         "UPDATE nodes SET access_count = 5, last_accessed = ?, last_review = ? WHERE id = ?",
         (old_date, old_date, stale_id),
     )
+    # Auto-linking can attach edges non-deterministically; this node is meant to be
+    # disconnected, and importance reads edge counts — strip them so it really is.
+    engine.db.conn.execute(
+        "DELETE FROM edges WHERE source_id = ? OR target_id = ?",
+        (stale_id, stale_id),
+    )
     engine.db.conn.commit()
 
     run_importance_scoring(engine)
@@ -376,3 +385,84 @@ def test_importance_range_with_new_signals(engine):
     assert fresh_imp > 0.2, f"Fresh node should be ~0.33, got {fresh_imp}"
     assert hub_imp > 0.7, f"Hub node should be >0.7, got {hub_imp}"
     assert stale_imp < 0.3, f"Stale node should be <0.3, got {stale_imp}"
+
+
+def test_recency_signal_follows_configured_half_life():
+    """At exactly one half-life the signal is 0.5; at zero days it is 1.0."""
+    from ormah.background.importance_scorer import _recency_signal
+
+    assert _recency_signal(0.0, 14.0) == pytest.approx(1.0)
+    assert _recency_signal(14.0, 14.0) == pytest.approx(0.5)
+    assert _recency_signal(28.0, 14.0) == pytest.approx(0.25)
+
+    # A different configured half-life moves the 0.5 point with it.
+    assert _recency_signal(7.0, 7.0) == pytest.approx(0.5)
+
+
+def test_recency_signal_survives_an_invalid_half_life():
+    """Defence in depth (council I1): the validator should make these unreachable,
+    but the guard must hold anyway. A zero or negative half-life must never raise
+    ZeroDivisionError and kill the job. A NaN half-life skips the '<= 0' check
+    (nan <= 0 is False) and would otherwise reach math.exp, returning NaN — which
+    the caller's clamp, max(0.0, min(1.0, x)), turns into 1.0 rather than
+    propagating, silently saturating importance at maximum. An infinite half-life
+    also skips the check and would make every node read as perfectly fresh
+    (recency_signal == 1.0) regardless of age."""
+    from ormah.background.importance_scorer import _recency_signal
+
+    assert _recency_signal(10.0, 0.0) == 0.0
+    assert _recency_signal(10.0, -14.0) == 0.0
+    assert _recency_signal(10.0, float("nan")) == 0.0
+    assert _recency_signal(10.0, float("inf")) == 0.0
+
+
+def test_importance_recency_is_independent_of_stability(engine):
+    """Two nodes of identical age and profile score the same regardless of stability.
+
+    Before #222 the recency term was exp(-days/stability), so a high-stability node
+    scored far higher than a low-stability one at the same age. It must not anymore.
+    """
+    low_id, _ = engine.remember(CreateNodeRequest(
+        content="Alpha node about zebras and telescopes",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Low stability",
+    ))
+    high_id, _ = engine.remember(CreateNodeRequest(
+        content="Beta node about zebras and telescopes",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="High stability",
+    ))
+
+    old_date = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+    engine.db.conn.execute(
+        "UPDATE nodes SET last_accessed = ?, last_review = ?, access_count = 3, "
+        "stability = 1.0 WHERE id = ?",
+        (old_date, old_date, low_id),
+    )
+    engine.db.conn.execute(
+        "UPDATE nodes SET last_accessed = ?, last_review = ?, access_count = 3, "
+        "stability = 100.0 WHERE id = ?",
+        (old_date, old_date, high_id),
+    )
+    # Auto-linking can attach edges non-deterministically; importance reads edge
+    # counts, so strip them to isolate the recency term.
+    engine.db.conn.execute(
+        "DELETE FROM edges WHERE source_id IN (?, ?) OR target_id IN (?, ?)",
+        (low_id, high_id, low_id, high_id),
+    )
+    engine.db.conn.commit()
+
+    run_importance_scoring(engine)
+
+    low_imp = engine.db.conn.execute(
+        "SELECT importance FROM nodes WHERE id = ?", (low_id,)
+    ).fetchone()["importance"]
+    high_imp = engine.db.conn.execute(
+        "SELECT importance FROM nodes WHERE id = ?", (high_id,)
+    ).fetchone()["importance"]
+
+    assert low_imp == pytest.approx(high_imp), (
+        f"stability must not affect importance recency: {low_imp} vs {high_imp}"
+    )
