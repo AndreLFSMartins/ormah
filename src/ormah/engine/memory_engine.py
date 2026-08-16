@@ -2543,8 +2543,19 @@ class MemoryEngine:
         key omits polarity and is never updated, so deriving it from there makes
         -1 followed by +1 never confirm at all.
 
-        Fail-closed: an unqualified signal, a source outside the allowlist, or a
-        missing whisper_log_id claims nothing.
+        Fail-closed: an unqualified signal, a source outside the allowlist, a
+        missing whisper_log_id, or an event that was never injected claims
+        nothing. was_injected = 1 is the provenance test: only a memory the
+        agent actually saw can have been used. The session-start review path
+        (_find_review_candidate, _REVIEW_FRAMING) deliberately hands the agent a
+        was_injected = 0 event and asks whether it *would* have been useful, and
+        that answer is relevance, not use. The other two callers already satisfy
+        this — _log_feedback_candidates hardcodes was_injected = 1 and the
+        session watcher filters on it — so the condition costs them nothing.
+
+        Enforced in SQL rather than by the caller so a future fourth caller
+        cannot reopen the hole. changes() returns 0 both for a non-injected
+        event and for an already-taken claim; both mean "do not reinforce".
 
         MUST be called inside the caller's transaction. Claiming after the
         mutator instead would let two concurrent confirmations both pass and
@@ -2556,10 +2567,12 @@ class MemoryEngine:
         conn.execute(
             """
             INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at)
-            VALUES (?, ?, datetime('now'))
+            SELECT wl.id, ?, datetime('now')
+            FROM whisper_log wl
+            WHERE wl.id = ? AND wl.was_injected = 1
             ON CONFLICT DO NOTHING
             """,
-            (whisper_log_id, node_id),
+            (node_id, whisper_log_id),
         )
         return conn.execute("SELECT changes()").fetchone()[0] == 1
 
