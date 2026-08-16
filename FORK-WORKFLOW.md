@@ -1,7 +1,5 @@
 # Fork & contribution workflow (Ormah)
 
-**READ THIS before any development, planning, branch, or PR operation.**
-
 This repo (`Tools/ormah`) is André's **running Beta** — a *converging downstream* of
 `r-spade/ormah`, **not** a diverged fork.
 
@@ -9,69 +7,72 @@ This repo (`Tools/ormah`) is André's **running Beta** — a *converging downstr
 
 - `local-main` = everything in `r-spade/main` **+** your local commits. You are
   **ahead-in-queue**, never diverged — `r-spade/main` is a strict ancestor of `local-main`.
-- A GitHub PR diffs a **branch (head)** against a **base** — NOT "your fork" against
-  "upstream". Your fork being hundreds of commits ahead is **invisible** to a PR whose
-  branch is based on `upstream/main`.
-- Therefore the single load-bearing rule: **every contribution branch is cut from
-  `upstream/main`, never from `local-main`.** That keeps every PR clean no matter how far
-  ahead your Beta runs.
+- A GitHub PR diffs a **branch (head)** against a **base** — not "your fork" against
+  "upstream". A branch based on `upstream/main` contains none of your 400+ commit lead, so
+  that lead is **invisible** to the PR.
+- Hence the **clean island**: a contribution branch cut from `upstream/main`, living in its
+  own worktree. Islands keep every PR clean no matter how far ahead the Beta runs.
 
-## Remotes — do NOT rename
+## Remotes — keep these names
 
-| remote     | points to               | role                                                        |
-|------------|-------------------------|-------------------------------------------------------------|
+| remote     | points to               | role                                                              |
+|------------|-------------------------|-------------------------------------------------------------------|
 | `origin`   | `r-spade/ormah`         | council divergence gate + PR base (council needs origin=upstream) |
-| `upstream` | `r-spade/ormah`         | `gh pr create` base                                         |
-| `fork`     | `AndreLFSMartins/ormah` | where you push branches / publish                           |
+| `upstream` | `r-spade/ormah`         | `gh pr create` base                                               |
+| `fork`     | `AndreLFSMartins/ormah` | where you push branches / publish                                 |
 
 The inversion (`origin` = upstream) is **intentional**: `council_pr.py` has an explicit
 `origin-is-upstream` guard (divergence gate anchored on `main..origin/main`; PR base read
-from the `upstream` remote). Renaming to the "standard" convention **breaks council**.
-Leave it.
+from the `upstream` remote). Renaming to the "standard" convention breaks council. Leave
+the names as they are.
 
 ## Golden rules
 
-1. **One clone, but isolation = worktree, not `checkout`.** Never a second clone. And never
-   `git checkout <upstream-branch>` in `Tools/ormah` itself: this working tree is what the
-   **running Beta serves** (launchd `com.ormah.server.dev`), so switching its branch swaps the
-   live server's code under it and crashes every whisper hook. Use `git worktree add`.
-2. **Contribution branches are born from `upstream/main`** — never from `local-main`.
-3. **Push branches to `fork`, never to `upstream`** (no write access, and you don't want it).
+1. **One clone; isolation comes from `git worktree add`.** The `Tools/ormah` working tree is
+   what the **running Beta serves** (launchd `com.ormah.server.dev`), so switching its branch
+   swaps the live server's code under it and crashes every whisper hook. Keep `Tools/ormah`
+   parked on `local-main` and give every other branch its own worktree.
+2. **Every contribution branch is a clean island** — born from `upstream/main`.
+3. **Branches go to `fork`.** Only PRs flow up to `upstream` (you have no write access there,
+   and you don't want it).
 4. `local-main` is your **Beta = upstream + queued PRs + private notes**. It is
    **disposable / recreatable**, not a relic.
-5. Local-only overlay files (`CLAUDE.md`, `INSTRUCTIONS.md`, `SESSION_LOG.md`, `FORK-WORKFLOW.md`,
-   `graphify-out/`, `.council/`, and **everything under `docs/`** — ADRs, superpowers plans/specs,
-   investigation notes) are **versioned on `local-main`** and never go upstream. Since 2026-08-11 those
-   are two independent facts, not one: an ignore rule was never what kept them out of a PR, it only
-   decided whether they entered a commit at all. What keeps them out is
-   **`.git/hooks/pre-push`** — fail-closed, it rejects any push whose three-dot diff against
-   `upstream/main` touches a protected path, with one exception (`local-main` → `fork`, the private
-   Beta backup). The hook lives in `.git/hooks/`, which every worktree in this clone shares, so it
-   covers all 20 at once. Rule 2 is still the practice; the hook is the net for when it slips
-   (a cherry-pick from `local-main`, a branch cut from the wrong base). Override, deliberately and
-   visibly: `git push --no-verify`.
+5. **Local-only material never reaches a PR.** Versioning and shipping are separate concerns,
+   handled by two independent mechanisms — keep them apart:
+   - **`.gitignore` decides what enters a commit.** `CLAUDE.md`, `INSTRUCTIONS.md`,
+     `SESSION_LOG.md` and `.council/` are **untracked**: no git backup, and a `git clean -x`
+     erases them.
+   - **`.git/hooks/pre-push` decides what ships.** `FORK-WORKFLOW.md`, `graphify-out/` and the
+     decision history under `docs/` *are* versioned on `local-main` (history a `git clean -x`
+     can erase is not history), and the hook is what keeps them out of a PR: fail-closed, it
+     rejects any push whose three-dot diff against `upstream/main` touches a path in its
+     `PROTECTED` allowlist. Two ref classes are exempt, and only towards `fork` (the private
+     Beta backup): `local-main` and `integration/*`.
 
-   > The hook is **not** versioned (nothing under `.git/` is). Re-cloning this repo loses it —
-   > re-create it from this rule before pushing anything.
+   `PROTECTED` is a **prefix allowlist** — read the regex in the hook before assuming a newly
+   added `docs/` path is covered by it. The hook lives in `.git/hooks/`, which every worktree in
+   this clone shares, so it covers all of them at once. Rule 2 is the practice; the hook is the
+   net for when it slips (a cherry-pick from `local-main`, a branch cut from the wrong base).
+   Override deliberately and visibly: `git push --no-verify`.
+
+   > Nothing under `.git/` is versioned, so re-cloning this repo loses the hook — re-create it
+   > from this rule before pushing anything.
 
 ## Recipe A — contribute a change upstream
 
 ```bash
 git fetch upstream
-git worktree add -b fix/<slug> ../ormah-wt-<slug> upstream/main   # clean island on r-spade's tip
+git worktree add -b fix/<slug> ../ormah-wt-<slug> upstream/main   # the clean island
 cd ../ormah-wt-<slug>                        # work HERE — Tools/ormah stays on local-main
 # ... commits ...
+git log --oneline upstream/main..HEAD        # gate: ONLY your own commits, nothing else
 git push fork fix/<slug>                     # the branch lives on YOUR fork
 /council-pr                                  # review + open PR (base r-spade:main, head fork:fix/<slug>)
 ```
 
-> **Never** `git checkout upstream/main -b fix/<slug>` inside `Tools/ormah` — that swaps the
-> running Beta's code (see Golden rule 1). The worktree gives the same clean island without
-> touching what the live server serves. Prune it with `git worktree remove ../ormah-wt-<slug>`
-> once the PR lands (branch-pruning rules in Recipe D still apply).
-
-The PR diff = only your commits. The 400+ commit lead is invisible because the branch
-does not contain it.
+The gate line is the proof the island is clean: anything in that log you did not write means
+the branch was cut from the wrong base — rebuild the island before pushing. Once the PR lands,
+prune the island with `git worktree remove ../ormah-wt-<slug>` (branch rules in Recipe D).
 
 > If `/council-pr` push is blocked by `origin-is-upstream — refusing to push to a repo you
 > do not own`, that guard is council's, not git's — an explicit `git push fork fix/<slug>`
@@ -99,22 +100,11 @@ edited your PR — resolve by taking their version.
 
 ## Recipe D — branch hygiene (prune)
 
-- Prune a **local** branch only when its PR is **merged** or **closed** — check with
-  `gh pr list --repo r-spade/ormah --author AndreLFSMartins`.
-- **Never** prune a branch whose PR is **open** (you may need it for review changes).
-- **Never** delete the branch on the **`fork` remote** while its PR is open — that closes
-  the PR. Only touch local refs.
-- Use `git branch -d` (safe — refuses unmerged). Only for squash-merged PRs confirmed via
-  `gh` use `git branch -D`.
-- Deleting a local branch never touches the PR (the PR lives on the fork). Recover any time
-  while the fork branch exists: `git checkout -b fix/<slug> fork/fix/<slug>`.
-
-## Anti-patterns (these are the "merging becomes a mess" pain)
-
-- Cutting a PR branch from `local-main` -> PR shows hundreds of commits.
-- `git checkout` of a contribution branch inside `Tools/ormah` -> swaps the live Beta's code,
-  crashes the whisper hooks. Use a worktree.
-- A second dev clone -> doubles reconciliation.
-- Renaming remotes to the "standard" convention -> breaks council.
-- Deleting an open PR's branch on the `fork` remote -> closes the PR.
-- `git push upstream ...` -> you never push branches to upstream; only PRs flow up.
+- Prune a **local** branch once its PR is **merged** or **closed** — confirm with
+  `gh pr list --repo r-spade/ormah --author AndreLFSMartins`. A branch whose PR is still
+  **open** stays: you may need it for review changes.
+- Prune **local refs only**. The PR lives on the `fork` branch, so deleting that branch on
+  the `fork` remote while the PR is open closes the PR.
+- Use `git branch -d` (safe — refuses unmerged). Reserve `git branch -D` for squash-merged
+  PRs confirmed via `gh`.
+- Recover any time while the fork branch exists: `git checkout -b fix/<slug> fork/fix/<slug>`.
