@@ -105,8 +105,9 @@ Anchoring decay on it would let an actively used node look stale — the AC "eve
 still advances its recency/decay anchor" requires the use timestamp. The two-way fallback is
 kept so a row missing either column still decays instead of being skipped.
 
-`importance_scorer.py:81-84` receives the identical change, for the identical reason — see
-*Out of scope* for why it was originally excluded and what the council review found.
+`importance_scorer.py:81-84` receives **the anchor flip only** — not the shared helper. See
+*Out of scope* for why it was originally excluded, what the council review found, and why the
+formula there must be left alone.
 
 ### 4. `src/ormah/config.py`
 
@@ -189,8 +190,23 @@ inflation. That is the desired direction, but it changes real-node numbers befor
   what makes `last_review` lag. An `S=1` node used today but reinforced yesterday sees its
   recency term fall from `~1.0` to `~0.37` — about `0.21` off importance, enough to cross the
   `0.5` gate and demote a memory in active use. The fix is the same anchor flip applied to the
-  decay manager, which is orthogonal to #222 (that PR rewrites the `recency_signal` line and
-  leaves the anchor alone).
+  decay manager — **and only that**. Council round 2 (2026-08-16, both peers, `high`) rejected the
+  first draft, which also routed the scorer through `lifecycle.retrievability` and read
+  `r["stability"]`. Verified against `fix/222-retrievability-only-decay`: that branch selects
+  `id, access_count, last_accessed, importance, last_review` — no `stability` — and computes
+  `_recency_signal(days_ago, half_life)` on importance's own clock. Post-rebase the draft would
+  either raise an uncaught `IndexError` (`sqlite3.Row` on a missing column; `IndexError` is not a
+  subclass of `ValueError` or `TypeError`) and abort `run_importance_scoring` for every node, or
+  reinstate FSRS in a job #222 deliberately removed it from. The earlier claim of orthogonality
+  with #222 was wrong. Both timestamp columns are selected on either version, so the anchor flip
+  alone applies cleanly.
+- **The same-device restore path** — `full_rebuild` preserves `meta` and `reload_restored_graph`
+  never calls `_migrate_fsrs`, so a pre-FSRS backup restored onto a migrated install skips the
+  seed. Found by both peers in council round 2 (`high`). It is a **pre-existing** defect —
+  `_migrate_fsrs` already returns early on `if fsrs_migrated: return` on `a28837b` — so it is
+  tracked as its own issue — r-spade/ormah#236 — rather than widening this one (decision: André, 2026-08-16). What this
+  issue owes: not claiming the C3 `last_review` guard covers restore in general. It covers the
+  empty-`meta` case only.
 - `tier_manager.py`, promotion floors, and the initial-lease work — #223.
 - Any rescale or backfill of existing `stability` values.
 - Splitting surfacing from confirmed use — #220.
@@ -205,7 +221,11 @@ edits to the existing decay and engine suites.
 - `S=1`, `t=30d` → `reinforced_stability` returns exactly `2.0` (AC1).
 - `t/S = 20000` → `spacing_factor` returns `cap` and raises nothing (AC2).
 - Iterating `reinforced_stability` from `S=1` with `t=1d` reaches `365.0` in **74** steps, and
-  each step's absolute increment is strictly smaller than the previous one (AC3).
+  each step's *ratio* `S'/S` is strictly smaller than the previous one — `1.61 → 1.45 → 1.36 → …`
+  (AC3). Assert the ratio, **not** the absolute increment: the increment is `g·√S·spacing`, which
+  *grows* with `S` (`0.61 → 0.72 → 0.83 → 0.95`, verified by execution). "Growth diminishes" is a
+  statement about the relative step. An earlier draft of this spec asserted the opposite and would
+  have produced a test that can never pass.
 - `stability=0` → falls back to `initial_stability` instead of raising.
 - `retrievability` matches `exp(-t/S)` on a table of known pairs, and is `<= 1.0` for `t >= 0`.
 
@@ -228,6 +248,14 @@ before the flip, or it proves nothing.
 - A node whose `last_accessed` is fresh but whose `last_review` is one cooldown old is **not**
   demoted (the inverted anchor).
 - Existing `test_decay_manager.py` cases must stay green.
+
+**Importance-anchor test — the lag must be ≥ 7 days, and 30 is the value to use.** Council round 2
+caught the first draft using a 1-day lag with `approx(0.33, abs=0.02)`. Recomputed: after #222 the
+14-day half-life turns a 1-day lag into `importance = 0.3141`, inside the `[0.3100, 0.3500]`
+window, so the test passes **whether or not the anchor was flipped** — a false green guarding the
+exact regression it exists to catch. At 30 days the old anchor yields `~0.075` post-#222 and
+`~0.0` pre-#222 (`exp(-30)` at `S=1`), so it is red under both formulas. That matters because this
+branch is written against `a28837b` and rebased onto #222.
 
 **Version tests**
 

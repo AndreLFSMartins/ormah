@@ -14,16 +14,32 @@
 
 1. The inline `math.exp(-days_since / stability)` in `decay_manager` becomes `lifecycle.retrievability(...)` — one implementation shared with the reinforcement path (AC5).
 2. The decay anchor flips from `last_review or last_accessed` to `last_accessed or last_review`. With the cooldown, `last_review` can lag the last use by a full cooldown window; anchoring decay on it would let an actively used node look stale. The two-way fallback stays so a row missing either column still decays instead of being skipped.
-3. **`importance_scorer.py` gets the same anchor flip and the same shared helper.** This file was declared out of scope in the original spec; the council review showed why that was wrong — see below.
+3. **`importance_scorer.py` gets the same anchor flip — and nothing else.** This file was declared out of scope in the original spec; the council review showed why that was wrong — see below.
 
-**Why `importance_scorer` is now in scope (council finding C2).** The scorer computes
-`recency_signal = math.exp(-days_ago / stability)` off `r["last_review"] or r["last_accessed"]`
-(`importance_scorer.py:81-84`) with weight `0.33` (`config.py:144`). The cooldown this issue
-introduces is precisely what makes `last_review` lag. For an `S=1` node used today but reinforced
-yesterday, the recency term drops from `~1.0` to `~0.37` — about `0.21` off importance, enough to
-cross the `0.5` gate and demote the ranking of a memory that is in active use. Leaving it out
-would ship the cooldown with two FSRS consumers on different clocks. The change is orthogonal to
-#222, which rewrites the `recency_signal` line itself and leaves the anchor alone.
+**Why `importance_scorer` is now in scope (council finding C2).** The scorer reads its recency
+anchor as `r["last_review"] or r["last_accessed"]` with weight `0.33` (`config.py:144`). The
+cooldown this issue introduces is precisely what makes `last_review` lag. A node used today but
+reinforced yesterday reads as a day old, which costs it importance and can cross the `0.5` gate,
+demoting the ranking of a memory that is in active use. Leaving it out would ship the cooldown
+with two consumers reading the same lagging timestamp.
+
+**The anchor flip is the ONLY change here — do not touch the formula (council round 2, C2).**
+The first draft of this task also routed the scorer through `lifecycle.retrievability`, reading
+`r["stability"]`. Both peers rejected that, and the source confirms them. #222 (PR #235, a merge
+prerequisite for this issue) rewrites the scorer to
+`SELECT id, access_count, last_accessed, importance, last_review FROM nodes` — **`stability` is
+no longer selected** — and computes `_recency_signal(days_ago, half_life)` on importance's own
+clock, deliberately decoupled from FSRS. Applying the old draft after #222 lands gives one of two
+outcomes, both bad:
+
+- `sqlite3.Row["stability"]` on a row without that column raises **`IndexError`**, which the
+  surrounding `except (ValueError, TypeError)` does not catch (verified:
+  `issubclass(IndexError, (ValueError, TypeError))` is `False`), so `run_importance_scoring`
+  aborts entirely; or
+- the hunk survives the rebase and **undoes #222**, putting FSRS stability back into a job it was
+  deliberately removed from.
+
+The earlier claim that this change is "orthogonal to #222" was wrong and has been removed.
 
 **Why existing decay tests stay green:** `_make_stale` (`test_decay_manager.py:13`) backdates
 `last_accessed` only, and nodes created by `engine.remember` have `last_review = NULL`. Both
@@ -113,11 +129,20 @@ Append to `tests/test_background/test_importance_scorer.py`:
 
 ```python
 def test_recency_ignores_a_lagging_last_review(engine):
-    """A node used today must not read as a day old because reinforcement is on cooldown."""
+    """A node used today must not read as stale because reinforcement is on cooldown.
+
+    The 30-day lag is load-bearing, not decorative (council round 2, C2). A 1-day lag
+    makes this test a FALSE GREEN after #222: with the 14-day half-life the old anchor
+    still yields importance 0.3141, inside approx(0.33, abs=0.02), so the test passes
+    whether or not the anchor was flipped. At 30 days the old anchor yields ~0.075 on
+    the post-#222 half-life and ~0.0 on the pre-#222 exp(-t/S) curve, so the test is
+    red on the old anchor under BOTH formulas — which matters because this branch is
+    written pre-#222 and rebased post-#222.
+    """
     from ormah.background.importance_scorer import run_importance_scoring
 
     node_id, _ = engine.remember(CreateNodeRequest(
-        content="Used today, reinforced yesterday",
+        content="Used today, reinforced a month ago",
         type=NodeType.fact,
         tier=Tier.working,
         title="Lagging review",
@@ -126,7 +151,7 @@ def test_recency_ignores_a_lagging_last_review(engine):
     engine.db.conn.execute(
         "UPDATE nodes SET last_accessed = ?, last_review = ?, stability = 1.0, "
         "access_count = 0 WHERE id = ?",
-        (now.isoformat(), (now - timedelta(days=1)).isoformat(), node_id),
+        (now.isoformat(), (now - timedelta(days=30)).isoformat(), node_id),
     )
     engine.db.conn.commit()
 
@@ -136,7 +161,7 @@ def test_recency_ignores_a_lagging_last_review(engine):
         "SELECT importance FROM nodes WHERE id = ?", (node_id,)
     ).fetchone()["importance"]
 
-    # recency ~= 1.0 (used today), not ~= 0.37 (exp(-1) from the lagging review).
+    # recency ~= 1.0 (used today), not ~= 0.23 (30 days on the importance half-life).
     # access_count=0 and no edges zero the other two signals, and the scorer
     # divides by the weight total, so importance collapses to w_recency/total.
     s = engine.settings
@@ -156,7 +181,7 @@ Expected, and each one matters:
 |---|---|
 | `test_decay_uses_the_shared_retrievability_implementation` | `AttributeError: module 'ormah.background.decay_manager' has no attribute 'lifecycle'` |
 | `test_a_node_used_today_is_not_decayed_while_its_review_lags` | `AssertionError: assert 'archival' == 'working'` — the node **is** demoted on the old anchor |
-| `test_recency_ignores_a_lagging_last_review` | importance `≈ 0.12` instead of `≈ 0.33` (recency `exp(-1) = 0.37`) |
+| `test_recency_ignores_a_lagging_last_review` | importance `≈ 0.0` instead of `≈ 0.33` — on `a28837b` the old anchor reads 30 days at `S=1`, so `exp(-30)` underflows the recency term to nothing. After a rebase onto #222 the same test fails at `≈ 0.075` (30 days on the 14-day half-life). Red under both formulas, by design. |
 
 If the anchor test passes here, stop: the node was skipped by the importance gate and the test proves nothing. Confirm with `SELECT importance FROM nodes` that it really is `0.2`.
 
@@ -205,40 +230,43 @@ with:
 
 The `0.001` floor is dropped: `lifecycle.retrievability` already clamps negative ages to `0`.
 
-- [ ] **Step 5: Flip the importance scorer to the same anchor**
+- [ ] **Step 5: Flip the importance scorer's anchor — ONE line, nothing else**
 
-In `src/ormah/background/importance_scorer.py`, replace lines 78-86:
+**Read this before touching the file.** This step changes exactly one expression: the anchor
+`or`-chain. It does **not** import `lifecycle`, does **not** read `r["stability"]`, and does
+**not** replace the recency formula. Whatever formula the scorer holds when you get here — the
+`exp(-t/S)` of `a28837b`, or `_recency_signal(days_ago, half_life)` after a rebase onto #222 —
+stays exactly as it is. This is the correction from council round 2 (C2), where both peers
+rejected the earlier draft that routed the scorer through `lifecycle.retrievability`.
+
+In `src/ormah/background/importance_scorer.py`, find the recency block and change only this line:
 
 ```python
-        # Recency signal: FSRS retrievability (exp(-t/S))
-        try:
-            stability = r["stability"] if r["stability"] else 1.0
             anchor_str = r["last_review"] or r["last_accessed"]
-            anchor = datetime.fromisoformat(anchor_str)
-            days_ago = max((now - anchor).total_seconds() / 86400, 0)
-            recency_signal = math.exp(-days_ago / stability)
-        except (ValueError, TypeError):
-            recency_signal = 0.0
 ```
 
-with:
+to:
 
 ```python
-        # Recency signal: FSRS retrievability (exp(-t/S)), through the shared
-        # implementation. Anchored on use rather than on the numeric stability
-        # update (#221): the reinforcement cooldown can leave last_review a day
-        # behind, which would read a memory used today as a day old.
-        try:
-            stability = r["stability"] if r["stability"] else 1.0
+            # Anchor on use, not on the numeric stability update (#221): the
+            # reinforcement cooldown can leave last_review a full window behind
+            # the last use, and a memory used today must not read as stale.
             anchor_str = r["last_accessed"] or r["last_review"]
-            anchor = datetime.fromisoformat(anchor_str)
-            days_ago = (now - anchor).total_seconds() / 86400
-            recency_signal = lifecycle.retrievability(days_ago, stability)
-        except (ValueError, TypeError):
-            recency_signal = 0.0
 ```
 
-Add `from ormah import lifecycle` to the imports. Leave `import math` in place only if another line still uses it — check with `grep -n "math\." src/ormah/background/importance_scorer.py` and drop the import if nothing does.
+Both columns are in the scorer's `SELECT` on `a28837b` and remain in it on #222
+(`SELECT id, access_count, last_accessed, importance, last_review FROM nodes`), so the flip
+applies cleanly under either version.
+
+**Rebase check — run this before and after any rebase onto #222:**
+
+```bash
+grep -n 'r\["stability"\]\|lifecycle\.' src/ormah/background/importance_scorer.py
+```
+
+Any hit means Step 5 overreached. `r["stability"]` after #222 raises `IndexError` — not caught by
+the surrounding `except (ValueError, TypeError)` — and aborts `run_importance_scoring` for every
+node. Leave `import math` and the existing imports untouched.
 
 - [ ] **Step 6: Run both suites**
 

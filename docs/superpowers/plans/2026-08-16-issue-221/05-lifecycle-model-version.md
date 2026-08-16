@@ -45,6 +45,32 @@ hence `last_review` is set; and with `access_count = 0` the seed returns `1.0` a
 binary from before `a28837b` does not know that key, sees `fsrs_migrated` absent, and reseeds. Both
 keys are therefore written together, so rolling back stays safe.
 
+**What the C3 guard does NOT cover — scope boundary, council round 2 (both peers, `high`).**
+
+The `last_review` guard protects exactly one shape of restore: the one where the index is *gone*,
+so `meta` comes back empty. It does nothing for a restore onto an installation whose index is
+still there, and that path is real:
+
+- `IndexBuilder.full_rebuild` (`builder.py:24-36`) clears `node_tags`, `edges`, `nodes_fts`,
+  `nodes` and `node_vectors`, but from `meta` it deletes only `auto_link_watermark`. Every other
+  key — including the version — survives the rebuild.
+- `MemoryEngine.reload_restored_graph` (`memory_engine.py:1237-1244`) calls `rebuild_index()` and
+  never calls `_migrate_fsrs`, which runs only from `__init__` (`memory_engine.py:151`).
+
+So restoring a pre-FSRS backup onto an already-migrated install keeps `lifecycle_model_version = 2`,
+hits the early return, and never reaches the guard at all. Those nodes keep `stability = 1.0`
+instead of `min(30, access_count * 2)`.
+
+**This is a pre-existing defect, not one this issue creates.** On `a28837b` today, `_migrate_fsrs`
+already returns early on `if fsrs_migrated: return`, with the same result. #221 inherits it and —
+until this paragraph was added — advertised it as handled. **Fixing it is out of scope here**
+(decision: André, 2026-08-16) and belongs to its own issue — r-spade/ormah#236 — whose shape is: treat the lifecycle
+keys as derived state (delete them in `full_rebuild`, same as `auto_link_watermark`) and call
+`_migrate_fsrs` at the end of `rebuild_index`, with an end-to-end restore test.
+
+Do not claim anywhere in this plan, in the PR body, or in the docs that the C3 guard covers
+restore in general. It covers the empty-`meta` case only.
+
 An unreadable version is now treated as **already migrated** rather than `0` — the original plan had
 this backwards. Skipping a seed is inert; running one is destructive.
 
@@ -151,6 +177,14 @@ def test_a_rebuilt_index_does_not_reseed_earned_stability(engine):
 
     The Markdown still carries stability and last_review, so the store is not a
     pre-FSRS one and must not be reseeded.
+
+    SCOPE, stated so nobody reads more into a green than it carries: this covers
+    the EMPTY-meta restore only. It deletes the keys by hand and calls
+    _migrate_fsrs directly — it goes through neither full_rebuild nor
+    reload_restored_graph. The same-device restore, where meta survives the
+    rebuild and _migrate_fsrs is never called, is a pre-existing defect tracked
+    outside this issue (see the scope boundary above). This test passing does
+    NOT mean restore is safe in general.
     """
     node_id = _make_node(engine)
     now = datetime.now(timezone.utc)

@@ -27,6 +27,16 @@
 - **Any new decay test must lower `importance` below `decay_importance_threshold`.** Both the
   node default and the threshold are `0.5` and the gate is `>=`, so a test left at the default
   never reaches the retrievability code it claims to exercise. See Task 4.
+- **The importance scorer gets the anchor flip and NOTHING else** (council round 2, C2). Do not
+  import `lifecycle` there, do not read `r["stability"]`, do not replace the recency formula.
+  After #222 that column is not selected, and `sqlite3.Row` raises an `IndexError` the surrounding
+  `except (ValueError, TypeError)` does not catch — aborting the whole scoring job. See Task 4
+  Step 5, which carries the `grep` that catches an overreach.
+- **The same-device restore bypass is OUT OF SCOPE** (council round 2, both peers, `high`;
+  decision: André, 2026-08-16). `full_rebuild` preserves `meta` and `reload_restored_graph` never
+  calls `_migrate_fsrs`, so a pre-FSRS backup restored onto a migrated install skips the seed.
+  Pre-existing on `a28837b`, so it goes to its own issue: r-spade/ormah#236. What this branch owes: never claiming
+  the C3 `last_review` guard covers restore in general. See Task 5.
 
 ## Setup (once, before Task 1)
 
@@ -50,7 +60,7 @@ Expected: the decay suite passes on unmodified `upstream/main`. That green is th
 | `src/ormah/engine/memory_engine.py:1936` (modify) | `_touch_access` → cooldown + helper call (AC4) | 3 |
 | `tests/test_engine/test_reinforcement_cooldown.py` (create) | Cooldown behavior | 3 |
 | `src/ormah/background/decay_manager.py` (modify) | Shared retrievability + inverted anchor (AC5) | 4 |
-| `src/ormah/background/importance_scorer.py` (modify) | Same anchor flip + shared helper (council C2) | 4 |
+| `src/ormah/background/importance_scorer.py` (modify) | Anchor flip **only** — never the formula (council C2, corrected round 2) | 4 |
 | `tests/test_background/test_importance_scorer.py` (modify) | Recency ignores a lagging `last_review` | 4 |
 | `src/ormah/engine/memory_engine.py:159` (modify) | Integer lifecycle-model version (AC6) | 5 |
 | `docs/12 - Configuration Reference.md`, `docs/05`, `docs/01` (modify) | Config + behavior docs (AC7) | 6 |
