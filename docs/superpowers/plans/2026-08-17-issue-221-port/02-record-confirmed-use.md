@@ -3,7 +3,10 @@
 **Files:**
 - Modify: `src/ormah/engine/memory_engine.py` — the `_record_confirmed_use` body
 - Modify: `src/ormah/config.py` — remove `fsrs_stability_growth` and its validator entry
+- Modify: `tests/test_config_fsrs.py` — add back the removal test Task 1 left out (Step 4)
 - Create: `tests/test_engine/test_reinforcement_cooldown.py`
+
+**Four files, not three.** An earlier revision of this task listed three and omitted `tests/test_config_fsrs.py`, even though Step 4 requires editing it. Step 8's `git add` is corrected to match.
 
 **Interfaces:**
 - Consumes: everything Task 1 produced.
@@ -126,7 +129,17 @@ grep -rn "_touch_access" src/ tests/
 grep -c "_record_confirmed_use(" src/ormah/engine/memory_engine.py
 ```
 
-Expected: **zero** hits for `_touch_access`, and **exactly 3** for `_record_confirmed_use(` — the two call sites plus the `def`. Any other number means a call site was added or removed; **stop and report**, do not adjust the code to reach the number.
+Expected: **exactly 3** for `_record_confirmed_use(` — the two call sites plus the `def`.
+
+For `_touch_access`, expected is **exactly these three pre-existing hits, all of which must survive**:
+
+- `src/ormah/background/forgetting_manager.py:54` — a stale comment naming the old method
+- `tests/test_engine/test_mutation_stamping.py:95` — `def test_touch_access_does_not_advance_updated`
+- `tests/test_store/test_file_store.py:121` — `def test_touch_access`
+
+The last two are **test function names**, matched by substring; they exercise `FileStore.touch_access`, a different and legitimate method that this port does not touch. All three are byte-identical on the base commit `3bfe663` — verify that with `git grep -n "_touch_access" 3bfe663 -- src/ tests/` rather than judging by eye.
+
+**This gate said "zero" and was wrong** — the plan author did not account for pre-existing substring matches. What it is actually checking is that no *engine method* named `_touch_access` exists and no call site was added. If your count differs from the list above, **stop and report**; never delete a hit to reach a number.
 
 - [ ] **Step 8: Run the engine suite and commit**
 
@@ -134,7 +147,7 @@ Run: `./.venv/bin/python -m pytest tests/test_engine/ -q` — expected: all pass
 
 ```bash
 ./.venv/bin/python -m ruff check src/ tests/
-git add src/ormah/engine/memory_engine.py src/ormah/config.py tests/test_engine/test_reinforcement_cooldown.py
+git add src/ormah/engine/memory_engine.py src/ormah/config.py tests/test_config_fsrs.py tests/test_engine/test_reinforcement_cooldown.py
 git commit -m "fix(lifecycle): bounded stability growth, one update per node per day (#221)"
 ```
 
