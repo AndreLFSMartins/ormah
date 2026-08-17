@@ -52,6 +52,14 @@ use, and `fsrs_growth_exponent` shrinks each step as stability rises — roughly
 eligible updates take a node from `1.0` to the default cap.
 `fsrs_reinforcement_cooldown_days` allows at most one numeric stability update per
 node per window; use still advances `last_accessed` on every event.
+
+Because of that, `last_review` can lag real use by a full cooldown window, and any
+job that treats it as a recency signal will read an actively used memory as stale.
+Decay and importance therefore anchor on `last_accessed`. If you add a consumer
+that anchors on `last_review` instead, keep
+`fsrs_reinforcement_cooldown_days < -ln(fsrs_decay_threshold) x stability`
+(about `1.2` days at the default threshold and an initial stability of `1.0`), or
+that consumer will treat the cooldown lag as decay.
 `fsrs_stability_growth` was removed in #221: it was a base multiplier, and the new
 `fsrs_growth_factor` is an additive term with different semantics.
 

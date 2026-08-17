@@ -22,6 +22,25 @@
 2. The decay anchor flips from `last_review or last_accessed` to `last_accessed or last_review`. With the cooldown, `last_review` can lag the last use by a full cooldown window; anchoring decay on it would let an actively used node look stale. The two-way fallback stays so a row missing either column still decays instead of being skipped.
 3. **`importance_scorer.py` gets the same anchor flip — and nothing else.** This file was declared out of scope in the original spec; the council review showed why that was wrong — see below.
 
+**The anchor flip is what makes the cooldown safe — it is not a nicety (Task 3 review, 2026-08-16).**
+Both consumers currently read `last_review or last_accessed`, using the access time only as a NULL
+fallback (`decay_manager.py:51`, `importance_scorer.py:81`). So while `last_review` moved on every
+touch, a node used today scored `R ≈ 1.0`. Task 3's cooldown freezes `last_review` for up to
+`fsrs_reinforcement_cooldown_days`, and until this task lands, the advancing `last_accessed`
+protects nothing — nothing reads it.
+
+`run_decay` demotes when `exp(-days_since / stability) < fsrs_decay_threshold`, i.e. when
+`days_since > -ln(0.3) × stability ≈ 1.204 × stability`. With the defaults (cooldown `1.0`,
+stability `1.0`) the lag clears that bar by 0.2 days — which is the only reason the suite is green
+between Task 3 and this task. **That margin is an accident of two independently tunable knobs, not
+a design.** Set `fsrs_reinforcement_cooldown_days = 2.0` — `config.py` documents it as
+"deliberately configurable" — and actively used working-tier memories would be archived by a
+background job.
+
+After this flip, decay reads the use timestamp and the coupling stops mattering for decay. Task 6
+documents it anyway, because `last_review` keeps its lag and any future consumer that anchors on it
+inherits the same trap. Do not treat the flip as cosmetic and do not land Task 3 without it.
+
 **Why `importance_scorer` is now in scope (council finding C2).** The scorer reads its recency
 anchor as `r["last_review"] or r["last_accessed"]` with weight `0.33` (`config.py:144`). The
 cooldown this issue introduces is precisely what makes `last_review` lag. A node used today but

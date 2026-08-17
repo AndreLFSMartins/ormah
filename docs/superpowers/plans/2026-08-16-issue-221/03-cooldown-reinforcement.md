@@ -155,55 +155,92 @@ def test_reinforcement_survives_a_zero_stability_node(engine):
     assert _row(engine, node_id)["stability"] > 0.0
 
 
-def test_concurrent_touches_still_produce_one_stability_update(engine):
-    """AC4 under concurrency (council round 3, I1).
+def test_concurrent_touches_run_reinforcement_once(engine, monkeypatch):
+    """AC4 under concurrency (council round 3 I1; test rebuilt after task review).
 
-    The sequential ten-touch test above cannot see this: it is the *interleaving*
-    that breaks the cooldown. Both threads read last_review before either writes
-    it, both conclude they are off cooldown, and both bump. The recall paths that
-    reach _touch_access carry no @_serialized_memory_operation, so this is the
-    real production shape, not a synthetic one.
+    The sequential ten-touch test cannot see this: it is the *interleaving* that
+    breaks the cooldown. Both threads read last_review before either writes it,
+    both conclude they are off cooldown, and both reinforce. The recall paths
+    that reach _touch_access carry no @_serialized_memory_operation, so this is
+    the production shape, not a synthetic one.
 
-    Barrier, not a bare thread pair: without it the two threads can serialize by
-    luck and the test greens on the broken code. The barrier forces both past the
-    cooldown read before either proceeds.
+    TWO construction choices, both load-bearing — read before editing:
+
+    1. A DELAY widens the window; a Barrier would deadlock. Synchronizing the
+       threads *inside* the critical section only works while the section is
+       unguarded: once @_serialized_memory_operation is in place the second
+       thread cannot enter until the first leaves, so a barrier there would time
+       out on correct code. A sleep does not synchronize, so it is safe in both
+       states — it just makes the unguarded race overwhelmingly likely.
+
+    2. The assertion COUNTS reinforcements; it cannot be the final stability.
+       Both threads read S=1.0 and both write 1.5 — the same value. Compounding
+       to 2.25 needs read-after-write, which is the serialization the bug
+       removes, so `stability == 1.5` holds whether the race fired or not. The
+       number of reinforced_stability calls is the only signal that separates
+       one bump from two.
     """
     import threading
+    import time
+
+    from ormah import lifecycle
 
     node_id = _make_node(engine)
-    engine.db.conn.execute(
-        "UPDATE nodes SET stability = 1.0, last_review = NULL WHERE id = ?", (node_id,)
-    )
-    engine.db.conn.commit()
     node = engine.file_store.load(node_id)
     node.stability = 1.0
     node.last_review = None
     engine.file_store.save(node)
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 1.0, last_review = NULL WHERE id = ?", (node_id,)
+    )
+    engine.db.conn.commit()
 
-    barrier = threading.Barrier(2)
+    reinforcements: list[float] = []
+    real_due = lifecycle.reinforcement_due
+    real_reinforce = lifecycle.reinforced_stability
+    lock = threading.Lock()
+
+    def _slow_due(last_review, now, cooldown_days):
+        verdict = real_due(last_review, now, cooldown_days)
+        time.sleep(0.05)  # widen the check-then-write window
+        return verdict
+
+    def _counting_reinforce(*args, **kwargs):
+        with lock:
+            reinforcements.append(1.0)
+        return real_reinforce(*args, **kwargs)
+
+    import ormah.engine.memory_engine as engine_module
+
+    monkeypatch.setattr(engine_module.lifecycle, "reinforcement_due", _slow_due)
+    monkeypatch.setattr(engine_module.lifecycle, "reinforced_stability", _counting_reinforce)
+
     errors: list[BaseException] = []
 
     def _touch() -> None:
         try:
-            barrier.wait(timeout=5)
             engine._touch_access(node_id)
         except BaseException as exc:  # noqa: BLE001 - surfaced via `errors` below
             errors.append(exc)
 
-    threads = [threading.Thread(target=_touch) for _ in range(2)]
+    threads = [threading.Thread(target=_touch) for _ in range(4)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=10)
+        t.join(timeout=15)
 
     assert not errors, f"a touch thread raised: {errors}"
-    row = _row(engine, node_id)
-    # One bump from S=1.0, never two. The second bump would compound past this.
-    assert row["stability"] == pytest.approx(1.5)
-    assert row["access_count"] == 2, "both touches must still be counted"
+    assert not [t for t in threads if t.is_alive()], "a touch thread never finished"
+    assert len(reinforcements) == 1, (
+        f"cooldown ran reinforcement {len(reinforcements)} times under concurrency"
+    )
+    assert _row(engine, node_id)["access_count"] == 4, "every touch must still be counted"
 ```
 
 Add `import pytest` to the file's imports.
+
+The `is_alive` assertion is not padding: without it a reintroduced deadlock makes `join(timeout=15)`
+return silently and the test fails on a confusing count mismatch instead of naming the hang.
 
 Then append to `tests/test_config_fsrs.py` (created in Task 2) the two tests that only become
 true once this task removes the field:
@@ -236,7 +273,7 @@ Expected: FAIL, with these specific failures:
 | `test_ten_touches_in_one_day_produce_one_stability_update` | every touch still updates stability |
 | `test_a_thirty_day_old_node_is_bounded_to_double` | reports ~`202.7` instead of `2.0` |
 | `test_reinforcement_survives_a_zero_stability_node` | raises `ZeroDivisionError` |
-| `test_concurrent_touches_still_produce_one_stability_update` | compounded stability instead of `1.5` |
+| `test_concurrent_touches_run_reinforcement_once` | reinforcement runs 2-4 times instead of once |
 | `test_the_removed_growth_knob_no_longer_exists` | the field is still there (Task 2 left it) |
 
 `test_an_env_carrying_the_removed_knob_still_loads` **passes here for the wrong reason** — the env
@@ -289,9 +326,10 @@ Replace lines 1936-1960 entirely:
         now = datetime.now(timezone.utc)
 
         # One numeric stability update per node per cooldown window (#221): the
-        # old formula let ten same-session touches compound to ~57x. The access
-        # anchor below still advances on every call, so decay never mistakes an
-        # actively used node for a stale one.
+        # old formula let ten same-session touches compound to ~57x. last_accessed
+        # below still advances on every call, and Task 4 repoints decay and
+        # importance at it, so a node in active use never reads as stale even
+        # though last_review now lags by up to one cooldown window.
         if lifecycle.reinforcement_due(
             node.last_review, now, self.settings.fsrs_reinforcement_cooldown_days
         ):
@@ -343,8 +381,10 @@ Run: `./.venv/bin/python -m pytest tests/test_engine/test_reinforcement_cooldown
 Expected: 6 passed.
 
 Then confirm the decorator is what carries the concurrency test, rather than luck: remove it,
-re-run `test_concurrent_touches_still_produce_one_stability_update` five times, and see it go
-red. Put it back. A lock nobody watched fail is a lock nobody knows works.
+re-run `test_concurrent_touches_run_reinforcement_once` five times, and see it go red every
+time — the 0.05s delay makes the unguarded race near-certain, so an intermittent red means the
+delay is too short, not that the test is flaky. Put the decorator back. A lock nobody watched
+fail is a lock nobody knows works.
 
 - [ ] **Step 6: Run the suites that already exercised this path, plus the config removal**
 
