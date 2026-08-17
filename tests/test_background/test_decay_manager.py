@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
 
 from ormah.background.decay_manager import run_decay
 from ormah.background.importance_scorer import run_importance_scoring
@@ -349,3 +350,97 @@ def test_decay_cleans_pending_proposals(engine):
         "SELECT COUNT(*) FROM proposals WHERE type = 'decay' AND status = 'pending'"
     ).fetchone()[0]
     assert count_after == 0
+
+
+def _make_decayable(engine, node_id: str) -> None:
+    """Lower importance under decay_importance_threshold.
+
+    Both the node default and the threshold are 0.5, and the gate is `>=`, so a
+    node left at its default is skipped before retrievability is ever computed.
+    """
+    engine.db.conn.execute(
+        "UPDATE nodes SET importance = 0.2 WHERE id = ?", (node_id,)
+    )
+    engine.db.conn.commit()
+
+
+def test_decay_uses_the_shared_retrievability_implementation(engine, monkeypatch):
+    """AC5: one exponential curve, shared with the reinforcement path."""
+    from ormah.background import decay_manager
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Node whose retrievability we intercept",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Intercepted",
+    ))
+    _make_stale(engine, node_id)
+    _make_decayable(engine, node_id)
+
+    calls = []
+    real = decay_manager.lifecycle.retrievability
+
+    def _spy(days_since, stability, **kwargs):
+        calls.append((days_since, stability))
+        return real(days_since, stability, **kwargs)
+
+    monkeypatch.setattr(decay_manager.lifecycle, "retrievability", _spy)
+    run_decay(engine)
+
+    assert calls, "run_decay computed retrievability without the shared helper"
+    days_since, _stability = calls[0]
+    assert days_since == pytest.approx(30, abs=1)
+
+
+def test_a_node_used_today_is_not_decayed_while_its_review_lags(engine):
+    """The cooldown can leave last_review a day behind; use must win the anchor.
+
+    With the old `last_review or last_accessed` order this node reads as 30 days
+    stale and is demoted. Step 2 pins that: the test must FAIL before the flip.
+    """
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Used today, reviewed a month ago",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Fresh use, stale review",
+    ))
+    now = datetime.now(timezone.utc)
+    engine.db.conn.execute(
+        "UPDATE nodes SET last_accessed = ?, last_review = ?, stability = 1.0 WHERE id = ?",
+        (now.isoformat(), (now - timedelta(days=30)).isoformat(), node_id),
+    )
+    _make_decayable(engine, node_id)
+
+    run_decay(engine)
+
+    assert _get_tier(engine, node_id) == "working"
+
+
+def test_zero_stability_decays_on_the_configured_initial_stability(engine, monkeypatch):
+    """Decay must use the same zero fallback reinforcement uses (council round 3, I3).
+
+    Node.stability is Field(ge=0.0), so 0 is a real state. With the hardcoded 1.0
+    fallback a seven-day-old zero-stability node reads R = exp(-7/1) ~= 0.0009 and
+    is archived; with fsrs_initial_stability = 30 it reads exp(-7/30) ~= 0.79 and
+    must survive. The 0.3 decay threshold sits between the two, so this test can
+    only pass on the shared fallback.
+    """
+    monkeypatch.setattr(engine.settings, "fsrs_initial_stability", 30.0)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Zero stability, used a week ago",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Zero stability",
+    ))
+    now = datetime.now(timezone.utc)
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 0.0, last_accessed = ?, last_review = NULL WHERE id = ?",
+        ((now - timedelta(days=7)).isoformat(), node_id),
+    )
+    engine.db.conn.commit()
+    _make_decayable(engine, node_id)
+
+    run_decay(engine)
+
+    assert _get_tier(engine, node_id) == "working"
