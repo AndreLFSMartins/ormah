@@ -35,8 +35,8 @@ access_count: int           # Times this node has been accessed/recalled
 # Temporal
 created: datetime           # When first stored (UTC)
 updated: datetime           # Last modification (UTC)
-last_accessed: datetime     # Last recall/search hit (UTC)
-last_review: datetime | None # Last FSRS review (spaced repetition)
+last_accessed: datetime     # Last recall/search hit (UTC); the decay anchor
+last_review: datetime | None # Last numeric stability update; gated by the reinforcement cooldown, so it can lag last_accessed
 valid_until: datetime | None # Expiry date (set by mark_outdated)
 
 # FSRS (Spaced Repetition)
