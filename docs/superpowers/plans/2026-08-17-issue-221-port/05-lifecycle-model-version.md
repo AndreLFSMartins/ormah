@@ -27,6 +27,10 @@ From `git show 4cf017f:src/ormah/engine/memory_engine.py`, take verbatim: the `L
 
 Every fallback in `_lifecycle_model_version` resolves to 1 (already migrated) except the total absence of any signal, which returns 0. Skipping a seed is inert; running one overwrites `stability` and rewrites the Markdown.
 
+**Then update one docstring elsewhere.** `_record_confirmed_use`'s lock-order note currently reads "exists in `_migrate_fsrs` and `_migrate_identity_tiers`". This task moves the seeding loop — the part that calls `file_store` inside `db.transaction()` — out of `_migrate_fsrs` and into `_seed_stability_from_access_count`, so after your change `_migrate_fsrs` no longer exhibits the pattern the sentence attributes to it. Change that name to `_seed_stability_from_access_count` and leave `_migrate_identity_tiers` alone.
+
+Verify rather than assume: after your edit, every function the sentence names must actually open `db.transaction()` and call `file_store` **inside** it. `_ensure_self_node` was in this list once and was removed because it saves *before* opening its transaction — a reviewer caught it. Do not add names back without reading their bodies.
+
 - [ ] **Step 4: Run to verify pass**
 
 Run: `./.venv/bin/python -m pytest tests/test_engine/test_lifecycle_model_version.py -v`
