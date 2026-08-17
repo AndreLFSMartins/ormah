@@ -34,8 +34,10 @@ not reinforce it and never did after #220.
 - [ ] **Step 3: Verify the removed knob is gone from the docs**
 
 ```bash
-grep -rn "fsrs_stability_growth" docs/ src/ tests/
+grep -rn "fsrs_stability_growth" "docs/12 - Configuration Reference.md" src/ tests/
 ```
+
+**Scope the grep to `docs/12`, not all of `docs/`.** Unlike the `fix/221-bounded-reinforcement` worktree, this branch is cut from `local-main`, which versions `docs/superpowers/` and `docs/lifecycle/`. A sweep over `docs/` therefore also hits eight planning and spec documents — including this plan — that legitimately name the removed knob in prose. The gate said "exactly three" over all of `docs/` and was wrong for that reason; scoped as above, three is correct.
 
 Expected: **exactly three hits, and all three must survive** — the prose sentence in `docs/12` explaining the removal (naming the removed identifier is the point; it is what someone upgrading greps for), plus two in `tests/test_config_fsrs.py` (a comment and the removal assertion). For a zero-hit check on live code, scope it: `grep -rn "fsrs_stability_growth" src/`. If your count disagrees with this list, **stop and report** — do not delete a hit to reach the number.
 
