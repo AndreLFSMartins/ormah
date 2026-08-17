@@ -30,12 +30,12 @@ connections: list[Connection]  # Outgoing edges to other nodes
 # Scoring
 confidence: float           # [0.0-1.0] How certain we are (default: 1.0)
 importance: float           # [0.0-1.0] Computed by importance_scorer job; see 05 - Background Jobs
-access_count: int           # Times this node has been accessed/recalled
+access_count: int           # Times this node was confirmed as used (see 05 - Background Jobs)
 
 # Temporal
 created: datetime           # When first stored (UTC)
 updated: datetime           # Last modification (UTC)
-last_accessed: datetime     # Last recall/search hit (UTC); the decay anchor
+last_accessed: datetime     # Last confirmed use (UTC); the decay anchor. Surfacing a memory in a whisper or a search result does not advance it — see #220
 last_review: datetime | None # Last numeric stability update; gated by the reinforcement cooldown, so it can lag last_accessed
 valid_until: datetime | None # Expiry date (set by mark_outdated)
 
