@@ -4,7 +4,13 @@
 
 **Goal:** Replace the unbounded FSRS stability update with a bounded, diminishing one, allow at most one numeric stability increase per node per day, and centralize the lifecycle math in a single module.
 
-**Architecture:** A new pure module `src/ormah/lifecycle.py` owns every formula (retrievability, spacing, reinforced stability, cooldown). `memory_engine._touch_access` and `background/decay_manager.run_decay` become thin callers. Four new config knobs replace `fsrs_stability_growth`. The boolean `meta.fsrs_migrated` flag becomes an integer `meta.lifecycle_model_version`.
+**Architecture:** A new pure module `src/ormah/lifecycle.py` owns the formulas (retrievability, spacing, reinforced stability, cooldown). `memory_engine._touch_access` and `background/decay_manager.run_decay` become thin callers. Four new config knobs replace `fsrs_stability_growth`. The boolean `meta.fsrs_migrated` flag becomes an integer `meta.lifecycle_model_version`.
+
+**Two of three call sites, not three.** `background/importance_scorer.py` keeps its own inline
+retrievability and its own hardcoded zero-stability fallback: a Global Constraint below forbids
+touching it, because #222 rewrites that line and reading `r["stability"]` there raises after #222
+lands. Do not read the sentence above as promising full centralization — the third call site
+converges with #222, not here.
 
 **Tech Stack:** Python ≥3.11, pydantic-settings, pytest (`asyncio_mode = auto`), SQLite, ruff (line-length 100, py311).
 
@@ -19,7 +25,14 @@
 - **The formula is fixed by #191** — do not tune it: `spacing = min(R^-0.2, cap)`, `S' = min(S × (1 + g × S^-w × spacing), max)`, with `g = 0.5`, `w = 0.5`, `cap = 2.0`, spacing exponent `0.2`.
 - **Verified target numbers** (recompute if you change anything): `S=1` + 30 days → exactly `2.0`; `S=1` → `365.0` in exactly **74** closely spaced updates.
 - Line length 100, `ruff check src/ tests/` must pass.
-- Do not rescale existing `stability` values anywhere.
+- Do not rescale existing `stability` values anywhere. **This constraint carries a docs
+  obligation, and Task 6 owes it:** refusing to rescale means a node the old unbounded formula
+  drove to `fsrs_max_stability` stays there, needing about `-ln(fsrs_decay_threshold) ×
+  fsrs_max_stability` days of disuse (~440 at the defaults) to decay — still pinned in `working`,
+  which is the symptom this issue exists to remove. Describing the new curve without saying that
+  leaves the reader concluding the opposite. **A constraint that changes user-visible behavior
+  needs a documentation deliverable named alongside it**; this one had none, which is how the gap
+  survived six task reviews and was caught only by the whole-branch review.
 - **Merge prerequisites, not just a preferred order:** #220 (PR #234) and #222 (PR #235) must
   land before this one. Without #220 the branch does not literally implement "confirmed use";
   #222 rewrites the same `recency_signal` line Task 4 now touches. Implement and review freely
