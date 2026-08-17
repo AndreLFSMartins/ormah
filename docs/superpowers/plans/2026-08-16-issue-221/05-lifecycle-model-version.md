@@ -296,10 +296,12 @@ Replace lines 159-197 entirely:
         which could say migrated/not-migrated and nothing else; it maps to
         version 1.
 
-        Every fallback here fails closed at 1 (already migrated), because the
+        An ambiguous signal fails closed at 1 (already migrated), because the
         only action version 0 unlocks is a destructive one: the seed overwrites
         stability and rewrites the Markdown. Skipping a needed seed leaves
-        defaults in place; running an unneeded one destroys real values.
+        defaults in place; running an unneeded one destroys real values. Only
+        the total absence of any signal — no version key, no legacy flag, and
+        no node carrying last_review — returns 0.
         """
         row = self.db.conn.execute(
             "SELECT value FROM meta WHERE key = 'lifecycle_model_version'"
