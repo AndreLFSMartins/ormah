@@ -276,10 +276,12 @@ def test_decay_cleans_pending_proposals(engine):
 
 
 def _make_decayable(engine, node_id: str) -> None:
-    """Lower importance under decay_importance_threshold.
+    """Lower importance to 0.2. Inert holdover from the pre-#222 importance gate.
 
-    Both the node default and the threshold are 0.5, and the gate is `>=`, so a
-    node left at its default is skipped before retrievability is ever computed.
+    #222 removed decay_importance_threshold entirely — decay_manager.py no
+    longer reads `importance` at all — so this no longer changes whether a
+    node is eligible for decay. Kept only because four tests still call it;
+    do not read a gate back into the value.
     """
     engine.db.conn.execute(
         "UPDATE nodes SET importance = 0.2 WHERE id = ?", (node_id,)

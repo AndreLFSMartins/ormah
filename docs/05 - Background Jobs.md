@@ -137,7 +137,7 @@ still decides which nodes survive when `core` is over its cap — see
 
 `importance_scorer` recomputes node importance from three dynamic signals:
 
-1. **Access signal**: how often the node has been recalled, based on `access_count`
+1. **Access signal**: how often the node has been used, based on `access_count`
 2. **Edge signal**: how connected the node is in the graph, based on total edge count
 3. **Recency signal**: how recently the node was touched, using half-life decay `exp(-ln(2) * days_ago / importance_recency_half_life_days)` — independent of FSRS stability, anchored on `last_accessed` (falling back to `last_review`)
 

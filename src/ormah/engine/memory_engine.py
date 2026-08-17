@@ -321,8 +321,8 @@ class MemoryEngine:
         # (backup.py:331-334), so this is also what a fresh-device restore or a
         # deleted index looks like — not only a genuinely pre-FSRS store. Ask
         # the durable source instead: last_review lives in the Markdown
-        # frontmatter (markdown.py:72-73) and is restored on rebuild
-        # (builder.py:161), so any store that ever seeded or reinforced carries
+        # frontmatter (markdown.py:81-82) and is restored on rebuild
+        # (builder.py:265), so any store that ever seeded or reinforced carries
         # it. Seeding over that would overwrite stability the user actually earned.
         reviewed = self.db.conn.execute(
             "SELECT 1 FROM nodes WHERE last_review IS NOT NULL LIMIT 1"
@@ -2502,11 +2502,13 @@ class MemoryEngine:
         """Record a confirmed use: update access stats and FSRS stability on disk and DB.
 
         Serialized because the cooldown is a check-then-write pair (#221,
-        council round 3): the two callers are behind the at-most-once claim
-        latch, but the latch is per whisper event, not per node, so two
-        concurrent confirmed uses of the same node would both read a stale
-        last_review and both bump stability. _memory_operation_lock is an
-        RLock, so a caller that already holds it re-enters safely.
+        council round 3): all three callers — memory_engine.py:900,
+        memory_engine.py:3331, and background/session_watcher.py:608 — are
+        behind the at-most-once claim latch, but the latch is per whisper
+        event, not per node, so two concurrent confirmed uses of the same
+        node would both read a stale last_review and both bump stability.
+        _memory_operation_lock is an RLock, so a caller that already holds it
+        re-enters safely.
 
         Lock order: this decorator acquires the memory lock before the body
         opens db.transaction(), i.e. memory-lock -> db-lock. The inverse order

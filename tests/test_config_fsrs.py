@@ -74,7 +74,7 @@ def test_non_finite_values_from_the_environment_are_rejected(tmp_memory_dir, mon
 
 
 def test_an_env_carrying_the_removed_knob_still_loads(tmp_memory_dir, monkeypatch):
-    """extra="ignore" (config.py:20) keeps an old .env from breaking startup."""
+    """extra="ignore" (config.py:69) keeps an old .env from breaking startup."""
     monkeypatch.setenv("ORMAH_FSRS_STABILITY_GROWTH", "1.5")
     settings = Settings(memory_dir=tmp_memory_dir)
     assert settings.fsrs_growth_factor == 0.5
