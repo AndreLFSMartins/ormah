@@ -78,3 +78,8 @@ def test_an_env_carrying_the_removed_knob_still_loads(tmp_memory_dir, monkeypatc
     monkeypatch.setenv("ORMAH_FSRS_STABILITY_GROWTH", "1.5")
     settings = Settings(memory_dir=tmp_memory_dir)
     assert settings.fsrs_growth_factor == 0.5
+
+
+def test_the_removed_growth_knob_no_longer_exists(tmp_memory_dir):
+    settings = Settings(memory_dir=tmp_memory_dir)
+    assert not hasattr(settings, "fsrs_stability_growth")

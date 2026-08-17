@@ -7,7 +7,6 @@ import hashlib
 from contextlib import contextmanager
 from functools import wraps
 import logging
-import math
 import re
 import threading
 import time
@@ -32,6 +31,7 @@ from ormah.engine.traversal import (
     format_node_with_neighbors,
     format_search_results,
 )
+from ormah import lifecycle
 from ormah.index.builder import IndexBuilder
 from ormah.index.db import Database
 from ormah.index.graph import GraphIndex
@@ -2441,25 +2441,49 @@ class MemoryEngine:
 
     @_serialized_memory_operation
     def _record_confirmed_use(self, node_id: str) -> None:
-        """Record a confirmed use: update access stats and FSRS stability on disk and DB."""
+        """Record a confirmed use: update access stats and FSRS stability on disk and DB.
+
+        Serialized because the cooldown is a check-then-write pair (#221,
+        council round 3): the two callers are behind the at-most-once claim
+        latch, but the latch is per whisper event, not per node, so two
+        concurrent confirmed uses of the same node would both read a stale
+        last_review and both bump stability. _memory_operation_lock is an
+        RLock, so a caller that already holds it re-enters safely.
+
+        Lock order: this decorator acquires the memory lock before the body
+        opens db.transaction(), i.e. memory-lock -> db-lock. The inverse order
+        (db-lock -> memory-lock, via file_store calls inside a transaction)
+        exists in _seed_stability_from_access_count, _migrate_identity_tiers,
+        and _ensure_self_node, but all three run only from startup() before the
+        server serves, so the two orders never interleave today. Invariant this
+        depends on: never call file_store inside db.transaction() outside
+        startup().
+        """
         node = self.file_store.load(node_id)
         if node is None:
             return
         now = datetime.now(timezone.utc)
 
-        # FSRS stability update. Node.stability is Field(ge=0.0), so 0 is a valid
-        # persisted value that would divide by zero here — and, once past that, keep
-        # new_stability pinned at 0 forever. decay_manager and importance_scorer already
-        # guard this same division; this was the one consumer that did not, and the
-        # ZeroDivisionError landed in the caller's isolating except as a silent lost
-        # reinforcement on a claim that had already been committed.
-        review_anchor = node.last_review or node.last_accessed
-        days_since = max((now - review_anchor).total_seconds() / 86400, 0.001)
-        stability = node.stability if node.stability else self.settings.fsrs_initial_stability
-        retrievability = math.exp(-days_since / stability)
-        new_stability = stability * self.settings.fsrs_stability_growth * (retrievability ** -0.2)
-        node.stability = round(min(new_stability, self.settings.fsrs_max_stability), 2)
-        node.last_review = now
+        # One numeric stability update per node per cooldown window (#221): the old
+        # formula let repeated confirmed uses compound without bound. last_accessed
+        # below still advances on every call, and Tasks 3-4 point decay and importance
+        # at it, so a node in active use never reads as stale even though last_review
+        # now lags by up to one cooldown window.
+        if lifecycle.reinforcement_due(
+            node.last_review, now, self.settings.fsrs_reinforcement_cooldown_days
+        ):
+            anchor = node.last_review or node.last_accessed
+            days_since = max((now - anchor).total_seconds() / 86400, 0.0)
+            node.stability = lifecycle.reinforced_stability(
+                node.stability,
+                days_since,
+                growth_factor=self.settings.fsrs_growth_factor,
+                growth_exponent=self.settings.fsrs_growth_exponent,
+                spacing_cap=self.settings.fsrs_spacing_cap,
+                max_stability=self.settings.fsrs_max_stability,
+                initial_stability=self.settings.fsrs_initial_stability,
+            )
+            node.last_review = now
 
         # Standard access tracking
         node.last_accessed = now
@@ -2469,7 +2493,13 @@ class MemoryEngine:
         with self.db.transaction() as conn:
             conn.execute(
                 "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, last_review = ? WHERE id = ?",
-                (node.access_count, node.last_accessed.isoformat(), node.stability, node.last_review.isoformat(), node_id),
+                (
+                    node.access_count,
+                    node.last_accessed.isoformat(),
+                    node.stability,
+                    node.last_review.isoformat() if node.last_review else None,
+                    node_id,
+                ),
             )
 
     # --- Private helpers ---

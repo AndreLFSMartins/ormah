@@ -169,7 +169,6 @@ class Settings(BaseSettings):
     # FSRS spaced repetition decay
     fsrs_initial_stability: float = 1.0    # days; starting stability for new nodes
     fsrs_decay_threshold: float = 0.3      # R below this = decay candidate
-    fsrs_stability_growth: float = 1.5     # base multiplier on access
     fsrs_max_stability: float = 365.0      # cap at 1 year
 
     # Bounded reinforcement (#221). See docs/12 for the curve.
@@ -1031,7 +1030,6 @@ class Settings(BaseSettings):
 
     @field_validator(
         "fsrs_initial_stability",
-        "fsrs_stability_growth",
         "fsrs_growth_factor",
         "fsrs_growth_exponent",
     )
