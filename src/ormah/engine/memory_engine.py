@@ -55,6 +55,11 @@ _EMBEDDING_SCHEMA_VERSION = 2
 # auto_heuristic is excluded pending #218 signal calibration.
 _CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge"})
 
+# Lifecycle-model version. 1 = the legacy FSRS seed (previously recorded as the
+# boolean meta key 'fsrs_migrated'); 2 = bounded reinforcement (#221). An integer
+# so a future curve migration can tell which model produced the stored values.
+LIFECYCLE_MODEL_VERSION = 2
+
 
 def _generate_title(content: str, max_chars: int = 60) -> str:
     """Generate a short title from the first line/sentence of content."""
@@ -162,13 +167,67 @@ class MemoryEngine:
         self._warmup_reranker()
 
     def _migrate_fsrs(self) -> None:
-        """Seed FSRS stability from access_count on first run, updating both DB and markdown."""
-        fsrs_migrated = self.db.conn.execute(
-            "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
-        ).fetchone()
-        if fsrs_migrated:
+        """Seed FSRS stability once, and record the store's lifecycle-model version."""
+        version = self._lifecycle_model_version()
+        if version >= LIFECYCLE_MODEL_VERSION:
             return
 
+        if version == 0:
+            self._seed_stability_from_access_count()
+
+        with self.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                "('lifecycle_model_version', ?)",
+                (str(LIFECYCLE_MODEL_VERSION),),
+            )
+            # Keep the legacy flag in sync so rolling back to a binary that only
+            # knows 'fsrs_migrated' does not reseed a store built under #221.
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
+            )
+
+    def _lifecycle_model_version(self) -> int:
+        """Read the store's lifecycle-model version, upgrading the legacy flag.
+
+        Stores written before #221 only carry the boolean 'fsrs_migrated' key,
+        which could say migrated/not-migrated and nothing else; it maps to
+        version 1.
+
+        Every fallback here fails closed at 1 (already migrated), because the
+        only action version 0 unlocks is a destructive one: the seed overwrites
+        stability and rewrites the Markdown. Skipping a needed seed leaves
+        defaults in place; running an unneeded one destroys real values.
+        """
+        row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'lifecycle_model_version'"
+        ).fetchone()
+        if row:
+            try:
+                return int(row["value"])
+            except (TypeError, ValueError):
+                return 1
+
+        legacy = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
+        ).fetchone()
+        if legacy:
+            return 1
+
+        # No meta at all. SQLite is derived and excluded from backups
+        # (backup.py:331-334), so this is also what a fresh-device restore or a
+        # deleted index looks like — not only a genuinely pre-FSRS store. Ask
+        # the durable source instead: last_review lives in the Markdown
+        # frontmatter (markdown.py:72-73) and is restored on rebuild
+        # (builder.py:161), so any store that ever seeded or reinforced carries
+        # it. Seeding over that would overwrite stability the user actually earned.
+        reviewed = self.db.conn.execute(
+            "SELECT 1 FROM nodes WHERE last_review IS NOT NULL LIMIT 1"
+        ).fetchone()
+        return 1 if reviewed else 0
+
+    def _seed_stability_from_access_count(self) -> None:
+        """Seed FSRS stability from access_count, updating both DB and markdown."""
         rows = self.db.conn.execute(
             "SELECT id, access_count, last_accessed FROM nodes"
         ).fetchall()
@@ -196,9 +255,6 @@ class MemoryEngine:
                             pass
                     self.file_store.save(node)
 
-            conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
-            )
         logger.info("FSRS data migration complete: seeded %d nodes from access_count", len(rows))
 
     def _seed_initial_maintenance_grace_period(self) -> None:
