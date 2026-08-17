@@ -8,7 +8,7 @@
 - Consumes: `lifecycle.retrievability` from Task 1.
 - Produces: nothing consumed by later tasks.
 
-`local-main`'s `decay_manager` is untouched by #220 and #222 — it still carries the inline `math.exp` — so this ports almost as-is from `4cf017f`.
+`local-main`'s `decay_manager` still carries the inline `math.exp`, so the retrievability change ports almost as-is from `4cf017f`. It is **not** untouched, though: #222 (`5c4a1fe`) removed the importance pre-gate from `run_decay`, and the test file already carries #222-era tests. Diff before you apply anything.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -18,7 +18,9 @@ git show 4cf017f:tests/test_background/test_decay_manager.py > /tmp/t3-decay-tes
 
 Diff `/tmp/t3-decay-tests.py` against `tests/test_background/test_decay_manager.py` and apply only the additions #221 made — including `test_a_naive_last_accessed_on_one_row_does_not_abort_the_whole_run`. Do not overwrite the file wholesale: `local-main` may carry decay tests from #222 that `4cf017f` never had.
 
-**Any new decay test must lower `importance` below `decay_importance_threshold`.** Both the node default and the threshold are `0.5` and the gate is `>=`, so a test left at the default never reaches the retrievability code it claims to exercise.
+**There is no importance gate on this branch, and no decay test needs to lower `importance`.** #222 (`5c4a1fe`) removed it — that is what #222 *is*: retrievability alone controls the working→archival demotion. `grep -n importance src/ormah/background/decay_manager.py` returns nothing.
+
+This constraint was carried over verbatim from #221's plan, where the gate still existed and a test left at the default `importance = 0.5` never reached the retrievability code. **Here it is dead**, and following it adds setup that does nothing while implying a gate that is gone.
 
 - [ ] **Step 2: Run to verify failure**
 
