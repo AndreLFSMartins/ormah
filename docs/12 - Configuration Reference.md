@@ -239,9 +239,43 @@ effect in this version; bounded forgetting reintroduces a consumer.
 | `working_decay_days` | `14` |
 | `fsrs_initial_stability` | `1.0` |
 | `fsrs_decay_threshold` | `0.3` |
-| `fsrs_stability_growth` | `1.5` |
 | `fsrs_max_stability` | `365.0` |
+| `fsrs_growth_factor` | `0.5` |
+| `fsrs_growth_exponent` | `0.5` |
+| `fsrs_spacing_cap` | `2.0` |
+| `fsrs_reinforcement_cooldown_days` | `1.0` |
 | `ingest_max_content_chars` | `100000` |
+
+Reinforcement is bounded and diminishing (#221):
+
+```text
+spacing = min(R^-0.2, fsrs_spacing_cap)
+S'      = min(S * (1 + fsrs_growth_factor * S^-fsrs_growth_exponent * spacing),
+              fsrs_max_stability)
+```
+
+`fsrs_spacing_cap` keeps a very old memory from reaching the ceiling in a single
+use, and `fsrs_growth_exponent` shrinks each step as stability rises — roughly 74
+eligible updates take a node from `1.0` to the default cap.
+`fsrs_reinforcement_cooldown_days` allows at most one numeric stability update per
+node per window; use still advances `last_accessed` on every event.
+
+Because of that, `last_review` can lag real use by a full cooldown window, and any
+job that treats it as a recency signal will read an actively used memory as stale.
+Decay and importance therefore anchor on `last_accessed`. If you add a consumer
+that anchors on `last_review` instead, keep
+`fsrs_reinforcement_cooldown_days < -ln(fsrs_decay_threshold) x stability`
+(about `1.2` days at the default threshold and an initial stability of `1.0`), or
+that consumer will treat the cooldown lag as decay.
+`fsrs_stability_growth` was removed in #221: it was a base multiplier, and the new
+`fsrs_growth_factor` is an additive term with different semantics.
+
+Downgrading to a build older than #221 after upgrading is **not supported**. The
+store records which lifecycle model wrote its `stability` values, and an older
+binary does not know that key: it keeps writing with the unbounded formula while
+leaving the version marker at the newer value, so a later upgrade trusts a marker
+that no longer describes the data. Roll the binary back only together with a
+backup taken before the upgrade.
 
 ## Agent-Backed Maintenance
 

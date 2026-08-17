@@ -124,7 +124,7 @@ It does not do embedding clustering or hierarchical clustering despite the name.
 ## Importance and Decay
 
 - `importance_scorer` computes a normalized multi-signal importance value
-- `decay_manager` uses FSRS-style retrievability alone to decide whether to demote working memories
+- `decay_manager` uses FSRS-style retrievability alone to decide whether to demote working memories, anchored on `last_accessed` (the last confirmed use) rather than on `last_review` (the last numeric stability update), which the reinforcement cooldown can leave a window behind
 
 Importance does not protect a node from decay. Cumulative signals such as access
 and edge counts could otherwise push a stale node permanently above any threshold.
@@ -154,7 +154,7 @@ Access and edge counts are log-normalized against reference values, then the wei
 
 The scorer runs every `120` minutes by default and only writes a new value when the change is meaningful.
 
-This score is not static. **Confirmed use** updates `access_count`, `last_accessed`, `last_review`, and `stability`, so a memory's importance changes over time as it is used, connected, or left untouched. Merely being surfaced does not: search results, UI search, whisper injection, and graph expansion write no lifecycle fields (issue #220). Confirmed use is a deliberate `recall_node`, or qualified positive feedback — `explicit`, `implicit`, or `auto_llm_judge`. Because `access_count` now counts confirmations rather than appearances, its values are far smaller than before, and `importance_access_reference` is calibrated against the old scale.
+This score is not static. **Confirmed use** updates `access_count` and `last_accessed` on every event, while `stability` and `last_review` move at most once per `fsrs_reinforcement_cooldown_days`, so a memory's importance changes over time as it is used, connected, or left untouched. Merely being surfaced does not: search results, UI search, whisper injection, and graph expansion write no lifecycle fields (issue #220). Confirmed use is a deliberate `recall_node`, or qualified positive feedback — `explicit`, `implicit`, or `auto_llm_judge`. Because `access_count` now counts confirmations rather than appearances, its values are far smaller than before, and `importance_access_reference` is calibrated against the old scale.
 
 ## Walkthrough Example
 
