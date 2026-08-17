@@ -1983,9 +1983,10 @@ class MemoryEngine:
         now = datetime.now(timezone.utc)
 
         # One numeric stability update per node per cooldown window (#221): the
-        # old formula let ten same-session touches compound to ~57x. The access
-        # anchor below still advances on every call, so decay never mistakes an
-        # actively used node for a stale one.
+        # old formula let ten same-session touches compound to ~57x. last_accessed
+        # below still advances on every call, and Task 4 repoints decay and
+        # importance at it, so a node in active use never reads as stale even
+        # though last_review now lags by up to one cooldown window.
         if lifecycle.reinforcement_due(
             node.last_review, now, self.settings.fsrs_reinforcement_cooldown_days
         ):
