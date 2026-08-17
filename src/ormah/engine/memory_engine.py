@@ -2034,6 +2034,15 @@ class MemoryEngine:
         serialized, so two concurrent recalls would both read a stale
         last_review and both bump stability. _memory_operation_lock is an
         RLock, so the call sites that already hold it re-enter safely.
+
+        Lock order: this decorator acquires the memory lock before the body
+        opens db.transaction(), i.e. memory-lock -> db-lock. The inverse order
+        (db-lock -> memory-lock, via file_store calls inside a transaction)
+        exists in _seed_stability_from_access_count, _migrate_identity_tiers,
+        and _ensure_self_node, but all three run only from startup() before the
+        server serves, so the two orders never interleave today. Invariant this
+        depends on: never call file_store inside db.transaction() outside
+        startup().
         """
         node = self.file_store.load(node_id)
         if node is None:
