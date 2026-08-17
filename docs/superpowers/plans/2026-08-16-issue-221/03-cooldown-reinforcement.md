@@ -12,6 +12,22 @@
 
 **Note on #220:** PR #234 renames this method to `_record_confirmed_use` and adds its own zero-stability guard. On rebase, keep the new name and this task's body — the guard now lives in `lifecycle.py`.
 
+**The cooldown is TOCTOU without the lock (council round 3, I1, Cursor).** `reinforcement_due`
+reads `last_review` off the in-memory node and the new `last_review` is written several statements
+later. The read and the write are not atomic, and the paths that reach `_touch_access` are **not
+serialized**: `recall_node` (`memory_engine.py:637`), `recall_search_structured` (`:679`) and
+`recall_search` (`:832`) carry no `@_serialized_memory_operation`, unlike `remember`/`update`. Two
+concurrent recalls on the FastAPI threadpool load the same node, both see `due=True`, and both
+write a bump — so **AC4 does not hold under concurrency**, and the sequential ten-touch test cannot
+see it. Sequential same-session compounding is genuinely fixed either way.
+
+The fix is Step 4's decorator, not a new mechanism: `_memory_operation_lock` is a
+`threading.RLock` (`memory_engine.py:93`), so it is **reentrant** — decorating `_touch_access`
+cannot deadlock at the call sites that already hold it. It also covers the Markdown write and the
+DB write as one unit, which a conditional `UPDATE … WHERE last_review < ?` would not: the file
+store is the source of truth here, and a DB-only guard would still let two processes write
+divergent Markdown.
+
 ---
 
 - [ ] **Step 1: Write the failing tests**
@@ -130,12 +146,65 @@ def test_reinforcement_survives_a_zero_stability_node(engine):
     engine._touch_access(node_id)
 
     assert _row(engine, node_id)["stability"] > 0.0
+
+
+def test_concurrent_touches_still_produce_one_stability_update(engine):
+    """AC4 under concurrency (council round 3, I1).
+
+    The sequential ten-touch test above cannot see this: it is the *interleaving*
+    that breaks the cooldown. Both threads read last_review before either writes
+    it, both conclude they are off cooldown, and both bump. The recall paths that
+    reach _touch_access carry no @_serialized_memory_operation, so this is the
+    real production shape, not a synthetic one.
+
+    Barrier, not a bare thread pair: without it the two threads can serialize by
+    luck and the test greens on the broken code. The barrier forces both past the
+    cooldown read before either proceeds.
+    """
+    import threading
+
+    node_id = _make_node(engine)
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 1.0, last_review = NULL WHERE id = ?", (node_id,)
+    )
+    engine.db.conn.commit()
+    node = engine.file_store.load(node_id)
+    node.stability = 1.0
+    node.last_review = None
+    engine.file_store.save(node)
+
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def _touch() -> None:
+        try:
+            barrier.wait(timeout=5)
+            engine._touch_access(node_id)
+        except BaseException as exc:  # noqa: BLE001 - surfaced via `errors` below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_touch) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"a touch thread raised: {errors}"
+    row = _row(engine, node_id)
+    # One bump from S=1.0, never two. The second bump would compound past this.
+    assert row["stability"] == pytest.approx(1.5)
+    assert row["access_count"] == 2, "both touches must still be counted"
 ```
+
+Add `import pytest` to the file's imports.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `./.venv/bin/python -m pytest tests/test_engine/test_reinforcement_cooldown.py -v`
-Expected: FAIL. `test_ten_touches_in_one_day_produce_one_stability_update` fails because every touch still updates stability; `test_a_thirty_day_old_node_is_bounded_to_double` reports ~`202.7` instead of `2.0`; `test_reinforcement_survives_a_zero_stability_node` raises `ZeroDivisionError`.
+Expected: FAIL. `test_ten_touches_in_one_day_produce_one_stability_update` fails because every touch still updates stability; `test_a_thirty_day_old_node_is_bounded_to_double` reports ~`202.7` instead of `2.0`; `test_reinforcement_survives_a_zero_stability_node` raises `ZeroDivisionError`; `test_concurrent_touches_still_produce_one_stability_update` reports a compounded stability instead of `1.5`.
+
+If the concurrency test happens to pass before Step 4, do not accept it — re-run it a few
+times. A lucky serialization greens it; the barrier makes that rare, not impossible.
 
 - [ ] **Step 3: Add the import**
 
@@ -150,8 +219,16 @@ from ormah import lifecycle
 Replace lines 1936-1960 entirely:
 
 ```python
+    @_serialized_memory_operation
     def _touch_access(self, node_id: str) -> None:
-        """Update access stats, and FSRS stability when it is off cooldown."""
+        """Update access stats, and FSRS stability when it is off cooldown.
+
+        Serialized because the cooldown is a check-then-write pair (#221,
+        council round 3): the recall paths that call this are not themselves
+        serialized, so two concurrent recalls would both read a stale
+        last_review and both bump stability. _memory_operation_lock is an
+        RLock, so the call sites that already hold it re-enter safely.
+        """
         node = self.file_store.load(node_id)
         if node is None:
             return
@@ -196,12 +273,24 @@ Replace lines 1936-1960 entirely:
             )
 ```
 
-Two deliberate changes beyond the formula swap: the `0.001` days floor is gone (the cooldown is what stops same-session compounding now), and `last_review` is written defensively as `None` when unset, because a node can now reach the write without ever being reinforced.
+Three deliberate changes beyond the formula swap: the `0.001` days floor is gone (the cooldown is
+what stops same-session compounding now), `last_review` is written defensively as `None` when
+unset (a node can now reach the write without ever being reinforced), and the method is
+**serialized** so the cooldown's check-then-write pair is atomic.
+
+`_serialized_memory_operation` is defined at `memory_engine.py:79` and already decorates
+`remember`/`update`; it is in scope at this indentation level, so no import is needed. Do not
+reach for a new lock — reusing this one is what makes the Markdown write and the DB write move
+as a unit.
 
 - [ ] **Step 5: Run the new tests**
 
 Run: `./.venv/bin/python -m pytest tests/test_engine/test_reinforcement_cooldown.py -v`
-Expected: 5 passed.
+Expected: 6 passed.
+
+Then confirm the decorator is what carries the concurrency test, rather than luck: remove it,
+re-run `test_concurrent_touches_still_produce_one_stability_update` five times, and see it go
+red. Put it back. A lock nobody watched fail is a lock nobody knows works.
 
 - [ ] **Step 6: Run the suites that already exercised this path**
 

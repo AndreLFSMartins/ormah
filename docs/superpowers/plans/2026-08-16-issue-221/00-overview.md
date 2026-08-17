@@ -37,6 +37,21 @@
   calls `_migrate_fsrs`, so a pre-FSRS backup restored onto a migrated install skips the seed.
   Pre-existing on `a28837b`, so it goes to its own issue: r-spade/ormah#236. What this branch owes: never claiming
   the C3 `last_review` guard covers restore in general. See Task 5.
+- **A verification step that contradicts its own task is the failure mode of this plan**
+  (council round 3: 4 of 5 findings were gates, not code). Three greps had to be rewritten because
+  they demanded a state the implementation forbids, or a zero count that would delete a test. When
+  you touch any task, re-read **its verification steps** — they are not reaudited automatically by
+  a fold, and they are what an implementer obeys when the prose and the gate disagree. If a gate
+  and a step conflict, the gate is wrong until proven otherwise: stop and report, never "fix" the
+  code to satisfy the gate.
+- **Downgrade below the new lifecycle model is UNSUPPORTED** (council round 3, C2; decision:
+  André, 2026-08-16). The dual `fsrs_migrated` + `lifecycle_model_version` write prevents a
+  *reseed* on rollback; it does not prevent an old binary from writing unbounded stability under a
+  version marker that says otherwise. Policy only — detecting an old-model write needs per-node
+  provenance and is explicitly out of scope. See Task 5.
+- **The reinforcement cooldown must be serialized** (council round 3, I1). The check-then-write
+  pair is TOCTOU, and the recall paths that reach `_touch_access` carry no
+  `@_serialized_memory_operation`. See Task 3.
 
 ## Setup (once, before Task 1)
 

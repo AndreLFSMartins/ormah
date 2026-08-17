@@ -1,4 +1,10 @@
-# Task 4: Decay and importance share one retrievability, anchored on use
+# Task 4: Decay uses the shared retrievability; importance gets the anchor flip only
+
+> **Title corrected in council round 3 (C1).** The old title — "decay and importance share one
+> retrievability" — described the *rejected* first draft. Importance keeps its own recency
+> formula; only the anchor moves. The Step 7 gate below was still written against the old title
+> and demanded a state that Step 5 forbids; that is fixed too. If you find yourself making
+> `importance_scorer` import `lifecycle` to satisfy a check, the check is wrong, not Step 5.
 
 **Files:**
 - Modify: `src/ormah/background/decay_manager.py:49-57`
@@ -121,6 +127,36 @@ def test_a_node_used_today_is_not_decayed_while_its_review_lags(engine):
     run_decay(engine)
 
     assert _get_tier(engine, node_id) == "working"
+
+
+def test_zero_stability_decays_on_the_configured_initial_stability(engine, monkeypatch):
+    """Decay must use the same zero fallback reinforcement uses (council round 3, I3).
+
+    Node.stability is Field(ge=0.0), so 0 is a real state. With the hardcoded 1.0
+    fallback a seven-day-old zero-stability node reads R = exp(-7/1) ~= 0.0009 and
+    is archived; with fsrs_initial_stability = 30 it reads exp(-7/30) ~= 0.79 and
+    must survive. The 0.3 decay threshold sits between the two, so this test can
+    only pass on the shared fallback.
+    """
+    monkeypatch.setattr(engine.settings, "fsrs_initial_stability", 30.0)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Zero stability, used a week ago",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Zero stability",
+    ))
+    now = datetime.now(timezone.utc)
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 0.0, last_accessed = ?, last_review = NULL WHERE id = ?",
+        ((now - timedelta(days=7)).isoformat(), node_id),
+    )
+    engine.db.conn.commit()
+    _make_decayable(engine, node_id)
+
+    run_decay(engine)
+
+    assert _get_tier(engine, node_id) == "working"
 ```
 
 Add `import pytest` to the file's imports if it is not already there.
@@ -182,6 +218,7 @@ Expected, and each one matters:
 | `test_decay_uses_the_shared_retrievability_implementation` | `AttributeError: module 'ormah.background.decay_manager' has no attribute 'lifecycle'` |
 | `test_a_node_used_today_is_not_decayed_while_its_review_lags` | `AssertionError: assert 'archival' == 'working'` — the node **is** demoted on the old anchor |
 | `test_recency_ignores_a_lagging_last_review` | importance `≈ 0.0` instead of `≈ 0.33` — on `a28837b` the old anchor reads 30 days at `S=1`, so `exp(-30)` underflows the recency term to nothing. After a rebase onto #222 the same test fails at `≈ 0.075` (30 days on the 14-day half-life). Red under both formulas, by design. |
+| `test_zero_stability_decays_on_the_configured_initial_stability` | `AssertionError: assert 'archival' == 'working'` — the hardcoded `1.0` fallback gives `R ≈ 0.0009`, under the `0.3` threshold, so the node is demoted |
 
 If the anchor test passes here, stop: the node was skipped by the importance gate and the test proves nothing. Confirm with `SELECT importance FROM nodes` that it really is `0.2`.
 
@@ -218,17 +255,34 @@ with:
             # Anchor on use, not on the numeric stability update: the per-day
             # reinforcement cooldown can leave last_review a full window behind
             # the last use, and an actively used node must not read as stale.
-            stability = row["stability"] if row["stability"] else 1.0
             anchor_str = row["last_accessed"] or row["last_review"]
             try:
                 anchor = datetime.fromisoformat(anchor_str)
             except (ValueError, TypeError):
                 continue
             days_since = (now - anchor).total_seconds() / 86400
-            retrievability = lifecycle.retrievability(days_since, stability)
+            # Pass the stored stability raw and let lifecycle own the zero case,
+            # with the SAME fallback reinforcement uses. Hardcoding 1.0 here
+            # while reinforcement falls back to fsrs_initial_stability is how
+            # the two paths silently disagree (council round 3, I3).
+            retrievability = lifecycle.retrievability(
+                days_since,
+                row["stability"],
+                fallback_stability=settings.fsrs_initial_stability,
+            )
 ```
 
-The `0.001` floor is dropped: `lifecycle.retrievability` already clamps negative ages to `0`.
+Two things go away here. The `0.001` floor is dropped: `lifecycle.retrievability` already clamps
+negative ages to `0`. And the `stability = row["stability"] if row["stability"] else 1.0`
+pre-coercion is dropped: it hardcoded a fallback that **differs from the one reinforcement uses**.
+
+**Why the hardcoded `1.0` was a real bug, not a style point (council round 3, I3, Codex).**
+`Node.stability` is `Field(ge=0.0)`, so `0` is a representable state this plan explicitly
+recognizes. Reinforcement falls back to `fsrs_initial_stability`; decay fell back to a literal
+`1.0`. With `fsrs_initial_stability = 30`, a seven-day-old zero-stability node should read
+`R ≈ 0.79` and survive, but decay computed `R ≈ 0.0009` and archived it. That defeats the shared
+semantics this whole task exists to establish. `settings` is already bound at
+`decay_manager.py:19` (`settings = engine.settings`), so nothing new needs threading through.
 
 - [ ] **Step 5: Flip the importance scorer's anchor — ONE line, nothing else**
 
@@ -273,15 +327,49 @@ node. Leave `import math` and the existing imports untouched.
 Run: `./.venv/bin/python -m pytest tests/test_background/test_decay_manager.py tests/test_background/test_importance_scorer.py -v`
 Expected: all pass, including the pre-existing `test_low_importance_stale_node_decayed`, `test_decay_is_idempotent`, and `test_decay_writes_audit_log`.
 
-- [ ] **Step 7: Confirm the duplicated formula is gone from both jobs**
+- [ ] **Step 7: Confirm the duplicated formula is gone from DECAY — and only decay**
 
-Run: `grep -n "math.exp" src/ormah/background/decay_manager.py src/ormah/background/importance_scorer.py`
-Expected: no output. Both jobs now go through `lifecycle.retrievability`.
+Two checks, deliberately asymmetric. Running one gate across both files is what made the
+previous draft self-contradictory (council round 3, C1, found independently by both peers).
+
+```bash
+# decay_manager: the inline curve must be gone.
+grep -n "math.exp" src/ormah/background/decay_manager.py
+```
+
+Expected: **no output**, and `import math` no longer needed in that file.
+
+```bash
+# importance_scorer: the anchor flipped, and NOTHING else moved.
+grep -n 'anchor_str = r\["last_accessed"\] or r\["last_review"\]' src/ormah/background/importance_scorer.py
+grep -n 'r\["stability"\]\|lifecycle\.' src/ormah/background/importance_scorer.py
+```
+
+Expected: **exactly one hit** on the first (the flipped anchor) and **no output** on the second.
+
+**`math.exp` MUST still be present in `importance_scorer.py` — that is the passing state, not a
+leftover.** On `a28837b` the scorer's recency is `math.exp(-days_ago / stability)` at
+`importance_scorer.py:84`, and after the required rebase onto #222 it is `_recency_signal`, which
+also uses `math.exp`. Step 5 forbids replacing either. A gate demanding zero `math.exp` across both
+files therefore stays red no matter how correctly Step 5 was implemented, and the only way to
+"fix" it is to route the scorer through `lifecycle.retrievability` and `r["stability"]` — which is
+exactly what council round 2 rejected. After the #222 rebase that column is not selected,
+`sqlite3.Row` raises `IndexError`, the surrounding `except (ValueError, TypeError)` does not catch
+it, and `run_importance_scoring` aborts for every node. The alternative outcome is the hunk
+surviving the rebase and undoing #222.
+
+Falsifier, if you want to see it: implement the anchor flip alone, run the *old* single grep across
+both files, apply the change it demands, rebase onto #222, and call `run_importance_scoring`.
 
 - [ ] **Step 8: Lint and commit**
 
 ```bash
 ./.venv/bin/python -m ruff check src/ormah/background/decay_manager.py src/ormah/background/importance_scorer.py tests/test_background/test_decay_manager.py tests/test_background/test_importance_scorer.py
 git add src/ormah/background/decay_manager.py src/ormah/background/importance_scorer.py tests/test_background/test_decay_manager.py tests/test_background/test_importance_scorer.py
-git commit -m "fix(lifecycle): decay and importance share one retrievability, anchored on use (#221)"
+git commit -m "fix(lifecycle): decay uses the shared retrievability; both jobs anchor on use (#221)"
 ```
+
+**Do not restore the old commit message** ("decay and importance share one retrievability"). It
+claims importance routes through `lifecycle`, which Step 5 forbids — the message was part of the
+same C1 contradiction as the old Step 7, and a future reader taking it at face value reintroduces
+the `IndexError`.

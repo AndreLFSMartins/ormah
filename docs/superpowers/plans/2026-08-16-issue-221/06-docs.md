@@ -54,6 +54,13 @@ eligible updates take a node from `1.0` to the default cap.
 node per window; use still advances `last_accessed` on every event.
 `fsrs_stability_growth` was removed in #221: it was a base multiplier, and the new
 `fsrs_growth_factor` is an additive term with different semantics.
+
+Downgrading to a build older than #221 after upgrading is **not supported**. The
+store records which lifecycle model wrote its `stability` values, and an older
+binary does not know that key: it keeps writing with the unbounded formula while
+leaving the version marker at the newer value, so a later upgrade trusts a marker
+that no longer describes the data. Roll the binary back only together with a
+backup taken before the upgrade.
 ```
 
 - [ ] **Step 2: Update the background-jobs doc**
@@ -101,7 +108,16 @@ last_review: datetime | None # Last numeric stability update; gated by the reinf
 - [ ] **Step 4: Verify the removed knob is gone from the docs**
 
 Run: `grep -rn "fsrs_stability_growth" docs/ src/ tests/`
-Expected: no output.
+
+Expected: **exactly one hit**, in `tests/test_config_fsrs.py` — the
+`test_the_removed_growth_knob_no_longer_exists` assertion from Task 2, which contains the string by
+construction and must survive. `docs/` and `src/` must be clean by now: the docs mention in Step 1
+is prose *about* the removal, not the identifier, and Task 3 removed the last live reader.
+
+**The old expectation here was "no output" (council round 3, I2).** An implementer chasing a clean
+grep deletes the only regression test that the base-multiplier knob is gone — the gate destroying
+the thing it exists to protect. If you want zero hits in `docs/` and `src/` alone, scope the grep:
+`grep -rn "fsrs_stability_growth" docs/ src/`.
 
 - [ ] **Step 5: Commit**
 

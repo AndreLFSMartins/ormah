@@ -215,7 +215,19 @@ Expected: 12 passed (the parametrized test expands to 4).
 - [ ] **Step 6: Confirm nothing else read the removed knob**
 
 Run: `grep -rn "fsrs_stability_growth" src/ tests/ eval/`
-Expected: exactly one hit — `src/ormah/engine/memory_engine.py:1947`, which Task 3 rewrites. Any other hit is a missed call site: fix it before committing.
+
+Expected: exactly **two** hits, and both must stay:
+
+| Hit | Why it stays |
+|---|---|
+| `src/ormah/engine/memory_engine.py:1947` | the last live reader; Task 3 rewrites it |
+| `tests/test_config_fsrs.py` | `test_the_removed_growth_knob_no_longer_exists`, whose whole job is asserting `not hasattr(settings, "fsrs_stability_growth")` — the string is there *by construction* |
+
+Any **third** hit is a missed call site: fix it before committing.
+
+**Do not chase this grep to zero** (council round 3, I2). The count was written as "exactly one"
+before the regression test existed in the same task; an implementer clearing the second hit deletes
+the only test that proves the old multiplier knob is gone.
 
 - [ ] **Step 7: Lint and commit**
 

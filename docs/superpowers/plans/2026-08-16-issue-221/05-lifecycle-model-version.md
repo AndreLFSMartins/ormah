@@ -43,7 +43,33 @@ hence `last_review` is set; and with `access_count = 0` the seed returns `1.0` a
 
 *I1 (medium, Cursor).* A store created under #221 would carry only `lifecycle_model_version`. A
 binary from before `a28837b` does not know that key, sees `fsrs_migrated` absent, and reseeds. Both
-keys are therefore written together, so rolling back stays safe.
+keys are therefore written together, so rolling back does not **reseed**.
+
+**Downgrade is not supported, and the dual key does not make it safe (council round 3, C2, Codex;
+decision: André, 2026-08-16).** The paragraph above used to end "so rolling back stays safe". That
+claim was too broad, and the gap it hid is real: `fsrs_migrated` stops the old binary from
+*reseeding*, but nothing stops it from *writing*. Rolled back, the old binary keeps applying its
+unbounded reinforcement formula to `stability` while `lifecycle_model_version = '2'` sits
+untouched — it has never heard of that key. On the next upgrade, `_migrate_fsrs` reads `2`, takes
+the early return, and treats old-model values as bounded-model values. A node reinforced at `S=1`
+over 30 days under the old binary reaches the old `365` ceiling instead of `2.0`, and the version
+number — whose entire purpose is to record *which model produced the stored stability* — now
+certifies the wrong answer. Decay runs on those values for months, silently.
+
+What this issue owes is the **policy, stated where someone can act on it**, not a mechanism:
+
+- Downgrading below `LIFECYCLE_MODEL_VERSION` after an upgrade is **unsupported**. Roll back the
+  binary only together with a backup taken before the upgrade.
+- The version marks *which model wrote the stability*, and it can only do that for as long as
+  every writer respects it. A binary that predates the key is not such a writer.
+- Do not describe the dual-key write as making rollback safe — in the PR body, the docs, or a
+  commit message. It prevents a reseed. That is all it does.
+
+**Detecting an old-model write is deliberately out of scope**, exactly like the same-device
+restore above. It needs durable per-node provenance, a `v2 → old binary → v2` integration test,
+and a recovery policy for contaminated values — a mechanism substantially larger than the version
+key itself, inside an issue that already waits on two open PRs. If the policy is later judged
+insufficient, that is its own issue, not a widening of this one.
 
 **What the C3 guard does NOT cover — scope boundary, council round 2 (both peers, `high`).**
 
@@ -205,7 +231,14 @@ def test_a_rebuilt_index_does_not_reseed_earned_stability(engine):
 
 
 def test_the_legacy_flag_is_written_alongside_the_version(engine):
-    """I1: a rollback to a binary that only knows fsrs_migrated must not reseed."""
+    """I1: a rollback to a binary that only knows fsrs_migrated must not reseed.
+
+    SCOPE, stated so a green is not over-read (council round 3, C2): this proves
+    the old binary will not RESEED. It does not prove rollback is safe. The old
+    binary still writes stability with the unbounded formula while leaving
+    lifecycle_model_version at '2', and on the next upgrade the early return
+    trusts that stale marker. Downgrade is unsupported; see the scope note above.
+    """
     row = engine.db.conn.execute(
         "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
     ).fetchone()

@@ -89,6 +89,16 @@ The inline math goes away. The function becomes:
    `stability = lifecycle.reinforced_stability(...)` and `last_review = now`.
 3. Write both disk and DB, as today.
 
+The method also becomes `@_serialized_memory_operation` (council round 3). Step 2 is a
+check-then-write pair on `last_review`, and the paths that reach it — `recall_node`,
+`recall_search_structured`, `recall_search` — carry no such decorator, unlike `remember`/`update`.
+Two concurrent recalls on the FastAPI threadpool would both read a stale `last_review`, both
+conclude they are off cooldown, and both bump: the cooldown would hold per session and fail under
+concurrency. `_memory_operation_lock` is an `RLock`, so the call sites already holding it re-enter
+safely, and taking it here covers the Markdown write and the DB write as one unit — which a
+conditional `UPDATE … WHERE last_review < ?` would not, since the file store is the source of
+truth.
+
 `access_count` keeps incrementing on every call — the cooldown governs the *numeric stability
 update*, which is what the issue bounds. Splitting surfacing from confirmed use is #220's job,
 not this one.
@@ -99,6 +109,15 @@ The five call sites (`memory_engine.py:646, 775, 811, 892, 938`) are untouched.
 
 `math.exp(-days_since / stability)` is replaced by `lifecycle.retrievability(...)`, and the
 anchor is **inverted** from `last_review or last_accessed` to `last_accessed or last_review`.
+
+The stored `stability` is passed **raw**, with
+`fallback_stability=settings.fsrs_initial_stability` — the same fallback reinforcement uses. The
+current code pre-coerces `stability` to a literal `1.0` when falsy; keeping that while
+reinforcement falls back to the configured value is how two paths that claim to share one
+implementation silently disagree (council round 3). `Node.stability` is `Field(ge=0.0)`, so `0` is
+a representable state: with `fsrs_initial_stability = 30`, a seven-day-old zero-stability node
+reads `R ≈ 0.79` under the shared fallback and `R ≈ 0.0009` under the hardcoded one — the
+difference between surviving and being archived.
 
 Rationale: with the cooldown, `last_review` can lag the last use by up to one cooldown period.
 Anchoring decay on it would let an actively used node look stale — the AC "every confirmed use
@@ -148,6 +167,18 @@ stored store-wide in the existing `meta` table (`src/ormah/index/schema.sql:67`)
 
 Both keys are written together, so a rollback to a binary that only knows `fsrs_migrated` does
 not reseed a store built under #221.
+
+**Downgrade is not supported** (council round 3; decision: André, 2026-08-16). The dual write
+stops a *reseed*; it does not stop the old binary from *writing*. Rolled back, that binary keeps
+applying the unbounded formula to `stability` while `lifecycle_model_version = '2'` stays
+untouched — it has never heard of the key. The next upgrade reads `2`, returns early, and
+certifies old-model values as bounded-model values: `S=1` reinforced over 30 days lands near the
+old `365` ceiling instead of `2.0`, and decay runs on that for months. The version can only
+record which model wrote a value for as long as every writer respects it, and a pre-#221 binary
+is not such a writer. Detecting an old-model write needs durable per-node provenance, a
+`v2 → old binary → v2` integration test and a recovery policy for contaminated values — out of
+scope here, its own issue if the policy proves insufficient. Nothing in this issue, its PR body
+or its docs may describe the dual-key write as making rollback safe.
 
 The `last_review` condition comes from council finding C3: `backup.py:331-334` excludes
 `index.db` from every backup, so a fresh-device restore or a deleted index arrives with an
@@ -234,6 +265,11 @@ edits to the existing decay and engine suites.
 - Ten `_touch_access` calls inside one day → `stability` and `last_review` change exactly once;
   `last_accessed` advances on all ten and `access_count` reaches ten (AC4).
 - A call after the cooldown elapses → `stability` moves again.
+- **Two `_touch_access` calls on one node from two threads, released by a `threading.Barrier`, →
+  one stability bump, both accesses counted (AC4 under concurrency).** The sequential test above
+  cannot see this: it is the interleaving that breaks the cooldown, and the recall paths that
+  reach `_touch_access` are not serialized, so the interleaving is the production shape. The
+  barrier is load-bearing — a bare thread pair can serialize by luck and green on broken code.
 - `tests/test_engine/test_mutation_stamping.py:95` (`test_touch_access_does_not_advance_updated`)
   must still pass unchanged.
 
@@ -247,6 +283,11 @@ before the flip, or it proves nothing.
   through `lifecycle.retrievability` — one implementation, asserted numerically (AC5).
 - A node whose `last_accessed` is fresh but whose `last_review` is one cooldown old is **not**
   demoted (the inverted anchor).
+- **A `stability = 0` node last used seven days ago, with `fsrs_initial_stability = 30`, is not
+  demoted.** This is the only test that distinguishes the shared fallback from a hardcoded `1.0`:
+  the two give `R ≈ 0.79` and `R ≈ 0.0009`, and the `0.3` decay threshold sits between them. At the
+  default `fsrs_initial_stability = 1.0` the two are indistinguishable, so the non-default value is
+  load-bearing, not decoration.
 - Existing `test_decay_manager.py` cases must stay green.
 
 **Importance-anchor test — the lag must be ≥ 7 days, and 30 is the value to use.** Council round 2
@@ -266,7 +307,8 @@ branch is written against `a28837b` and rebased onto #222.
   stability untouched, version ends at `2`. Removing the guard must make this test report the
   seeded value instead.
 - Unreadable version → treated as migrated, seed does not run.
-- `fsrs_migrated` is present after any migration path (rollback safety).
+- `fsrs_migrated` is present after any migration path — this proves an older binary will not
+  **reseed**, and nothing more. It is not a rollback-safety test; downgrade is unsupported.
 
 **Config tests**
 
