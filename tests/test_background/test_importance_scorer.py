@@ -466,3 +466,46 @@ def test_importance_recency_is_independent_of_stability(engine):
     assert low_imp == pytest.approx(high_imp), (
         f"stability must not affect importance recency: {low_imp} vs {high_imp}"
     )
+
+
+def test_recency_anchors_on_use_not_on_the_numeric_update(engine):
+    """#221: the cooldown can leave last_review a window behind real use.
+
+    A node used today whose last_review is 30 days old must score as recent.
+    Anchoring on last_review would read it as stale.
+    """
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Gamma node about zebras and telescopes",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Lagging last_review",
+    ))
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=30)).isoformat()
+
+    # Used today, last reinforced 30 days ago — the shape the cooldown creates.
+    engine.db.conn.execute(
+        "UPDATE nodes SET last_accessed = ?, last_review = ?, access_count = 3 "
+        "WHERE id = ?",
+        (now.isoformat(), old, node_id),
+    )
+    engine.db.conn.commit()
+    run_importance_scoring(engine)
+    fresh = engine.db.conn.execute(
+        "SELECT importance FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()["importance"]
+
+    # Same node, same last_review, but the use is now old too.
+    engine.db.conn.execute(
+        "UPDATE nodes SET last_accessed = ? WHERE id = ?", (old, node_id)
+    )
+    engine.db.conn.commit()
+    run_importance_scoring(engine)
+    stale = engine.db.conn.execute(
+        "SELECT importance FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()["importance"]
+
+    assert fresh > stale, (
+        "recency followed last_review, not last_accessed: "
+        f"fresh={fresh} stale={stale}"
+    )

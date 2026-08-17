@@ -239,9 +239,61 @@ effect in this version; bounded forgetting reintroduces a consumer.
 | `working_decay_days` | `14` |
 | `fsrs_initial_stability` | `1.0` |
 | `fsrs_decay_threshold` | `0.3` |
-| `fsrs_stability_growth` | `1.5` |
 | `fsrs_max_stability` | `365.0` |
+| `fsrs_growth_factor` | `0.5` |
+| `fsrs_growth_exponent` | `0.5` |
+| `fsrs_spacing_cap` | `2.0` |
+| `fsrs_reinforcement_cooldown_days` | `1.0` |
 | `ingest_max_content_chars` | `100000` |
+
+Reinforcement is bounded and diminishing (#221):
+
+```text
+spacing = min(R^-0.2, fsrs_spacing_cap)
+S'      = min(S * (1 + fsrs_growth_factor * S^-fsrs_growth_exponent * spacing),
+              fsrs_max_stability)
+```
+
+`fsrs_spacing_cap` keeps a very old memory from reaching the ceiling in a single
+use, and `fsrs_growth_exponent` shrinks each step as stability rises — roughly 74
+eligible updates take a node from `1.0` to `fsrs_max_stability`.
+`fsrs_reinforcement_cooldown_days` allows at most one numeric stability update per
+node per window; use still advances `last_accessed` on every event.
+`fsrs_reinforcement_cooldown_days = 0` is a legal value that disables the cooldown
+entirely, which allows unbounded-feeling growth within a single session — 74
+recalls in one sitting reach `fsrs_max_stability`. This reproduces #221's
+user-visible symptom and is currently legal and undocumented outside this note.
+
+Reinforcement fires only on *confirmed use* (#220) — an explicit recall or a
+submitted positive signal, each taken at most once per whisper event. The
+per-day cooldown applies on top of that latch, so the 74 updates above are 74
+separate days on which a memory was deliberately used, not 74 recalls.
+Surfacing a memory in a whisper or a search result does not reinforce it and
+never did after #220.
+
+Because of that, `last_review` can lag real use by a full cooldown window, and any
+job that treats it as a recency signal will read an actively used memory as stale.
+Decay and importance therefore anchor on `last_accessed`. If you add a consumer
+that anchors on `last_review` instead, keep
+`fsrs_reinforcement_cooldown_days < -ln(fsrs_decay_threshold) x stability`
+(about `1.2` days at the default threshold and an initial stability of `1.0`), or
+that consumer will treat the cooldown lag as decay.
+`fsrs_stability_growth` was removed in #221: it was a base multiplier, and the new
+`fsrs_growth_factor` is an additive term with different semantics.
+
+Upgrading does not rescale `stability` values written by the old unbounded
+formula. Only future growth is bounded; a memory the old formula pushed to
+`fsrs_max_stability` stays there and will not decay for roughly
+`-ln(fsrs_decay_threshold) x fsrs_max_stability` days of disuse (about 440 at
+the defaults). Correcting existing values would require a rescaling migration,
+deliberately not done here.
+
+Downgrading to a build older than #221 after upgrading is **not supported**. The
+store records which lifecycle model wrote its `stability` values, and an older
+binary does not know that key: it keeps writing with the unbounded formula while
+leaving the version marker at the newer value, so a later upgrade trusts a marker
+that no longer describes the data. Roll the binary back only together with a
+backup taken before the upgrade.
 
 ## Agent-Backed Maintenance
 

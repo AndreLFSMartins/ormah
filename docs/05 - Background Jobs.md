@@ -124,7 +124,7 @@ It does not do embedding clustering or hierarchical clustering despite the name.
 ## Importance and Decay
 
 - `importance_scorer` computes a normalized multi-signal importance value
-- `decay_manager` uses FSRS-style retrievability alone to decide whether to demote working memories
+- `decay_manager` uses FSRS-style retrievability alone to decide whether to demote working memories, anchored on `last_accessed` (the last use) rather than `last_review` (the last numeric stability update, which the reinforcement cooldown can leave a window behind)
 
 Importance does not protect a node from decay. Cumulative signals such as access
 and edge counts could otherwise push a stale node permanently above any threshold.
@@ -137,9 +137,9 @@ still decides which nodes survive when `core` is over its cap — see
 
 `importance_scorer` recomputes node importance from three dynamic signals:
 
-1. **Access signal**: how often the node has been recalled, based on `access_count`
+1. **Access signal**: how often the node has been used, based on `access_count`
 2. **Edge signal**: how connected the node is in the graph, based on total edge count
-3. **Recency signal**: how recently the node was touched, using half-life decay `exp(-ln(2) * days_ago / importance_recency_half_life_days)` — independent of FSRS stability
+3. **Recency signal**: how recently the node was touched, using half-life decay `exp(-ln(2) * days_ago / importance_recency_half_life_days)` — independent of FSRS stability, anchored on `last_accessed` (falling back to `last_review`)
 
 With the default configuration, those signals are weighted almost evenly:
 
@@ -154,7 +154,7 @@ Access and edge counts are log-normalized against reference values, then the wei
 
 The scorer runs every `120` minutes by default and only writes a new value when the change is meaningful.
 
-This score is not static. Recall and search hits update `access_count`, `last_accessed`, `last_review`, and `stability`, so a memory's importance changes over time as it is used, connected, or left untouched.
+This score is not static. Confirmed use — an explicit recall or a submitted positive signal (#220) — updates `access_count` and `last_accessed` on every event; `stability` and `last_review` move at most once per `fsrs_reinforcement_cooldown_days` (#221). So a memory's importance changes over time as it is used, connected, or left untouched.
 
 ## Walkthrough Example
 

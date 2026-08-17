@@ -169,8 +169,13 @@ class Settings(BaseSettings):
     # FSRS spaced repetition decay
     fsrs_initial_stability: float = 1.0    # days; starting stability for new nodes
     fsrs_decay_threshold: float = 0.3      # R below this = decay candidate
-    fsrs_stability_growth: float = 1.5     # base multiplier on access
     fsrs_max_stability: float = 365.0      # cap at 1 year
+
+    # Bounded reinforcement (#221). See docs/12 for the curve.
+    fsrs_growth_factor: float = 0.5        # g; size of one reinforcement step
+    fsrs_growth_exponent: float = 0.5      # w; damps the step as stability rises
+    fsrs_spacing_cap: float = 2.0          # ceiling on the R^-0.2 spacing factor
+    fsrs_reinforcement_cooldown_days: float = 1.0  # min days between numeric updates
 
     # Search
     fts_weight: float = 0.4
@@ -1004,11 +1009,50 @@ class Settings(BaseSettings):
             raise ValueError(f"threshold must be 0–1, got {v}")
         return v
 
-    @field_validator("fsrs_initial_stability", "fsrs_stability_growth")
+    @field_validator(
+        "fsrs_initial_stability",
+        "fsrs_max_stability",
+        "fsrs_growth_factor",
+        "fsrs_growth_exponent",
+        "fsrs_spacing_cap",
+        "fsrs_reinforcement_cooldown_days",
+    )
+    @classmethod
+    def _fsrs_finite(cls, v: float) -> float:
+        # The bounds checks below cannot do this: every `v <= 0` / `v < 1` /
+        # `v < 0` comparison is False for NaN, so NaN passes all of them, and
+        # infinity satisfies them outright. A NaN growth factor propagates NaN
+        # into stability, which is then serialized into the Markdown frontmatter;
+        # a NaN cooldown raises inside timedelta.
+        if not math.isfinite(v):
+            raise ValueError(f"FSRS parameter must be finite, got {v}")
+        return v
+
+    @field_validator(
+        "fsrs_initial_stability",
+        "fsrs_growth_factor",
+        "fsrs_growth_exponent",
+    )
     @classmethod
     def _fsrs_positive(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"FSRS parameter must be > 0, got {v}")
+        return v
+
+    @field_validator("fsrs_spacing_cap")
+    @classmethod
+    def _fsrs_spacing_cap_min(cls, v: float) -> float:
+        # Below 1 the spacing factor would shrink stability on use.
+        if v < 1:
+            raise ValueError(f"fsrs_spacing_cap must be >= 1, got {v}")
+        return v
+
+    @field_validator("fsrs_reinforcement_cooldown_days")
+    @classmethod
+    def _fsrs_cooldown_non_negative(cls, v: float) -> float:
+        # 0 is valid: it disables the cooldown.
+        if v < 0:
+            raise ValueError(f"fsrs_reinforcement_cooldown_days must be >= 0, got {v}")
         return v
 
     @field_validator("importance_recency_half_life_days")

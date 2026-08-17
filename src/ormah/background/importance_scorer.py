@@ -96,7 +96,9 @@ def run_importance_scoring(engine) -> None:
 
         # Recency signal: importance's own half-life, not FSRS stability (#222)
         try:
-            anchor_str = r["last_review"] or r["last_accessed"]
+            # Anchor on use, not on the numeric stability update (#221): the
+            # reinforcement cooldown can leave last_review a full window behind.
+            anchor_str = r["last_accessed"] or r["last_review"]
             anchor = datetime.fromisoformat(anchor_str)
             days_ago = max((now - anchor).total_seconds() / 86400, 0)
             recency_signal = _recency_signal(days_ago, half_life)
