@@ -9,14 +9,13 @@ open upstream at the time of writing.
 
 ## Problem
 
-Archival is one-way. `TierManager.promote()` exists (`src/ormah/engine/tier_manager.py:18`) but
-has no production caller — `enforce_core_cap` is the only `TierManager` method the engine uses
-(`memory_engine.py:730`). A node deliberately recalled from archival cannot return to the
-whisper-eligible working tier.
+Archival is one-way. `TierManager.promote()` exists in `src/ormah/engine/tier_manager.py` but has
+no production caller — `enforce_core_cap` is the engine's only `TierManager` call site. A node
+deliberately recalled from archival cannot return to the whisper-eligible working tier.
 
-New nodes also ignore the configured initial stability. `fsrs_initial_stability` is validated
-(`config.py:1013-1041`) but `remember()` never passes it, so `MemoryNode.stability` falls back
-to the model default `1.0` (`models/node.py:74`). At the default `fsrs_decay_threshold = 0.3`,
+New nodes also ignore the configured initial stability. `fsrs_initial_stability` is validated by
+`_fsrs_finite` and `_fsrs_positive`, but `remember()` never passes it, so the node takes
+`MemoryNode.stability`'s `Field(default=1.0)`. At the default `fsrs_decay_threshold = 0.3`,
 `S = 1` reaches `R < 0.3` after `1.2039728` days ≈ **28.9 hours** — a new memory becomes a decay
 candidate on its second day.
 
@@ -64,6 +63,37 @@ every commit on them is authored by `andrema2`, and neither carries `docs/lifecy
 The hook will not stop that directory from shipping. Do not edit the dossier inside the #223
 worktree.
 
+### What the dependency merge required
+
+`fix/220-confirmed-use` merged clean. `fix/221-bounded-reinforcement` conflicted in
+`memory_engine.py`, semantically rather than textually: #220 renamed `_touch_access` to
+`_record_confirmed_use` and put it behind the at-most-once claim, while #221 was cut from
+`upstream/main`, where the method still carries the old name, and replaced the unbounded formula
+with the bounded one. Three hunks, resolved as follows.
+
+- Two module constants, `_CONFIRMED_USE_SOURCES` (#220) and `LIFECYCLE_MODEL_VERSION` (#221) —
+  independent, both kept.
+- The definition takes #220's name with a docstring covering both concerns. The callers are cited
+  **by name**, not by line, and #221's lock-order list was corrected: it named
+  `_ensure_self_node`, which calls `file_store.save` *before and outside* its `db.transaction()`,
+  so it does not belong. Verified on the island that only `_seed_stability_from_access_count` and
+  `_migrate_identity_tiers` call `file_store` inside a transaction.
+- The body takes #221's bounded update, with the zero-stability rationale folded into its comment
+  because `lifecycle.reinforced_stability` now owns that case.
+
+Two follow-on fixes the conflict did not surface: `tests/test_engine/test_reinforcement_cooldown.py`
+called `engine._touch_access` in ten places, and its concurrency-test docstring asserted a fact
+about the callers. Verified before rewriting it that none of `recall_node`, `submit_feedback`, or
+the session watcher's `_record_whisper_usage_signals` carries
+`@_serialized_memory_operation` — so the claim still holds, and the added clause is that #220's
+latch is per whisper event, not per node, which is why two events for one node still race.
+
+### Reference style
+
+Code references in this document name **symbols**, not line numbers. `local-main` and the island
+diverge by hundreds of commits, so a line number read off one is wrong in the other — and edits
+made while implementing invalidate them again. Symbol names survive both.
+
 ## Changes
 
 ### 1. `src/ormah/config.py`
@@ -99,21 +129,20 @@ Serialize only when not `None`, following the existing optional-field pattern; p
 
 ### 5. `src/ormah/index/schema.sql` and `src/ormah/index/db.py`
 
-`superseded_by TEXT` on `nodes`, plus one entry in the `_migrate()` pair list
-(`db.py:143-152`) — `PRAGMA table_info`-guarded, so it is idempotent and existing rows stay
-`NULL`.
+`superseded_by TEXT` on `nodes`, plus one entry in the `_migrate` pair list in `db.py` —
+`PRAGMA table_info`-guarded, so it is idempotent and existing rows stay `NULL`.
 
 ### 6. `src/ormah/engine/memory_engine.py`
 
-The promotion lives inside `_record_confirmed_use` (`:2504`), after the #221 cooldown block:
+The promotion lives inside `_record_confirmed_use`, after the #221 cooldown block and before the
+`# Standard access tracking` lines:
 
 ```python
 if node.tier is Tier.archival and node.superseded_by is None:
     node.stability = lifecycle.promotion_floor(
         node.stability, self.settings.fsrs_initial_stability
     )
-    if self.tier_manager.promote(node, Tier.working):
-        _apply_archival_clock(node, Tier.archival)
+    self.tier_manager.promote(node, Tier.working)
 ```
 
 Three sub-decisions:
@@ -126,20 +155,23 @@ it on every promotion cannot push stability past one initial lease.
 **The tier flip goes through `TierManager.promote()`** rather than assigning `node.tier`. This
 gives #223's root cause its first production caller and brings the tier-ordering guard along.
 Visible, deliberate consequence: `promote()` calls `touch_updated()`, so `updated` advances. That
-is correct — the tier genuinely changed, and `updated` feeds LWW sync (`memory_engine.py:1233`);
+is correct — the tier genuinely changed, and `updated` feeds LWW sync (see the no-op guard comment in `update_node`);
 not advancing it would let a stale remote copy win and silently re-archive the node. `updated`
 therefore joins the UPDATE.
 
-**The `archived_at` rule moves out of `update_node` into a module helper**
-(`_apply_archival_clock`), called by both paths. #223 is the second writer of that rule, and
-duplicating it is how the two copies diverge later.
+**No `archived_at` handling — the field does not exist upstream.** Verified on the island:
+`archived_at` appears nowhere in `src/` or `tests/`, is absent from `schema.sql` and from the
+`_migrate` pair list, `update_node`'s tier block is a bare `node.tier = req.tier`, and
+`background/forgetting_manager.py` does not exist. All of that is #28, which is local-only work on
+`local-main` and not in `upstream/main`. There is therefore nothing to extract into a shared
+helper, no column to write, and no purge queue for a promoted node to leave.
 
-The existing targeted UPDATE gains three columns, with no branching — on the non-promoting path
-the three values are the ones already on disk:
+The existing targeted UPDATE gains two columns, with no branching — on the non-promoting path
+both values are the ones already on disk:
 
 ```sql
 UPDATE nodes SET access_count=?, last_accessed=?, stability=?, last_review=?,
-                 tier=?, archived_at=?, updated=? WHERE id=?
+                 tier=?, updated=? WHERE id=?
 ```
 
 No `builder.index_single`, no `_index_embedding`: content did not change and the UPDATE already
@@ -151,11 +183,11 @@ sit inside).
 Also here: `_mark_superseded(source_id, consolidation_id)`, a serialized operation that sets the
 field on the loaded node, saves the markdown, and writes the `superseded_by` column in one
 transaction — needed because the field deliberately does not travel through `update_node`. And a
-comment in `_lifecycle_model_version` (`:291`) recording why #223 does not bump the version.
+comment in `_lifecycle_model_version` recording why #223 does not bump the version.
 
 ### 7. `src/ormah/background/consolidator.py`
 
-Mark `superseded_by` **before** demoting (`consolidator.py:191-203`). The order is the fail-safe:
+Mark `superseded_by` **before** demoting, in the `derived_from` + demote loop that closes `_apply_consolidation`. The order is the fail-safe:
 crashing between the two leaves the node `working` + marked, which is harmless because the marker
 only blocks *automatic* promotion. The reverse order would leave it `archival` + unmarked —
 exactly the promotable node we do not want. `derived_from` is untouched, which is what gives
@@ -163,12 +195,12 @@ exactly the promotable node we do not want. `derived_from` is untouched, which i
 
 ## What deliberately does not change
 
-Three independent `1.0` defaults stay: the model default (`models/node.py:74`), the `parse_node`
-fallback (`markdown.py:52`), and `stability REAL DEFAULT 1.0` (`schema.sql:19`). Changing any of
+Three independent `1.0` defaults stay: `MemoryNode.stability`'s `Field(default=1.0)`, `parse_node`'s
+`meta.get("stability", 1.0)` fallback, and `stability REAL DEFAULT 1.0` in `schema.sql`. Changing any of
 them would retroactively rescale nodes that never carried the field, which #191 forbids. Only
 `remember()` gains `stability=self.settings.fsrs_initial_stability`.
 
-The `Self` node (`memory_engine.py:400`) keeps `1.0` and is unaffected: it is `core`, and
+The `Self` node built by `_ensure_self_node` keeps `1.0` and is unaffected: it is `core`, and
 `run_decay` queries `tier = 'working'` and additionally skips `user_node_id`.
 
 `lifecycle_model_version` stays at `2`. Nothing reads it on the promotion path and no existing
@@ -182,7 +214,7 @@ an omission, with a test pinning the value.
 
 `run_decay` holds `_memory_operation_lock` for its whole run (`serialized_memory_job` →
 `engine.memory_operation()`), and `_record_confirmed_use` takes the same `RLock`
-(`memory_engine.py:203`). **Verified:** decay and promotion cannot interleave in-process, in
+(`_memory_operation_lock`, created in `MemoryEngine.__init__`). **Verified:** decay and promotion cannot interleave in-process, in
 either direction — decay takes its `tier='working'` snapshot under the lock, so it cannot see a
 node promoted after it; and a node promoted before the snapshot appears in it with
 `last_accessed = now`, so `R ≈ 1` and decay skips it.
@@ -196,8 +228,8 @@ thread).
 
 **A window between file and index.** If `file_store.save` succeeds and the UPDATE fails, markdown
 says `working` while the index says `archival`. Markdown is the source of truth and the
-`index_updater` job reconciles by `file_hash` every **1 minute** (`scheduler.py:156-162`,
-`builder.py:116`); in that window the node is merely not whisper-eligible. This is the existing
+`index_updater` job reconciles by `file_hash` every **1 minute** (the `index_updater` job in
+`scheduler.py`, running `builder.incremental_update`); in that window the node is merely not whisper-eligible. This is the existing
 behaviour of every field the method already writes.
 
 All three callers already wrap `_record_confirmed_use` in `try/except` and never propagate
@@ -206,8 +238,8 @@ will not retry. Same contract #220 established; no new failure mode.
 
 ## Acceptance criteria → tests
 
-Qualification needs no new logic. `_claim_confirmed_use` (`memory_engine.py:3295`) already
-fail-closes on `signal == 1`, `source ∈ {explicit, implicit, auto_llm_judge}` (`:75`),
+Qualification needs no new logic. `_claim_confirmed_use` already
+fail-closes on `signal == 1`, `source ∈ _CONFIRMED_USE_SOURCES` = `{explicit, implicit, auto_llm_judge}`,
 `was_injected == 1`, and at-most-once — and all three callers pass through it. Promotion placed
 inside `_record_confirmed_use` inherits "unqualified sources do not promote" for free. The tests
 below exist to stop a future fourth caller from reopening the hole.
@@ -227,7 +259,7 @@ Everything else extends the file that already owns the concern.
 | Bounded update precedes the floor | `tests/test_engine/test_reinforcement_cooldown.py` | Archival, `S = 1`, `last_review = now − 30d` → `stability == 5.814`. The bounded update gives `1 → 2.0` (spacing saturates at cap `2.0`); the floor lifts `2 → 5.814`. Inverted order would instead give ≈ **8.23** (`5.814 × (1 + 0.5 × 5.814**-0.5 × 2)`), so equality at `5.814` catches the inversion. |
 | Floor applies under cooldown | `tests/test_engine/test_reinforcement_cooldown.py` | Archival, `S = 1`, `last_review = now` → `tier == working` **and** `stability == 5.814`. ⚠️ Asserting only `tier == working` passes with the bug, and the node would re-archive in ~29 h. |
 | Floor does not stack | `tests/test_engine/test_reinforcement_cooldown.py` | Two confirmed uses in one day on an archival `S = 1` node → `5.814`, not `11.628` and not `6.814`. |
-| `recall_node` promotes exactly the requested node | `tests/test_engine/test_reversible_promotion.py` | Archival A with archival neighbour B. `recall_node(A)` → A becomes `working`, **B stays `archival`**. ⚠️ Without the neighbour, an implementation promoting every id in `whisper_log_ids` passes — and `recall_node` does create `whisper_log` rows for neighbours (`memory_engine.py:806`). |
+| `recall_node` promotes exactly the requested node | `tests/test_engine/test_reversible_promotion.py` | Archival A with archival neighbour B. `recall_node(A)` → A becomes `working`, **B stays `archival`**. ⚠️ Without the neighbour, an implementation promoting every id in `whisper_log_ids` passes — and `recall_node` does create `whisper_log` rows for neighbours, in `_log_feedback_candidates`. |
 | Qualified positives only | `tests/test_engine/test_confirmed_use_contract.py` (where #220's matrix lives) | Parametrised: `(1,"explicit",injected=1)` promotes · `(1,"auto_heuristic",1)` does not · `(-1,"explicit",1)` does not · `(1,"explicit",injected=0)` does not. |
 | Generic `derived_from` vs superseded | `tests/test_engine/test_reversible_promotion.py` | Two archival nodes, both `derived_from` targets, only one with `superseded_by` → the plain one promotes, the marked one does not. ⚠️ Testing only the marked node misses the block-everything bug the issue explicitly names. |
 | Consolidation provenance | `tests/test_background/test_consolidator.py` | Source ends `archival` + `superseded_by == new_id`; plus an ordering test that injects a demotion failure and asserts the node ended `working` + marked, not `archival` + unmarked. |
@@ -262,6 +294,16 @@ Product docs are updated separately on `local-main`, after the PR — and **by c
 merge**: an ormah memory records that merging a contribution branch into `local-main` can wipe
 `docs/superpowers`. That memory's full content could not be loaded (two `recall_node` timeouts),
 so it is **an unverified whisper title** — re-confirm before executing.
+
+### Landmine when this reaches `local-main`
+
+`local-main` **does** have `archived_at` and `forgetting_manager` (#28); the island does not. So the
+promotion written for upstream is incomplete there: a node promoted out of archival on `local-main`
+keeps its `archived_at` timestamp, which leaves a stale graveyard clock on an active node and,
+depending on how `forgetting_manager` gates purge eligibility, may leave it purgeable while it sits
+in `working`. When cherry-picking #223 onto `local-main`, the promotion must additionally clear
+`archived_at` on the node and in the index UPDATE. This is deliberately **not** in the PR — the
+column does not exist upstream — and it must not be forgotten locally.
 
 ## Out of scope
 
