@@ -150,9 +150,22 @@ git commit -m "docs(lifecycle): bounded reinforcement knobs, cooldown, and the d
 git log --oneline upstream/main..HEAD
 ```
 
-Expected: the full suite green, ruff clean, and **seven** commits — one per task, plus `f85b1c3`
-(`docs(lifecycle): the fail-closed docstring contradicted the version-0 branch`), a comment-only
-correction approved after the Task 5 review. Nothing inherited from another branch. Do not squash
-or rewrite history to reach a commit count.
+Expected: the full suite green, ruff clean, and **eight** commits. Not one per task — Task 3 landed
+two, and two corrections were approved mid-execution:
+
+| Commit | Task |
+|---|---|
+| `ef35398` | 1 |
+| `49e598d` | 2 |
+| `39a639d`, `013f454` | 3 |
+| `cce18f4` | 4 |
+| `e055a27` | 5 |
+| `f85b1c3` | 5 — comment-only docstring correction, approved after the task review |
+| `fddb46f` | 6 — this task's own commit, which Step 5 creates just before this gate runs |
+
+Nothing inherited from another branch. **Do not squash or rewrite history to reach a count.** This
+gate has been wrong three times: "six, one per task" ignored that Task 3 landed two commits;
+"seven" forgot that Step 6 runs *after* Step 5 commits. If your count disagrees with the table,
+report the difference — the table is a record of what was approved, not a target to hit.
 
 If any pre-existing failure appears, check it against the known-environmental set before treating it as a regression: run the same test on a clean `upstream/main` checkout first.
