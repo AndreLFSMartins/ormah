@@ -117,15 +117,23 @@ last_review: datetime | None # Last numeric stability update; gated by the reinf
 
 Run: `grep -rn "fsrs_stability_growth" docs/ src/ tests/`
 
-Expected: **exactly one hit**, in `tests/test_config_fsrs.py` — the
-`test_the_removed_growth_knob_no_longer_exists` assertion from Task 2, which contains the string by
-construction and must survive. `docs/` and `src/` must be clean by now: the docs mention in Step 1
-is prose *about* the removal, not the identifier, and Task 3 removed the last live reader.
+Expected: **exactly three hits, and all three must survive**:
 
-**The old expectation here was "no output" (council round 3, I2).** An implementer chasing a clean
-grep deletes the only regression test that the base-multiplier knob is gone — the gate destroying
-the thing it exists to protect. If you want zero hits in `docs/` and `src/` alone, scope the grep:
-`grep -rn "fsrs_stability_growth" docs/ src/`.
+- `docs/12 - Configuration Reference.md` — the prose sentence Step 1 adds explaining that the knob
+  was removed. Naming the removed identifier is the point: that is what someone upgrading greps for.
+- `tests/test_config_fsrs.py:50` — a comment recording the pre-removal behavior.
+- `tests/test_config_fsrs.py:78` — `assert not hasattr(settings, "fsrs_stability_growth")`, the
+  Task 2 regression test that the knob is gone.
+
+What this step verifies is **one deletion**: the `fsrs_stability_growth` / `1.5` table row at
+`docs/12 - Configuration Reference.md:238`, which Step 1 replaces. Delete nothing else. For a
+zero-hit check on live code, scope the grep to the source tree: `grep -rn "fsrs_stability_growth" src/`.
+
+**This gate has now been wrong twice, in opposite directions.** Round 3 (council, I2) caught the
+original "no output" expectation, which would have deleted the very regression test the gate exists
+to protect. The replacement — "exactly one hit" — was wrong too: the test file carries two
+occurrences, and Step 1 of this same task writes the identifier back into `docs/`. If the count you
+measure disagrees with the list above, **stop and report**; do not delete a hit to reach the number.
 
 - [ ] **Step 5: Commit**
 
@@ -142,6 +150,9 @@ git commit -m "docs(lifecycle): bounded reinforcement knobs, cooldown, and the d
 git log --oneline upstream/main..HEAD
 ```
 
-Expected: the full suite green, ruff clean, and exactly six commits — one per task — with nothing inherited from another branch.
+Expected: the full suite green, ruff clean, and **seven** commits — one per task, plus `f85b1c3`
+(`docs(lifecycle): the fail-closed docstring contradicted the version-0 branch`), a comment-only
+correction approved after the Task 5 review. Nothing inherited from another branch. Do not squash
+or rewrite history to reach a commit count.
 
 If any pre-existing failure appears, check it against the known-environmental set before treating it as a regression: run the same test on a clean `upstream/main` checkout first.
