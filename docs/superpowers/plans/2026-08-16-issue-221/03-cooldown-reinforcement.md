@@ -2,11 +2,18 @@
 
 **Files:**
 - Modify: `src/ormah/engine/memory_engine.py:1936-1960` (`_touch_access`)
+- Modify: `src/ormah/config.py` (remove `fsrs_stability_growth` and drop it from `_fsrs_positive`)
+- Modify: `tests/test_config_fsrs.py` (append the two removal tests)
 - Create: `tests/test_engine/test_reinforcement_cooldown.py`
 
 **Interfaces:**
 - Consumes: `ormah.lifecycle.reinforcement_due` and `ormah.lifecycle.reinforced_stability` (Task 1); the four `Settings` fields from Task 2.
 - Produces: no new public names. `_touch_access` keeps its signature `(self, node_id: str) -> None` and its five call sites (`memory_engine.py:646, 775, 811, 892, 938`) stay untouched.
+- Removes: `fsrs_stability_growth`. **This task owns the removal, together with its only reader**
+  (`memory_engine.py:1947`, inside `_touch_access`). Task 2 deliberately left the field in place:
+  deleting it there and rewriting the reader here would leave the Task 2 commit raising
+  `AttributeError` on every recall path, and 12 test files exercise those paths (pre-flight,
+  2026-08-16; decision: André). Field and reader go in one commit, so every commit stays green.
 
 **Behavior contract:** every call advances `last_accessed` and `access_count`. Only a call that is off cooldown changes `stability` and `last_review`.
 
@@ -198,21 +205,68 @@ def test_concurrent_touches_still_produce_one_stability_update(engine):
 
 Add `import pytest` to the file's imports.
 
+Then append to `tests/test_config_fsrs.py` (created in Task 2) the two tests that only become
+true once this task removes the field:
+
+```python
+def test_the_removed_growth_knob_no_longer_exists(tmp_memory_dir):
+    settings = Settings(memory_dir=tmp_memory_dir)
+    assert not hasattr(settings, "fsrs_stability_growth")
+
+
+def test_an_env_carrying_the_removed_knob_still_loads(tmp_memory_dir, monkeypatch):
+    """extra="ignore" (config.py:20) keeps an old .env from breaking startup."""
+    monkeypatch.setenv("ORMAH_FSRS_STABILITY_GROWTH", "1.5")
+    settings = Settings(memory_dir=tmp_memory_dir)
+    assert settings.fsrs_growth_factor == 0.5
+```
+
+These live here, not in Task 2, because in Task 2 the field still exists: the first would fail and
+the second would pass for the wrong reason — the env var would bind to the live field instead of
+being ignored as an extra.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `./.venv/bin/python -m pytest tests/test_engine/test_reinforcement_cooldown.py -v`
-Expected: FAIL. `test_ten_touches_in_one_day_produce_one_stability_update` fails because every touch still updates stability; `test_a_thirty_day_old_node_is_bounded_to_double` reports ~`202.7` instead of `2.0`; `test_reinforcement_survives_a_zero_stability_node` raises `ZeroDivisionError`; `test_concurrent_touches_still_produce_one_stability_update` reports a compounded stability instead of `1.5`.
+Run: `./.venv/bin/python -m pytest tests/test_engine/test_reinforcement_cooldown.py tests/test_config_fsrs.py -v`
+
+Expected: FAIL, with these specific failures:
+
+| Test | Expected failure |
+|---|---|
+| `test_ten_touches_in_one_day_produce_one_stability_update` | every touch still updates stability |
+| `test_a_thirty_day_old_node_is_bounded_to_double` | reports ~`202.7` instead of `2.0` |
+| `test_reinforcement_survives_a_zero_stability_node` | raises `ZeroDivisionError` |
+| `test_concurrent_touches_still_produce_one_stability_update` | compounded stability instead of `1.5` |
+| `test_the_removed_growth_knob_no_longer_exists` | the field is still there (Task 2 left it) |
+
+`test_an_env_carrying_the_removed_knob_still_loads` **passes here for the wrong reason** — the env
+var binds to the still-present field. That is expected and is exactly why it could not live in
+Task 2: it only becomes meaningful after Step 3 removes the field.
 
 If the concurrency test happens to pass before Step 4, do not accept it — re-run it a few
 times. A lucky serialization greens it; the barrier makes that rare, not impossible.
 
-- [ ] **Step 3: Add the import**
+- [ ] **Step 3: Add the import, and remove the old knob**
 
 In `src/ormah/engine/memory_engine.py`, add to the existing `ormah` imports (alphabetical order within the block):
 
 ```python
 from ormah import lifecycle
 ```
+
+In `src/ormah/config.py`, delete the field line Task 2 left in place:
+
+```python
+    fsrs_stability_growth: float = 1.5     # base multiplier on access; removed in Task 3
+```
+
+and drop `"fsrs_stability_growth"` from the `_fsrs_positive` validator's field list, leaving
+`"fsrs_initial_stability"`, `"fsrs_growth_factor"`, `"fsrs_growth_exponent"`.
+
+Do this **before** Step 4, not after: between the two edits `memory_engine.py:1947` still reads a
+field that no longer exists, so the tree is briefly broken. That is fine inside one task and not
+fine across a commit boundary — which is the whole reason the removal lives here. Do not commit
+until Step 4 is done.
 
 - [ ] **Step 4: Rewrite `_touch_access`**
 
@@ -292,15 +346,45 @@ Then confirm the decorator is what carries the concurrency test, rather than luc
 re-run `test_concurrent_touches_still_produce_one_stability_update` five times, and see it go
 red. Put it back. A lock nobody watched fail is a lock nobody knows works.
 
-- [ ] **Step 6: Run the suites that already exercised this path**
+- [ ] **Step 6: Run the suites that already exercised this path, plus the config removal**
 
-Run: `./.venv/bin/python -m pytest tests/test_engine/test_mutation_stamping.py tests/test_engine/test_scoring_signals.py tests/test_store/test_file_store.py -v`
-Expected: all pass unchanged. `test_touch_access_does_not_advance_updated` (`test_mutation_stamping.py:95`) is the important one — reinforcement must still not stamp `updated`.
+Run: `./.venv/bin/python -m pytest tests/test_engine/test_mutation_stamping.py tests/test_engine/test_scoring_signals.py tests/test_store/test_file_store.py tests/test_config_fsrs.py -v`
 
-- [ ] **Step 7: Lint and commit**
+Expected: all pass. `test_touch_access_does_not_advance_updated` (`test_mutation_stamping.py:95`)
+is the important one — reinforcement must still not stamp `updated`. `test_config_fsrs.py` now
+reports **32 passed**: the 30 from Task 2 plus the two removal tests added in Step 1.
+
+Then run the recall paths, because this task both removed the old knob and serialized the method
+they all call:
 
 ```bash
-./.venv/bin/python -m ruff check src/ormah/engine/memory_engine.py tests/test_engine/test_reinforcement_cooldown.py
-git add src/ormah/engine/memory_engine.py tests/test_engine/test_reinforcement_cooldown.py
-git commit -m "fix(lifecycle): bound stability growth and allow one update per node per day (#221)"
+./.venv/bin/python -m pytest tests/test_engine/ tests/test_api/test_routes_concurrency.py -q
 ```
+
+Expected: no new failures against the branch baseline. A `sqlite3.ProgrammingError` or a hang here
+means the `RLock` re-entry assumption is wrong — stop and report rather than swapping in a
+different lock.
+
+- [ ] **Step 7: Confirm the old knob is gone from src/**
+
+```bash
+grep -rn "fsrs_stability_growth" src/ eval/
+```
+
+Expected: **no output** — this task removed the field and its last reader together.
+
+`tests/` is deliberately not in that grep: `tests/test_config_fsrs.py` still contains the string,
+inside `test_the_removed_growth_knob_no_longer_exists`, by construction. Do not widen the grep and
+then delete that test to make it quiet (council round 3, I2).
+
+- [ ] **Step 8: Lint and commit**
+
+```bash
+./.venv/bin/python -m ruff check src/ormah/engine/memory_engine.py src/ormah/config.py tests/test_engine/test_reinforcement_cooldown.py tests/test_config_fsrs.py
+git add src/ormah/engine/memory_engine.py src/ormah/config.py tests/test_engine/test_reinforcement_cooldown.py tests/test_config_fsrs.py
+git commit -m "fix(lifecycle): bounded stability growth, one update per node per day (#221)"
+```
+
+`config.py` and `test_config_fsrs.py` are in this commit on purpose: the removal of
+`fsrs_stability_growth` and the rewrite of its only reader must land together, or the intermediate
+commit breaks every recall path.

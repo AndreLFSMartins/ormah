@@ -70,10 +70,12 @@ Expected: the decay suite passes on unmodified `upstream/main`. That green is th
 |---|---|---|
 | `src/ormah/lifecycle.py` (create) | All lifecycle math; no I/O, no DB, no settings object | 1 |
 | `tests/test_lifecycle.py` (create) | Unit tests for the math (AC1, AC2, AC3) | 1 |
-| `src/ormah/config.py` (modify) | Remove `fsrs_stability_growth`; add 4 knobs + validators | 2 |
+| `src/ormah/config.py` (modify) | Add 4 knobs + validators — **additive only** | 2 |
 | `tests/test_config_fsrs.py` (create) | Validator coverage (AC7) | 2 |
-| `src/ormah/engine/memory_engine.py:1936` (modify) | `_touch_access` → cooldown + helper call (AC4) | 3 |
-| `tests/test_engine/test_reinforcement_cooldown.py` (create) | Cooldown behavior | 3 |
+| `src/ormah/config.py` (modify) | Remove `fsrs_stability_growth` + its validator entry | 3 |
+| `tests/test_config_fsrs.py` (modify) | The two removal tests | 3 |
+| `src/ormah/engine/memory_engine.py:1936` (modify) | `_touch_access` → cooldown + helper call + serialized (AC4) | 3 |
+| `tests/test_engine/test_reinforcement_cooldown.py` (create) | Cooldown behavior, incl. concurrency | 3 |
 | `src/ormah/background/decay_manager.py` (modify) | Shared retrievability + inverted anchor (AC5) | 4 |
 | `src/ormah/background/importance_scorer.py` (modify) | Anchor flip **only** — never the formula (council C2, corrected round 2) | 4 |
 | `tests/test_background/test_importance_scorer.py` (modify) | Recency ignores a lagging `last_review` | 4 |
