@@ -7,7 +7,6 @@ import hashlib
 from contextlib import contextmanager
 from functools import wraps
 import logging
-import math
 import re
 import threading
 import uuid
@@ -15,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ormah import lifecycle
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
@@ -1969,25 +1969,38 @@ class MemoryEngine:
 
     @_serialized_memory_operation
     def _record_confirmed_use(self, node_id: str) -> None:
-        """Record a confirmed use: update access stats and FSRS stability on disk and DB."""
+        """Record confirmed use, updating stability only when it is off cooldown.
+
+        Serialized because the cooldown is a check-then-write pair (#221,
+        council round 3): the recall paths that call this are not themselves
+        serialized, so two concurrent recalls would both read a stale
+        last_review and both bump stability. _memory_operation_lock is an
+        RLock, so the call sites that already hold it re-enter safely.
+        """
         node = self.file_store.load(node_id)
         if node is None:
             return
         now = datetime.now(timezone.utc)
 
-        # FSRS stability update. Node.stability is Field(ge=0.0), so 0 is a valid
-        # persisted value that would divide by zero here — and, once past that, keep
-        # new_stability pinned at 0 forever. decay_manager and importance_scorer already
-        # guard this same division; this was the one consumer that did not, and the
-        # ZeroDivisionError landed in the caller's isolating except as a silent lost
-        # reinforcement on a claim that had already been committed.
-        review_anchor = node.last_review or node.last_accessed
-        days_since = max((now - review_anchor).total_seconds() / 86400, 0.001)
-        stability = node.stability if node.stability else self.settings.fsrs_initial_stability
-        retrievability = math.exp(-days_since / stability)
-        new_stability = stability * self.settings.fsrs_stability_growth * (retrievability ** -0.2)
-        node.stability = round(min(new_stability, self.settings.fsrs_max_stability), 2)
-        node.last_review = now
+        # One numeric stability update per node per cooldown window (#221): the
+        # old formula let ten same-session touches compound to ~57x. The access
+        # anchor below still advances on every call, so decay never mistakes an
+        # actively used node for a stale one.
+        if lifecycle.reinforcement_due(
+            node.last_review, now, self.settings.fsrs_reinforcement_cooldown_days
+        ):
+            anchor = node.last_review or node.last_accessed
+            days_since = max((now - anchor).total_seconds() / 86400, 0.0)
+            node.stability = lifecycle.reinforced_stability(
+                node.stability,
+                days_since,
+                growth_factor=self.settings.fsrs_growth_factor,
+                growth_exponent=self.settings.fsrs_growth_exponent,
+                spacing_cap=self.settings.fsrs_spacing_cap,
+                max_stability=self.settings.fsrs_max_stability,
+                initial_stability=self.settings.fsrs_initial_stability,
+            )
+            node.last_review = now
 
         # Standard access tracking
         node.last_accessed = now
@@ -1996,8 +2009,15 @@ class MemoryEngine:
         self.file_store.save(node)
         with self.db.transaction() as conn:
             conn.execute(
-                "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, last_review = ? WHERE id = ?",
-                (node.access_count, node.last_accessed.isoformat(), node.stability, node.last_review.isoformat(), node_id),
+                "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, "
+                "last_review = ? WHERE id = ?",
+                (
+                    node.access_count,
+                    node.last_accessed.isoformat(),
+                    node.stability,
+                    node.last_review.isoformat() if node.last_review else None,
+                    node_id,
+                ),
             )
 
     # --- Private helpers ---
