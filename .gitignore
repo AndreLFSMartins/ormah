@@ -82,23 +82,25 @@ CLAUDE.md
 .codex
 .codex/
 # Agent/session tooling artifacts (local-only; never versioned).
-# Also keeps Codex headless review payloads under its 1 MiB input limit —
-# these dirs (docs/superpowers alone is >1 MiB) were being inlined into the
-# council adversarial-review prompt and tripping "Input exceeds maximum length".
+# Also keeps Codex headless review payloads under its 1 MiB input limit — these
+# dirs were being inlined into the council adversarial-review prompt and
+# tripping "Input exceeds maximum length".
 .council/
 .cursor/
 .firecrawl/
 .superpowers/
 .understand-anything/
 .vite/
-docs/superpowers/
 docs/handoffs/
 # graphify-out/ is versioned here (fork/local-main only — Recipe A in
 # FORK-WORKFLOW.md keeps it out of upstream PRs by branch discipline, not by
 # gitignore). Overrides the machine-wide default in ~/.config/git/ignore and
 # this repo's own .git/info/exclude, both of which still ignore it globally.
 # Anchored to the repo root only — per-subfolder graphify-out/ dirs (e.g. from
-# a multi-subfolder `graphify extract`) stay ignored as merge intermediates.
+# a multi-subfolder `graphify extract`) stay ignored as merge intermediates by
+# the unanchored rules in ~/.config/git/ignore and .git/info/exclude. Do NOT add
+# a bare `graphify-out/` here to enforce that: unanchored and later in the file,
+# it would also re-ignore the root tree this negation exists to version.
 !/graphify-out/
 /graphify-out/cost.json
 # Regenerable scratch inside graphify-out/ — never worth versioning.
@@ -117,23 +119,18 @@ docs/handoffs/
 Music/
 .npmrc
 
-# Superpowers generated planning artifacts
-/docs/superpowers/
-
-# ...except they ARE versioned here (fork/local-main only), same deal as
-# graphify-out/ above: plans and specs are this Beta's decision history and are
-# worth more than a clean `git status`. Must come AFTER both rules above (l.94
-# unanchored, l.121 anchored) — a negation only works once every matching rule
-# has been seen. Anchored to the repo root, so a nested docs/superpowers/ inside
-# a worktree stays ignored.
+# docs/superpowers/ is deliberately absent from this file — no ignore rule, and
+# therefore no negation either. Plans and specs are this Beta's decision history
+# and are versioned on fork/local-main. Nothing outside this repo ignores them
+# ("docs/ — NOTHING under it is excluded any more" in .git/info/exclude), so a
+# rule + `!` negation pair would only be an ordering trap: the pair used to sit
+# here, a third rule far below re-ignored the tree, and `git add` needed -f.
 # What keeps this off upstream is NOT this file: it is .git/hooks/pre-push
 # (fail-closed on local-only paths) plus FORK-WORKFLOW.md Recipe A. Versioning
 # and shipping are separate concerns.
-# NOTE: this re-inlines ~4.6 MB into any tool that reads the working tree —
-# see the 1 MiB Codex-review limit noted at l.86. If /council-pr trips
-# "Input exceeds maximum length" again, fix it in the council's file selection,
-# not by re-ignoring this tree.
-!/docs/superpowers/
+# NOTE: this leaves ~4.6 MB inlined into any tool that reads the working tree.
+# If /council-pr trips "Input exceeds maximum length" again, fix it in the
+# council's file selection, not by re-ignoring this tree.
 
 # >>> dev-council ephemerals (managed by /council-init — do not edit) >>>
 .council/project-map.md
@@ -158,8 +155,8 @@ Music/
 .council/.*-stderr.log
 # <<< dev-council ephemerals <<<
 
-# Local agent/session tooling artifacts (local-only; never versioned).
-# docs/superpowers alone is >1 MiB and must never reach upstream.
-.superpowers/
-docs/superpowers/
-graphify-out/
+# Nothing below this point. A bare `graphify-out/` or `docs/superpowers/` added
+# here would silently override the rules above — a later rule wins, so it would
+# re-ignore both deliberately-versioned trees and make new files vanish from
+# `git status` without any error. Both already have their entry above; add new
+# exclusions next to the tree they belong to, not at the end of the file.
