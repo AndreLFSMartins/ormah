@@ -361,10 +361,32 @@ Expected: **no output**, and `import math` no longer needed in that file.
 ```bash
 # importance_scorer: the anchor flipped, and NOTHING else moved.
 grep -n 'anchor_str = r\["last_accessed"\] or r\["last_review"\]' src/ormah/background/importance_scorer.py
-grep -n 'r\["stability"\]\|lifecycle\.' src/ormah/background/importance_scorer.py
+grep -n 'lifecycle\.' src/ormah/background/importance_scorer.py
+grep -cn 'r\["stability"\]' src/ormah/background/importance_scorer.py
 ```
 
-Expected: **exactly one hit** on the first (the flipped anchor) and **no output** on the second.
+Expected: **exactly one hit** on the first (the flipped anchor), **no output** on the second, and
+**exactly `1`** on the third.
+
+**Why the third is `1` and not `0` — this gate was itself wrong until the Task 4 implementer caught
+it (2026-08-16).** The first version of this check grepped
+`'r\["stability"\]\|lifecycle\.'` and expected no output. But
+`importance_scorer.py:80` already contains `stability = r["stability"] if r["stability"] else 1.0`
+— the old formula's own lookup, pre-existing on this branch and **explicitly protected by Step 5's
+"nothing else" rule**. So the gate was red by construction, and the only way to green it was to edit
+the very line Step 5 forbids touching.
+
+That is the identical defect as the original C1, reproduced inside the correction *for* C1. The
+implementer refused to satisfy it and reported instead, which is the correct response and the one
+this plan asks for. The split above separates the two questions the gate was conflating:
+
+| Check | Meaning |
+|---|---|
+| `lifecycle\.` → 0 hits | Step 5 did not overreach. This is the one that matters. |
+| `r\["stability"\]` → exactly 1 | the pre-existing line is still there, and no NEW read was added |
+
+After the rebase onto #222 the third count becomes `0`, because #222 rewrites the scorer's query and
+recency formula wholesale. A count of `2` at any point means Step 5 overreached.
 
 **`math.exp` MUST still be present in `importance_scorer.py` — that is the passing state, not a
 leftover.** On `a28837b` the scorer's recency is `math.exp(-days_ago / stability)` at
