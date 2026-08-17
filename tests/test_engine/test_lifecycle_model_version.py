@@ -91,6 +91,27 @@ def test_a_corrupt_version_fails_closed_as_migrated(engine):
     assert engine._lifecycle_model_version() == 1
 
 
+def test_a_stored_zero_version_fails_closed_as_migrated(engine):
+    """int(row["value"]) returns 0 for a literal stored '0' directly, bypassing both
+    the legacy-flag check and the last_review probe and reaching the destructive
+    seed. Nothing writes '0' today, but a future migration that someday does must
+    not reopen the hole this method exists to close.
+    """
+    node_id = _make_node(engine)
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 42.0, access_count = 5 WHERE id = ?", (node_id,)
+    )
+    engine.db.conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('lifecycle_model_version', '0')"
+    )
+    engine.db.conn.commit()
+
+    assert engine._lifecycle_model_version() == 1
+
+    engine._migrate_fsrs()
+    assert _stability(engine, node_id) == 42.0, "the seed re-ran on a stored '0' version"
+
+
 def test_a_rebuilt_index_does_not_reseed_earned_stability(engine):
     """C3: SQLite is excluded from backups, so a restore arrives with no meta.
 

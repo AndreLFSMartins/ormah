@@ -298,7 +298,9 @@ class MemoryEngine:
         An ambiguous signal fails closed at 1 (already migrated), because the
         only action version 0 unlocks is a destructive one: the seed overwrites
         stability and rewrites the Markdown. Skipping a needed seed leaves
-        defaults in place; running an unneeded one destroys real values. Only
+        defaults in place; running an unneeded one destroys real values. A
+        stored value below 1 — a literal '0', a negative integer, or anything
+        that fails to parse — is clamped up to 1 for the same reason. Only
         the total absence of any signal — no version key, no legacy flag, and
         no node carrying last_review — returns 0.
         """
@@ -307,9 +309,10 @@ class MemoryEngine:
         ).fetchone()
         if row:
             try:
-                return int(row["value"])
+                value = int(row["value"])
             except (TypeError, ValueError):
                 return 1
+            return value if value >= 1 else 1
 
         legacy = self.db.conn.execute(
             "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
