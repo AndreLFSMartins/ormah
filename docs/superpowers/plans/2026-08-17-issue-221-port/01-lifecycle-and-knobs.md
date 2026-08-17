@@ -17,7 +17,19 @@ git show 4cf017f:tests/test_lifecycle.py > tests/test_lifecycle.py
 git show 4cf017f:tests/test_config_fsrs.py > tests/test_config_fsrs.py
 ```
 
-These three files do not exist on `local-main` and neither #220 nor #222 touches their concerns, so they port unchanged.
+These three files do not exist on `local-main` and neither #220 nor #222 touches their concerns, so they port unchanged — with **one deletion**.
+
+Delete this test from `tests/test_config_fsrs.py`. Task 2 adds it back:
+
+```python
+def test_the_removed_growth_knob_no_longer_exists(tmp_memory_dir):
+    settings = Settings(memory_dir=tmp_memory_dir)
+    assert not hasattr(settings, "fsrs_stability_growth")
+```
+
+**Why it moves:** `_record_confirmed_use` still reads `fsrs_stability_growth` until Task 2, so the knob cannot go yet — and shipping this task with a known-red test would break the rule that every commit on this branch passes the suite. This is the same call André made on the original #221 plan for the same knob.
+
+Delete **only** that one test. `test_an_env_carrying_the_removed_knob_still_loads` stays: it asserts `fsrs_growth_factor == 0.5` and passes whether or not the old knob exists. The comment near the top that mentions `fsrs_stability_growth` by name also stays — it documents the NaN behavior and is not an assertion.
 
 - [ ] **Step 2: Run the lifecycle tests — they must pass, the config ones must fail**
 
@@ -25,9 +37,9 @@ Run: `./.venv/bin/python -m pytest tests/test_lifecycle.py -v`
 Expected: all pass — `lifecycle.py` is self-contained.
 
 Run: `./.venv/bin/python -m pytest tests/test_config_fsrs.py -v`
-Expected: failures naming the four knobs as unknown fields. That is the RED for Step 3.
+Expected: failures naming the four new knobs as unknown fields. That is the RED for Step 3.
 
-Note `tests/test_config_fsrs.py` also contains the two removal tests for `fsrs_stability_growth`, which belong to Task 2. They will fail here — that is expected and correct; Task 2 turns them green. Do not delete them, and do not remove the knob in this task: `_record_confirmed_use` still reads it until Task 2, and removing it now leaves the branch red at this commit.
+Do **not** remove `fsrs_stability_growth` in this task — `_record_confirmed_use` still reads it until Task 2, so removing it now breaks the engine at this commit.
 
 - [ ] **Step 3: Add the four knobs**
 
@@ -61,12 +73,12 @@ The non-finite check is not redundant with the positivity checks: NaN compares `
 - [ ] **Step 5: Run the config tests**
 
 Run: `./.venv/bin/python -m pytest tests/test_config_fsrs.py -v`
-Expected: every test passes **except** the two `fsrs_stability_growth` removal tests, which stay red until Task 2.
+Expected: **all pass.** The one test that could not pass yet was removed in Step 1.
 
 - [ ] **Step 6: Run the full suite and commit**
 
 Run: `./.venv/bin/python -m pytest tests/ -q`
-Expected: the baseline count plus the two known-red removal tests. Nothing else new.
+Expected: **zero failures**, and the passed count above the 2545 baseline by the number of tests this task added. A single failure is a regression — stop and report it; there is no known-red set on this branch.
 
 ```bash
 ./.venv/bin/python -m ruff check src/ tests/

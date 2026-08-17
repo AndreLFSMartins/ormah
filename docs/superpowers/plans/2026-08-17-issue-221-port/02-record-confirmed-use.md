@@ -98,14 +98,22 @@ Then append this to `_record_confirmed_use`'s existing docstring, keeping #220's
         """
 ```
 
-- [ ] **Step 4: Remove `fsrs_stability_growth`**
+- [ ] **Step 4: Remove `fsrs_stability_growth` and add its removal test**
 
-Delete the field from `src/ormah/config.py`'s FSRS block and remove `"fsrs_stability_growth"` from `_fsrs_positive`'s field list. It was a base multiplier; `fsrs_growth_factor` is an additive term with different semantics, so this is a removal, not a rename.
+Nothing reads the knob anymore after Step 3. Delete the field from `src/ormah/config.py`'s FSRS block and remove `"fsrs_stability_growth"` from `_fsrs_positive`'s field list. It was a base multiplier; `fsrs_growth_factor` is an additive term with different semantics, so this is a removal, not a rename.
+
+Then append to `tests/test_config_fsrs.py` the test Task 1 deliberately left out, so the removal is pinned by a regression test:
+
+```python
+def test_the_removed_growth_knob_no_longer_exists(tmp_memory_dir):
+    settings = Settings(memory_dir=tmp_memory_dir)
+    assert not hasattr(settings, "fsrs_stability_growth")
+```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `./.venv/bin/python -m pytest tests/test_engine/test_reinforcement_cooldown.py tests/test_config_fsrs.py -v`
-Expected: all pass, including the two removal tests that were red after Task 1.
+Expected: all pass, including the removal test just added.
 
 - [ ] **Step 6: Prove the serialization is load-bearing**
 

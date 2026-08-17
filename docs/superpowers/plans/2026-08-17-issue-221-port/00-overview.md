@@ -18,6 +18,7 @@
 - **The formula is fixed by #191 — do not tune it:** `spacing = min(R^-0.2, cap)`, `S' = min(S × (1 + g × S^-w × spacing), max)`, with `g = 0.5`, `w = 0.5`, `cap = 2.0`.
 - **Do not change any default.** `fsrs_reinforcement_cooldown_days` stays `1.0` (decision: André, 2026-08-17). The #220 latch plus this cooldown make growth much slower than either issue alone implied; that is the conservative direction and is deliberate.
 - **Do not rescale existing `stability` values anywhere.** This carries a docs obligation, owed by Task 6.
+- **Every commit on this branch passes the full suite.** No task ships a known-red test for a later task to fix. This is why Task 1 leaves out one removal test that Task 2 adds back — the knob it asserts against is still in use until then.
 - Line length 100, `ruff check src/ tests/` must pass.
 - This branch is local-only. It is **never** pushed to `upstream`, and it does not replace PR #239.
 
