@@ -64,6 +64,8 @@ the names as they are.
 git fetch upstream
 git worktree add -b fix/<slug> ../ormah-wt-<slug> upstream/main   # the clean island
 cd ../ormah-wt-<slug>                        # work HERE — Tools/ormah stays on local-main
+python3 -m venv .venv                        # every island gets its OWN venv — see the gate below
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/pip install -e ".[dev]"
 # ... commits ...
 git log --oneline upstream/main..HEAD        # gate: ONLY your own commits, nothing else
 git push fork fix/<slug>                     # the branch lives on YOUR fork
@@ -73,6 +75,25 @@ git push fork fix/<slug>                     # the branch lives on YOUR fork
 The gate line is the proof the island is clean: anything in that log you did not write means
 the branch was cut from the wrong base — rebuild the island before pushing. Once the PR lands,
 prune the island with `git worktree remove ../ormah-wt-<slug>` (branch rules in Recipe D).
+
+### Import gate — run it before trusting any test number from an island
+
+`VIRTUAL_ENV` exported in the shell (the Beta's own `Tools/ormah/.venv`) overrides the island's
+interpreter: `sys.path` resolves to *that* venv **plus `Tools/ormah/src`**, so the island's tests
+import `local-main`'s code. The suite goes green against the wrong tree and the number is worthless.
+This has already produced a retracted "98 passed".
+
+Strip the leaked variables and **prove which tree you imported** before any test run:
+
+```bash
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"
+#   the printed path MUST contain ormah-wt-<slug>/ — if it does not, STOP: the number is not yours
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest tests/ -q > out.txt 2>&1
+echo "PYTEST_EXIT=$?" >> out.txt              # NEVER pipe pytest to `tail` — the exit code becomes tail's
+```
+
+Both halves are load-bearing: without the import line the run is against the wrong tree, and
+without the redirect + `$?` a run with failures reports exit 0.
 
 > If `/council-pr` push is blocked by `origin-is-upstream — refusing to push to a repo you
 > do not own`, that guard is council's, not git's — an explicit `git push fork fix/<slug>`
