@@ -132,6 +132,24 @@ Serialize only when not `None`, following the existing optional-field pattern; p
 `superseded_by TEXT` on `nodes`, plus one entry in the `_migrate` pair list in `db.py` —
 `PRAGMA table_info`-guarded, so it is idempotent and existing rows stay `NULL`.
 
+### 5b. `src/ormah/index/builder.py` — amendment, 2026-08-18
+
+**Added after approval.** The original list of seven files missed this one, and without it the
+column added in §5 is written and immediately erased.
+
+`IndexBuilder._index_file_nodes_only` runs `INSERT OR REPLACE INTO nodes` with an explicit column
+list. In SQLite `REPLACE` is DELETE + INSERT, so a column absent from that list is recreated at its
+`DEFAULT` — `NULL`. The consolidator (§7) marks a source and then calls
+`update_node(tier=archival)` on the next line, which calls `builder.index_single`: the marker is
+wiped from the index inside the same loop iteration that wrote it.
+
+`superseded_by` must therefore join the column list, the `?` placeholders, and the value tuple.
+
+Severity, stated honestly: this does **not** break the promotion gate. That gate reads the Markdown
+via `file_store.load`, and the file keeps the marker, so a superseded node stays blocked either way.
+What breaks is the index column: permanently `NULL`, which is a lie told to the SQL consumer this
+spec names in §5 (#209).
+
 ### 6. `src/ormah/engine/memory_engine.py`
 
 The promotion lives inside `_record_confirmed_use`, after the #221 cooldown block and before the
