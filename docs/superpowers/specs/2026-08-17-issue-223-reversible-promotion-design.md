@@ -219,7 +219,32 @@ either direction — decay takes its `tier='working'` snapshot under the lock, s
 node promoted after it; and a node promoted before the snapshot appears in it with
 `last_accessed = now`, so `R ≈ 1` and decay skips it.
 
-Two limitations, stated rather than hidden:
+**That guarantee is inherited, not built here — and it is under review.** #223 adds no exclusion
+of its own. It relies entirely on a lock that
+[#240](https://github.com/r-spade/ormah/issues/240) documents as a starvation defect, and whose
+proposed fix is precisely to stop background jobs from excluding the foreground. Recorded as a
+dependency rather than as a settled property, so the coupling is visible to whoever lands either
+change:
+
+- **What breaks if the lock stops excluding.** `run_decay` reads its snapshot outside any
+  transaction (`decay_manager.py:28-31`) and demotes row by row afterwards
+  (`decay_manager.py:76`). A node whose confirmed use lands between the snapshot and its own
+  demotion would be archived on stale data — losing the seven-day lease #223 exists to grant, one
+  instant after the use that earned it. Today the lock makes that interleaving impossible.
+- **What #223 would then need, and why it is not sketched here.** The fix shape is a revalidation
+  inside the demoting write: demote only if the node's `last_accessed` still matches the snapshot.
+  But `update_node` takes no guard parameter, and the guarded-mutator precedent
+  (`delete_node_guarded`) is **local-only (#28) and absent from this island** — verified, 0
+  occurrences in `memory_engine.py` on `feat/223-reversible-promotion`. So this is not a small
+  edit; it is its own design question, left open deliberately rather than answered with an
+  unreviewed sketch. It becomes required work only if #240 lands a fix that removes whole-run
+  exclusion.
+
+The issue's acceptance criterion — *"concurrent promotion/decay cannot leave markdown and index
+lifecycle state inconsistent"* — is met today by the lock. This section exists so that it is not
+met *accidentally*.
+
+Two further limitations, stated rather than hidden:
 
 **No cross-process exclusion.** A CLI running alongside the server does not share the `RLock`.
 This is a pre-existing property of `_memory_operation_lock`, not something #223 introduces. The
