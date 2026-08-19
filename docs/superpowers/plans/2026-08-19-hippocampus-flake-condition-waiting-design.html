@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remove the wall-clock race from test_hippocampus.py</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">Remove the wall-clock race from test_hippocampus.py</div>
+  <a href="#problem">Problem</a>
+  <a href="#root-cause">Root cause</a>
+  <a href="#approach">Approach</a>
+  <a href="#component">Component</a>
+  <a href="#call-sites">Call sites</a>
+  <a href="#error-handling">Error handling</a>
+  <a href="#testing">Testing</a>
+  <a href="#verification-gates">Verification gates</a>
+  <a href="#out-of-scope">Out of scope</a>
+</nav>
+<main>
+<div class="doc-title">
+  <p class="eyebrow">Test design</p>
+  <h1>Remove the wall-clock race from <code>test_hippocampus.py</code></h1>
+</div>
+
+<div class="meta">
+  <span>2026-08-19</span>
+  <span class="chip on">approved, pending implementation</span>
+</div>
+
+<p class="statement">Replace fixed-budget <code>time.sleep()</code> with condition-based polling to eliminate a 50/50 intermittent test failure on CI runners.</p>
+
+<h2 id="problem">Problem</h2>
+
+<p><code>tests/test_background/test_hippocampus.py::test_new_file_triggers_ingestion</code> fails intermittently on CI with <code>AssertionError: assert 'new_session.md' in {}</code>.</p>
+
+<p>It is a test defect, not a product bug. Evidence:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Route</th>
+      <th>Finding</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>gh pr view 247 --json files</code></td>
+      <td>The PR that went red touches one file, <code>src/ormah/pi_instructions.md</code>, +1/-1, markdown only. No causal path to <code>background/hippocampus.py</code>.</td>
+    </tr>
+    <tr>
+      <td>CI run 32160547915 (sha <code>fdf8b1b</code>, PR #234), 2026-08-18</td>
+      <td>The same assertion failed on an unrelated, code-heavy branch. Two branches with no shared code, one failure mode.</td>
+    </tr>
+    <tr>
+      <td>6 isolated local runs, 2026-08-15 (memory <code>cbcf96cd</code>)</td>
+      <td>3 PASS / 3 FAIL — a measured 50/50 flake.</td>
+    </tr>
+    <tr>
+      <td><code>upstream/main</code> baseline, 2026-08-16 (memory <code>988fca91</code>)</td>
+      <td>Already on the known-red list, flagged as polluting baseline comparisons.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="root-cause">Root cause</h2>
+
+<p><code>src/ormah/background/hippocampus.py:159-186</code>. After the test writes the file, the work crosses three thread boundaries before the assertion can hold:</p>
+
+<pre><code>write_text
+  -&gt; watchdog observer thread          (on_created / on_modified)
+  -&gt; _schedule_ingest arms threading.Timer(debounce)   [a new thread]
+  -&gt; _do_ingest -&gt; _ingest_file        (SQLite write + embedding)
+  -&gt; _save_state</code></pre>
+
+<p>The test grants a fixed <code>time.sleep(0.5)</code> for all of it. Instrumented locally on an idle machine, the real write-to-state latency is <strong>0.136s</strong> — a margin of only 3.7x. A GitHub runner (2 shared vCPU, 1838 tests, ~8 min wall clock, fastembed resident) exceeds 3.7x of thread-scheduling delay routinely. Observed CI failure rate: ~2 in 8 recent runs.</p>
+
+<p>The same defect exists at line 169, which waits <code>time.sleep(0.5)</code> for a debounce timer before asserting <code>call_count == 1</code>.</p>
+
+<p>Line 166's <code>time.sleep(0.05)</code> is <strong>not</strong> this defect — it is a deliberate interval between rapid writes, and stays.</p>
+
+<h2 id="approach">Approach</h2>
+
+<p>Condition-based waiting (<span class="ref">superpowers:systematic-debugging</span>, <code>condition-based-waiting.md</code>). Replace the fixed budget with polling on the condition the test actually cares about.</p>
+
+<p class="callout">Rejected alternatives:</p>
+
+<ul>
+  <li><strong>Synchronization event in production code.</strong> Exposing a <code>threading.Event</code> on <code>HippocampusHandler</code> would be fully deterministic, but changes product code to serve a test and widens the upstream diff outside <code>tests/</code>.</li>
+  <li><strong>Raise the sleep to 5s.</strong> Still probabilistic, adds 10s to every suite run, and is the symptom fix <span class="ref">systematic-debugging</span> classifies as failure.</li>
+</ul>
+
+<h2 id="component">Component</h2>
+
+<p>One private helper in the test file. No new dependencies.</p>
+
+<pre><code class="language-python">def _wait_until(predicate, timeout=10.0, interval=0.01):
+    """Poll until predicate() is truthy. Returns its last value."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() &lt; deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(interval)
+    return predicate()</code></pre>
+
+<p>It returns the last value rather than raising, so the assertion that fails stays the test's original one. A genuine regression still reports <code>assert 'new_session.md' in {}</code> — not a generic timeout error.</p>
+
+<p><code>time.monotonic()</code> rather than <code>time.time()</code>: a wall-clock adjustment mid-run must not extend or truncate the deadline.</p>
+
+<h2 id="call-sites">Call sites</h2>
+
+<p><strong>Line 83 — <code>test_new_file_triggers_ingestion</code>.</strong> Poll until the state file names the ingested file, then assert as before.</p>
+
+<p><strong>Line 169 — the debounce test.</strong> Half-conversion. <code>_wait_until(lambda: call_count >= 1)</code> removes the racy half; a short bounded settle window then precedes <code>assert call_count == 1</code>.</p>
+
+<p>Proving the negative half ("no second call arrived") inherently requires a waiting window. The asymmetry is acceptable and deliberate: a slow runner makes that half fail toward a <strong>false pass</strong>, never a false failure, so it cannot redden CI.</p>
+
+<h2 id="error-handling">Error handling</h2>
+
+<p>A real regression — the watcher never ingesting — now surfaces after the 10s timeout with the original assertion message. Slower than today's 0.5s, but only on the failing path; the passing path gets <em>faster</em> (~0.14s instead of a fixed 0.5s), so the suite's total wall clock drops.</p>
+
+<h2 id="testing">Testing</h2>
+
+<p>Test-first, with a deterministic red. Repetition is not the proof — injected latency is.</p>
+
+<ol>
+  <li><strong>RED:</strong> patch the ingest path to sleep longer than the current fixed budget, and show <code>test_new_file_triggers_ingestion</code> as written today fails under it. This reproduces the loaded-runner condition deterministically.</li>
+  <li><strong>GREEN:</strong> the converted test passes under the same injected latency.</li>
+  <li><strong>Regression guard:</strong> with the watcher genuinely broken (ingestion disabled), the converted test still fails — the helper must not paper over a real defect.</li>
+  <li>Full file green: <code>pytest tests/test_background/test_hippocampus.py</code>.</li>
+</ol>
+
+<h2 id="verification-gates">Verification gates</h2>
+
+<p>Both are load-bearing and neither may be skipped — the repo has already retracted a "98 passed" that came from a leaked <code>VIRTUAL_ENV</code>.</p>
+
+<pre><code class="language-bash">env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"
+#   the path MUST contain ormah-wt-&lt;slug&gt;/
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest tests/ -q &gt; out.txt 2&gt;&amp;1
+echo "PYTEST_EXIT=$?" &gt;&gt; out.txt</code></pre>
+
+<p>Compare the result against the measured <code>upstream/main</code> baseline of 13 known-red tests (memory <code>988fca91</code>), not against a plan's description of it. Expect 12 red, with <code>test_new_file_triggers_ingestion</code> the one removed.</p>
+
+<p>That count is corroboration, not proof. The baseline itself contains this 50/50 flake, so a single suite run could land on 12 by luck alone. <strong>The decisive evidence is step 2</strong> — the converted test passing under injected latency that makes the old one fail. A suite run showing 12 red without that step proves nothing.</p>
+
+<h2 id="out-of-scope">Out of scope</h2>
+
+<ul>
+  <li>The other 38 <code>time.sleep</code> call sites in <code>tests/</code>. Most are legitimate (deliberately widened race windows, simulated slow subprocesses) and none has a demonstrated CI failure.</li>
+  <li>The other 12 known-red baseline tests, including the <code>~/.config/ormah/.env</code> environment leak — that deserves its own issue.</li>
+  <li><code>test_importance_scorer.py::test_importance_range_with_new_signals</code>, which reddens PR #229 for an unrelated reason.</li>
+  <li>Any change under <code>src/</code>.</li>
+</ul>
+
+<div class="meta">
+  <p class="eyebrow">Scope and target</p>
+  <p><strong>Scope:</strong> <code>tests/test_background/test_hippocampus.py</code> only. No production code.<br><strong>Upstream target:</strong> clean island from <code>upstream/main</code> (FORK-WORKFLOW.md Recipe A).</p>
+</div>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:d19377246c8f780653277d0ef8b5a57e4fec4505632191308d63347e43e2d7bb -->
