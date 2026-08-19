@@ -154,6 +154,22 @@ logging.basicConfig(level=logging.INFO, stream=sys.stderr,
 
 K = 10
 
+# X-1 (council round 4): pair_batch's own fallback log line only fires when a chunk of size
+# > 1 exhausts its unparseable-probe budget. The recursive bisect-to-singleton base case
+# (pair_batch.py:163-164, `if len(idx) == 1: return _judge_singles(...)`) calls the
+# single-pair path with NO log line at all — a fully unparseable 10-pair batch makes 10 extra
+# `claude -p` calls that `grep "pairs individually"` cannot see. Counting actual invocations
+# of the judge_single callback is the only path-independent measure: batch mode never calls
+# it unless some fallback happened, logged or not.
+FALLBACK_CALLS = {"link": 0, "dup": 0, "conflict": 0}
+
+
+def counted(name, fn):
+    def wrapper(p):
+        FALLBACK_CALLS[name] += 1
+        return fn(p)
+    return wrapper
+
 
 def load(path):
     """Load the frozen corpus. Reads a file and nothing else.
@@ -277,7 +293,8 @@ def main(pairs_path, out_path):
     link = pair_batch.judge_pairs(
         settings, auto_linker._LLM_LINK_INSTRUCTIONS, no_pairs,
         auto_linker._render_link_pair,
-        judge_single=lambda p: auto_linker._llm_classify_link(settings, p["node"], p["other"]),
+        judge_single=counted("link", lambda p: auto_linker._llm_classify_link(
+            settings, p["node"], p["other"])),
         k=K)
     out["link"] = dict(zip(ids, [label_link(v) for v in link]))
     out["link_payload"] = dict(zip(ids, [payload(v, ("relationship", "reason")) for v in link]))
@@ -285,8 +302,8 @@ def main(pairs_path, out_path):
     dup = pair_batch.judge_pairs(
         settings, duplicate_merger._LLM_DUP_INSTRUCTIONS, no_pairs,
         duplicate_merger._render_dup_pair,
-        judge_single=lambda p: duplicate_merger._llm_check_duplicate(
-            settings, p["node"], p["other"]),
+        judge_single=counted("dup", lambda p: duplicate_merger._llm_check_duplicate(
+            settings, p["node"], p["other"])),
         k=K)
     out["dup"] = dict(zip(ids, [label_dup(v) for v in dup]))
     out["dup_payload"] = dict(zip(ids, [
@@ -295,8 +312,8 @@ def main(pairs_path, out_path):
     conflict = pair_batch.judge_pairs(
         settings, conflict_detector._LLM_CONFLICT_INSTRUCTIONS, ab_pairs,
         conflict_detector._render_conflict_pair,
-        judge_single=lambda c: conflict_detector._llm_check_conflict(
-            settings, c["node_a"], c["node_b"]),
+        judge_single=counted("conflict", lambda c: conflict_detector._llm_check_conflict(
+            settings, c["node_a"], c["node_b"])),
         k=K)
     out["conflict"] = dict(zip(ids, [label_conflict(v) for v in conflict]))
     out["conflict_payload"] = dict(zip(ids, [
@@ -305,6 +322,11 @@ def main(pairs_path, out_path):
     for judge in ("link", "dup", "conflict"):
         labels = out[judge].values()
         out["counts"][f"{judge}_error"] = sum(1 for x in labels if x == "error")
+        # The authoritative fallback signal (X-1, council round 4) — how many pairs this
+        # judge fell back to single-pair calls for, silent bisection included. Compare this
+        # across legs in Task 5 Step 3, not the log grep, which structurally cannot see the
+        # silent path (pair_batch.py:163-164 logs nothing at the length==1 base case).
+        out["counts"][f"{judge}_singles"] = FALLBACK_CALLS[judge]
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, sort_keys=True)
@@ -333,29 +355,50 @@ Expected: **no output**. Any line here means an edit landed before the baseline 
 - [ ] **Step 5: Run the BEFORE leg**
 
 ```bash
+rm -f ~/.cache/ormah-ab-20260819/before.json
 cd /Users/andre/Documents/GitHub/Tools/ormah && cd /Users/andre/Documents/GitHub/Tools/ormah && \
   .venv/bin/python ~/.cache/ormah-ab-20260819/detector.py \
     ~/.cache/ormah-ab-20260819/corpus.jsonl \
     ~/.cache/ormah-ab-20260819/before.json
 ```
+`rm -f` first: a crashed run must leave no file behind, never an old one silently mistaken
+for this run's output (X-3, council round 4).
 Expected: a counts block naming `pairs`, `corpus_sha256`, `k: 10`, and a per-judge `*_error` count. **The digest must equal the one Step 2 printed** — if it does not, the corpus changed and this leg is worthless. Runtime ~5 min for ~18 `claude -p` calls.
 
 **Read the error counts now, not later.** If any judge's `*_error` is above ~20% of pairs, the BEFORE leg itself is unhealthy and the AFTER comparison would be noise on noise — STOP and report rather than proceeding.
 
 - [ ] **Step 6: Capture the BEFORE parse-and-fallback evidence**
 
-The fallback into `_judge_singles` is the failure mode no agreement-based gate can see: a broken `pair_id` turns N/10 calls into N, destroying the saving. `pair_batch` logs it. Re-run the leg's log capture:
+The fallback into `_judge_singles` is the failure mode no agreement-based gate can see: a
+broken `pair_id` turns N/10 calls into N, destroying the saving. Step 3's `{judge}_singles`
+counters in the JSON output are the **authoritative** signal — they count every actual call
+to the single-pair path, including the silent bisect-to-singleton base case
+(`pair_batch.py:163-164`) that logs nothing. The log grep below is a secondary,
+human-readable cross-check only; a rise in `{judge}_singles` with no matching log line is
+expected, not a bug.
 
 ```bash
+set -o pipefail
+rm -f ~/.cache/ormah-ab-20260819/before-replicate.json
 cd /Users/andre/Documents/GitHub/Tools/ormah && \
   .venv/bin/python ~/.cache/ormah-ab-20260819/detector.py \
     ~/.cache/ormah-ab-20260819/corpus.jsonl \
     ~/.cache/ormah-ab-20260819/before-replicate.json \
     2>&1 | tee ~/.cache/ormah-ab-20260819/before.log
+.venv/bin/python -c "
+import json
+c = json.load(open('$HOME/.cache/ormah-ab-20260819/before-replicate.json'))['counts']
+print({k: c[k] for k in c if k.endswith('_singles')})
+"
 grep -c "judging .* pairs individually" ~/.cache/ormah-ab-20260819/before.log || echo 0
 grep -c "no usable pair_id" ~/.cache/ormah-ab-20260819/before.log || echo 0
 ```
-Expected: two counts, recorded as the BEFORE fallback baseline. `before-replicate.json` is a second BEFORE sample — it is **not** a calibrated noise floor (the spec withdrew that), but it tells the human reviewer in Task 5 how much this judge moves on its own between two identical runs. Cost: ~18 more calls.
+Expected: the `{judge}_singles` counts (authoritative), plus the two secondary log-line
+counts, recorded as the BEFORE fallback baseline. `before-replicate.json` is a second BEFORE
+sample — it is **not** a calibrated noise floor (the spec withdrew that), but it tells the
+human reviewer in Task 5 how much this judge moves on its own between two identical runs.
+Cost: ~18 more calls. `rm -f` first and `pipefail` on the pipe: a crashed run must leave no
+file behind and a non-zero `$?`, never an old file silently mistaken for this run's output.
 
 - [ ] **Step 7: Record the baseline in the working directory, commit nothing**
 

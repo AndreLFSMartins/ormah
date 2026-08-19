@@ -10,10 +10,19 @@
 
 **Why this is a task and not a note.** The spec's round-2 predecessor asserted this tree "does NOT hot-reload", citing `cli.py:158` as `reload=False`. That citation is wrong: `cli.py:158` is `reload=args.reload`, and `make server` runs `python -m ormah.main`, which is `reload=True` (`main.py:452`). The live daemon happens to have started without `--reload`, so safety today rests on a launch-flag accident. During this work an unvalidated adapter reaching the running daemon would let `duplicate_merger` **merge memories irreversibly**.
 
-Two independent protections, because the first is procedural and the second is not:
+Two independent protections, in an order that makes the second one actually work:
 
 1. Stop the daemon for the edit window — removes the process that could pick up a half-finished adapter.
-2. Take a backup first — turns an irreversible merge into a recoverable one if anything slips through anyway.
+2. Take a backup — turns an irreversible merge into a recoverable one if anything slips through anyway.
+
+**Backup after stop, not before (Codex, council round 4 round 3).** `ormah backup create`
+copies the store directories with `shutil.copytree` under an in-process `threading.RLock`
+(`backup.py:32,312`) — a lock that only serializes threads inside this CLI process. It does
+nothing to a **separate** daemon process. Backing up before stopping the daemon lets a
+`duplicate_merger`/`conflict_detector` job mutate or delete files mid-copy, producing a
+torn snapshot that would not restore the pre-change graph — defeating the exact protection
+this task exists to provide. Stop first, confirm no `claude -p` child is mid-write, then back
+up a quiesced store.
 
 - [ ] **Step 1: Create the working directory (outside the repo — it will hold production memory content)**
 
@@ -21,15 +30,7 @@ Two independent protections, because the first is procedural and the second is n
 mkdir -p ~/.cache/ormah-ab-20260819
 ```
 
-- [ ] **Step 2: Take a backup BEFORE touching anything**
-
-```bash
-.venv/bin/ormah backup create
-.venv/bin/ormah backup list | head -5
-```
-Expected: `backup list` names a backup created just now. If `backup create` fails, STOP and report — do not proceed to Task 2 without a recoverable snapshot.
-
-- [ ] **Step 3: Record the daemon's current launch flags, then stop it**
+- [ ] **Step 2: Record the daemon's current launch flags, then stop it**
 
 ```bash
 {
@@ -39,7 +40,7 @@ Expected: `backup list` names a backup created just now. If `backup create` fail
   .venv/bin/ormah server status
 } | tee ~/.cache/ormah-ab-20260819/precondition.txt
 ```
-Expected: the recorded command line contains `ormah server start` and **no** `--reload`. If it does contain `--reload`, say so in the report — the window was already unsafe and the backup in Step 2 is the only thing that stood between an edit and a merge.
+Expected: the recorded command line contains `ormah server start` and **no** `--reload`. If it does contain `--reload`, say so in the report — the window was already unsafe before this task even started.
 
 ```bash
 .venv/bin/ormah server stop
@@ -47,12 +48,22 @@ Expected: the recorded command line contains `ormah server start` and **no** `--
 ```
 Expected: `server status` now reports not running.
 
-- [ ] **Step 4: Verify no `claude -p` child survives from a background job**
+- [ ] **Step 3: Verify no `claude -p` child survives from a background job**
 
 ```bash
 pgrep -fl 'claude -p' || echo "clean: no claude -p children"
 ```
-Expected: `clean: no claude -p children`. If any are listed, wait for them to finish rather than killing them — a killed `duplicate_merger` call can leave a half-applied merge.
+Expected: `clean: no claude -p children`. If any are listed, wait for them to finish rather than killing them — a killed `duplicate_merger` call can leave a half-applied merge, and taking the backup over that half-applied state next would enshrine it.
+
+- [ ] **Step 4: Take the backup, now that the store is quiesced**
+
+```bash
+.venv/bin/ormah backup create
+.venv/bin/ormah backup list | head -5
+```
+Expected: `backup list` names a backup created just now, taken with the daemon down and no
+`claude -p` children — a consistent snapshot, not one racing a live writer. If `backup create`
+fails, STOP and report — do not proceed to Task 2 without a recoverable snapshot.
 
 - [ ] **Step 5: Append the closing evidence to the record**
 
