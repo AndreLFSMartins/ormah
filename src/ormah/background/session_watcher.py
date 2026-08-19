@@ -558,6 +558,7 @@ def _record_whisper_usage_signals(
                 },
             })
 
+    confirmed_node_ids: list[str] = []
     with engine.db.transaction() as conn:
         for record in judge_records:
             row = record["row"]
@@ -580,6 +581,38 @@ def _record_whisper_usage_signals(
                     source=_LLM_JUDGE_AFFINITY_SOURCE,
                     confirmed_at=now_iso,
                 )
+            # Issue #220: the same at-most-once claim submit_feedback takes, not a
+            # parallel polarity check. has_llm_judge only sees this watcher's own
+            # signal source, so it is blind to feedback submitted through MCP — the
+            # claim is what makes one whisper event reinforce once across both
+            # callers. Note _insert_affinity must run first: it reads changes()
+            # nowhere, but the claim helper does, so nothing may sit between its
+            # INSERT and its read.
+            if engine._claim_confirmed_use(
+                conn,
+                row["id"],
+                row["node_id"],
+                signal=record["polarity"],
+                source=_LLM_JUDGE_AFFINITY_SOURCE,
+            ):
+                confirmed_node_ids.append(row["node_id"])
+
+    # Issue #220: reinforcement runs after the transaction commits. db.transaction()
+    # holds a process-level lock for its whole body and _record_confirmed_use writes
+    # markdown to disk, so doing this inside would stall every writer in the process
+    # for the length of N file saves — and would take db_lock before memory_lock,
+    # inverting the order every serialized writer uses.
+    #
+    # Each node is isolated: the signals and claims above are already committed, so
+    # letting one node's failure escape would abort the ingest slice, skip every later
+    # node, and leave both has_llm_judge set and the claims taken — nothing would ever
+    # retry them. Failures here are logged, never raised. This is the at-most-once
+    # contract.
+    for node_id in confirmed_node_ids:
+        try:
+            engine._record_confirmed_use(node_id)
+        except Exception:
+            logger.exception("confirmed-use reinforcement failed for node %s", node_id)
 
     return recorded
 
