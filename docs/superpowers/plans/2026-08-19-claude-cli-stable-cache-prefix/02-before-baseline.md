@@ -138,6 +138,7 @@ nothing: no merge, no edge, no watermark."""
 import hashlib
 import json
 import logging
+import subprocess
 import sys
 
 from ormah.background import auto_linker, conflict_detector, duplicate_merger
@@ -217,12 +218,40 @@ def payload(v, keys):  # noqa: D103 — see the comment above
     return {k: v[k] for k in keys if k in v}
 
 
+def sha(s):
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def fingerprint(settings):
+    """Everything except the system prefix that could move a verdict between legs.
+
+    Matching corpus digests prove the two legs read the same INPUT FILE. They do not
+    prove the two legs were otherwise the same run: `detector.py` is a mutable file in
+    a cache directory, `Settings` is rebuilt per leg, and the CLI binary can be updated
+    underneath. Any of those changing would move verdicts, and the change would be
+    blamed on the system prefix. Recorded per leg and compared in Task 5.
+    """
+    try:
+        cli = subprocess.run([settings.claude_cli_bin, "--version"], capture_output=True,
+                             text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        cli = f"<unavailable: {e}>"
+    return {
+        "detector_sha256": sha(open(__file__, encoding="utf-8").read()),
+        "model": settings.llm_model,
+        "claude_cli_bin": settings.claude_cli_bin,
+        "claude_cli_version": cli,
+        "k": K,
+    }
+
+
 def main(pairs_path, out_path):
     settings = Settings()
     settings.maintenance_pairs_per_call = K
     rows, corpus_sha = load(pairs_path)
     ids = [r["pair_id"] for r in rows]
-    out = {"counts": {"pairs": len(rows), "corpus_sha256": corpus_sha, "k": K}}
+    out = {"counts": {"pairs": len(rows), "corpus_sha256": corpus_sha, "k": K},
+           "fingerprint": fingerprint(settings)}
 
     # auto_linker and duplicate_merger judge pairs keyed {node, other}
     # (duplicate_merger.py:514, auto_linker.py:573); conflict_detector keys them
@@ -232,6 +261,18 @@ def main(pairs_path, out_path):
                 for r in rows]
     ab_pairs = [{"node_a": r["node_a"], "node_b": r["node_b"],
                  "similarity": r.get("similarity", 0.0)} for r in rows]
+
+    # The rendered prompts are what actually reaches the model. Hashing them catches a
+    # renderer or instruction-block change that the corpus digest cannot see, and it is
+    # the same rendering production performs — no second implementation to drift.
+    out["prompt_sha256"] = {
+        "link": sha("\n".join(auto_linker._render_link_pair(p) for p in no_pairs)
+                    + auto_linker._LLM_LINK_INSTRUCTIONS),
+        "dup": sha("\n".join(duplicate_merger._render_dup_pair(p) for p in no_pairs)
+                   + duplicate_merger._LLM_DUP_INSTRUCTIONS),
+        "conflict": sha("\n".join(conflict_detector._render_conflict_pair(p) for p in ab_pairs)
+                        + conflict_detector._LLM_CONFLICT_INSTRUCTIONS),
+    }
 
     link = pair_batch.judge_pairs(
         settings, auto_linker._LLM_LINK_INSTRUCTIONS, no_pairs,

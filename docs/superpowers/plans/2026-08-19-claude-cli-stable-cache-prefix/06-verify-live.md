@@ -162,7 +162,12 @@ report that gap as **assumed**, not quietly drop it.
 
 - [ ] **Step 4: Restart the daemon Task 1 stopped**
 
+Snapshot the transcript directory **first**. Step 7 compares against this, and without a
+pre-restart baseline it cannot tell a file the daemon wrote from one that was already there:
+
 ```bash
+find ~/.claude/projects -name "*.jsonl" | sort > ~/.cache/ormah-ab-20260819/transcripts-before.txt
+wc -l ~/.cache/ormah-ab-20260819/transcripts-before.txt
 .venv/bin/ormah server start -d
 sleep 5
 .venv/bin/ormah server status
@@ -206,43 +211,55 @@ Report the median `cache_write` and `cost_usd` against arm A's 7,743 and $0.0181
 
 - [ ] **Step 7: Verify no transcripts are being persisted**
 
-**Attribute by session id, not by timestamp.** Whoever runs this task is themselves inside an
-interactive Claude Code session, so a bare `find` always returns files and can never decide
-anything. The daemon's own `claude -p` calls carry session ids that show up in the envelope
-and therefore in the log; match on those.
+**Two questions, and the second is the one that matters.** Matching known daemon session ids
+catches the calls that *succeeded* — but the id only reaches the log when the envelope parsed
+and carried `usage` (Task 4 logs it there), so a call that dies before producing an envelope
+can leave a transcript and never appear in `daemon-sessions.txt`. Cleanup is best-effort and
+runs from that same envelope (`_cleanup_persisted_stub`, `claude_cli_adapter.py:344`), so
+exactly the calls the id-match cannot see are the ones most likely to leave a file behind.
+That is why the second check is a set difference against the pre-restart snapshot, and why an
+unattributable new file is **inconclusive, never clean**.
 
 ```bash
-# Session ids the daemon's own calls reported — the `session=` field Task 4 logs.
+C=~/.cache/ormah-ab-20260819
+
+# (a) Known daemon session ids — the `session=` field Task 4 logs. No mtime filter: a slow
+#     run or a delayed review would otherwise hide a real match behind a time window.
 grep -oE 'claude -p usage: session=[0-9a-f-]{36}' ~/.local/share/ormah/logs/ormah.log \
-  | grep -oE '[0-9a-f-]{36}' | sort -u > ~/.cache/ormah-ab-20260819/daemon-sessions.txt
-wc -l ~/.cache/ormah-ab-20260819/daemon-sessions.txt
+  | grep -oE '[0-9a-f-]{36}' | sort -u > "$C/daemon-sessions.txt"
 
-# Transcripts on disk whose filename IS one of those ids. Anything here is a daemon transcript.
-find ~/.claude/projects -name "*.jsonl" -newermt "-30 minutes" -print0 \
-  | xargs -0 -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | sort -u \
-  > ~/.cache/ormah-ab-20260819/recent-transcripts.txt
-comm -12 ~/.cache/ormah-ab-20260819/daemon-sessions.txt \
-         ~/.cache/ormah-ab-20260819/recent-transcripts.txt
+# (b) Every transcript that appeared since the pre-restart snapshot.
+find ~/.claude/projects -name "*.jsonl" | sort > "$C/transcripts-after.txt"
+comm -13 "$C/transcripts-before.txt" "$C/transcripts-after.txt" > "$C/transcripts-new.txt"
+
+echo "--- new transcripts since the restart ---"; wc -l < "$C/transcripts-new.txt"
+echo "--- matching a known daemon session id (BLOCKING if any) ---"
+grep -Ff "$C/daemon-sessions.txt" "$C/transcripts-new.txt" || echo "  none"
+echo "--- new but NOT attributable to a daemon session id ---"
+grep -vFf "$C/daemon-sessions.txt" "$C/transcripts-new.txt" || echo "  none"
 ```
-Expected: the `comm` prints **nothing**.
 
-**A match BLOCKS.** Every id it prints is a daemon `claude -p` transcript persisted to disk —
-production memory content at rest outside the store — which would mean `--setting-sources ""`
-re-enabled session persistence after all (the risk the stale comment recorded on claude
-2.1.156). This is not a note to file: stop, stop the daemon again, and report before anything
-else. Do not leave the changed daemon running on direct evidence that it writes memory content
-outside the store, and do not close the task. The comment corrected in Task 3 Step 5 would need
-reverting too, but that is the smaller half.
+Read it in this order:
 
-This is a *behavioural* gate, not the CLI version guard that was considered and rejected: it
-blocks on what this machine was observed to do, not on a version number.
+- **Any file matching a daemon session id BLOCKS.** That is production memory content at rest
+  outside the store, which would mean `--setting-sources ""` re-enabled session persistence
+  after all (the risk the stale comment recorded on claude 2.1.156). Stop the daemon again and
+  report before anything else — do not leave the changed daemon running on direct evidence
+  that it writes memory content to disk, and do not close the task. The comment corrected in
+  Task 3 Step 5 would need reverting too, but that is the smaller half. This is a
+  *behavioural* gate, not the CLI version guard that was considered and rejected: it blocks on
+  what this machine was observed to do, not on a version number.
+- **Unattributable new files are INCONCLUSIVE.** Most will be the operator's own interactive
+  Claude Code sessions — but a daemon call that failed before yielding an envelope looks
+  exactly the same from here, and that is the case the id-match structurally cannot cover.
+  Open one and check whether its turns are memory-judgment prompts before calling this clean.
+  Report the count either way.
+- **An empty `daemon-sessions.txt` makes check (a) inconclusive too**: no usage line carried a
+  `session=` yet, so there was nothing to match against. Say so; an unattributable check proves
+  nothing in either direction.
 
-If `daemon-sessions.txt` is empty the check is **inconclusive, not clean**: no usage line
-carried a `session=` yet, so there is nothing to match against. Say so in the report rather
-than recording a pass — an unattributable check proves nothing either way. Note also that the
-adapter already deletes the persisted stub for calls that return a usable envelope
-(`_cleanup_persisted_stub`, `claude_cli_adapter.py:344`), so what this check can still catch
-is a transcript from a call that failed *before* yielding one.
+Never report this step as clean unless (a) matched nothing **and** (b) produced no
+unattributable new file, or every such file was inspected and attributed elsewhere.
 
 - [ ] **Step 8: Report completion**
 

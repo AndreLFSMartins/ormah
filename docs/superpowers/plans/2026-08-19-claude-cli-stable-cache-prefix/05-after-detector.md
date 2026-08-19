@@ -36,15 +36,30 @@ Expected: a counts block with the same `pairs` **and the same `corpus_sha256`** 
 cd /Users/andre/Documents/GitHub/Tools/ormah && .venv/bin/python - <<'PY'
 import json, os, sys
 C = os.path.expanduser("~/.cache/ormah-ab-20260819")
-shas = {leg: json.load(open(f"{C}/{leg}.json"))["counts"]["corpus_sha256"]
+legs = {leg: json.load(open(f"{C}/{leg}.json"))
         for leg in ("before", "before-replicate", "after")}
-print(json.dumps(shas, indent=2))
-if len(set(shas.values())) != 1:
-    sys.exit("STOP — the three legs judged different corpora; no divergence below means anything.")
-print("corpus identical across all three legs")
+bad = []
+# The corpus digest proves the same input FILE. It does not prove the same run: detector.py
+# is a mutable file in a cache dir, Settings is rebuilt per leg, the CLI can be upgraded
+# underneath, and a renderer edit would change what actually reaches the model. Each of
+# those moves verdicts, and the move would be blamed on the system prefix. Compare all three.
+for key, get in (("corpus_sha256", lambda d: d["counts"]["corpus_sha256"]),
+                 ("prompt_sha256", lambda d: d["prompt_sha256"]),
+                 ("fingerprint", lambda d: d["fingerprint"])):
+    vals = {leg: json.dumps(get(d), sort_keys=True) for leg, d in legs.items()}
+    same = len(set(vals.values())) == 1
+    print(f"{key:16} {'IDENTICAL' if same else 'DIFFERS'}")
+    if not same:
+        bad.append(key)
+        for leg, v in vals.items():
+            print(f"    {leg:18} {v[:160]}")
+if bad:
+    sys.exit(f"STOP — {bad} differ across legs. The comparison is confounded: a verdict "
+             f"change can no longer be attributed to the system prefix.")
+print("all three legs: same corpus, same rendered prompts, same execution fingerprint")
 PY
 ```
-**If the digests differ, stop.** A pair count that happens to match is not enough: a node edited between legs changes the rendered prompt while leaving the count intact, and the resulting verdict change would be blamed on the system prompt.
+**If any of the three differ, stop.** A matching pair count is not enough, and neither is a matching corpus digest on its own: an edited renderer, a rebuilt `detector.py` or an upgraded CLI all move verdicts while the corpus stays byte-identical, and the move would be blamed on the system prompt. The one thing *expected* to differ between BEFORE and AFTER is the adapter's system prefix — that is the change under test, and it is deliberately not in the fingerprint.
 
 - [ ] **Step 3: Objective check — parse and fallback rates**
 
@@ -218,18 +233,61 @@ b = json.load(open(f"{C}/before.json")); a = json.load(open(f"{C}/after.json"))
 r = json.load(open(f"{C}/before-replicate.json"))
 pairs = {p['pair_id']: p for p in
          (json.loads(l) for l in open(f"{C}/corpus.jsonl") if l.strip())}
-# Only the fields production ACTS on. `explanation` is the conflict judge's — it becomes the
-# edge reason (conflict_detector.py:372); that judge never emits `reason`.
+# What gets DISPLAYED for a listed pair. `explanation` is the conflict judge's — it becomes
+# the edge reason (conflict_detector.py:372); that judge never emits `reason`.
 FIELDS = {"link": ("relationship", "reason"),
           "dup": ("merged_title", "merged_content", "reason"),
           "conflict": ("type", "same_subject", "evolved_node", "explanation")}
 
 
-def mut(src, judge, k):
-    """The mutation-driving fields of one verdict, as a comparable tuple."""
+def effect(src, judge, k):
+    """What production would DO with this verdict, as a comparable value.
+
+    Not the raw payload. Production ignores most of these fields depending on the
+    decision, and comparing them regardless would report movement where nothing
+    would have happened:
+
+    - dup: nothing happens unless `is_duplicate` (duplicate_merger).
+    - conflict: `if not conflict: continue` then `if not same_subject: continue`
+      (conflict_detector.py:363-365) — and `evolved_node` only picks a direction
+      when the type is `evolution` (:377-381); otherwise the edge is `contradicts`
+      between a and b regardless.
+    - link: `none`/`error` writes nothing.
+
+    Free-text is deliberately EXCLUDED from the effect. `reason` and `explanation`
+    are stochastic sentence-by-sentence, so including them would mark nearly every
+    no-op pair as moved and bury the merges and edge flips this list exists to
+    surface. They are still printed for every listed pair — they are just not what
+    makes a pair listed.
+    """
     d = src.get(f"{judge}_payload", {}).get(k, {})
-    return tuple(json.dumps(d.get(f), sort_keys=True, ensure_ascii=False)
-                 for f in FIELDS[judge])
+    label = src[judge].get(k)
+    if judge == "dup":
+        if label != "duplicate":
+            return ("no-op",)
+        return ("merge", d.get("merged_title"), d.get("merged_content"))
+    if judge == "conflict":
+        if label in ("none", "error") or d.get("same_subject", True) is False:
+            return ("no-op",)
+        ctype = d.get("type") or label
+        if ctype == "evolution":
+            return ("evolved_from", d.get("evolved_node", "b"))
+        return ("contradicts",)
+    if label in ("none", "error"):
+        return ("no-op",)
+    return ("link", label)
+
+
+def mut(src, judge, k):
+    return json.dumps(effect(src, judge, k), sort_keys=True, ensure_ascii=False)
+
+
+def flat(s, n):
+    """One line, truncated. Never let memory text start a line in this file."""
+    return " ".join(str(s).split())[:n]
+
+
+SIDECAR = {}
 
 
 print("# BEFORE -> AFTER divergences\n")
@@ -254,26 +312,41 @@ for judge in ("link", "dup", "conflict"):
     print(f"## {judge} — {len(diffs)} of {len(b[judge])} pairs moved "
           f"({n_pay} payload-only)\n")
     bp = b.get(f"{judge}_payload", {}); ap = a.get(f"{judge}_payload", {})
+    n_self = 0
     for k, before, after, rep, label_moved, payload_moved in diffs:
         p = pairs.get(k, {})
         na, nb = p.get('node_a', {}), p.get('node_b', {})
         # `self` covers payload movement between the BEFORE runs too, not just the label.
-        self_move = " `self`" if (rep is not None and rep != before) or (
-            mut(b, judge, k) != mut(r, judge, k)) else ""
+        is_self = (rep is not None and rep != before) or mut(b, judge, k) != mut(r, judge, k)
+        n_self += bool(is_self)
+        self_move = " `self`" if is_self else ""
         kind = "" if label_moved else " *(payload-only)*"
         print(f"- **{k}**{self_move}{kind}: `{before}` -> `{after}`")
-        print(f"  - **A** — {str(na.get('title'))[:90]}")
-        print(f"    > {str(na.get('content'))[:400]}")
-        print(f"  - **B** — {str(nb.get('title'))[:90]}")
-        print(f"    > {str(nb.get('content'))[:400]}")
+        # flat(): memory content is multi-line and arbitrary. A body containing a line
+        # like "## Credentials" would land at column zero in this file, where the
+        # aggregate-only `grep "^## "` of Step 8 would pick it up and send it through an
+        # agent tool — defeating the no-read rule from one line of someone's memory.
+        # Counts go to the sidecar below instead, and this is defence in depth.
+        print(f"  - **A** — {flat(na.get('title'), 90)}")
+        print(f"    > {flat(na.get('content'), 400)}")
+        print(f"  - **B** — {flat(nb.get('title'), 90)}")
+        print(f"    > {flat(nb.get('content'), 400)}")
         for label, src in (("BEFORE", bp), ("AFTER", ap)):
             fields = {f: src.get(k, {}).get(f) for f in FIELDS[judge]
                       if src.get(k, {}).get(f) is not None}
             if fields:
-                shown = {f: (str(val)[:400] if isinstance(val, str) else val)
+                shown = {f: (flat(val, 400) if isinstance(val, str) else val)
                          for f, val in fields.items()}
                 print(f"  - {label} verdict: `{json.dumps(shown, ensure_ascii=False)}`")
+    SIDECAR[judge] = {"pairs": len(b[judge]), "moved": len(diffs),
+                      "payload_only": n_pay, "self": n_self}
     print()
+
+# Aggregate-only sidecar: four integers per judge, no memory text of any kind. This is the
+# ONLY file about this run an agent may read. Step 8 reads it instead of grepping the
+# report, because a grep over the report can surface a line that came from memory content.
+with open(f"{C}/divergence-counts.json", "w", encoding="utf-8") as f:
+    json.dump(SIDECAR, f, indent=2, sort_keys=True)
 PY
 wc -l ~/.cache/ormah-ab-20260819/divergences.md
 ```
@@ -288,14 +361,16 @@ wc -l ~/.cache/ormah-ab-20260819/divergences.md
 > shell redirect and never read back by the agent. This is the one artifact in the plan André
 > opens himself.
 
-Tell André the file is ready and hand him the path. Then report **only these aggregates**,
-none of which contain memory content:
+**Not even a `grep` over the report.** Memory content is multi-line and arbitrary: a body
+containing a line like `## Credentials` lands at column zero inside `divergences.md`, and a
+`grep "^## "` meant to fetch the per-judge headings would send that line straight through an
+agent tool. Step 7 writes an aggregate-only sidecar for exactly this — four integers per
+judge, no memory text anywhere in it. **Read the sidecar, never the report.**
 
 ```bash
-# Counts only — the per-judge headings, never the entries beneath them.
-grep -E "^## " ~/.cache/ormah-ab-20260819/divergences.md
-wc -l ~/.cache/ormah-ab-20260819/divergences.md
-echo "open it yourself:  open -e ~/.cache/ormah-ab-20260819/divergences.md"
+# The ONLY file about this run an agent may read.
+cat ~/.cache/ormah-ab-20260819/divergence-counts.json
+echo "open the report yourself:  open -e ~/.cache/ormah-ab-20260819/divergences.md"
 ```
 
 Say plainly, in the report:
