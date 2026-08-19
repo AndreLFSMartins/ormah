@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design: fixed --system-prompt in ClaudeCliAdapter</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">Design: fixed --system-prompt in ClaudeCliAdapter</div>
+  <a href="#problem">Problem: the cache-write tax</a>
+  <a href="#measurement" class="lvl-3">Measurement: paired A/B test</a>
+  <a href="#decision">Decision: module-level constant</a>
+  <a href="#constant" class="lvl-3">The constant</a>
+  <a href="#argv-change" class="lvl-3">argv change</a>
+  <a href="#usage-logging" class="lvl-3">Usage logging for observability</a>
+  <a href="#tests">Tests: TDD — red before green</a>
+  <a href="#verification">Verification plan</a>
+  <a href="#out-of-scope">Out of scope</a>
+  <a href="#known-risk">Known risk: flag rename</a>
+</nav>
+<main>
+<div class="eyebrow">Design document · 2026-08-19</div>
+<h1><em>Fixed system prompt</em> in ClaudeCliAdapter</h1>
+
+<div class="statement">
+  Every headless `claude -p` call currently wastes tokens on dynamic system-prompt data that invalidates the prompt cache. This design fixes it to a static constant, eliminating ~7k cache-write tokens per call — a 3.0× cost reduction.
+</div>
+
+<div class="meta">
+  <span class="chip on">Status: approved</span>
+  <span class="chip">Scope: <code>claude_cli_adapter.py</code> + tests</span>
+</div>
+
+<h2 id="problem"><em>Problem:</em> the cache-write tax</h2>
+
+<p>Every headless call from <code>ClaudeCliAdapter</code> (maintenance jobs and ingest) currently makes a <code>claude -p</code> request with the default Claude Code system prompt. That prompt injects dynamic data — current working directory, git status, environment variables — which changes on every invocation, invalidating the prompt-cache prefix.</p>
+
+<p>The result: a ~7.7k token <code>cache_write</code> charge on every single call.</p>
+
+<h3 id="measurement"><em>Measurement:</em> paired A/B test</h3>
+
+<p>Test date: 2026-08-19 | identical argv, same <code>--json-schema</code> and hardened <code>--settings</code> | steady-state baseline (first call excluded):</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Configuration</th>
+      <th><code>cache_write</code> (tokens)</th>
+      <th>Cost per call</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Today (default system prompt)</td>
+      <td>7,726 every call</td>
+      <td>$0.0182</td>
+    </tr>
+    <tr>
+      <td>Fixed <code>--system-prompt</code></td>
+      <td>110</td>
+      <td>$0.0061</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>Result: 3.0× cheaper per call.</strong> Total context stays nearly flat (~27k vs ~25.7k) — the change is prefix <em>stability</em>. Since <code>cache_write</code> bills at 1.25× and <code>cache_read</code> at 0.1×, prefix reuse compounds the savings.</p>
+
+<p>Compatibility verified on claude CLI 2.1.235: <code>--system-prompt</code> + <code>--json-schema</code> + hardened <code>--settings</code> returns schema-conformant JSON, exit 0. The flag <code>--exclude-dynamic-system-prompt-sections</code> adds nothing over <code>--system-prompt</code> alone.</p>
+
+<h2 id="decision"><em>Decision:</em> module-level constant</h2>
+
+<p>Pass a fixed system prompt on every call via a module-level constant. No constructor parameter, no <code>Settings</code> knob, no environment variable — any mutable source reintroduces prefix variability and incurs the full <code>cache_write</code> again.</p>
+
+<h3 id="constant">The constant</h3>
+
+<pre><code class="language-python">_SYSTEM_PROMPT = (
+    "You are a text-analysis engine used by Ormah's background memory jobs. "
+    "Follow the instructions in the user message exactly. Output only the "
+    "requested result — when a JSON schema is provided, reply with JSON that "
+    "conforms to it and nothing else."
+)</code></pre>
+
+<p>Declared next to <code>_HARDENED_SETTINGS</code> with a comment citing the measurement (7,726 → 110 cache_write, 3.0× cost savings).</p>
+
+<p>The prompt is intentionally task-neutral: both callers (<code>pair_batch</code> and ingest extraction) pass all task context in the user message, so the system prompt does not influence judgment.</p>
+
+<h3 id="argv-change">argv change</h3>
+
+<p>Append <code>"--system-prompt", _SYSTEM_PROMPT</code> unconditionally to the existing argv block (currently <code>claude_cli_adapter.py:207-215</code>).</p>
+
+<h3 id="usage-logging">Usage logging for observability</h3>
+
+<p>The adapter currently discards <code>usage</code> and <code>total_cost_usd</code> from the CLI JSON envelope, so cost can only be tracked with an external shim. As part of this change, emit one best-effort <code>logger.info</code> per call after the envelope is parsed, with these fields from <code>envelope["usage"]</code> / <code>envelope["total_cost_usd"]</code>:</p>
+
+<ul>
+  <li><code>input</code> (tokens)</li>
+  <li><code>output</code> (tokens)</li>
+  <li><code>cache_read</code> (tokens)</li>
+  <li><code>cache_write</code> (tokens)</li>
+  <li><code>cost_usd</code></li>
+</ul>
+
+<p><strong>Error handling:</strong> envelope without <code>usage</code> → no usage line, no exception. Every existing failure path of <code>generate()</code> stays byte-for-byte unchanged.</p>
+
+<h2 id="tests"><em>Tests:</em> TDD — red before green</h2>
+
+<ol>
+  <li><strong><code>test_argv_pins_fixed_system_prompt</code></strong> — assert the built argv contains the adjacent pair <code>--system-prompt</code>, <code>_SYSTEM_PROMPT</code> (same style as the existing <code>test_argv_pins_model_and_json_output</code>).</li>
+  <li><strong><code>test_usage_logged_from_envelope</code></strong> — an envelope carrying <code>usage</code> + <code>total_cost_usd</code> produces exactly one <code>logger.info</code> call with all five fields (verified via <code>caplog</code>).</li>
+  <li><strong><code>test_missing_usage_never_breaks_parse</code></strong> — an envelope without <code>usage</code> returns a normal result, logs nothing, and raises no exception.</li>
+</ol>
+
+<p>The existing <code>test_real_claude_*</code> integration tests exercise the new flag automatically when run with <code>-m integration</code>.</p>
+
+<h2 id="verification"><em>Verification plan</em></h2>
+
+<p>Heavy assumptions first:</p>
+
+<details>
+  <summary><strong>1. Quality A/B gate</strong> — the zero-quality-trade-off claim is currently assumed</summary>
+  <div class="callout">
+    <p>Drift in output quality is invisible without measurement. Use the eval framework to confirm:</p>
+    <ol>
+      <li>Mine 100 pairs from the production store:
+        <pre><code>python -m eval.maintenance.cli mine --db ~/.local/share/ormah/memory/index.db -n 100</code></pre>
+        (read-only, path from <code>Settings().db_path</code> on this machine; <strong>never commit or share the output <code>pairs.jsonl</code></strong> — it is sensitive)</li>
+      <li>Run on <strong>current</strong> code with <code>run --mode single</code> → save <code>before.json</code></li>
+      <li>Apply this change; run <code>run --mode single</code> again → save <code>after.json</code></li>
+      <li>Compare: <code>report --single before.json --batched after.json</code></li>
+      <li><strong>If the gate fails</strong> → stop investigation before any merge</li>
+    </ol>
+  </div>
+</details>
+
+<details>
+  <summary><strong>2. Unit tests and lint</strong></summary>
+  <div class="callout">
+    <p><code>make test</code> (all green) + <code>make lint</code> (no violations)</p>
+  </div>
+</details>
+
+<details>
+  <summary><strong>3. Live cache_write baseline</strong></summary>
+  <div class="callout">
+    <p>Restart the daemon. The first <code>auto_linker</code> run after boot doubles as the live measurement: read <code>cache_write</code> from the new usage log and compare against the 7,726 token baseline.</p>
+    <p><strong>Expected steady-state:</strong> ~110 tokens per call (after the first call is excluded).</p>
+  </div>
+</details>
+
+<h2 id="out-of-scope"><em>Out of scope</em></h2>
+
+<ul>
+  <li><strong><code>ORMAH_MAINTENANCE_PAIRS_PER_CALL` (K) stays at 10</strong> — deferred by André (2026-08-19) to a future change behind the per-job A/B eval gate (Council C3, issue #87). Not included here because batching contaminates the system-prompt measurement and carries a real judgment-quality trade-off.</li>
+  <li>No persistence of usage data — log line only, no metrics store.</li>
+  <li>The external shim (<code>/tmp/claude-501/claude-usage-shim.sh</code>) is retired, not installed.</li>
+</ul>
+
+<h2 id="known-risk"><em>Known risk:</em> flag rename</h2>
+
+<p><code>--system-prompt</code> is verified on claude CLI 2.1.235. A future rename of the flag fails loud, not silent: <code>claude -p</code> exits non-zero and triggers the existing <code>logger.warning("claude -p exited …")</code> + <code>None</code> return, which will be visible in the daemon log.</p>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:6b790f196fc6f111a4971032c9a505df97252b10c9efabb93cf069bfa7baff3e -->
