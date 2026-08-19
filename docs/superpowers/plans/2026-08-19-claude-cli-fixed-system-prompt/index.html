@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fixed --system-prompt in ClaudeCliAdapter — Implementation Plan (SUPERSEDED)</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">Fixed --system-prompt in ClaudeCliAdapter — Implementation Plan (SUPERSEDED)</div>
+  <a href="#why-superseded">Why This Plan Is Superseded</a>
+  <a href="#plan-overview">Plan Overview</a>
+  <a href="#tech-stack" class="lvl-3">Tech Stack</a>
+  <a href="#global-constraints" class="lvl-3">Global Constraints</a>
+  <a href="#council-findings">Council Review Findings</a>
+  <a href="#round-1" class="lvl-3">Round 1 (2026-08-19)</a>
+  <a href="#round-2" class="lvl-3">Round 2 (2026-08-19)</a>
+  <a href="#tasks">Tasks (Execute in Order)</a>
+  <a href="#task-1" class="lvl-3">Task 1: Baseline Legs — BEFORE any code change</a>
+  <a href="#task-1b" class="lvl-3">Task 1b: BEFORE Legs for Destructive Callers — BEFORE any code change</a>
+  <a href="#task-2" class="lvl-3">Task 2: Fixed _SYSTEM_PROMPT Constant in argv (TDD)</a>
+  <a href="#task-3" class="lvl-3">Task 3: Per-Call Usage/Cost Log Line (TDD)</a>
+  <a href="#task-4" class="lvl-3">Task 4: AFTER Legs + Calibrated Quality Gate</a>
+  <a href="#task-5" class="lvl-3">Task 5: Full Verification + Live Measurement</a>
+  <a href="#file-references">File References</a>
+  <a href="#implementation-notes">Implementation Notes</a>
+</nav>
+<main>
+<article>
+  <div class="callout warn">
+    <strong>Status: SUPERSEDED</strong> — Do not execute this plan. Replaced by <a href="../2026-08-19-claude-cli-stable-cache-prefix/00-overview.md">2026-08-19-claude-cli-stable-cache-prefix</a>.
+  </div>
+
+  <section>
+    <h2 id="why-superseded">Why This Plan Is Superseded</h2>
+    <p>This plan was written against a design that has been withdrawn. Two independent reasons, both established by measurement rather than review:</p>
+
+    <ol>
+      <li><em>Premise does not reproduce.</em> Targeted 3.0× saving from <code>--system-prompt</code> alone (7,726 → 110 cache_write). Re-measured on <code>claude-haiku-4-5</code>: <code>--system-prompt</code> alone is <strong>1.19×</strong>. The saving lives in <code>--setting-sources ""</code>, and the two flags together are <strong>2.19×</strong>.</li>
+      <li><em>Quality gate approves without measuring.</em> An independent audit of all 26 code blocks found: shell word-splitting assumptions, AFTER comparing file with itself and passing, injection detection matching titles only, 8% judgment flip rate, and <code>combine({})</code> returning PASS.</li>
+    </ol>
+
+    <p class="statement">Do not reuse Task 2 tests — three of five assert the prompt contains the substring the prompt contains.</p>
+
+    <p>Still valid if revived: distance→similarity conversion (1 - d²/2), vector query shape, pair-shape keys, every CLI entry point, and <code>combine()</code>'s failure-over-invalidity precedence.</p>
+  </section>
+
+  <section>
+    <h2 id="plan-overview">Plan Overview</h2>
+    <p class="eyebrow">Goal and Architecture</p>
+
+    <p>Pin a constant <code>--system-prompt</code> on every <code>claude -p</code> call (<em>3.0× cheaper per call</em> via a stable cache prefix) and log per-call usage/cost from the CLI envelope.</p>
+
+    <p><strong>Architecture:</strong> Two surgical edits inside <code>ClaudeCliAdapter.generate()</code> — one argv flag fed by a module constant, one best-effort log line after envelope parse. Because the adapter is shared by <strong>seven callers</strong>, quality is gated on <strong>seven axes</strong>: six A/B agreement arms (linker, duplicate-merger, conflict-detector; each in single and batched paths) plus one ingest extraction smoke.</p>
+
+    <p class="statement">Every <em>before</em> leg runs on <strong>current</strong> code. Tasks 1 and 1b must precede any edit.</p>
+
+    <h3 id="tech-stack">Tech Stack</h3>
+    <ul>
+      <li><strong>Language:</strong> Python 3.11</li>
+      <li><strong>Test framework:</strong> pytest with existing <code>_fake_popen</code> fixtures</li>
+      <li><strong>Evaluation:</strong> <code>eval.maintenance</code> harness, <code>pair_batch.judge_pairs</code></li>
+    </ul>
+
+    <h3 id="global-constraints">Global Constraints</h3>
+    <ul>
+      <li><strong>Branch:</strong> <code>local-main</code>. No clean island; do not create branches.</li>
+      <li><strong>Hot reload:</strong> Tree does NOT hot-reload. Edits apply only at explicit restart in Task 5.</li>
+      <li><strong>Production memory:</strong> Everything under <code>~/.cache/ormah-eval-20260819/</code> stays out of repo — never committed, never shared.</li>
+      <li><strong>No merges, edges, watermarks:</strong> Task 1b calls destructive judges as pure functions; records verdicts, never applies them.</li>
+      <li><strong>K=10 unchanged:</strong> <code>ORMAH_MAINTENANCE_PAIRS_PER_CALL=10</code> (deferred by André).</li>
+      <li><strong>Baseline failure:</strong> One test fails deterministically on <code>local-main</code> before this change: <code>test_forgetting_gate6_ignores_edge_type_contradicts_protects_like_supports</code>.</li>
+      <li><strong>Budget:</strong> ~740 <code>claude -p</code> calls (~$12, ~2h15 wall clock).</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2 id="council-findings">Council Review Findings</h2>
+
+    <h3 id="round-1">Round 1 (2026-08-19)</h3>
+    <p class="eyebrow">2 high, 3 medium — all re-verified before acceptance</p>
+
+    <ul>
+      <li><strong>H1:</strong> A/B only exercised <code>auto_linker._llm_classify_link</code>; ingest regression unmeasured → ingest smoke added.</li>
+      <li><strong>H2:</strong> <code>report.agreement</code> compared one BEFORE map to one AFTER with no noise floor → second BEFORE leg, key-set equality, shuffled control added.</li>
+      <li><strong>M3:</strong> Prompt said "follow instructions in user message" — collides with trust boundary → prompt rewritten in Task 2.</li>
+      <li><strong>M4:</strong> Only caps <code>none→edge</code>; poorer prompt fails the other way → symmetric cap added.</li>
+      <li><strong>M5:</strong> <code>test -s</code> polling accepted leftover file as DONE → outputs deleted before legs, wait on PID.</li>
+    </ul>
+
+    <h3 id="round-2">Round 2 (2026-08-19)</h3>
+    <p class="eyebrow">Both peers delivered, 9 findings — all re-verified before acceptance</p>
+
+    <ul>
+      <li><strong>C1 (Codex, high):</strong> Gate covered 2 of 7 adapter callers; <code>duplicate_merger</code> merges irreversibly and was unmeasured → <strong>Task 1b added</strong> with six A/B arms in Task 4.</li>
+      <li><strong>C1 agravante:</strong> <code>auto_linker.py:425</code> resolves K=10 via <code>pair_batch.judge_pairs</code>, not <code>_llm_classify_link</code> → batched legs added to Tasks 1, 1b, 4.</li>
+      <li><strong>C2 (Cursor, high):</strong> Round-1 prompt wrong about message shape — rules come <em>after</em> material, not after task → rewritten around named untrusted regions.</li>
+      <li><strong>C3 (Cursor, high):</strong> Injection gate only counted PWNED titles; AFTER that extracts nothing scored clean → injection gated on extraction liveness.</li>
+      <li><strong>I4 (Cursor, high):</strong> <code>EDGE_TO_NONE_MAX</code> uncalibrated → replaced by <code>transition_rate</code> against judge's own noise per arm.</li>
+      <li><strong>I5 (Cursor, medium):</strong> <code>scenarios.py</code> passes <code>GATE_CACHE</code>, but gate hardcoded <code>CACHE</code> → honoured in <code>gate.py</code>, self-check executable.</li>
+      <li><strong>I6 (Cursor, medium):</strong> <code>max(rc_ab, rc_ingest)</code> buried real FAIL under INVALID → <code>combine()</code> ranks failures above invalidity.</li>
+      <li><strong>I7 (Codex, medium):</strong> Task 5 decided by <code>grep FAILED</code>; abort printed <code>(none)</code> → passed-count and collection-error assertions added.</li>
+      <li><strong>Partially rejected (Codex, high):</strong> AFTER now compared against <strong>both</strong> BEFORE replicates, judged on worse (accepted half).</li>
+    </ul>
+
+    <p class="statement"><strong>Known gap:</strong> <code>consolidator.py:292</code> and <code>session_watcher.py:283</code> share the adapter and are unmeasured.</p>
+  </section>
+
+  <section>
+    <h2 id="tasks">Tasks (Execute in Order)</h2>
+    <p class="eyebrow">Tasks 1 and 1b must precede any code edit</p>
+
+    <p>Each task file is self-contained; a subagent gets its task file plus the overview.</p>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="big">6</div>
+        <div class="label">Measurement tasks</div>
+      </div>
+      <div class="metric">
+        <div class="big">~740</div>
+        <div class="label">claude -p calls</div>
+      </div>
+      <div class="metric">
+        <div class="big">~$12</div>
+        <div class="label">Budget</div>
+      </div>
+      <div class="metric">
+        <div class="big">2h15min</div>
+        <div class="label">Wall clock</div>
+      </div>
+    </div>
+
+    <h3 id="task-1">Task 1: Baseline Legs — BEFORE any code change</h3>
+    <p class="eyebrow">14 steps | ~100 calls | 15–20 min</p>
+
+    <p><strong>Produces:</strong> <code>pairs.jsonl</code> (mined corpus); <code>before.json</code>, <code>before2.json</code> (two independent verdicts on unchanged code, single path); <code>before-batch.json</code>, <code>before2-batch.json</code> (same two, batched path at K=10); <code>ingest-before.json</code> (extraction smoke).</p>
+
+    <p><strong>Why two BEFORE legs:</strong> An LLM judge disagrees with itself run to run. With a single map, self-disagreement is indistinguishable from a prompt effect. <code>agreement(before, before2)</code> measures the instrument's noise; Task 4 requires AFTER to stay within that floor.</p>
+
+    <p class="statement">Nothing in the repo is created or modified by this task.</p>
+
+    <h3 id="task-1b">Task 1b: BEFORE Legs for Destructive Callers — BEFORE any code change</h3>
+    <p class="eyebrow">8 steps | ~264 calls | Both must complete before Task 2</p>
+
+    <p><strong>Produces:</strong> mined candidate files and eight verdict maps: <code>dup-before.json</code>, <code>dup-before2.json</code>, <code>dup-before-batch.json</code>, <code>dup-before2-batch.json</code>, <code>conflict-before.json</code>, <code>conflict-before2.json</code>, <code>conflict-before-batch.json</code>, <code>conflict-before2-batch.json</code>.</p>
+
+    <p><strong>Why this task exists (C1):</strong> The adapter is shared by seven callers. Task 1 measures two. The two most dangerous are <code>duplicate_merger.py:140</code> (merges irreversibly) and <code>conflict_detector.py:103</code> (pollutes graph). The judgement is collected, never applied — calls pure functions, records verdicts.</p>
+
+    <p><strong>Dangerous direction inverted:</strong> Linker fails by dropping edges (<code>edge→none</code>). Destructive callers fail by <strong>inventing</strong> them (<code>distinct→duplicate</code>, <code>none→conflict</code>). Task 4 caps the <strong>positive</strong> direction for these callers.</p>
+
+    <h3 id="task-2">Task 2: Fixed <code>_SYSTEM_PROMPT</code> Constant in argv (TDD)</h3>
+    <p class="eyebrow">5 steps | Modify 1 file (llm/claude_cli_adapter.py) + tests</p>
+
+    <p><strong>Consumes:</strong> All BEFORE legs must exist.</p>
+
+    <p><strong>Produces:</strong> Module constant <code>_SYSTEM_PROMPT: str</code>; argv gains <code>"--system-prompt", _SYSTEM_PROMPT</code>.</p>
+
+    <p class="eyebrow">Prompt-Text Constraint (Council Round 2, C2)</p>
+    <p>The prompt must not defer to instructions in the user message — the trust boundary note says transcript is UNTRUSTED. Every real caller puts load-bearing rules <em>after</em> the material (ingest appends "Now extract…" after &lt;/conversation&gt;; pair judges append rules after Memory A/B blocks). Saying the material "follows the task" demotes those rules to data. Instead, name the untrusted <em>REGIONS</em>: &lt;conversation&gt; tags and Memory A/B blocks. Keep everything outside binding.</p>
+
+    <h3 id="task-3">Task 3: Per-Call Usage/Cost Log Line (TDD)</h3>
+    <p class="eyebrow">5 steps | Modify 1 file + tests | Best-effort observability</p>
+
+    <p><strong>Produces:</strong> One <code>logger.info</code> per call, message prefix <code>claude -p usage:</code> with fields <code>in= out= cache_read= cache_write= cost_usd=</code>.</p>
+
+    <p class="statement">Placement matters: log line goes <em>before</em> the <code>is_error</code> branch. An error envelope is still billed — dropping it understates cost when provider fails.</p>
+
+    <h3 id="task-4">Task 4: AFTER Legs + Calibrated Quality Gate</h3>
+    <p class="eyebrow">8 steps | ~396 calls | Creates run_gate.py</p>
+
+    <p><strong>Consumes (unmodified):</strong> Task 1's and 1b's BEFORE outputs and <code>gate.py</code> helpers; <code>pair.jsonl</code>, <code>dup-pairs.jsonl</code>, <code>conflict-pairs.jsonl</code>.</p>
+
+    <p><strong>Produces:</strong> Pass/fail decision. Nothing downstream consumes files; Task 5 only runs when gate passes.</p>
+
+    <p class="eyebrow">Six A/B Arms (Council Round 2, C1)</p>
+    <table>
+      <thead>
+        <tr><th>Arm</th><th>Path</th><th>Dangerous Direction</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>linker single</td><td><code>_llm_classify_link</code></td><td>edge→none</td></tr>
+        <tr><td>linker batched</td><td><code>pair_batch.judge_pairs</code>, K=10 <em>(daemon path)</em></td><td>edge→none</td></tr>
+        <tr><td>dup single</td><td><code>_llm_check_duplicate</code></td><td>distinct→duplicate (destructive)</td></tr>
+        <tr><td>dup batched</td><td><code>judge_pairs</code>, K=10</td><td>distinct→duplicate (destructive)</td></tr>
+        <tr><td>conflict single</td><td><code>_llm_check_conflict</code></td><td>none→conflict</td></tr>
+        <tr><td>conflict batched</td><td><code>judge_pairs</code>, K=10</td><td>none→conflict</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Calibration note:</strong> The directional cap is NOT the more sensitive test when source class is large, but earns its place when sparse. At 15% <code>distinct</code> (18 source labels), a 35% flip puts cap 3× wider margin than agreement.</p>
+
+    <h3 id="task-5">Task 5: Full Verification + Live Measurement</h3>
+    <p class="eyebrow">8 steps | No code changes | Read from live system</p>
+
+    <p><strong>Consumes:</strong> A passing Task 4 gate (<code>GATE_EXIT=0</code>). Do not start otherwise.</p>
+
+    <p><strong>Produces:</strong> Measured numbers reported back. No commits.</p>
+
+    <p class="statement"><strong>Exit early on gate failures:</strong><br>
+    • <code>GATE_EXIT=1</code> → STOP, do not restart daemon, do not proceed to Task 5. Report which arm failed and criterion.<br>
+    • <code>GATE_EXIT=2</code> → STOP, do NOT read as soft pass. Judge too noisy, corpus degenerate, or cap lacks power. Report to André.
+    </p>
+  </section>
+
+  <section>
+    <h2 id="file-references">File References</h2>
+    <ul>
+      <li><strong>Design spec:</strong> <code>docs/superpowers/specs/2026-08-19-claude-cli-fixed-system-prompt-design.md</code></li>
+      <li><strong>Modified files (Tasks 2–3):</strong> <code>src/ormah/background/llm/claude_cli_adapter.py</code>, <code>tests/test_background/test_claude_cli_adapter.py</code></li>
+      <li><strong>Measurement artifacts (outside repo):</strong> <code>~/.cache/ormah-eval-20260819/</code></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2 id="implementation-notes">Implementation Notes</h2>
+    <p class="eyebrow">For subagents executing individual tasks</p>
+
+    <p>Each task file is self-contained and names its exact prerequisites and outputs. Read the overview first — especially Global Constraints — before starting your task.</p>
+
+    <p><strong>Measurement integrity:</strong> All BEFORE legs must run on unchanged code. The two BEFORE replicates define the noise floor; AFTER is compared against both and judged on the worse. This prevents a lucky pairing from carrying the arm.</p>
+
+    <p><strong>Sequential, never parallel:</strong> All baseline and AFTER legs run sequentially under identical machine conditions. Parallel runs add noise that makes the floor meaningless.</p>
+
+    <p><strong>Stop rules are hard:</strong> An A/B arm below the noise floor (<code>agree_rate < 0.90</code>), or a destructive caller with too few source labels for its cap, means the judge cannot measure — not that you should re-tune the threshold. Report to André; the fix is a different measurement design, not a code edit.</p>
+  </section>
+</article>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:a68a346e6d7df9926075772ca4627ac7dccdcf9e76c35f6df36925c3709ba185 -->
