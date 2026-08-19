@@ -51,6 +51,83 @@ def test_high_importance_stale_node_is_decayed(engine):
     assert _get_tier(engine, node_id) == "archival"
 
 
+def test_invalid_timestamp_skips_one_node_without_aborting_decay(engine, caplog):
+    """A malformed row must not prevent later valid nodes from decaying.
+
+    Removing the importance pre-gate exposes high-importance rows to timestamp
+    arithmetic. A quoted/imported timestamp without timezone information parses
+    successfully but cannot be subtracted from timezone-aware ``now``. Keep that
+    failure scoped to the affected node instead of aborting the whole batch.
+    """
+    poisoned_id, _ = engine.remember(CreateNodeRequest(
+        content="High-importance node with an invalid recency anchor",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Invalid timestamp",
+    ))
+    healthy_id, _ = engine.remember(CreateNodeRequest(
+        content="Valid stale node that must still be processed",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Valid timestamp",
+    ))
+
+    aware_old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    naive_old = (datetime.now() - timedelta(days=30)).isoformat()
+    engine.db.conn.execute(
+        "UPDATE nodes SET importance = 0.9, stability = 1.0, "
+        "last_review = NULL, last_accessed = ? WHERE id = ?",
+        (naive_old, poisoned_id),
+    )
+    engine.db.conn.execute(
+        "UPDATE nodes SET importance = 0.1, stability = 1.0, "
+        "last_review = ?, last_accessed = ? WHERE id = ?",
+        (aware_old, aware_old, healthy_id),
+    )
+    engine.db.conn.commit()
+
+    run_decay(engine)
+
+    assert _get_tier(engine, poisoned_id) == "working"
+    assert _get_tier(engine, healthy_id) == "archival"
+    assert "skipped node" in caplog.text
+    assert "Decay manager failed" not in caplog.text
+
+
+def test_decay_retrievability_respects_stability(engine):
+    """At the same age, low stability decays while high stability survives."""
+    low_id, _ = engine.remember(CreateNodeRequest(
+        content="Thirty-day-old low-stability memory",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Low stability",
+    ))
+    high_id, _ = engine.remember(CreateNodeRequest(
+        content="Thirty-day-old high-stability memory",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="High stability",
+    ))
+
+    old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 1.0, last_review = NULL, last_accessed = ? "
+        "WHERE id = ?",
+        (old, low_id),
+    )
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 100.0, last_review = NULL, last_accessed = ? "
+        "WHERE id = ?",
+        (old, high_id),
+    )
+    engine.db.conn.commit()
+
+    run_decay(engine)
+
+    assert _get_tier(engine, low_id) == "archival"
+    assert _get_tier(engine, high_id) == "working"
+
+
 def test_accumulated_access_and_edges_do_not_pin_a_node_to_working(engine):
     """The reported case, driven end-to-end: 50 accesses + 4 edges on a stale
     hub node make the real importance_scorer compute importance ~= 0.5892

@@ -52,9 +52,14 @@ def run_decay(engine) -> None:
             anchor_str = row["last_review"] or row["last_accessed"]
             try:
                 anchor = datetime.fromisoformat(anchor_str)
+                days_since = max((now - anchor).total_seconds() / 86400, 0.001)
             except (ValueError, TypeError):
+                logger.warning(
+                    "Decay manager skipped node %s with invalid recency anchor %r",
+                    row["id"][:8],
+                    anchor_str,
+                )
                 continue
-            days_since = max((now - anchor).total_seconds() / 86400, 0.001)
             retrievability = math.exp(-days_since / stability)
 
             if retrievability >= r_threshold:
