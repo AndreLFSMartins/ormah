@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design — Issue #221: bound stability reinforcement and add a per-day cooldown</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">Design — Issue #221: bound stability reinforcement and add a per-day cooldown</div>
+  <a href="#problem">Problem</a>
+  <a href="#decision">Decision (from #191)</a>
+  <a href="#changes">Changes</a>
+  <a href="#changes-1-lifecycle" class="lvl-3">1. New module src/ormah/lifecycle.py</a>
+  <a href="#changes-2-touch-access" class="lvl-3">2. src/ormah/engine/memory_engine.py — _touch_access</a>
+  <a href="#changes-3-decay-manager" class="lvl-3">3. src/ormah/background/decay_manager.py</a>
+  <a href="#changes-4-config" class="lvl-3">4. src/ormah/config.py</a>
+  <a href="#changes-5-lifecycle-version" class="lvl-3">5. Lifecycle-model version</a>
+  <a href="#interaction">Interaction with #220 and #222 (neither landed)</a>
+  <a href="#out-of-scope">Out of scope</a>
+  <a href="#testing">Testing</a>
+  <a href="#testing-lifecycle-unit" class="lvl-3">Lifecycle.py unit tests</a>
+  <a href="#testing-engine" class="lvl-3">Engine tests</a>
+  <a href="#testing-decay" class="lvl-3">Decay tests</a>
+  <a href="#testing-importance-anchor" class="lvl-3">Importance-anchor test — the lag must be ≥ 7 days, and 30 is the value to use</a>
+  <a href="#testing-version" class="lvl-3">Version tests</a>
+  <a href="#testing-config" class="lvl-3">Config tests</a>
+  <a href="#docs">Docs</a>
+  <a href="#fork-workflow">Fork workflow</a>
+</nav>
+<main>
+<div class="eyebrow">Issue #221</div>
+
+<div class="statement">Bound stability reinforcement and add a per-day cooldown — fixing unbounded spacing, same-session compounding, and underflow crashes by capping the reinforcement step and introducing a cooldown gate.</div>
+
+<div class="meta">
+  <span class="tag">Design</span>
+  <span class="tag">Core engine</span>
+  <a href="https://github.com/r-spade/ormah/issues/221" target="_blank">GitHub issue</a>
+  <span class="divider">—</span>
+  Decision from <a href="https://github.com/r-spade/ormah/issues/191">#191</a> (closed) &middot; Landing: #220 (PR #234, open) → #222 (PR #235, open) → <strong>#221</strong> → #223
+</div>
+
+<h2 id="problem">Problem</h2>
+
+<p>The <code>_touch_access</code> method in <code>src/ormah/engine/memory_engine.py:1936</code> grows stability with an unbounded spacing factor. Given the formula:</p>
+
+<pre><code class="language-python">retrievability = math.exp(-days_since / node.stability)
+new_stability = node.stability * self.settings.fsrs_stability_growth * (retrievability ** -0.2)</code></pre>
+
+<p>Three defects follow:</p>
+
+<ol>
+  <li><strong>Unbounded spacing.</strong> As <code>R → 0</code>, <code>R^-0.2 → ∞</code>. An <code>S=1</code> node touched after 30 days gets <code>R^-0.2 = 403.43</code>, so one event can take it from <code>S=1</code> to the <code>365</code> cap.</li>
+  <li><strong>Same-session compounding.</strong> The <code>days_since >= 0.001</code> floor lets ten immediate touches produce <code>1.5^10 ≈ 57×</code> growth.</li>
+  <li><strong>Underflow crash.</strong> For <code>t/S > ~745</code>, <code>math.exp(-t/S)</code> underflows to <code>0.0</code> and <code>0.0 ** -0.2</code> raises <code>ZeroDivisionError</code> (verified: <code>ZeroDivisionError: 0.0 cannot be raised to a negative power</code>). A node with <code>S = 0.5</code> untouched for 10,000 days reaches that state.</li>
+</ol>
+
+<p>Separately, <code>exp(-t/S)</code> is written out three times — <code>memory_engine.py:1946</code>, <code>decay_manager.py:57</code>, <code>importance_scorer.py:84</code> — so a curve change means editing three call sites that can silently diverge.</p>
+
+<h2 id="decision">Decision (from #191)</h2>
+
+<p>The formula centralizes and caps the reinforcement step:</p>
+
+<pre><code class="language-text">R       = exp(-t / S)                              # curve unchanged
+spacing = min(R^-0.2, fsrs_spacing_cap)
+S'      = min(S × (1 + g × S^-w × spacing), fsrs_max_stability)
+g = 0.5   w = 0.5                                  # initial policy, configurable, not fitted</code></pre>
+
+<p>At most <strong>one numeric stability increase per node per day</strong>. Every use still advances the recency/decay anchor, so the two timestamps must move independently.</p>
+
+<p>Centralize the lifecycle math instead of duplicating formulas, and replace the boolean migration flag with an integer lifecycle-model version.</p>
+
+<p>Arithmetic verified before writing this spec (<code>/usr/bin/python3</code>, constants above):</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Acceptance criterion</th>
+      <th>Computed</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>S=1</code>, 30 days</td>
+      <td><code>spacing = 2.0</code> → <code>S' = 2.0</code> exactly</td>
+    </tr>
+    <tr>
+      <td>Closely spaced updates <code>S=1 → 365</code></td>
+      <td><strong>74</strong> updates (<code>t=1d</code> and <code>spacing=1</code> both give 74)</td>
+    </tr>
+    <tr>
+      <td>Old-node spacing</td>
+      <td><code>t/S = 20000</code> → <code>2.0</code>, no exception</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="changes">Changes</h2>
+
+<h3 id="changes-1-lifecycle">1. New module <code>src/ormah/lifecycle.py</code></h3>
+
+<p>Pure functions, no I/O and no DB access, at the package root so <code>engine/</code> and <code>background/</code> both import it without either depending on the other.</p>
+
+<pre><code class="language-python">def retrievability(days_since: float, stability: float) -> float
+def spacing_factor(days_since: float, stability: float, cap: float) -> float
+def reinforced_stability(stability: float, days_since: float, *, growth_factor: float,
+                         growth_exponent: float, spacing_cap: float,
+                         max_stability: float, initial_stability: float) -> float
+def reinforcement_due(last_review: datetime | None, now: datetime,
+                      cooldown_days: float) -> bool</code></pre>
+
+<p class="callout"><strong>Underflow (AC2).</strong> <code>spacing_factor</code> never computes <code>R</code> and then raises it to a negative power. <code>R^-0.2 == exp(0.2 × t/S)</code> identically, so the helper works on the exponent directly and returns <code>cap</code> as soon as <code>0.2 × t/S >= log(cap)</code> — <code>math.exp</code> is never called with a large argument, and no intermediate underflows. Finite for any age.</p>
+
+<p class="callout"><strong>Zero stability.</strong> <code>Node.stability</code> is <code>Field(ge=0.0)</code>, so <code>S = 0</code> is representable and <code>exp(-t/0)</code> raises. Every helper falls back to <code>initial_stability</code> when <code>stability</code> is falsy. (#220 adds an equivalent guard at the same site; see <em>Interaction with #220</em> below.)</p>
+
+<p>Rounding stays as today: <code>round(min(new_stability, max_stability), 2)</code>.</p>
+
+<h3 id="changes-2-touch-access">2. <code>src/ormah/engine/memory_engine.py</code> — <code>_touch_access</code></h3>
+
+<p>The inline math goes away. The function becomes:</p>
+
+<ol>
+  <li>Always: <code>last_accessed = now</code>, <code>access_count += 1</code>.</li>
+  <li>Only when <code>lifecycle.reinforcement_due(node.last_review, now, cooldown)</code>: <code>stability = lifecycle.reinforced_stability(...)</code> and <code>last_review = now</code>.</li>
+  <li>Write both disk and DB, as today.</li>
+</ol>
+
+<p>The method also becomes <code>@_serialized_memory_operation</code> (council round 3). Step 2 is a check-then-write pair on <code>last_review</code>, and the paths that reach it — <code>recall_node</code>, <code>recall_search_structured</code>, <code>recall_search</code> — carry no such decorator, unlike <code>remember</code>/<code>update</code>. Two concurrent recalls on the FastAPI threadpool would both read a stale <code>last_review</code>, both conclude they are off cooldown, and both bump: the cooldown would hold per session and fail under concurrency. <code>_memory_operation_lock</code> is an <code>RLock</code>, so the call sites already holding it re-enter safely, and taking it here covers the Markdown write and the DB write as one unit — which a conditional <code>UPDATE … WHERE last_review < ?</code> would not, since the file store is the source of truth.</p>
+
+<p><code>access_count</code> keeps incrementing on every call — the cooldown governs the <em>numeric stability update</em>, which is what the issue bounds. Splitting surfacing from confirmed use is #220's job, not this one.</p>
+
+<p>The five call sites (<code>memory_engine.py:646, 775, 811, 892, 938</code>) are untouched.</p>
+
+<h3 id="changes-3-decay-manager">3. <code>src/ormah/background/decay_manager.py</code></h3>
+
+<p><code>math.exp(-days_since / stability)</code> is replaced by <code>lifecycle.retrievability(...)</code>, and the anchor is <strong>inverted</strong> from <code>last_review or last_accessed</code> to <code>last_accessed or last_review</code>.</p>
+
+<p>The stored <code>stability</code> is passed <strong>raw</strong>, with <code>fallback_stability=settings.fsrs_initial_stability</code> — the same fallback reinforcement uses. The current code pre-coerces <code>stability</code> to a literal <code>1.0</code> when falsy; keeping that while reinforcement falls back to the configured value is how two paths that claim to share one implementation silently disagree (council round 3). <code>Node.stability</code> is <code>Field(ge=0.0)</code>, so <code>0</code> is a representable state: with <code>fsrs_initial_stability = 30</code>, a seven-day-old zero-stability node reads <code>R ≈ 0.79</code> under the shared fallback and <code>R ≈ 0.0009</code> under the hardcoded one — the difference between surviving and being archived.</p>
+
+<p><strong>Rationale:</strong> with the cooldown, <code>last_review</code> can lag the last use by up to one cooldown period. Anchoring decay on it would let an actively used node look stale — the AC "every confirmed use still advances its recency/decay anchor" requires the use timestamp. The two-way fallback is kept so a row missing either column still decays instead of being skipped.</p>
+
+<p><code>importance_scorer.py:81-84</code> receives <strong>the anchor flip only</strong> — not the shared helper. See <em><a href="#out-of-scope">Out of scope</a></em> for why it was originally excluded, what the council review found, and why the formula there must be left alone.</p>
+
+<h3 id="changes-4-config">4. <code>src/ormah/config.py</code></h3>
+
+<p><strong>Removed:</strong> <code>fsrs_stability_growth</code> (today <code>1.5</code>, a <em>base multiplier</em>). The new <code>g</code> is an <em>additive</em> term with a different meaning; reusing the name would silently reinterpret any existing <code>ORMAH_FSRS_STABILITY_GROWTH</code> value. <code>model_config</code> sets <code>extra: "ignore"</code>, so an old <code>.env</code> carrying the removed key still loads.</p>
+
+<p><strong>Added,</strong> with validators:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Default</th>
+      <th>Validation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>fsrs_growth_factor</code></td>
+      <td><code>0.5</code></td>
+      <td>finite, <code>&gt; 0</code></td>
+    </tr>
+    <tr>
+      <td><code>fsrs_growth_exponent</code></td>
+      <td><code>0.5</code></td>
+      <td>finite, <code>&gt; 0</code></td>
+    </tr>
+    <tr>
+      <td><code>fsrs_spacing_cap</code></td>
+      <td><code>2.0</code></td>
+      <td>finite, <code>&gt;= 1.0</code></td>
+    </tr>
+    <tr>
+      <td><code>fsrs_reinforcement_cooldown_days</code></td>
+      <td><code>1.0</code></td>
+      <td>finite, <code>&gt;= 0</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<p><code>fsrs_growth_factor</code> and <code>fsrs_growth_exponent</code> join the existing <code>_fsrs_positive</code> validator; the other two get their own. A new <code>_fsrs_finite</code> validator covers all four plus the pre-existing <code>fsrs_initial_stability</code> and <code>fsrs_max_stability</code> — council finding I2: none of the bounds checks reject NaN (<code>v <= 0</code> is False for it) and infinity satisfies them outright, so <code>ORMAH_FSRS_GROWTH_FACTOR=nan</code> would propagate NaN into <code>stability</code> and into the Markdown frontmatter.</p>
+
+<h3 id="changes-5-lifecycle-version">5. Lifecycle-model version</h3>
+
+<p><code>meta.fsrs_migrated</code> (<code>'1'</code> / absent) is replaced by <code>meta.lifecycle_model_version</code>, an integer stored store-wide in the existing <code>meta</code> table (<code>src/ormah/index/schema.sql:67</code>).</p>
+
+<p><code>_migrate_fsrs</code> in <code>memory_engine.py:159</code> becomes version-aware:</p>
+
+<ul>
+  <li>New key absent, <code>fsrs_migrated = '1'</code> present → backfill version <code>1</code>, skip the seed.</li>
+  <li>New key absent, <code>fsrs_migrated</code> absent, but some node carries <code>last_review</code> → version <code>1</code>, skip the seed.</li>
+  <li>New key absent, <code>fsrs_migrated</code> absent, no node carries <code>last_review</code> → run the <code>access_count</code> seed once, as today.</li>
+  <li>Key present but unreadable → version <code>1</code> (fail closed), skip the seed.</li>
+</ul>
+
+<p>Both keys are written together, so a rollback to a binary that only knows <code>fsrs_migrated</code> does not reseed a store built under #221.</p>
+
+<p class="callout warn"><strong>Downgrade is not supported</strong> (council round 3; decision: André, 2026-08-16). The dual write stops a <em>reseed</em>; it does not stop the old binary from <em>writing</em>. Rolled back, that binary keeps applying the unbounded formula to <code>stability</code> while <code>lifecycle_model_version = '2'</code> stays untouched — it has never heard of the key. The next upgrade reads <code>2</code>, returns early, and certifies old-model values as bounded-model values: <code>S=1</code> reinforced over 30 days lands near the old <code>365</code> ceiling instead of <code>2.0</code>, and decay runs on that for months. The version can only record which model wrote a value for as long as every writer respects it, and a pre-#221 binary is not such a writer. Detecting an old-model write needs durable per-node provenance, a <code>v2 → old binary → v2</code> integration test and a recovery policy for contaminated values — out of scope here, its own issue if the policy proves insufficient. Nothing in this issue, its PR body or its docs may describe the dual-key write as making rollback safe.</p>
+
+<p>The <code>last_review</code> condition comes from council finding C3: <code>backup.py:331-334</code> excludes <code>index.db</code> from every backup, so a fresh-device restore or a deleted index arrives with an empty <code>meta</code> table and would otherwise be mistaken for a pre-FSRS store — running the seed over valid stabilities and rewriting the Markdown that holds them. <code>last_review</code> is the durable signal that survives this: it is written to the frontmatter (<code>markdown.py:72-73</code>) and restored on rebuild (<code>builder.py:161</code>). Treating an unreadable version as <code>0</code> was the same mistake in miniature — skipping a needed seed is inert, running an unneeded one is destructive.</p>
+
+<ul>
+  <li>Version <code>&lt; 2</code> → write <code>2</code> (bounded reinforcement).</li>
+</ul>
+
+<p>Version <code>2</code> records <em>which model produced the stored stabilities</em>; it does not rescale them. Rescaling is explicitly out of scope — #191 rules that a future curve migration must preserve each node's archival deadline rather than apply a constant factor, and this issue introduces no curve change to migrate.</p>
+
+<h2 id="interaction">Interaction with #220 and #222 (neither landed)</h2>
+
+<p>Both PRs are open against <code>r-spade:main</code>; this island is cut from <code>upstream/main</code>, so neither is present here.</p>
+
+<ul>
+  <li><strong>#220</strong> renames <code>_touch_access</code> → <code>_record_confirmed_use</code> and adds a zero-stability guard in the same block. Because this design moves the math into <code>lifecycle.py</code>, the rebase conflict is confined to the function signature and a few lines of its body — the helper calls survive as written. #220's local guard becomes redundant with <code>lifecycle.py</code>'s, and the helper's version wins on rebase.</li>
+  <li><strong>#222</strong> rewrites <code>importance_scorer.py</code>'s recency signal to its own half-life, removing <code>stability</code> from that job entirely.</li>
+</ul>
+
+<p class="callout"><strong>Accepted consequence, stated explicitly:</strong> without #220 in this branch, <code>_touch_access</code> is still called from surfacing paths. The cooldown therefore also throttles surfacing-driven inflation. That is the desired direction, but it changes real-node numbers before #220 lands.</p>
+
+<h2 id="out-of-scope">Out of scope</h2>
+
+<ul>
+  <li><del><code>importance_scorer.py</code></del> — <strong>moved into scope by the council review (2026-08-16, finding C2).</strong> The original reasoning was that the AC names only the decay manager and the reinforcement path, and that #222 already decouples that job from stability. That missed a defect this issue creates: the scorer reads <code>last_review or last_accessed</code> with weight <code>0.33</code> (<code>importance_scorer.py:81-84</code>, <code>config.py:144</code>), and the cooldown introduced here is exactly what makes <code>last_review</code> lag. An <code>S=1</code> node used today but reinforced yesterday sees its recency term fall from <code>~1.0</code> to <code>~0.37</code> — about <code>0.21</code> off importance, enough to cross the <code>0.5</code> gate and demote a memory in active use. The fix is the same anchor flip applied to the decay manager — <strong>and only that</strong>. Council round 2 (2026-08-16, both peers, <code>high</code>) rejected the first draft, which also routed the scorer through <code>lifecycle.retrievability</code> and read <code>r["stability"]</code>. Verified against <code>fix/222-retrievability-only-decay</code>: that branch selects <code>id, access_count, last_accessed, importance, last_review</code> — no <code>stability</code> — and computes <code>_recency_signal(days_ago, half_life)</code> on importance's own clock. Post-rebase the draft would either raise an uncaught <code>IndexError</code> (<code>sqlite3.Row</code> on a missing column; <code>IndexError</code> is not a subclass of <code>ValueError</code> or <code>TypeError</code>) and abort <code>run_importance_scoring</code> for every node, or reinstate FSRS in a job #222 deliberately removed it from. The earlier claim of orthogonality with #222 was wrong. Both timestamp columns are selected on either version, so the anchor flip alone applies cleanly.</li>
+  <li><strong>The same-device restore path</strong> — <code>full_rebuild</code> preserves <code>meta</code> and <code>reload_restored_graph</code> never calls <code>_migrate_fsrs</code>, so a pre-FSRS backup restored onto a migrated install skips the seed. Found by both peers in council round 2 (<code>high</code>). It is a <strong>pre-existing</strong> defect — <code>_migrate_fsrs</code> already returns early on <code>if fsrs_migrated: return</code> on <code>a28837b</code> — so it is tracked as its own issue — <code>r-spade/ormah#236</code> — rather than widening this one (decision: André, 2026-08-16). What this issue owes: not claiming the C3 <code>last_review</code> guard covers restore in general. It covers the empty-<code>meta</code> case only.</li>
+  <li><code>tier_manager.py</code>, promotion floors, and the initial-lease work — #223.</li>
+  <li>Any rescale or backfill of existing <code>stability</code> values.</li>
+  <li>Splitting surfacing from confirmed use — #220.</li>
+</ul>
+
+<h2 id="testing">Testing</h2>
+
+<p>TDD, one test per acceptance criterion, in <code>tests/test_engine/test_lifecycle.py</code> (new) plus edits to the existing decay and engine suites.</p>
+
+<h3 id="testing-lifecycle-unit">Lifecycle.py unit tests</h3>
+
+<ul>
+  <li><code>S=1</code>, <code>t=30d</code> → <code>reinforced_stability</code> returns exactly <code>2.0</code> (AC1).</li>
+  <li><code>t/S = 20000</code> → <code>spacing_factor</code> returns <code>cap</code> and raises nothing (AC2).</li>
+  <li>Iterating <code>reinforced_stability</code> from <code>S=1</code> with <code>t=1d</code> reaches <code>365.0</code> in <strong>74</strong> steps, and each step's <em>ratio</em> <code>S'/S</code> is strictly smaller than the previous one — <code>1.61 → 1.45 → 1.36 → …</code> (AC3). Assert the ratio, <strong>not</strong> the absolute increment: the increment is <code>g·√S·spacing</code>, which <em>grows</em> with <code>S</code> (<code>0.61 → 0.72 → 0.83 → 0.95</code>, verified by execution). "Growth diminishes" is a statement about the relative step. An earlier draft of this spec asserted the opposite and would have produced a test that can never pass.</li>
+  <li><code>stability=0</code> → falls back to <code>initial_stability</code> instead of raising.</li>
+  <li><code>retrievability</code> matches <code>exp(-t/S)</code> on a table of known pairs, and is <code>&lt;= 1.0</code> for <code>t >= 0</code>.</li>
+</ul>
+
+<h3 id="testing-engine">Engine tests</h3>
+
+<ul>
+  <li>Ten <code>_touch_access</code> calls inside one day → <code>stability</code> and <code>last_review</code> change exactly once; <code>last_accessed</code> advances on all ten and <code>access_count</code> reaches ten (AC4).</li>
+  <li>A call after the cooldown elapses → <code>stability</code> moves again.</li>
+  <li><strong>Two <code>_touch_access</code> calls on one node from two threads, released by a <code>threading.Barrier</code>, → one stability bump, both accesses counted (AC4 under concurrency).</strong> The sequential test above cannot see this: it is the interleaving that breaks the cooldown, and the recall paths that reach <code>_touch_access</code> are not serialized, so the interleaving is the production shape. The barrier is load-bearing — a bare thread pair can serialize by luck and green on broken code.</li>
+  <li><code>tests/test_engine/test_mutation_stamping.py:95</code> (<code>test_touch_access_does_not_advance_updated</code>) must still pass unchanged.</li>
+</ul>
+
+<h3 id="testing-decay">Decay tests</h3>
+
+<p class="callout"><strong>Important:</strong> every one of these must set <code>importance = 0.2</code> first. Council finding C1: <code>run_decay</code> skips a node when <code>importance >= decay_importance_threshold</code>, and both the node default and the threshold are <code>0.5</code> with a <code>>=</code> gate, so a test at the default never reaches the retrievability code. The anchor test in particular must be observed <strong>failing</strong> on <code>a28837b</code> before the flip, or it proves nothing.</p>
+
+<ul>
+  <li>Same <code>(days_since, stability)</code> input produces the same <code>R</code> through <code>run_decay</code>'s path and through <code>lifecycle.retrievability</code> — one implementation, asserted numerically (AC5).</li>
+  <li>A node whose <code>last_accessed</code> is fresh but whose <code>last_review</code> is one cooldown old is <strong>not</strong> demoted (the inverted anchor).</li>
+  <li><strong>A <code>stability = 0</code> node last used seven days ago, with <code>fsrs_initial_stability = 30</code>, is not demoted.</strong> This is the only test that distinguishes the shared fallback from a hardcoded <code>1.0</code>: the two give <code>R ≈ 0.79</code> and <code>R ≈ 0.0009</code>, and the <code>0.3</code> decay threshold sits between them. At the default <code>fsrs_initial_stability = 1.0</code> the two are indistinguishable, so the non-default value is load-bearing, not decoration.</li>
+  <li>Existing <code>test_decay_manager.py</code> cases must stay green.</li>
+</ul>
+
+<h3 id="testing-importance-anchor">Importance-anchor test — the lag must be ≥ 7 days, and 30 is the value to use</h3>
+
+<p>Council round 2 caught the first draft using a 1-day lag with <code>approx(0.33, abs=0.02)</code>. Recomputed: after #222 the 14-day half-life turns a 1-day lag into <code>importance = 0.3141</code>, inside the <code>[0.3100, 0.3500]</code> window, so the test passes <strong>whether or not the anchor was flipped</strong> — a false green guarding the exact regression it exists to catch. At 30 days the old anchor yields <code>~0.075</code> post-#222 and <code>~0.0</code> pre-#222 (<code>exp(-30)</code> at <code>S=1</code>), so it is red under both formulas. That matters because this branch is written against <code>a28837b</code> and rebased onto #222.</p>
+
+<h3 id="testing-version">Version tests</h3>
+
+<ul>
+  <li>Store with <code>fsrs_migrated='1'</code> and no new key → backfills <code>lifecycle_model_version = 1</code>, does not re-seed, then advances to <code>2</code> (AC6).</li>
+  <li>Fresh store → seed runs once, version ends at <code>2</code>.</li>
+  <li>Store with no <code>meta</code> at all but a node carrying <code>last_review</code> (the rebuilt-index case) → stability untouched, version ends at <code>2</code>. Removing the guard must make this test report the seeded value instead.</li>
+  <li>Unreadable version → treated as migrated, seed does not run.</li>
+  <li><code>fsrs_migrated</code> is present after any migration path — this proves an older binary will not <strong>reseed</strong>, and nothing more. It is not a rollback-safety test; downgrade is unsupported.</li>
+</ul>
+
+<h3 id="testing-config">Config tests</h3>
+
+<ul>
+  <li>Each new knob rejects its invalid range (AC7).</li>
+  <li>Every lifecycle float rejects <code>nan</code>, <code>inf</code> and <code>-inf</code>, from the constructor and from the environment (council finding I2). Verified against the current code: <code>Settings</code> accepts both <code>nan</code> and <code>inf</code> today, because <code>v <= 0</code>, <code>v < 1</code> and <code>v < 0</code> are all False for NaN and infinity satisfies them outright.</li>
+  <li>An <code>.env</code> carrying the removed <code>fsrs_stability_growth</code> still loads (<code>extra: "ignore"</code>).</li>
+</ul>
+
+<p class="callout"><strong>Verification command.</strong> Run inside the worktree with its own venv: <code>./.venv/bin/python -m pytest tests/ -v</code>. A bare <code>python -m pytest</code> imports the <code>ormah</code> installed from <code>local-main</code> and produces a false green.</p>
+
+<h2 id="docs">Docs</h2>
+
+<ul>
+  <li><code>docs/12 - Configuration Reference.md</code> — remove <code>fsrs_stability_growth</code>, document the four new knobs (AC7).</li>
+  <li><code>docs/05 - Background Jobs.md</code> — decay's anchor description.</li>
+  <li><code>docs/01 - Data Model.md</code> — <code>last_accessed</code> vs <code>last_review</code> now move independently.</li>
+</ul>
+
+<h2 id="fork-workflow">Fork workflow</h2>
+
+<p>Per <code>FORK-WORKFLOW.md</code> Recipe A. The island already exists: <code>git worktree add -b fix/221-bounded-reinforcement ../ormah-wt-221 upstream/main</code> (gate verified: zero commits over the base at creation). Work happens in the worktree — this checkout stays on <code>local-main</code> and serves the running Beta. Push to <code>fork</code>, PR against <code>r-spade:main</code>.</p>
+
+<p>This spec and its plan live on <code>local-main</code> only: <code>docs/superpowers/</code> is in the pre-push <code>PROTECTED</code> allowlist, so committing them inside the island would block the push.</p>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:194b229665966efa62fd9babb336a774cf4a884418be81135198e00424a5ceae -->

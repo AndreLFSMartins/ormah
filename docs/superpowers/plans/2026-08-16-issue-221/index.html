@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bounded Stability Reinforcement (#221)</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">Bounded Stability Reinforcement (#221)</div>
+  <a href="#architecture">Architecture</a>
+  <a href="#tech-stack">Tech Stack</a>
+  <a href="#global-constraints">Global Constraints</a>
+  <a href="#setup">Setup (once, before Task 1)</a>
+  <a href="#file-structure">File Structure</a>
+  <a href="#task-order">Task Order</a>
+  <a href="#acceptance-criteria">Acceptance Criteria → Task Map</a>
+  <a href="#final-gate">Final Gate (after Task 6)</a>
+  <a href="#task-1-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-1-rationale" class="lvl-3">Rationale</a>
+  <a href="#task-1-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-2-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-2-rationale" class="lvl-3">Rationale</a>
+  <a href="#task-2-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-3-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-3-behavior" class="lvl-3">Behavior Contract</a>
+  <a href="#task-3-toctou" class="lvl-3">TOCTOU Without the Lock (council round 3, I1)</a>
+  <a href="#task-3-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-4-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-4-three-changes" class="lvl-3">Three Changes</a>
+  <a href="#task-4-why-importance-scorer-in-scope" class="lvl-3">Why importance_scorer Is Now In Scope (council finding C2)</a>
+  <a href="#task-4-anchor-flip-only" class="lvl-3">The Anchor Flip Is the ONLY Change (council round 2, C2)</a>
+  <a href="#task-4-why-existing-tests-pass" class="lvl-3">Why Existing Decay Tests Stay Green</a>
+  <a href="#task-4-why-new-tests-set-importance" class="lvl-3">Why Every New Decay Test Sets importance = 0.2 (council finding C1)</a>
+  <a href="#task-4-step-7-asymmetric-checks" class="lvl-3">Step 7: Two Asymmetric Checks</a>
+  <a href="#task-4-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-5-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-5-semantics" class="lvl-3">Semantics</a>
+  <a href="#task-5-downgrade-policy" class="lvl-3">Downgrade Is Not Supported (council round 3, C2; decision: André, 2026-08-16)</a>
+  <a href="#task-5-out-of-scope" class="lvl-3">Out of Scope (council round 2, both peers, high)</a>
+  <a href="#task-5-steps" class="lvl-3">Implementation Steps</a>
+  <a href="#task-6-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-6-scope-discipline" class="lvl-3">Scope Discipline</a>
+  <a href="#task-6-steps" class="lvl-3">Implementation Steps</a>
+</nav>
+<main>
+<section class="eyebrow">Implementation Plan</section>
+<h1><em>Bounded Stability Reinforcement</em> (#221)</h1>
+
+<p class="statement">Replace the unbounded FSRS stability update with a bounded, diminishing one, allow at most one numeric stability increase per node per day, and centralize the lifecycle math in a single module.</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="big">6</div>
+    <div class="label">Tasks</div>
+  </div>
+  <div class="metric">
+    <div class="big">2</div>
+    <div class="label">New modules</div>
+  </div>
+  <div class="metric">
+    <div class="big">4</div>
+    <div class="label">Config knobs</div>
+  </div>
+  <div class="metric">
+    <div class="big">7</div>
+    <div class="label">Acceptance criteria</div>
+  </div>
+</div>
+
+<h2 id="architecture">Architecture</h2>
+<p>A new pure module <code>src/ormah/lifecycle.py</code> owns every formula: retrievability, spacing, reinforced stability, and cooldown. <code>memory_engine._touch_access</code> and <code>background/decay_manager.run_decay</code> become thin callers. Four new config knobs replace <code>fsrs_stability_growth</code>. The boolean <code>meta.fsrs_migrated</code> flag becomes an integer <code>meta.lifecycle_model_version</code>.</p>
+
+<h2 id="tech-stack">Tech Stack</h2>
+<p>Python ≥3.11, pydantic-settings, pytest (<code>asyncio_mode = auto</code>), SQLite, ruff (line-length 100, py311).</p>
+
+<div class="callout">
+  <strong>Spec:</strong> <code>docs/superpowers/specs/2026-08-16-issue-221-bounded-reinforcement-design.md</code><br>
+  <strong>Issue:</strong> <a href="https://github.com/r-spade/ormah/issues/221">r-spade/ormah#221</a>
+</div>
+
+<h2 id="global-constraints">Global Constraints</h2>
+
+<ul>
+  <li><strong>Work only inside</strong> <code>/Users/andre/Documents/GitHub/Tools/ormah-wt-221</code> (branch <code>fix/221-bounded-reinforcement</code>, cut from <code>upstream/main</code> @ <code>a28837b</code>). Never edit <code>Tools/ormah</code> — it serves the running Beta.</li>
+  <li><strong>Verification command:</strong> <code>./.venv/bin/python -m pytest &lt;path&gt; -v</code> from the worktree root. A bare <code>python -m pytest</code> imports the <code>ormah</code> installed from <code>local-main</code> and reports a false green.</li>
+  <li><strong>Never commit</strong> anything under <code>docs/superpowers/</code>, <code>.council/</code>, <code>graphify-out/</code>, <code>CLAUDE.md</code>, <code>INSTRUCTIONS.md</code>, <code>SESSION_LOG.md</code>, <code>FORK-WORKFLOW.md</code> in this branch — the pre-push hook blocks the push.</li>
+  <li><strong>The formula is fixed by #191</strong> — do not tune it: <code>spacing = min(R^-0.2, cap)</code>, <code>S' = min(S × (1 + g × S^-w × spacing), max)</code>, with <code>g = 0.5</code>, <code>w = 0.5</code>, <code>cap = 2.0</code>, spacing exponent <code>0.2</code>.</li>
+  <li><strong>Verified target numbers</strong> (recompute if you change anything): <code>S=1</code> + 30 days → exactly <code>2.0</code>; <code>S=1</code> → <code>365.0</code> in exactly <strong>74</strong> closely spaced updates.</li>
+  <li>Line length 100, <code>ruff check src/ tests/</code> must pass.</li>
+  <li>Do not rescale existing <code>stability</code> values anywhere.</li>
+  <li><strong>Merge prerequisites, not just a preferred order:</strong> #220 (PR #234) and #222 (PR #235) must land before this one.</li>
+  <li><strong>Any new decay test must lower <code>importance</code> below <code>decay_importance_threshold</code>.</strong> Both the node default and the threshold are <code>0.5</code> and the gate is <code>>=</code>. See Task 4.</li>
+  <li><strong>The importance scorer gets the anchor flip and NOTHING else</strong> (council round 2, C2). Do not import <code>lifecycle</code> there. See Task 4 Step 5.</li>
+  <li><strong>The same-device restore bypass is OUT OF SCOPE</strong> (council round 2, both peers, <code>high</code>). See Task 5.</li>
+  <li><strong>A verification step that contradicts its own task is the failure mode of this plan.</strong> When you touch any task, re-read its verification steps.</li>
+  <li><strong>Downgrade below the new lifecycle model is UNSUPPORTED</strong> (council round 3, C2). See Task 5.</li>
+  <li><strong>The reinforcement cooldown must be serialized</strong> (council round 3, I1). See Task 3.</li>
+</ul>
+
+<h2 id="setup">Setup (once, before Task 1)</h2>
+
+<pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-221
+python3 -m venv .venv
+./.venv/bin/pip install -q -e ".[dev]"
+./.venv/bin/python -m pytest tests/test_background/test_decay_manager.py -v</code></pre>
+
+<p>Expected: the decay suite passes on unmodified <code>upstream/main</code>. That green is the baseline every later task compares against.</p>
+
+<h2 id="file-structure">File Structure</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>File</th>
+      <th>Responsibility</th>
+      <th>Task</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>src/ormah/lifecycle.py</code> (create)</td>
+      <td>All lifecycle math; no I/O, no DB, no settings object</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td><code>tests/test_lifecycle.py</code> (create)</td>
+      <td>Unit tests for the math (AC1, AC2, AC3)</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td><code>src/ormah/config.py</code> (modify)</td>
+      <td>Remove <code>fsrs_stability_growth</code>; add 4 knobs + validators</td>
+      <td>2</td>
+    </tr>
+    <tr>
+      <td><code>tests/test_config_fsrs.py</code> (create)</td>
+      <td>Validator coverage (AC7)</td>
+      <td>2</td>
+    </tr>
+    <tr>
+      <td><code>src/ormah/engine/memory_engine.py:1936</code> (modify)</td>
+      <td><code>_touch_access</code> → cooldown + helper call (AC4)</td>
+      <td>3</td>
+    </tr>
+    <tr>
+      <td><code>tests/test_engine/test_reinforcement_cooldown.py</code> (create)</td>
+      <td>Cooldown behavior</td>
+      <td>3</td>
+    </tr>
+    <tr>
+      <td><code>src/ormah/background/decay_manager.py</code> (modify)</td>
+      <td>Shared retrievability + inverted anchor (AC5)</td>
+      <td>4</td>
+    </tr>
+    <tr>
+      <td><code>src/ormah/background/importance_scorer.py</code> (modify)</td>
+      <td>Anchor flip <strong>only</strong></td>
+      <td>4</td>
+    </tr>
+    <tr>
+      <td><code>tests/test_background/test_importance_scorer.py</code> (modify)</td>
+      <td>Recency ignores lagging <code>last_review</code></td>
+      <td>4</td>
+    </tr>
+    <tr>
+      <td><code>src/ormah/engine/memory_engine.py:159</code> (modify)</td>
+      <td>Integer lifecycle-model version (AC6)</td>
+      <td>5</td>
+    </tr>
+    <tr>
+      <td><code>docs/12 - Configuration Reference.md</code>, <code>docs/05</code>, <code>docs/01</code> (modify)</td>
+      <td>Config + behavior docs (AC7)</td>
+      <td>6</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="task-order">Task Order</h2>
+
+<ol>
+  <li><strong>Task 1</strong> — <code>lifecycle.py</code> + unit tests. No dependencies.</li>
+  <li><strong>Task 2</strong> — config knobs. No dependencies.</li>
+  <li><strong>Task 3</strong> — <code>_touch_access</code>. Needs Tasks 1 and 2.</li>
+  <li><strong>Task 4</strong> — <code>decay_manager</code>. Needs Task 1.</li>
+  <li><strong>Task 5</strong> — lifecycle-model version. Independent, but land after 3 so the version marks a store that already runs the new curve.</li>
+  <li><strong>Task 6</strong> — docs. Needs Tasks 2–5.</li>
+</ol>
+
+<h2 id="acceptance-criteria">Acceptance Criteria → Task Map</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>AC</th>
+      <th>Task</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>S=1</code> after 30 days → <code>1 → 2</code></td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td>Spacing finite for extremely old nodes, no underflow failure</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td>Diminishing growth; ~74 updates from <code>S=1</code> to the cap</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td>Ten uses in one day → one numeric update, latest use time recorded</td>
+      <td>3</td>
+    </tr>
+    <tr>
+      <td>Decay manager and reinforcement share one retrievability implementation</td>
+      <td>1, 4</td>
+    </tr>
+    <tr>
+      <td>Lifecycle-model versioning represents more than migrated/not-migrated</td>
+      <td>5</td>
+    </tr>
+    <tr>
+      <td>Config validation, tests, and configuration docs cover every new knob/state</td>
+      <td>2, 6</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="final-gate">Final Gate (after Task 6)</h2>
+
+<pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-221
+./.venv/bin/python -m pytest tests/ -v
+./.venv/bin/python -m ruff check src/ tests/
+git log --oneline upstream/main..HEAD</code></pre>
+
+<p>The <code>git log</code> must show only the commits from this plan. Anything else means the island was cut from the wrong base.</p>
+
+<hr>
+
+<div class="phase p-o"><span class="pn">1</span> The Lifecycle Module</div>
+
+<p>Create the foundational pure module that owns all lifecycle math: retrievability, spacing, reinforced stability, and cooldown detection. This module has no I/O, no database access, and no settings dependency — it is a computational layer that Tasks 3 and 4 call to keep the curve consistent.</p>
+
+<h3 id="task-1-interfaces">Interfaces</h3>
+
+<ul>
+  <li>Consumes: nothing (pure stdlib module).</li>
+  <li>Produces, for Tasks 3 and 4:
+    <ul>
+      <li><code>retrievability(days_since, stability, *, fallback_stability=1.0) -> float</code></li>
+      <li><code>spacing_factor(days_since, stability, cap, *, fallback_stability=1.0) -> float</code></li>
+      <li><code>reinforced_stability(stability, days_since, *, growth_factor, growth_exponent, spacing_cap, max_stability, initial_stability) -> float</code></li>
+      <li><code>reinforcement_due(last_review, now, cooldown_days) -> bool</code></li>
+    </ul>
+  </li>
+</ul>
+
+<h3 id="task-1-rationale">Rationale</h3>
+
+<p><code>exp(-t/S)</code> is currently written out in three files. A curve change means three edits that can silently diverge. Centralizing the math lets Tasks 3 and 4 stay small and keeps the rebase conflict with <a href="https://github.com/r-spade/ormah/pull/234">#220</a> (which renames <code>_touch_access</code>) down to a function signature.</p>
+
+<h3 id="task-1-steps">Implementation Steps</h3>
+
+<ol>
+  <li>Write failing tests in <code>tests/test_lifecycle.py</code>.</li>
+  <li>Run tests to verify they fail.</li>
+  <li>Write the module at <code>src/ormah/lifecycle.py</code>.</li>
+  <li>Run tests to verify they pass (expect 13 passed).</li>
+  <li>Lint the module and tests.</li>
+  <li>Commit with message: <code>feat(lifecycle): centralize retrievability, spacing and bounded reinforcement (#221)</code></li>
+</ol>
+
+<hr>
+
+<div class="phase p-b"><span class="pn">2</span> Configuration Knobs</div>
+
+<p>Replace the single <code>fsrs_stability_growth</code> multiplier with four knobs that control the bounded reinforcement curve. These parameters replace a base multiplier that could silently reinterpret old <code>.env</code> values.</p>
+
+<h3 id="task-2-interfaces">Interfaces</h3>
+
+<ul>
+  <li>Consumes: nothing.</li>
+  <li>Produces, for Tasks 3 and 4 — four <code>Settings</code> fields:
+    <ul>
+      <li><code>fsrs_growth_factor: float = 0.5</code></li>
+      <li><code>fsrs_growth_exponent: float = 0.5</code></li>
+      <li><code>fsrs_spacing_cap: float = 2.0</code></li>
+      <li><code>fsrs_reinforcement_cooldown_days: float = 1.0</code></li>
+    </ul>
+  </li>
+  <li>Removes: <code>fsrs_stability_growth</code> (its only reader, <code>memory_engine.py:1947</code>, is rewritten in Task 3).</li>
+</ul>
+
+<h3 id="task-2-rationale">Rationale</h3>
+
+<p><code>fsrs_stability_growth = 1.5</code> is a <em>base multiplier</em> (<code>S × 1.5 × …</code>). The new <code>g = 0.5</code> is an <em>additive</em> term (<code>S × (1 + g × …)</code>). Keeping the name would silently reinterpret any existing <code>ORMAH_FSRS_STABILITY_GROWTH</code> value.</p>
+
+<h3 id="task-2-steps">Implementation Steps</h3>
+
+<ol>
+  <li>Write failing tests in <code>tests/test_config_fsrs.py</code>.</li>
+  <li>Run tests to verify they fail.</li>
+  <li>Replace the field block at <code>src/ormah/config.py:89-93</code>.</li>
+  <li>Update validators at <code>src/ormah/config.py:564-569</code>.</li>
+  <li>Run tests to verify they pass (expect 12 passed).</li>
+  <li>Confirm exactly two hits on <code>grep -rn "fsrs_stability_growth" src/ tests/ eval/</code> (both staying).</li>
+  <li>Lint and commit with message: <code>config(lifecycle): bounded-reinforcement knobs replace fsrs_stability_growth (#221)</code></li>
+</ol>
+
+<hr>
+
+<div class="phase p-g"><span class="pn">3</span> Cooldown and Bounded Reinforcement</div>
+
+<p>Introduce the per-node, per-day cooldown on numeric stability updates. Every use still advances <code>last_accessed</code> and the decay anchor, but only one reinforcement per cooldown window moves <code>stability</code>. Serialization is mandatory because the cooldown is a check-then-write pair and the recall paths are not themselves serialized.</p>
+
+<h3 id="task-3-interfaces">Interfaces</h3>
+
+<ul>
+  <li>Consumes: <code>ormah.lifecycle.reinforcement_due</code> and <code>ormah.lifecycle.reinforced_stability</code> (Task 1); the four <code>Settings</code> fields from Task 2.</li>
+  <li>Produces: no new public names. <code>_touch_access</code> keeps its signature and its five call sites stay untouched.</li>
+</ul>
+
+<h3 id="task-3-behavior">Behavior Contract</h3>
+
+<p>Every call advances <code>last_accessed</code> and <code>access_count</code>. Only a call that is off cooldown changes <code>stability</code> and <code>last_review</code>.</p>
+
+<div class="callout warn">
+  <strong>Note on #220:</strong> PR #234 renames this method to <code>_record_confirmed_use</code> and adds its own zero-stability guard. On rebase, keep the new name and this task's body — the guard now lives in <code>lifecycle.py</code>.
+</div>
+
+<h3 id="task-3-toctou">TOCTOU Without the Lock (council round 3, I1)</h3>
+
+<p><code>reinforcement_due</code> reads <code>last_review</code> off the in-memory node and the new <code>last_review</code> is written several statements later. The read and the write are not atomic, and the paths that reach <code>_touch_access</code> are <strong>not serialized</strong>. Two concurrent recalls on the FastAPI threadpool load the same node, both see <code>due=True</code>, and both write a bump.</p>
+
+<p>The fix is the <code>@_serialized_memory_operation</code> decorator: <code>_memory_operation_lock</code> is a <code>threading.RLock</code> (<code>memory_engine.py:93</code>), so it is <strong>reentrant</strong> — decorating <code>_touch_access</code> cannot deadlock at the call sites that already hold it. It also covers the Markdown write and the DB write as one unit.</p>
+
+<h3 id="task-3-steps">Implementation Steps</h3>
+
+<ol>
+  <li>Write failing tests in <code>tests/test_engine/test_reinforcement_cooldown.py</code>.</li>
+  <li>Run tests to verify failures: unbounded growth, no cooldown, zero-stability division errors, concurrent compounding.</li>
+  <li>Add the import <code>from ormah import lifecycle</code> to <code>memory_engine.py</code>.</li>
+  <li>Rewrite <code>_touch_access</code> at <code>memory_engine.py:1936-1960</code> — add <code>@_serialized_memory_operation</code> decorator.</li>
+  <li>Run the new tests (expect 6 passed).</li>
+  <li>Verify the decorator is carrying the concurrency test by removing it, re-running 5 times, and seeing it go red.</li>
+  <li>Lint and commit with message: <code>fix(lifecycle): bound stability growth and allow one update per node per day (#221)</code></li>
+</ol>
+
+<hr>
+
+<div class="phase p-o"><span class="pn">4</span> Decay Uses Shared Retrievability; Importance Gets the Anchor Flip</div>
+
+<div class="callout">
+  <strong>Title corrected in council round 3 (C1).</strong> The old title described the <em>rejected</em> first draft. Importance keeps its own recency formula; only the anchor moves. The old Step 7 gate demanded a state that Step 5 forbids; that is fixed too.
+</div>
+
+<h3 id="task-4-interfaces">Interfaces</h3>
+
+<ul>
+  <li>Consumes: <code>ormah.lifecycle.retrievability</code> (Task 1).</li>
+  <li>Produces: no new names. <code>run_decay(engine) -> None</code> is unchanged.</li>
+</ul>
+
+<h3 id="task-4-three-changes">Three Changes</h3>
+
+<ol>
+  <li>The inline <code>math.exp(-days_since / stability)</code> in <code>decay_manager</code> becomes <code>lifecycle.retrievability(...)</code> — shared with the reinforcement path (AC5).</li>
+  <li>The decay anchor flips from <code>last_review or last_accessed</code> to <code>last_accessed or last_review</code>. With the cooldown, <code>last_review</code> can lag the last use by a full cooldown window; anchoring decay on it would let an actively used node look stale.</li>
+  <li><strong><code>importance_scorer.py</code> gets the same anchor flip — and nothing else.</strong> This file was declared out of scope in the original spec; the council review showed why that was wrong.</li>
+</ol>
+
+<h3 id="task-4-why-importance-scorer-in-scope">Why <code>importance_scorer</code> Is Now In Scope (council finding C2)</h3>
+
+<p>The scorer reads its recency anchor as <code>r["last_review"] or r["last_accessed"]</code> with weight <code>0.33</code> (<code>config.py:144</code>). The cooldown this issue introduces is precisely what makes <code>last_review</code> lag. A node used today but reinforced yesterday reads as a day old, which costs it importance and can cross the <code>0.5</code> gate, demoting the ranking of a memory that is in active use.</p>
+
+<h3 id="task-4-anchor-flip-only">The Anchor Flip Is the ONLY Change (council round 2, C2)</h3>
+
+<p>The first draft also routed the scorer through <code>lifecycle.retrievability</code>, reading <code>r["stability"]</code>. Both peers rejected that. <a href="https://github.com/r-spade/ormah/pull/235">#222 (PR #235</a>, a merge prerequisite) rewrites the scorer to <code>SELECT id, access_count, last_accessed, importance, last_review FROM nodes</code> — <strong><code>stability</code> is no longer selected</strong>. Applying the old draft after #222 lands breaks either way: <code>sqlite3.Row["stability"]</code> raises <code>IndexError</code> (not caught by the surrounding exception), aborting <code>run_importance_scoring</code> for every node; or the hunk undoes #222.</p>
+
+<h3 id="task-4-why-existing-tests-pass">Why Existing Decay Tests Stay Green</h3>
+
+<p><code>_make_stale</code> (<code>test_decay_manager.py:13</code>) backdates <code>last_accessed</code> only, and nodes created by <code>engine.remember</code> have <code>last_review = NULL</code>. Both anchor orders resolve to <code>last_accessed</code> for those rows.</p>
+
+<h3 id="task-4-why-new-tests-set-importance">Why Every New Decay Test Sets <code>importance = 0.2</code> (council finding C1)</h3>
+
+<p><code>run_decay</code> skips a node when <code>importance >= decay_importance_threshold</code>, and both sides default to <code>0.5</code> (<code>config.py:155</code>, <code>node.py:58</code>). A decay test that leaves importance at its default never reaches the code it claims to exercise: it passes whether or not the anchor flipped.</p>
+
+<h3 id="task-4-step-7-asymmetric-checks">Step 7: Two Asymmetric Checks</h3>
+
+<p>Running one gate across both files is what made the previous draft self-contradictory (council round 3, C1, found independently by both peers).</p>
+
+<pre><code class="language-bash"># decay_manager: the inline curve must be gone.
+grep -n "math.exp" src/ormah/background/decay_manager.py</code></pre>
+
+<p>Expected: <strong>no output</strong>, and <code>import math</code> no longer needed in that file.</p>
+
+<pre><code class="language-bash"># importance_scorer: the anchor flipped, and NOTHING else moved.
+grep -n 'anchor_str = r\["last_accessed"\] or r\["last_review"\]' src/ormah/background/importance_scorer.py
+grep -n 'r\["stability"\]\|lifecycle\.' src/ormah/background/importance_scorer.py</code></pre>
+
+<p>Expected: <strong>exactly one hit</strong> on the first (the flipped anchor) and <strong>no output</strong> on the second.</p>
+
+<div class="callout warn">
+  <strong>Critical:</strong> <code>math.exp</code> <strong>MUST still be present in <code>importance_scorer.py</code></strong> — that is the passing state, not a leftover. On <code>a28837b</code> the scorer's recency is <code>math.exp(-days_ago / stability)</code>, and after the required rebase onto #222 it is <code>_recency_signal</code>, which also uses <code>math.exp</code>. Step 5 forbids replacing either. A gate demanding zero <code>math.exp</code> across both files stays red no matter how correctly Step 5 was implemented.
+</div>
+
+<h3 id="task-4-steps">Implementation Steps</h3>
+
+<ol>
+  <li>Append failing tests to both <code>test_decay_manager.py</code> and <code>test_importance_scorer.py</code>.</li>
+  <li>Run both suites and verify the RIGHT failures (anchor test fails red; scorer importance underflows).</li>
+  <li>Swap the decay import: replace <code>import math</code> with <code>from ormah import lifecycle</code>.</li>
+  <li>Rewrite the decay retrievability block at <code>decay_manager.py:49-57</code>.</li>
+  <li>Flip the importance scorer's anchor — ONE line, nothing else — in <code>importance_scorer.py:78-86</code>.</li>
+  <li>Run both suites (expect all pass, including pre-existing tests).</li>
+  <li>Confirm the asymmetric checks above (two separate greps).</li>
+  <li>Lint and commit with message: <code>fix(lifecycle): decay uses the shared retrievability; both jobs anchor on use (#221)</code></li>
+</ol>
+
+<hr>
+
+<div class="phase p-b"><span class="pn">5</span> Integer Lifecycle-Model Version</div>
+
+<p>Replace the boolean <code>fsrs_migrated</code> flag with an integer version that records which model produced the stored stability values. Version 2 marks the bounded-reinforcement model; version 1 is the legacy FSRS seed.</p>
+
+<h3 id="task-5-interfaces">Interfaces</h3>
+
+<ul>
+  <li>Consumes: nothing from earlier tasks.</li>
+  <li>Produces:
+    <ul>
+      <li>module-level constant <code>LIFECYCLE_MODEL_VERSION: int = 2</code> in <code>memory_engine.py</code></li>
+      <li><code>MemoryEngine._lifecycle_model_version(self) -> int</code></li>
+      <li><code>MemoryEngine._seed_stability_from_access_count(self) -> None</code></li>
+      <li><code>_migrate_fsrs(self) -> None</code> keeps its name and its call site at <code>memory_engine.py:151</code></li>
+    </ul>
+  </li>
+</ul>
+
+<h3 id="task-5-semantics">Semantics</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Store state</th>
+      <th><code>_lifecycle_model_version()</code></th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>No <code>lifecycle_model_version</code>, no <code>fsrs_migrated</code>, no node carries <code>last_review</code></td>
+      <td><code>0</code></td>
+      <td>seed from <code>access_count</code>, then write <code>2</code> + <code>fsrs_migrated</code></td>
+    </tr>
+    <tr>
+      <td>No <code>lifecycle_model_version</code>, no <code>fsrs_migrated</code>, but some node carries <code>last_review</code></td>
+      <td><code>1</code></td>
+      <td><strong>skip the seed</strong>, write <code>2</code> + <code>fsrs_migrated</code></td>
+    </tr>
+    <tr>
+      <td>No <code>lifecycle_model_version</code>, <code>fsrs_migrated = '1'</code></td>
+      <td><code>1</code></td>
+      <td>skip the seed, write <code>2</code> + <code>fsrs_migrated</code></td>
+    </tr>
+    <tr>
+      <td><code>lifecycle_model_version</code> present but unreadable</td>
+      <td><code>1</code></td>
+      <td><strong>skip the seed</strong> (fail closed), rewrite both keys</td>
+    </tr>
+    <tr>
+      <td><code>lifecycle_model_version = 2</code></td>
+      <td><code>2</code></td>
+      <td>nothing</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Version 2 records <em>which model produced the stored stabilities</em>. It does not rescale them: #191 rules that a future curve migration must preserve each node's archival deadline rather than apply a constant factor.</p>
+
+<h3 id="task-5-downgrade-policy">Downgrade Is Not Supported (council round 3, C2; decision: André, 2026-08-16)</h3>
+
+<p>Downgrading below <code>LIFECYCLE_MODEL_VERSION</code> after an upgrade is <strong>unsupported</strong>. Roll back the binary only together with a backup taken before the upgrade. The version marks <em>which model wrote the stability</em>, and a binary that predates the key keeps writing with the unbounded formula while leaving the version marker at the newer value.</p>
+
+<h3 id="task-5-out-of-scope">Out of Scope (council round 2, both peers, <code>high</code>)</h3>
+
+<p>The <code>last_review</code> guard in <code>_lifecycle_model_version</code> protects exactly one shape of restore: the one where the index is <em>gone</em>, so <code>meta</code> comes back empty. It does nothing for a restore onto an installation whose index is still there. This is a pre-existing defect, not one this issue creates. Fixing it is out of scope and belongs to its own issue — <a href="https://github.com/r-spade/ormah/issues/236">r-spade/ormah#236</a>. Do not claim anywhere in this plan, in the PR body, or in the docs that the C3 guard covers restore in general.</p>
+
+<h3 id="task-5-steps">Implementation Steps</h3>
+
+<ol>
+  <li>Write failing tests in <code>tests/test_engine/test_lifecycle_model_version.py</code>.</li>
+  <li>Run tests to verify they fail (import error on missing constant).</li>
+  <li>Add the constant <code>LIFECYCLE_MODEL_VERSION = 2</code> to <code>memory_engine.py</code>.</li>
+  <li>Rewrite <code>_migrate_fsrs</code> at <code>memory_engine.py:159-197</code>, and add the new methods.</li>
+  <li>Run tests to verify they pass (expect 7 passed).</li>
+  <li>Verify the <code>last_review</code> guard by dropping it, re-running, and seeing stability become <code>14.0</code> instead of <code>1.0</code>.</li>
+  <li>Run the engine suite to ensure startup migrations work.</li>
+  <li>Lint and commit with message: <code>refactor(lifecycle): integer lifecycle-model version replaces the fsrs_migrated flag (#221)</code></li>
+</ol>
+
+<hr>
+
+<div class="phase p-g"><span class="pn">6</span> Documentation</div>
+
+<p>Update configuration reference, background jobs, and data model documentation to reflect the new bounded reinforcement knobs, the per-day cooldown, the flipped decay anchor, and the lifecycle-model version policy.</p>
+
+<h3 id="task-6-interfaces">Interfaces</h3>
+
+<ul>
+  <li>Consumes: the field names from Task 2 and the behavior from Tasks 3–5.</li>
+  <li>Produces: nothing consumed by code.</li>
+</ul>
+
+<h3 id="task-6-scope-discipline">Scope Discipline</h3>
+
+<p>Do not touch <code>docs/05</code> lines 129, 137, or 154 (high-importance decay protection and the importance recency term). Those belong to #222 / PR #235; editing them here creates a conflict with an open PR.</p>
+
+<h3 id="task-6-steps">Implementation Steps</h3>
+
+<ol>
+  <li>Update the configuration reference at <code>docs/12 - Configuration Reference.md:232-241</code> — replace the four old FSRS rows with the new seven rows, including the formula block and downgrade policy.</li>
+  <li>Update the background jobs doc at <code>docs/05 - Background Jobs.md:127</code> and <code>:152</code> — explain the decay anchor on <code>last_accessed</code> and the cooldown's effect on importance signals.</li>
+  <li>Update the data model doc at <code>docs/01 - Data Model.md:38-39</code> — clarify that <code>last_accessed</code> is the decay anchor and <code>last_review</code> can lag behind.</li>
+  <li>Verify the removed knob is gone: <code>grep -rn "fsrs_stability_growth" docs/ src/ tests/</code> — expect exactly one hit in <code>tests/test_config_fsrs.py</code>.</li>
+  <li>Commit with message: <code>docs(lifecycle): bounded reinforcement knobs, cooldown, and the decay anchor (#221)</code></li>
+  <li>Run the final gate: full test suite, ruff check, and git log — expect 6 commits, all from this plan.</li>
+</ol>
+
+</section>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:deff8cf601a056a985726d692fec4f6b787e3010c1dd5e72aa8ab0a669244f44 -->

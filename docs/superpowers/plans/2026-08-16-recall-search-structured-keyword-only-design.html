@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>recall_search_structured: keyword-only tuning parameters</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">recall_search_structured: keyword-only tuning parameters</div>
+  <a href="#decision">Make tuning parameters keyword-only</a>
+  <a href="#problem">The silent-failure trap</a>
+  <a href="#evidence">Why this is not a public contract issue</a>
+  <a href="#keyword-safety" class="lvl-3">Keyword calls are safe</a>
+  <a href="#the-change">The change: keyword-only with bare `*`</a>
+  <a href="#contract">Contract and guarantees</a>
+  <a href="#test-plan">Test plan</a>
+  <a href="#test-walkthrough" class="lvl-3">Worked example</a>
+  <a href="#rejected">Rejected alternatives</a>
+  <a href="#alt-deprecation" class="lvl-3">Deprecation shim</a>
+  <a href="#alt-document" class="lvl-3">Document only</a>
+  <a href="#out-of-scope">Out of scope</a>
+</nav>
+<main>
+<article>
+
+<section>
+  <div class="eyebrow">2026-08-16 · Issue #220 · fix/220-confirmed-use</div>
+  <h2 id="decision">Make <em>tuning parameters</em> keyword-only</h2>
+  <p class="statement">Mark `min_relevance`, `auto_temporal`, `spread_activation`, and `query_vec` as keyword-only in `recall_search_structured` to prevent silent floor-dropping when positional arguments drift.</p>
+
+  <p>When <code>#220</code> removed the <code>touch_access</code> parameter, `min_relevance` inherited its positional slot. Pre-existing code passing <code>False</code> in the 4th position now silently means <code>min_relevance=0</code>, removing the relevance floor. The change closes this silent-failure trap by marking tuning parameters keyword-only.</p>
+</section>
+
+<section>
+  <h2 id="problem">The silent-failure trap</h2>
+
+  <p>At commit <code>a28837bc</code>, the signature was:</p>
+
+  <div class="callout">
+    <code>def recall_search_structured(self, query: str, limit: int = 10, default_space: str | None = None, touch_access: bool = True, min_relevance: float | None = None, ...)</code>
+  </div>
+
+  <p><code>touch_access</code> held the 4th positional slot. With it gone, <code>min_relevance</code> inherits that slot — and a caller passing <code>False</code> there gets <code>min_relevance=0</code>, which removes the floor and admits lower-relevance results. No exception is raised; the caller receives silently wider results.</p>
+
+  <p>Council R1 filed this as <span class="schip">medium</span> (Codex, 0.96 confidence) framed as breaking external callers. The evidence changes that framing.</p>
+</section>
+
+<section>
+  <h2 id="evidence">Why this is not a public contract issue</h2>
+
+  <p>Verified during design:</p>
+  <ul>
+    <li><code>src/ormah/__init__.py</code> is <strong>0 bytes</strong> — `MemoryEngine` is not re-exported.</li>
+    <li>`recall_search_structured` appears in <strong>no documentation</strong> or README. The documented surface covers HTTP routes, not the engine.</li>
+    <li>`touch_access` appears in <strong>no public surface</strong>: not in adapters (MCP), not in HTTP API, not in CLI.</li>
+    <li><code>pyproject.toml</code> declares one entry point: <code>ormah = "ormah.cli:main"</code>.</li>
+    <li>All <strong>14 in-repo call sites</strong> (4 production/eval, 10 tests) pass at most `query` positionally; everything after is keyword.</li>
+    <li>No known external consumer imports `MemoryEngine`.</li>
+  </ul>
+
+  <p><strong>This is an internal silent-failure trap, not a public-contract problem.</strong> The most likely future victim is a caller inside this repo.</p>
+
+  <h3 id="keyword-safety">Keyword calls are safe</h3>
+
+  <p>An unknown keyword flows into `**filters` and is forwarded to <code>HybridSearch.search</code>, which declares fixed named parameters and no `**kwargs` — so it raises `TypeError` loudly. On the FTS fallback, the unknown key is ignored (correct behavior: `touch_access` no longer exists). Neither keyword path corrupts a value.</p>
+
+  <p><strong>Only the positional path corrupts, silently.</strong></p>
+</section>
+
+<section>
+  <h2 id="the-change">The change: keyword-only with bare `*`</h2>
+
+  <p>Mark every tuning parameter keyword-only in the signature:</p>
+
+  <pre><code class="language-python">def recall_search_structured(
+    self, query: str, limit: int = 10, default_space: str | None = None,
+    *, min_relevance: float | None = None,
+    auto_temporal: bool = True, spread_activation: bool = True,
+    query_vec: Any | None = None, **filters,
+) -&gt; list[dict]:</code></pre>
+
+  <p>`query`, `limit` and `default_space` remain positional — exactly what the 14 existing call sites use. `min_relevance`, `auto_temporal`, `spread_activation` and `query_vec` become keyword-only.</p>
+</section>
+
+<section>
+  <h2 id="contract">Contract and guarantees</h2>
+
+  <ul>
+    <li>A call with 4 or more positional arguments raises `TypeError` at call time.</li>
+    <li>No existing call site changes; all 14 already comply.</li>
+    <li>`touch_access` is <strong>not</strong> reintroduced. #220 removed it deliberately.</li>
+    <li>The guarantee outlives this specific parameter: any future reordering of tuning parameters can no longer be absorbed silently by a positional caller.</li>
+  </ul>
+</section>
+
+<section>
+  <h2 id="test-plan">Test plan</h2>
+
+  <p>One contract test, added to <code>tests/test_engine/test_confirmed_use_contract.py</code>:</p>
+
+  <p class="meta">Test: `test_recall_search_structured_rejects_positional_tuning_args`</p>
+
+  <pre><code class="language-python">with pytest.raises(TypeError):
+    engine.recall_search_structured("caching architecture", 10, None, False)</code></pre>
+
+  <h3 id="test-walkthrough">Worked example</h3>
+
+  <ul>
+    <li><strong>Before the change:</strong> the call is accepted, `min_relevance=False` coerces to `0.0`, the floor is dropped, nothing raises. `pytest.raises(TypeError)` fails with <em>DID NOT RAISE</em> — the test is RED for the exact reason it targets.</li>
+    <li><strong>After the change:</strong> Python raises `TypeError: recall_search_structured() takes from 2 to 4 positional arguments but 5 were given`. GREEN.</li>
+  </ul>
+
+  <p>The assertion reaches the defect: deleting the `*` in the future turns it red again.</p>
+
+  <p>The positive side — keyword calls still work — needs no new test. The 14 existing call sites exercise it throughout the suite.</p>
+</section>
+
+<section>
+  <h2 id="rejected">Rejected alternatives</h2>
+
+  <h3 id="alt-deprecation">Deprecation shim</h3>
+  <p>Reintroduce `touch_access` as an ignored keyword-only parameter emitting `DeprecationWarning`. <strong>Rejected:</strong> resurrects a name #220 deleted on purpose, adds dead machinery for zero known consumers, and — decisively — leaves the positional trap open, which is the only part that corrupts.</p>
+
+  <h3 id="alt-document">Document only</h3>
+  <p>Note the break in the PR description and change no code. <strong>Rejected:</strong> cheapest option, but leaves the silent-floor trap live for the next internal caller.</p>
+</section>
+
+<section>
+  <h2 id="out-of-scope">Out of scope</h2>
+
+  <p><code>**filters</code> swallows any misspelled filter keyword (e.g., `tierz=` for `tiers=`), silently on the FTS fallback and loudly on the hybrid path. This is pre-existing (not introduced by #220) and wider than this change. Reported upstream as its own issue; not fixed here.</p>
+</section>
+
+</article>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:71f00476bad93486a74c2395d8ad5ca3c9f396dec6c5b623852f0842b77d6698 -->
