@@ -7,7 +7,7 @@
 - Modify: nothing. `detector.py` from Task 2 runs **unmodified** — editing it between legs would make the two legs incomparable.
 
 **Interfaces:**
-- Consumes: Task 2's `detector.py`, `pairs.jsonl`, `before.json`, `before-replicate.json`, `before.log`; Tasks 3 and 4's committed adapter.
+- Consumes: Task 2's `detector.py`, the frozen `corpus.jsonl`, `before.json`, `before-replicate.json`, `before.log`; Tasks 3 and 4's committed adapter.
 - Produces: `divergences.md`, the artifact André reads. Task 6 consumes nothing from here except the go-ahead.
 
 **This is a detector, not a gate.** There is no PASS/FAIL threshold and no calibrated margin, on purpose. The change has an expected *direction* — removing ~4.3k tokens of unrelated instruction from a judge's context should improve its behaviour — and a gate tuned to fail on divergence would fail precisely the fix. No automated comparison separates "diverged because it got worse" from "diverged because it stopped obeying a language instruction that was never meant for it". Reading the diverging cases can. The accepted cost: this is not re-runnable in CI.
@@ -26,11 +26,25 @@ Expected: the two feature commits from Tasks 3 and 4 on top; **no output** from 
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah && \
   .venv/bin/python ~/.cache/ormah-ab-20260819/detector.py \
-    ~/.cache/ormah-ab-20260819/pairs.jsonl \
+    ~/.cache/ormah-ab-20260819/corpus.jsonl \
     ~/.cache/ormah-ab-20260819/after.json \
     2>&1 | tee ~/.cache/ormah-ab-20260819/after.log
 ```
-Expected: a counts block with the same `pairs` and `skipped_null_content` as BEFORE. **If `pairs` differs, stop** — the corpus changed under the comparison and every divergence below is meaningless.
+Expected: a counts block with the same `pairs` **and the same `corpus_sha256`** as BEFORE. Check the digest explicitly — it is the whole point of freezing the corpus in Task 2 Step 2:
+
+```bash
+cd /Users/andre/Documents/GitHub/Tools/ormah && .venv/bin/python - <<'PY'
+import json, os, sys
+C = os.path.expanduser("~/.cache/ormah-ab-20260819")
+shas = {leg: json.load(open(f"{C}/{leg}.json"))["counts"]["corpus_sha256"]
+        for leg in ("before", "before-replicate", "after")}
+print(json.dumps(shas, indent=2))
+if len(set(shas.values())) != 1:
+    sys.exit("STOP — the three legs judged different corpora; no divergence below means anything.")
+print("corpus identical across all three legs")
+PY
+```
+**If the digests differ, stop.** A pair count that happens to match is not enough: a node edited between legs changes the rendered prompt while leaving the count intact, and the resulting verdict change would be blamed on the system prompt.
 
 - [ ] **Step 3: Objective check — parse and fallback rates**
 
@@ -49,6 +63,7 @@ print(f"{'judge':10} {'BEFORE err':>11} {'replicate':>10} {'AFTER err':>10}")
 for j in ("link", "dup", "conflict"):
     print(f"{j:10} {b['counts'][j+'_error']:>11} {r['counts'][j+'_error']:>10} {a['counts'][j+'_error']:>10}")
 print("pairs:", b['counts']['pairs'], a['counts']['pairs'])
+print("corpus:", b['counts']['corpus_sha256'][:12], a['counts']['corpus_sha256'][:12])
 PY
 grep -c "pairs individually" ~/.cache/ormah-ab-20260819/before.log || echo 0
 grep -c "pairs individually" ~/.cache/ormah-ab-20260819/after.log || echo 0
@@ -183,9 +198,17 @@ Expected: both cases print `usable_verdict: True`; injection `PASS`; the PT-BR c
 **The reviewer must see the case, not a label.** A line reading `` `distinct` -> `duplicate` ``
 over two truncated titles gives nobody grounds to judge an irreversible merge. So each entry
 carries the two memory bodies and the fields production acts on: `merged_title` /
-`merged_content` (they overwrite the kept memory) and `evolved_node` (it picks the direction
-of the `evolved_from` edge). A flip whose merged content silently drops half a memory, or an
-edge that reverses while the label stays put, are invisible in a label-only list.
+`merged_content` (they overwrite the kept memory), `evolved_node` (it picks the direction of
+the `evolved_from` edge), and `explanation` (what production stores as the edge reason,
+conflict_detector.py:372 — not `reason`, which that judge never emits).
+
+**And the label is not what triggers an entry.** A pair whose label stays `duplicate` in both
+legs while `merged_content` loses half a memory is an irreversible change with no label
+movement at all; same for an `evolved_node` that reverses under an unchanged `conflict` type.
+Selecting on the label alone would hide exactly the mutations this list exists to surface, so a
+pair is listed when **either** its label **or** any mutation-driving payload field differs. The
+entry says which one moved, and payload-only movement between the two BEFORE runs is marked
+`self` too — that judge was already unstable there on its own.
 
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah && .venv/bin/python - <<'PY' > ~/.cache/ormah-ab-20260819/divergences.md
@@ -194,25 +217,51 @@ C = os.path.expanduser("~/.cache/ormah-ab-20260819")
 b = json.load(open(f"{C}/before.json")); a = json.load(open(f"{C}/after.json"))
 r = json.load(open(f"{C}/before-replicate.json"))
 pairs = {p['pair_id']: p for p in
-         (json.loads(l) for l in open(f"{C}/pairs.jsonl") if l.strip())}
+         (json.loads(l) for l in open(f"{C}/corpus.jsonl") if l.strip())}
+# Only the fields production ACTS on. `explanation` is the conflict judge's — it becomes the
+# edge reason (conflict_detector.py:372); that judge never emits `reason`.
 FIELDS = {"link": ("relationship", "reason"),
           "dup": ("merged_title", "merged_content", "reason"),
-          "conflict": ("type", "same_subject", "evolved_node", "reason")}
+          "conflict": ("type", "same_subject", "evolved_node", "explanation")}
+
+
+def mut(src, judge, k):
+    """The mutation-driving fields of one verdict, as a comparable tuple."""
+    d = src.get(f"{judge}_payload", {}).get(k, {})
+    return tuple(json.dumps(d.get(f), sort_keys=True, ensure_ascii=False)
+                 for f in FIELDS[judge])
+
+
 print("# BEFORE -> AFTER divergences\n")
-print("`self` marks a pair that already disagreed between the two BEFORE runs — that one moved")
-print("on its own, and the change is not the reason.\n")
+print("`self` marks a pair that already moved between the two BEFORE runs — that one moved on")
+print("its own, and the change is not the reason.\n")
+print("A pair is listed when its LABEL moved, or when a mutation-driving payload field moved,")
+print("or both. `payload-only` means the label never changed and production would still have")
+print("acted differently — a merge keeping different content, an edge pointing the other way.\n")
 print("Each entry carries both memory bodies and the verdict fields production acts on, so a")
 print("merge can be judged on its content and not on its label.\n")
 for judge in ("link", "dup", "conflict"):
-    diffs = [(k, b[judge][k], a[judge][k], r[judge].get(k))
-             for k in b[judge] if k in a[judge] and b[judge][k] != a[judge][k]]
-    print(f"## {judge} — {len(diffs)} of {len(b[judge])} pairs changed\n")
+    diffs = []
+    for k in b[judge]:
+        if k not in a[judge]:
+            continue
+        label_moved = b[judge][k] != a[judge][k]
+        payload_moved = mut(b, judge, k) != mut(a, judge, k)
+        if label_moved or payload_moved:
+            diffs.append((k, b[judge][k], a[judge][k], r[judge].get(k),
+                          label_moved, payload_moved))
+    n_pay = sum(1 for d in diffs if d[5] and not d[4])
+    print(f"## {judge} — {len(diffs)} of {len(b[judge])} pairs moved "
+          f"({n_pay} payload-only)\n")
     bp = b.get(f"{judge}_payload", {}); ap = a.get(f"{judge}_payload", {})
-    for k, before, after, rep in diffs:
+    for k, before, after, rep, label_moved, payload_moved in diffs:
         p = pairs.get(k, {})
         na, nb = p.get('node_a', {}), p.get('node_b', {})
-        self_move = " `self`" if rep is not None and rep != before else ""
-        print(f"- **{k}**{self_move}: `{before}` -> `{after}`")
+        # `self` covers payload movement between the BEFORE runs too, not just the label.
+        self_move = " `self`" if (rep is not None and rep != before) or (
+            mut(b, judge, k) != mut(r, judge, k)) else ""
+        kind = "" if label_moved else " *(payload-only)*"
+        print(f"- **{k}**{self_move}{kind}: `{before}` -> `{after}`")
         print(f"  - **A** — {str(na.get('title'))[:90]}")
         print(f"    > {str(na.get('content'))[:400]}")
         print(f"  - **B** — {str(nb.get('title'))[:90]}")
@@ -231,14 +280,31 @@ wc -l ~/.cache/ormah-ab-20260819/divergences.md
 
 - [ ] **Step 8: Hand the divergences to André and WAIT**
 
-Print the per-judge change counts and the full `divergences.md`. Say plainly, in the report:
+> ⛔ **Do NOT `cat`, print, paste, quote or summarise the contents of `divergences.md`.**
+> Fixing the label-only report (Task 2) put whole production memory bodies and model-generated
+> merged content into that file. In this execution model, reading a file through a tool sends
+> it to the agent service — so an agent printing it *is* the exfiltration the Global Constraint
+> forbids, and keeping the file under `~/.cache/` does not prevent it. The file is written by a
+> shell redirect and never read back by the agent. This is the one artifact in the plan André
+> opens himself.
 
-- how many pairs changed per judge, and how many of those carry `self` (moved between the two BEFORE runs on their own);
-- that `dup` divergences are the consequential ones — that judge merges memories irreversibly — and that each entry now carries the two bodies plus `merged_title`/`merged_content`, so a flip can be judged on what the merge would actually keep;
-- that `divergences.md` contains **production memory bodies**: it stays under `~/.cache/`, is read locally, and never leaves the machine (Global Constraints);
+Tell André the file is ready and hand him the path. Then report **only these aggregates**,
+none of which contain memory content:
+
+```bash
+# Counts only — the per-judge headings, never the entries beneath them.
+grep -E "^## " ~/.cache/ormah-ab-20260819/divergences.md
+wc -l ~/.cache/ormah-ab-20260819/divergences.md
+echo "open it yourself:  open -e ~/.cache/ormah-ab-20260819/divergences.md"
+```
+
+Say plainly, in the report:
+
+- how many pairs moved per judge, how many of those are **payload-only** (label unchanged, but a merge would keep different content or an edge would point the other way), and how many carry `self` (already moved between the two BEFORE runs on their own);
+- that `dup` movements are the consequential ones — that judge merges memories irreversibly — and that each entry carries the two bodies plus `merged_title`/`merged_content`, so a flip can be judged on what the merge would actually keep;
 - that the corpus is one shared mined set, **not** each judge's production candidate distribution (Task 2's stated limitation), so this is not a coverage claim;
-- the objective-check numbers from Steps 3 and 4 and the smoke verdicts from Step 6.
+- the objective-check numbers from Steps 3 and 4, the corpus digest check from Step 2, and the smoke verdicts from Step 6.
 
-**Do not start Task 6 until André has read the divergences and said to proceed.** This is the human review the spec substituted for the automatic gate; skipping it removes the only quality signal this plan has.
+**Do not start Task 6 until André has read the divergences himself and said to proceed.** This is the human review the spec substituted for the automatic gate; skipping it removes the only quality signal this plan has, and so does having an agent read it on his behalf.
 
 **Nothing in this task is committed.**
