@@ -99,6 +99,32 @@ without the redirect + `$?` a run with failures reports exit 0.
 > do not own`, that guard is council's, not git's — an explicit `git push fork fix/<slug>`
 > bypasses it.
 
+### Evidence gate — the Beta's data describes `local-main`, never `upstream/main`
+
+The same trap as the import gate, one level up: there the wrong *code* runs, here the right
+code produces numbers about the **wrong tree**.
+
+- `local-main` = `upstream/main` **+ ~693 commits**, and **every PR you have opened but that has
+  not landed yet lives in `local-main`** (queued, not merged). `gh pr view <n>` is the only
+  authority on which ones those are — the Beta running a change is not evidence it shipped.
+- The server, the MCP processes and the whisper hook all import from `Tools/ormah/src/ormah`
+  (golden rule 1), so **`~/.local/share/ormah/memory/index.db` is a product of `local-main`**.
+  Every row in it — `whisper_log`, `affinity`, `signals`, `confirmed_use_claims` — was written
+  by queued code.
+
+Before quoting any measurement or behaviour claim in an upstream issue or PR, prove the path
+exists there:
+
+```bash
+git diff --stat upstream/main local-main -- src/ormah/<file>.py   # empty  = the finding is upstream's
+git show upstream/main:src/ormah/<file>.py | grep -n "<symbol>"   # absent = the finding is yours only
+```
+
+State the base in the comment itself when it matters. Real case, 2026-08-19: one measurement
+session produced #246 and a comment on #242 — `affinity.py` was byte-identical to `upstream/main`
+(finding valid upstream), while `confirmed_use_claims` did not exist there at all (it comes from
+PR #234, still open). Same database, same session, two different bases.
+
 ## Recipe B — also run the change in your Beta right now
 
 ```bash
