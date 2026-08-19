@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from ormah.models.node import CreateNodeRequest, NodeType, Tier
 
 
@@ -65,6 +67,32 @@ def test_a_touch_after_the_cooldown_moves_stability_again(engine):
 
     assert after["stability"] > before["stability"]
     assert after["last_review"] > before["last_review"]
+
+
+def test_reinforcement_anchors_on_last_accessed_not_a_lagging_last_review(engine):
+    """A confirmed use inside the cooldown must not be invisible to the spacing calc.
+
+    last_review gates *whether* the numeric update runs; last_accessed is the last
+    confirmed use. When they diverge (a use landed inside the cooldown, so it moved
+    last_accessed but not last_review), the growth calculation must measure the gap
+    since that last use, not since the last numeric write (PR #239 review comment).
+    """
+    node_id = _make_node(engine)
+    node = engine.file_store.load(node_id)
+    node.stability = 1.0
+    now = datetime.now(timezone.utc)
+    node.last_review = now - timedelta(hours=25)
+    node.last_accessed = now - timedelta(hours=1)
+    engine.file_store.save(node)
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 1.0, last_review = ?, last_accessed = ? WHERE id = ?",
+        (node.last_review.isoformat(), node.last_accessed.isoformat(), node_id),
+    )
+    engine.db.conn.commit()
+
+    engine._touch_access(node_id)
+
+    assert _row(engine, node_id)["stability"] == pytest.approx(1.50, abs=0.01)
 
 
 def test_a_thirty_day_old_node_is_bounded_to_double(engine):
