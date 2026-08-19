@@ -2534,7 +2534,10 @@ class MemoryEngine:
         if lifecycle.reinforcement_due(
             node.last_review, now, self.settings.fsrs_reinforcement_cooldown_days
         ):
-            anchor = node.last_review or node.last_accessed
+            # reinforcement cooldown can leave last_review a full window behind
+            # a use that already landed inside it (PR #239 review comment):
+            # last_accessed is the actual spacing signal, last_review only gates.
+            anchor = node.last_accessed or node.last_review
             days_since = max((now - anchor).total_seconds() / 86400, 0.0)
             node.stability = lifecycle.reinforced_stability(
                 node.stability,
