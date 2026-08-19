@@ -59,6 +59,30 @@ def _wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
     assert predicate(), f"condition was not met within {timeout} seconds"
 
 
+def _drain_timers(handler: HippocampusHandler, timeout: float = 10.0) -> None:
+    """Wait until no debounce timer is armed and no ingestion is still running.
+
+    A sleep cannot show that no second ingestion is coming: a timer armed to fire later
+    runs after the window and after the counting patch is restored, so it never reaches
+    the assertion. Waiting on the handler's own timers can, and anything still armed at
+    the deadline fails the caller instead of being quietly waited out.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        with handler._timer_lock:
+            armed = list(handler._timers.values())
+        if not armed:
+            break
+        assert time.monotonic() < deadline, f"{len(armed)} debounce timer(s) never fired"
+        for timer in armed:
+            timer.join(timeout=max(0.0, deadline - time.monotonic()))
+    # No timer is armed, but _do_ingest drops its timer before taking the ingest lock,
+    # so an empty dict alone would not prove the work is done. Holding that lock does.
+    acquired = handler._ingest_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+    assert acquired, "an ingestion was still running"
+    handler._ingest_lock.release()
+
+
 def test_initial_scan_ingests_existing_files(engine, tmp_path):
     """Files present before watcher starts get ingested on catch-up scan."""
     watch_dir = tmp_path / "watch"
@@ -263,10 +287,13 @@ def test_debounce_prevents_duplicate_ingestion(engine, tmp_path):
             handler.on_modified(FileModifiedEvent(str(md_file)))
             time.sleep(0.05)
 
-        # Wait for debounce
-        time.sleep(0.5)
+        # The debounced timer must fire at all -- wait on that, not on a budget.
+        _wait_for(lambda: call_count >= 1)
+        # Then quiesce, still inside the patch, so a late duplicate is counted rather
+        # than slipping past a fixed window with the counter already restored.
+        _drain_timers(handler)
 
-    assert call_count == 1
+        assert call_count == 1
 
 
 def test_state_file_persists(engine, tmp_path):
