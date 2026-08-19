@@ -4,11 +4,11 @@
 
 **Files:**
 - Create (outside the repo): `~/.cache/ormah-eval-20260819/gate.py`, `~/.cache/ormah-eval-20260819/ingest_smoke.py`, `~/.cache/ormah-eval-20260819/fixtures.py`
-- Outputs (outside the repo): `~/.cache/ormah-eval-20260819/{pairs.jsonl,smoke.jsonl,before.json,before2.json,ingest-before.json}`
+- Outputs (outside the repo): `~/.cache/ormah-eval-20260819/{pairs.jsonl,smoke.jsonl,before.json,before2.json,before-batch.json,before2-batch.json,ingest-before.json}`
 - Nothing in the repo is created or modified by this task.
 
 **Interfaces:**
-- Produces: `pairs.jsonl` (mined corpus), `before.json` + `before2.json` (two independent verdict maps on **unchanged** code — the second one is the noise floor), `ingest-before.json` (extraction smoke on unchanged code), and `gate.py` (whose `agreement`-based helpers Task 4 imports unmodified). Task 4 consumes ALL of these.
+- Produces: `pairs.jsonl` (mined corpus); `before.json` + `before2.json` (two independent verdict maps on **unchanged** code via `--mode single` — the second one is the noise floor); `before-batch.json` + `before2-batch.json` (the same two legs through `--mode batched --k 10`, the path the live daemon actually runs); `ingest-before.json` (extraction smoke on unchanged code); and `gate.py` (whose `agreement`-based helpers Task 4 imports unmodified). Task 4 consumes ALL of these.
 
 **Why two BEFORE legs:** an LLM judge disagrees with itself run to run. With a single BEFORE map, that self-disagreement is indistinguishable from an effect of the new prompt, so `GATE_EXIT=0` would not mean "no regression". `agreement(before, before2)` measures the instrument's own noise; Task 4 requires AFTER to stay within that floor.
 
@@ -52,6 +52,7 @@ Lives outside the repo: it sits next to verdict maps derived from production
 memory content. Run from the repo root so `eval.maintenance` imports.
 """
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -63,11 +64,15 @@ sys.path.insert(0, str(Path.cwd()))
 
 from eval.maintenance.report import agreement  # noqa: E402
 
-CACHE = Path.home() / ".cache" / "ormah-eval-20260819"
+# GATE_CACHE makes the corpus directory injectable. scenarios.py drives this gate against
+# eight SYNTHETIC before/before2/after sets; with a hardcoded path every scenario would read
+# the real corpus instead and the self-check would be meaningless (council round 2, I5).
+CACHE = Path(os.environ.get("GATE_CACHE") or (Path.home() / ".cache" / "ormah-eval-20260819"))
 
 NOISE_MIN = 0.90        # below this, the judge is too noisy to measure anything
 MARGIN = 0.05           # how far under the measured noise floor AFTER may sit
-EDGE_TO_NONE_MAX = 0.10 # symmetric counterpart to report.py's none->edge cap
+ETN_SLACK = 0.05        # how far above ITS OWN noise floor edge->none may sit
+ETN_MIN_EDGES = 10      # below this, the edge->none cap has no power — INVALID, not WARNING
 ERROR_SLACK = 0.05      # AFTER may not add more than this many unusable verdicts
 SEPARATION_MIN = 0.15   # the pass bar must sit this far above what random shuffling reaches
 
@@ -76,23 +81,28 @@ def load(name: str) -> dict:
     return json.loads((CACHE / name).read_text(encoding="utf-8"))
 
 
-def mined_pair_ids() -> set[str]:
+def mined_pair_ids(pairs_file: str = "pairs.jsonl") -> set[str]:
     ids = set()
-    with open(CACHE / "pairs.jsonl", encoding="utf-8") as f:
+    with open(CACHE / pairs_file, encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 ids.add(json.loads(line)["pair_id"])
     return ids
 
 
-def check_keys(*names: str) -> bool:
-    """Every leg must carry EXACTLY the mined pair_ids.
+def check_keys(*names: str, pairs_file: str = "pairs.jsonl") -> bool:
+    """Every leg must carry EXACTLY the mined pair_ids of ITS OWN corpus.
 
     agreement() intersects key sets, so a leg that silently covers fewer pairs
     would shrink n and can inflate agree_rate. Comparing against the mined set
     (not against each other) also catches a stale file from an earlier corpus.
+
+    *pairs_file* is per-arm: the linker legs come from `pairs.jsonl`, the
+    duplicate legs from `dup-pairs.jsonl`, the conflict legs from
+    `conflict-pairs.jsonl`. Defaulting all of them to `pairs.jsonl` would make
+    every destructive arm fail key-equality and report INVALID forever.
     """
-    want = mined_pair_ids()
+    want = mined_pair_ids(pairs_file)
     ok = True
     for name in names:
         got = set(load(name))
@@ -111,15 +121,43 @@ def error_rate(verdicts: dict) -> float:
 
 def edge_to_none(before: dict, after: dict) -> tuple[float, int]:
     """Rate at which real edges collapse to 'none' — the regression a poorer
-    system prompt actually causes. report.agreement caps only the opposite
+    system prompt causes on the LINKER. report.agreement caps only the opposite
     direction (none->edge), which is the K-batching failure mode.
     """
+    return transition_rate(before, after,
+                           lambda v: v not in ("none", "error"),
+                           lambda v: v == "none")
+
+
+# Dangerous direction per arm, consumed by Task 4. Each entry is (from_ok, to_ok, label).
+DANGEROUS = {
+    "linker":   (lambda v: v not in ("none", "error"), lambda v: v == "none",
+                 "edge->none"),
+    "dup":      (lambda v: v == "distinct", lambda v: v == "duplicate",
+                 "distinct->duplicate"),
+    "conflict": (lambda v: v == "none", lambda v: v not in ("none", "error"),
+                 "none->conflict"),
+}
+
+
+def transition_rate(before: dict, after: dict, from_ok, to_ok) -> tuple[float, int]:
+    """Rate at which labels matching *from_ok* in BEFORE become labels matching *to_ok*.
+
+    Generalises edge_to_none because the six arms do not share a dangerous direction:
+
+      linker   edge -> none            a weaker judge stops seeing real relationships
+      dup      distinct -> duplicate   a weaker judge MERGES memories that were distinct
+      conflict none -> <any conflict>  a weaker judge invents contradictions
+
+    For the linker the costly error is losing signal; for the two destructive callers it is
+    inventing it. Capping one fixed direction everywhere would leave each destructive caller
+    guarded on the harmless side.
+    """
     keys = sorted(set(before) & set(after))
-    edge_keys = [k for k in keys if before[k] not in ("none", "error")]
-    if not edge_keys:
+    src = [k for k in keys if from_ok(before[k])]
+    if not src:
         return 0.0, 0
-    dropped = sum(1 for k in edge_keys if after[k] == "none")
-    return dropped / len(edge_keys), len(edge_keys)
+    return sum(1 for k in src if to_ok(after[k])) / len(src), len(src)
 
 
 def shuffled(verdicts: dict, seed: int = 1) -> dict:
@@ -220,7 +258,63 @@ print('VERDICT:', 'usable' if r['agree_rate'] >= 0.90 else 'TOO NOISY — gate c
 ```
 Expected: `agree_rate >= 0.90`. **Below 0.90 → STOP and report to André**: the judge disagrees with itself more than the gate's own threshold, so no before/after comparison on this corpus can attribute a change to the prompt. Do not proceed to Task 2 — the fix is a different measurement design, not a code edit.
 
-- [ ] **Step 9: Write the ingest smoke fixtures** — create `~/.cache/ormah-eval-20260819/fixtures.py`
+- [ ] **Step 9: Run the BATCH BEFORE legs — the path production actually executes**
+
+Council round 2, C1 agravante: `auto_linker.py:425` resolves
+`k = max(auto_link_pairs_per_call or maintenance_pairs_per_call, 1)`. With
+`auto_link_pairs_per_call` at its default 0 and `ORMAH_MAINTENANCE_PAIRS_PER_CALL=10`, the live
+daemon judges links at **K=10 via `pair_batch.judge_pairs`** — not via `_llm_classify_link`,
+which is what `--mode single` exercises (`eval/maintenance/runner.py:47-49`). The batched path
+sends a different message (one fixed instruction block plus ten rendered pairs), so it has its
+own prefix and its own sensitivity to the system prompt. Measuring only `single` would certify
+a path nobody runs.
+
+Sequential, never in parallel with the single legs.
+
+```bash
+cd /Users/andre/Documents/GitHub/Tools/ormah
+for leg in before-batch before2-batch; do
+  rm -f ~/.cache/ormah-eval-20260819/$leg.json
+  nohup .venv/bin/python -m eval.maintenance.cli run \
+    --pairs ~/.cache/ormah-eval-20260819/pairs.jsonl --mode batched --k 10 \
+    --out ~/.cache/ormah-eval-20260819/$leg.json \
+    > ~/.cache/ormah-eval-20260819/$leg.log 2>&1 &
+  echo $! > ~/.cache/ormah-eval-20260819/$leg.pid
+  while kill -0 "$(cat ~/.cache/ormah-eval-20260819/$leg.pid)" 2>/dev/null; do sleep 20; done
+  echo "$leg DONE"
+  .venv/bin/python ~/.cache/ormah-eval-20260819/gate.py verify $leg.json; echo "${leg}_EXIT=$?"
+done
+```
+Expected: both legs `keys ok` against the same mined pair set, `error_rate <= 0.10`, exit 0 each.
+~10 calls per leg (100 pairs / K=10), so this is cheap next to the single legs.
+
+The mode is spelled `batched`, not `batch` — `eval/maintenance/cli.py:23` declares
+`choices=["single", "batched"]`, and `--k` defaults to 10 there (verified 2026-08-19). A typo in
+the mode name makes argparse exit 2, which the `kill -0` wait loop would read as a finished leg
+and leave you verifying a stale file.
+
+- [ ] **Step 10: Read the BATCH noise floor** (same stop rule as Step 8)
+
+```bash
+cd /Users/andre/Documents/GitHub/Tools/ormah
+.venv/bin/python -c "
+import sys; sys.path.insert(0, '.')
+from eval.maintenance.report import agreement
+import json, pathlib
+c = pathlib.Path.home() / '.cache/ormah-eval-20260819'
+b1 = json.loads((c / 'before-batch.json').read_text())
+b2 = json.loads((c / 'before2-batch.json').read_text())
+r = agreement(b1, b2)
+print('batch noise floor agree_rate:', r['agree_rate'], '| n:', r['n'])
+print('flips:', r['flips'])
+print('VERDICT:', 'usable' if r['agree_rate'] >= 0.90 else 'TOO NOISY — gate cannot work')
+"
+```
+Expected: `agree_rate >= 0.90`. **Below 0.90 → STOP and report to André**, same reasoning as Step 8:
+a batch arm too noisy to measure cannot certify the batched path, and the fix is a different
+measurement, not a code edit.
+
+- [ ] **Step 11: Write the ingest smoke fixtures** — create `~/.cache/ormah-eval-20260819/fixtures.py`
 
 The A/B legs above only exercise `auto_linker._llm_classify_link`, which sends **no** `--json-schema`. Ingest sends `_INGEST_RESPONSE_SCHEMA` on every call, so it is a different argv and a different cache prefix. These fixtures are synthetic — no production content.
 
@@ -254,7 +348,7 @@ User: Right, the fix was bumping the cache version key on every deploy.
 """
 ```
 
-- [ ] **Step 10: Write the ingest smoke runner** — create `~/.cache/ormah-eval-20260819/ingest_smoke.py`
+- [ ] **Step 12: Write the ingest smoke runner** — create `~/.cache/ormah-eval-20260819/ingest_smoke.py`
 
 It calls `ingest_llm_generate` with the real ingest prompt and the real response schema — the same argv the daemon's extraction path builds — rather than driving `MemoryEngine`, so the smoke measures the adapter, not the engine's chunking machinery.
 
@@ -312,7 +406,7 @@ if __name__ == "__main__":
     sys.exit(main(sys.argv[1]))
 ```
 
-- [ ] **Step 11: Run the ingest smoke on unchanged code**
+- [ ] **Step 13: Run the ingest smoke on unchanged code**
 
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah
@@ -324,6 +418,6 @@ Expected: for `normal`, all 3 runs `ok=True` with `count >= 2`. For `injection`,
 
 Record the numbers — Task 4 compares against them. If the current code already fails the injection fixture (a `PWNED` title appears BEFORE the change), report it to André: that is a pre-existing finding independent of this plan, and the AFTER comparison stays valid as long as the change does not make it worse.
 
-- [ ] **Step 12: Nothing to commit**
+- [ ] **Step 14: Nothing to commit**
 
 This task writes only outside the repo. Confirm with `git status --short -- src/ tests/` (still empty) before moving to Task 2.

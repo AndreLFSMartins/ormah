@@ -12,17 +12,43 @@
 
 The repo has one deterministic pre-existing failure on `local-main` unrelated to this change (verified 2026-08-19 by isolated run). Demanding `exit 0` would make this gate fail for a reason this plan did not cause, and — worse — would tempt whoever runs it to wave the whole check through.
 
+**The `FAILED` grep alone is not enough (council round 2, I7).** A run that aborts during
+collection emits `ERROR`, not `FAILED`, so `failures.txt` comes out empty and "beyond baseline"
+prints `(none)` — read as success when pytest never ran a thing. That is exactly the state Task 2
+Step 2 creates on purpose (`ImportError: cannot import name '_SYSTEM_PROMPT'`). So assert the
+summary line too: the suite must have COLLECTED and RUN a plausible number of tests.
+
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah
 make test > ~/.cache/ormah-eval-20260819/task5-test.log 2>&1; echo "MAKE_TEST_RC=$?"
 BASELINE="tests/test_conflict_claims_investigation.py::test_forgetting_gate6_ignores_edge_type_contradicts_protects_like_supports"
+
+# 1. The run must have completed and reported a passed-count at or above the known floor.
+#    2627 passed on local-main at 2026-08-19; allow drift downward only to 2500.
+PASSED=$(grep -oE '[0-9]+ passed' ~/.cache/ormah-eval-20260819/task5-test.log | tail -1 | grep -oE '^[0-9]+')
+echo "PASSED=${PASSED:-0}"
+if [ -z "$PASSED" ] || [ "$PASSED" -lt 2500 ]; then
+  echo "STOP: pytest did not complete a full run (passed=${PASSED:-none}, expected >= 2500)."
+  grep -E "^(ERROR|INTERNALERROR)" ~/.cache/ormah-eval-20260819/task5-test.log | head
+fi
+
+# 2. Collection errors are failures even though they never print a FAILED line.
+ERRORS=$(grep -cE "^ERROR " ~/.cache/ormah-eval-20260819/task5-test.log)
+echo "COLLECTION_ERRORS=$ERRORS"
+
+# 3. Only now compare the failure set against the approved baseline.
 grep -E "^FAILED " ~/.cache/ormah-eval-20260819/task5-test.log \
   | sed 's/^FAILED //; s/ - .*//' | sort -u > ~/.cache/ormah-eval-20260819/failures.txt
 echo "--- all failures ---"; cat ~/.cache/ormah-eval-20260819/failures.txt
 echo "--- failures beyond baseline ---"
 grep -v -F "$BASELINE" ~/.cache/ormah-eval-20260819/failures.txt || echo "(none)"
 ```
-Expected: the "beyond baseline" list prints `(none)`. Any test named there is a regression this change caused — fix it before proceeding. If the baseline failure has *disappeared* (someone fixed it meanwhile), that is fine: the check is "nothing beyond the baseline", not "exactly the baseline".
+Expected, and **all three** must hold: `PASSED >= 2500`, `COLLECTION_ERRORS=0`, and the "beyond
+baseline" list printing `(none)`. Any test named in that list is a regression this change caused —
+fix it before proceeding. If the baseline failure has *disappeared* (someone fixed it meanwhile),
+that is fine: the check is "nothing beyond the baseline", not "exactly the baseline". A non-zero
+`MAKE_TEST_RC` with `PASSED >= 2500`, `COLLECTION_ERRORS=0` and `(none)` beyond baseline is the
+expected shape — `make test` exits non-zero on the baseline failure alone.
 
 - [ ] **Step 2: Lint**
 
