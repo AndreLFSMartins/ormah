@@ -1,62 +1,62 @@
 # Graph Report - ormah  (2026-08-19)
 
 ## Corpus Check
-- 737 files · ~852,350 words
+- 750 files · ~866,939 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 9827 nodes · 20599 edges · 552 communities (409 shown, 143 thin omitted)
+- 9877 nodes · 20645 edges · 576 communities (426 shown, 150 thin omitted)
 - Extraction: 86% EXTRACTED · 14% INFERRED · 0% AMBIGUOUS · INFERRED: 2869 edges (avg confidence: 0.62)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `50aad2c0`
+- Built from commit: `d0075101`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- NodeType
+- ok
 - test_session_watcher.py
-- test_hippocampus.py
+- main.py
 - CloudProtectionService
 - product_bridge.rs
 - IngestSpool
 - Pi Plugin Client
 - ProtectionOperationPhase
 - rerank
-- consolidator.py
+- CreateNodeRequest
 - Tauri Sidecar Commands
-- CloudKeyError
+- _rot_one_builtin
 - test_config.py
-- test_whisper_context.py
+- _make_settings_mock
 - load_state
 - Ingest is async: the client nudges, the server owns the cursor and advances on job completion
 - session_watcher.py
-- run_importance_scoring
+- .build_whisper_context
 - GraphView.tsx
 - Settings
 - routes_agent.py
-- ._extract_memories_llm
+- run_importance_scoring
 - test_claude_cli_adapter.py
-- recovery.py
-- CloudState
+- RecoveryKitError
+- timedelta
 - routes_account.py
 - SessionHandler
 - run_conflict_detection
-- cloud/__init__.py
+- StoreLockTimeout
 - test_session_watcher_flush.py
-- parse_node
+- MemoryNode
 - test_eval_whisper/test_metrics.py
 - test_duplicate_merger.py
 - JobTracker
 - llm/__init__.py
-- CreateNodeRequest
+- get_watermark
 - Tauri Bundle Config
 - test_whisper_out.py
-- server_manager.py
+- CloudKeyError
 - test_confirmed_use_contract.py
 - open_bundle
-- context_builder.py
+- GraphIndex
 - forgetting_manager.py
 - CloudCryptoError
 - CLI Adapter Tests
@@ -82,62 +82,62 @@
 - run_uninstall
 - ProtectionOperationKind
 - EdgeType
-- TestClient
+- test_account_billing_routes.py
 - CloudClient
 - routes_protection.py
-- ok
+- ormah/cli.py
 - test_eval_recall/test_metrics.py
 - test cleanup auto ingested
 - run_auto_linker
 - cli_adapter.py
-- node.py
+- _remove_codex_md_block
 - test_merge_undo.py
 - test_seq_fingerprint.py
-- get_ormah_bin_path
+- configure_codex_mcp
 - test feedback schema
-- test_hybrid_search.py
-- _mark_idle
-- SessionWatch
+- _make_titled_hybrid
+- test_cloud_cli.py
+- TestClient
 - validate_case
 - run_forgetting
-- llm_client.py
+- reset_adapter
 - get_fastembed_cache_dir
 - test pair batch
 - src/types.ts
 - Recomendações para o Ormah como projeto open source
-- parse_transcript
+- TestSafeBoundary
 - recall/cli.py
-- _atomic_write
-- protection.py
+- _is_ormah_hook
+- restore.py
 - run_setup_json
 - TestSubmitFeedbackBasic
 - test relevance runner
 - _NeverEofProc
-- configure_claude_hooks
+- 2026-08-19-hippocampus-flake-condition-waiting/00-overview.md
 - run_whisper_eval
 - test_mutation_stamping.py
 - start_scheduler
 - whisper/cli.py
-- extract_json
+- test_hybrid_search.py
 - test_routes.py
 - desktop ui package
 - TierManager
-- format_report
-- test_file_cache.py
+- whisper/runner.py
+- parse_transcript
 - test_server_manager.py
-- _remove_mcp_from_json
-- GraphIndex
-- LiteLLMEmbeddingAdapter
+- IndexBuilder
+- node.py
+- seed_case
 - setup_logging
 - test_setup.py
 - test_backup.py
 - extract_time_params
 - _make_engine_with_encoder
 - PromptIntent
-- PromptClassifier
+- ControlledEncoder
 - mcp_adapter.py
 - compilerOptions
-- background/__init__.py
+- maintenance/cli.py
 - seed_case
 - parser.py
 - test_eval_recall/test_report.py
@@ -146,30 +146,30 @@
 - compilerOptions
 - desktop/ui/src/App.tsx
 - Lifecycle cluster — issue dossier
-- llm_generate
-- timedelta
+- run_eval
+- _node_dict
 - MemoryEngine facade
 - APScheduler background scheduler
-- stored_or_encoded
+- TestWhisperTopicShift
 - Design — Issue #223: reversible promotion and the seven-day initial lease
-- .generate
-- ormah/cli.py
-- _redact_secrets
+- claude_cli_adapter.py
+- test_routes_admin_run_task.py
+- test_cli_cloud_backup.py
 - test_main_backfill_fallback.py
 - Whisper pipeline (involuntary recall)
-- conflict_detector.py
+- _FakeEngine
 - auto_linker edge-write hardening — Overview
 - compute_affinity_boost
 - proposals.py
-- get_watermark
-- run_auto_cluster
+- HybridSearch
+- extract_json
 - test_stats.py
-- entitlements.py
+- account.py
 - visual.ts
 - _find_link_candidates
 - routes_ui.py
-- configure_codex_mcp
 - conftest.py
+- _decision
 - test_cli_account.py
 - TestSyntheticPromptEndpoint
 - Ormah Desktop (Tauri v2 app)
@@ -182,12 +182,12 @@
 - Review Relevance Is Not Confirmed Use — Implementation Plan
 - normalize_conflict_type
 - test_llm_cancel.py
-- _FakeConn
+- test_whisper_context.py
 - Review relevance is not confirmed use
 - MaintenanceManager
 - _insert_node
 - test_protection_routes.py
-- test_scoring_signals.py
+- _find_conflict_candidates
 - Changes
 - FakeEncoder
 - forceLayout.ts
@@ -196,12 +196,12 @@
 - Investigação — o loop de rewind de cursor do #154 (2026-07-30)
 - spool_proto.py
 - _claude_code_wire
-- HybridSearch
+- _sanitize_fts_query
 - VectorStore
 - match synthetic pattern
 - 01-gate-the-claim.md
 - patch
-- test_memory_engine.py
+- NodeType
 - TestConsolidationSignatureSkip
 - test_migrations.py
 - Desktop release build job (macOS + Linux matrix)
@@ -210,8 +210,8 @@
 - Force-Directed Graph Canvas (full-bleed)
 - cmd_eval_whisper_run
 - 02-pin-legacy-fallback.md
-- unwire_one
-- main
+- _remove_claude_md_block
+- _merge_hooks
 - Reconciling #126 (pair-verdict invalidation) with #208 (lock-order hoist) in IndexBuilder
 - TestGetMaintenanceBatches
 - test graph
@@ -219,13 +219,14 @@
 - graph
 - routes_ingest.py
 - MemoryEngine
-- .recall_search
-- detect_space_from_cwd
-- run_mcp_stdio
+- FakeProtectionService
+- LlmCancelledError
+- TestWhisperRerankerBlendIntegration
+- test_parser.py
 - Whisper: detect rotted synthetic-prompt patterns and propose corrections — Design
-- find_rotted_patterns
+- test_synthetic_pattern_monitor.py
 - NodeFileHandler
-- validate_llm_runtime_config
+- test_validate_llm_runtime_config_keeps_claude_cli_default
 - Design — forgetting gate #6 must ignore non-value-bearing edges
 - constants.ts
 - GraphCanvas.tsx
@@ -235,20 +236,20 @@
 - Suppressing selection with a fact, not with the cursor (ADR-0004)
 - strip_temporal_phrases
 - Design: ADR-0004 Fix A — stop dead-lettering `no_safe_boundary`
-- run_whisper_log_cleanup
-- install_pi_md
+- _remove_claude_hooks
+- llm_cancel.py
 - test_miner.py
 - Canonical Ormah guidance block (Claude memory file)
-- safe_error_message
+- transfer.py
 - should_rewind
 - TestWhisperDecisions
 - start_session_watcher
 - Problemas de ingestão
 - recall_search_structured Keyword-Only Tuning Parameters — Implementation Plan
-- main.py
+- ormah/__init__.py
 - TestRecallFloorAndSpaceOrdering
-- test_cloud_cli.py
-- test_cli_cloud_backup.py
+- live_patterns
+- ._extract_time_params
 - test_run_stats.py
 - GraphView component (Cytoscape rendering + selection)
 - test tool schemas
@@ -256,15 +257,15 @@
 - relevance_quarantine.py
 - updater.rs
 - test_auto_linker.py
-- set_cloud_backup_enabled
+- client.py
 - Session-watcher live-loss safety net — Implementation Plan
-- test_hybrid_search_raw_cosine.py
+- safe_error_message
 - Ormah Desktop App Icon (canonical 512px master)
 - renderer
 - Encoder factory (get encoder   get adapter)
 - Ormah system map
 - age encryption envelope (client-side, private identity never
-- llm_errors.py
+- 2026-08-19-claude-cli-fixed-system-prompt/00-overview.md
 - Design — session-watcher live-loss safety net
 - Design: Claude-CLI memory extraction (replace local gemma)
 - recall_search_structured: keyword-only tuning parameters
@@ -272,8 +273,10 @@
 - Ormah Project Banner Image
 - Canonical ormah-maintenance agent (mcp  ormah  run maintenan
 - Ormah Claude Code plugin (manifest, hooks, MCP, commands)
+- PromptClassifier
 - _create_pair
 - Avaliação profunda — ormah Beta (`local-main`) — 2026-07-13
+- Path
 - Setup: skip the Claude Code wiring the ormah plugin already provides — Design
 - test_delete_guarded.py
 - single instance listener
@@ -286,12 +289,13 @@
 - _legacy_archival
 - Separate Surfaced Results from Confirmed Memory Use — Design
 - Whisper golden corpus (golden/golden.jsonl, local-only)
-- seed_case
-- db.py
+- generate_server_wrapper
+- _run_fusion
+- background/__init__.py
 - build
 - verify release versions
 - files
-- run_eval
+- find_rotted_patterns
 - `frozen_until` Implementation Plan — Overview
 - Investigação consolidada — ingestão (2026-07-30, tarde)
 - test graph focus
@@ -325,26 +329,33 @@
 - ingest-deferred-tracks.md
 - Auditoria do ADR-0004 — 2026-08-09
 - beta-keep (150 commits) — MUST survive the Task 6 merge (not in any PR, not upstream)
-- install_claude_md
+- test_file_cache.py
 - Spec — isolate `test_setup.py` from the developer's machine
 - LoggingHandler
 - Draft comment for #209 — failure-mode analysis of the four-way duplicate policy
+- TestExtractionSchema
 - TestStopOffsetCeiling
+- TestMarkOutdated
 - Port #221 (bounded reinforcement) onto local-main's post-#220 API — Implementation Plan
 - Runbook — running against the archived data directory (`ormah_old`)
 - Graph Node Size by Degree — Design
 - Graph view: WebGL live-force migration (sigma.js)
 - Design: session-watcher catch-up off the bind path (#52)
+- load_identities
+- _edges_between
 - Design — Graph active-first com drill-down de espaço (#22 slice 1)
 - Design
 - Design
 - index_updater lock-order inversion — design
 - ADR-0004 — repairing the two defects that break H1 in the ingest spool
-- configure_claude_code_mcp
-- config.py
+- get_ormah_bin_path
+- local_auth.py
+- test_consolidator.py
 - Investigação — pipeline de whisper — 2026-07-15
 - Setup: stop clobbering pre-existing user config
 - LLM Cancellation Redesign — Single Global Epoch
+- test_ingest_provider.py
+- Design: fixed `--system-prompt` in ClaudeCliAdapter
 - 01-lifecycle-and-knobs.md
 - Handoff — ADR-0004 slice 3 (`no_safe_boundary`): plano revisado 5×, nada implementado (2026-07-28)
 - ADR-0004 Slice 1 — Nudge core: the client stops waiting, the server owns the queue
@@ -363,6 +374,7 @@
 - Proposal — Memory lifecycle: clock calibration, cold layer, and Deep Recall
 - Beta ↔ Upstream Sync — Implementation Plan (overview)
 - Delta-selection for dedup/conflict (#81) — Implementation Plan Overview
+- Design — remove the wall-clock race from `test_hippocampus.py`
 - Ingest batches are sized to a recall sweet spot, not the context window; delta ordered first
 - Amendment 2026-08-09 — the 2026-07-28 force-close REMEDY is retracted; its DIAGNOSIS is confirmed and still open
 - Amendment 2026-08-13 — Fix A ships: the `no_safe_boundary` dead-letter is retired, not just re-admitted
@@ -398,16 +410,19 @@
 - Setup Test Env Isolation — Overview
 - 2026-08-17-issue-221-port/06-docs.md
 - Issue #232 — Explicit filter parameters on the recall boundary
+- _deprecated_key_present
+- _reciprocal_rank_fusion
+- TestIngestConfidence
 - Problema 3 — o churn de `seq` (refutado como causa do backlog)
 - Task 3 — Pure helpers: `buildSpaceLegend` + `scopeLabel`
 - Bounded Stability Reinforcement (#221) — Implementation Plan
-- .get_whisper_context
+- main
 - Recovery drops an orphan fragment rather than re-ingesting the whole transcript
 - ⛔ SUPERSEDED — this plan was split into three slices (2026-07-21)
 - Task 4 — Wiring: `App.tsx` (estado + fetch) e `GraphView.tsx` (legenda drill + banner)
 - Task 2: Add `_claude_code_plugin_provides_hooks()`
 - Task 2: Always-on Ingest worker — drains the spool; Observer becomes optional
-- memory_engine.py
+- .recall_search
 - Task 2: `POST /ingest/nudge` — 202, feeds the worker
 - Task 03: `_missing_embeddable_count()` + `backfill_embeddings()`
 - Task 2 — Rebase the 5 small PRs (#57 → #60 → #68 → #38 → #31)
@@ -432,7 +447,7 @@
 - 13 — disposition of #194 (conflict candidates missing creation dates)
 - 14 — flip criteria for bounded forgetting (#28 / PR #31)
 - 15 — macro planning for #224 (system-level conflict owner)
-- LocalAdapter
+- TestGetAdapter
 - flows.md
 - 2026-07-21-adr-0004-async-ingest-nudge-SUPERSEDED/01-timeout-signal.md
 - 2026-07-21-adr-0004-async-ingest-nudge-SUPERSEDED/02-timeout-classification.md
@@ -520,21 +535,30 @@
 - 02-settings-singleton.md
 - 03-find-binary-seam.md
 - 04-verify-branch.md
-- TestExtractionSchema
-- _commit_updates_chunked
+- TestSpaceScoring
+- test_full_rebuild_resets_watermark
 - ormah-desktop
 - test_admin_embedding_backfill_task.py
 - init_key
+- cloud_paths
 - test_recall_concurrency.py
-- TestSessionBufferRoute
-- live_patterns
-- test_synthetic_pattern_monitor.py
+- logging_setup.py
+- _render_conflict_pair
+- test_candidate_discovery_failure_is_reported_not_swallowed
+- unwire_one
+- test_migration_seq.py
+- test_validate_llm_runtime_config_rejects_empty_ollama_model
+- test_settings_construction_with_bad_pair_still_succeeds
+- test_length_penalty_disabled_at_zero
+- test_question_similarity_blend_dominates
 - 01-lifecycle-module.md
 - 02-config-knobs.md
 - 03-cooldown-reinforcement.md
 - 04-decay-shared-retrievability.md
 - 05-lifecycle-model-version.md
 - 06-docs.md
+- test_question_blend_vs_keyword_blend_differ
+- run_mcp_stdio
 
 ## God Nodes (most connected - your core abstractions)
 1. `Settings` - 204 edges
@@ -551,14 +575,14 @@
 ## Surprising Connections (you probably didn't know these)
 - `Pi ormah-maintenance agent prompt (ormah_run_maintenance)` --semantically_similar_to--> `Shipped ormah-pi-maintenance agent prompt`  [INFERRED] [semantically similar]
   integrations/pi-plugin/agents/ormah-maintenance.md → src/ormah/agents/ormah-pi-maintenance.md
-- `test_model_default_is_unlocked()` --uses--> `MemoryNode`  [INFERRED]
-  tests/test_store/test_space_locked.py → src/ormah/models/node.py
-- `test_ephemeral_thread_connection_is_retired()` --uses--> `Database`  [INFERRED]
-  tests/test_index/test_db_fd_lifecycle.py → src/ormah/index/db.py
 - `test_migrate_normalizes_duplicate_payloads_and_preserves_candidate_ids()` --uses--> `Database`  [INFERRED]
   tests/test_index/test_feedback_schema.py → src/ormah/index/db.py
-- `test_migration_adds_matched_pattern_to_an_existing_db()` --uses--> `Database`  [INFERRED]
-  tests/test_index/test_whisper_decisions_migration.py → src/ormah/index/db.py
+- `test_consolidation_settings_defaults()` --uses--> `Settings`  [INFERRED]
+  tests/test_background/test_consolidator.py → src/ormah/config.py
+- `test_consolidation_settings_env_override()` --uses--> `Settings`  [INFERRED]
+  tests/test_background/test_consolidator.py → src/ormah/config.py
+- `test_extraction_uses_ingest_adapter_not_maintenance()` --uses--> `Settings`  [INFERRED]
+  tests/test_background/test_ingest_provider.py → src/ormah/config.py
 
 ## Import Cycles
 - None detected.
@@ -575,23 +599,23 @@
 - **Visual encoding of the memory graph: nodes, edges, color, and lens layout** — docs_graph_memorynodes, docs_graph_memoryedges, docs_graph_colorencodingscheme, docs_graph_lensclusterlayout [INFERRED 0.85]
 - **Per-agent Ormah guidance blocks installed by ormah setup (Claude, Codex, Pi)** — src_ormah_instructions_ormah_guidance_block, src_ormah_codex_instructions_codex_guidance_block, src_ormah_pi_instructions_pi_guidance_block, integrations_claude_plugin_setup_claude_md_install [INFERRED 0.95]
 
-## Communities (552 total, 143 thin omitted)
+## Communities (576 total, 150 thin omitted)
 
-### Community 0 - "NodeType"
-Cohesion: 0.06
-Nodes (49): The ingest extraction prompt contract: rules, response schema, rendered…, MemoryNode, NodeType, Advance `updated`. Call before saving any content mutation; never for read-side…, BaseModel, Search-related models., SearchQuery, SearchResult (+41 more)
+### Community 0 - "ok"
+Cohesion: 0.08
+Nodes (21): fail(), ok(), play_finale(), Shared output formatting for CLI and setup — matches install.sh visual style., Play a ~2.5s terminal animation: 'ormah' dissolves into a sphere. TTY only —…, Reset color detection cache (for testing)., Section header: \\n==> msg (bold)., Success: [ok] msg (green). (+13 more)
 
 ### Community 1 - "test_session_watcher.py"
 Cohesion: 0.03
-Nodes (116): _file_hash(), _ingest_session(), IngestResult, Why an ingest attempt did/didn't commit, so reconcile parks only files that…, Return SHA-256 hex digest of a file's contents., Ingest a single JSONL session transcript if changed. ``boundary`` is the…, _append_assistant(), _append_codex_turn() (+108 more)
+Nodes (190): _frozen_unchanged(), _ingest_session(), IngestResult, Why an ingest attempt did/didn't commit, so reconcile parks only files that…, True when this file is still EXACTLY the one the freeze examined, so re-…, Ingest a single JSONL session transcript if changed. ``boundary`` is the…, _append_assistant(), _append_codex_turn() (+182 more)
 
-### Community 2 - "test_hippocampus.py"
-Cohesion: 0.05
-Nodes (58): _detect_space(), _file_hash(), HippocampusHandler, _ingest_file(), _load_state(), _matches_ignore(), FileSystemEventHandler, Observer (+50 more)
+### Community 2 - "main.py"
+Cohesion: 0.04
+Nodes (83): BaseHTTPMiddleware, AgentMiddleware, Request, Response, Request middleware for agent_id extraction and logging., _detect_space(), _file_hash(), HippocampusHandler (+75 more)
 
 ### Community 3 - "CloudProtectionService"
-Cohesion: 0.09
-Nodes (38): ProtectionState, _cleared_upload_journal(), CloudProtectionService, _EnablePrerequisiteError, _existing_store_id(), _is_disk_full_error(), _is_offline_error(), _known_state() (+30 more)
+Cohesion: 0.07
+Nodes (49): ProtectionState, _cleared_upload_journal(), _cloud_error_code(), CloudProtectionService, _EnablePrerequisiteError, _existing_store_id(), _finalize_is_definitively_expired(), _is_disk_full_error() (+41 more)
 
 ### Community 4 - "product_bridge.rs"
 Cohesion: 0.08
@@ -606,100 +630,100 @@ Cohesion: 0.05
 Nodes (41): ormahPi(), IngestBody, MaintenanceResults, OrmahClient, OrmahHttpError, RecallBody, RememberBody, WhisperResponse (+33 more)
 
 ### Community 7 - "ProtectionOperationPhase"
-Cohesion: 0.09
-Nodes (73): ProtectionOperationPhase, ProtectionReasonCode, StrEnum, Durable client phases around the only ambiguous upload boundary., Stable machine-readable causes shared by CLI, REST, and desktop clients., UploadJournalPhase, cloud_state_dir(), FakeCloudClient (+65 more)
+Cohesion: 0.08
+Nodes (76): Build a BackupService from a Settings-like object., service_from_settings(), Client-side cloud primitives: encryption, snapshot bundles, key lifecycle.…, ProtectionOperationPhase, ProtectionReasonCode, StrEnum, Durable client phases around the only ambiguous upload boundary., Stable machine-readable causes shared by CLI, REST, and desktop clients. (+68 more)
 
 ### Community 8 - "rerank"
 Cohesion: 0.05
 Nodes (46): _linear_rescale(), Rescale raw CE score to [0, 1] using clamped linear interpolation., Rerank search results using a cross-encoder with linear-rescale blended…, rerank(), _candidate(), _linear_rescale(), Unit tests for the cross-encoder reranker with linear-rescale blended scoring.…, blend_alpha=1 means only CE matters. (+38 more)
 
-### Community 9 - "consolidator.py"
-Cohesion: 0.08
-Nodes (26): _apply_consolidation(), _cluster_signature(), _consolidate_cluster(), _find_consolidation_clusters(), Background job: consolidate clusters of similar working-tier memories via LLM., Create a consolidated node, link originals, and demote them to archival.…, Find clusters of similar working memories and consolidate via LLM., Consolidate a single cluster using LLM summarization. (+18 more)
+### Community 9 - "CreateNodeRequest"
+Cohesion: 0.04
+Nodes (61): Assign unassigned nodes to spaces based on their connections., run_auto_cluster(), CreateNodeRequest, _connect(), auto_cluster must not propagate the placeholder 'null' space (#22 council…, Startup migration re-locks legacy identity memories once (#22 council C)., The repair resets a swept identity cluster back to global + locked., Happy path still works: an unassigned node inherits a real neighbor space. (+53 more)
 
 ### Community 10 - "Tauri Sidecar Commands"
 Cohesion: 0.06
 Nodes (58): Command, base_url(), detect_agents(), fetch_stats(), graph_url(), is_onboarded(), mark_onboarded(), marker_path() (+50 more)
 
-### Community 11 - "CloudKeyError"
-Cohesion: 0.09
-Nodes (39): CloudKeyError, _ensure_recovery_kit_can_be_rewritten(), extract_recovery_kit_format_version(), extract_store_id(), extract_store_id_from_text(), import_key(), install_store_id(), RuntimeError (+31 more)
+### Community 11 - "_rot_one_builtin"
+Cohesion: 0.12
+Nodes (16): A rotted <task-notification> plus live traffic — the standard setup. Reuses…, The job runs daily and the pattern stays rotted daily., proposed_action IS the dedup key: a date or count in it would change every run,…, Rejecting means "I know, leave it" — it must not come back tomorrow., An unresolved pending proposal must not be filed twice. The pattern rots, a…, council I3. Approving executes nothing, yet the shared proposals surface…, decay_manager.py:20-24 deletes type='decay' proposals on EVERY run, unguarded.…, _rot_one_builtin() (+8 more)
 
 ### Community 12 - "test_config.py"
 Cohesion: 0.05
-Nodes (73): parametrize, Tests for config validation., Create settings with overrides, using a temp dir for memory_dir., council C2: constructing Settings must NEVER raise for this pair — `ormah…, _settings(), test_activation_decay_one_ok(), test_activation_decay_zero(), test_affinity_defaults() (+65 more)
+Nodes (72): parametrize, Tests for config validation., Create settings with overrides, using a temp dir for memory_dir., _settings(), test_activation_decay_one_ok(), test_activation_decay_zero(), test_affinity_defaults(), test_backup_defaults() (+64 more)
 
-### Community 13 - "test_whisper_context.py"
-Cohesion: 0.05
-Nodes (31): _make_settings_mock(), Tests for whisper context (involuntary recall injection)., Create a MagicMock settings object with affinity-related float attributes., Affinity boost rescues candidates that would otherwise be gated out., A candidate below the injection gate that receives a strong affinity boost…, Affinity boost is only applied when reranker_enabled=True., If affinity boost raises, the pipeline should continue with unmodified scores., A strong negative affinity boost should push a marginal candidate below the… (+23 more)
+### Community 13 - "_make_settings_mock"
+Cohesion: 0.07
+Nodes (24): _make_settings_mock(), Create a MagicMock settings object with affinity-related float attributes., Affinity boost rescues candidates that would otherwise be gated out., A candidate below the injection gate that receives a strong affinity boost…, Affinity boost is only applied when reranker_enabled=True., If affinity boost raises, the pipeline should continue with unmodified scores., A strong negative affinity boost should push a marginal candidate below the…, Exploration slot injects one unconfirmed gated-out candidate. (+16 more)
 
 ### Community 14 - "load_state"
-Cohesion: 0.10
-Nodes (65): load_state(), ProtectionIntentStatus, ProtectionState, User-facing states for the paid backup protection journey., Load one store's state, distinguishing absence from unsafe existing data., Durable phases for an explicit Protect action., Update selected fields while preserving the rest of one store's state., update_state() (+57 more)
+Cohesion: 0.14
+Nodes (52): load_state(), ProtectionIntentStatus, ProtectionState, User-facing states for the paid backup protection journey., Load one store's state, distinguishing absence from unsafe existing data., Durable phases for an explicit Protect action., Update selected fields while preserving the rest of one store's state., update_state() (+44 more)
 
 ### Community 15 - "Ingest is async: the client nudges, the server owns the cursor and advances on job completion"
 Cohesion: 0.18
 Nodes (11): Amendment 2026-07-22 — the durable queue is a directory spool, not the Cursor alone (and not a job table), Amendment 2026-08-10 — the cause is found: the frozen-prefix jump is a WINDOWED-parse artefact, Amendment 2026-08-12 — the windowed-parse defect reproduces post-wipe; neither fix from 08-09/08-10 has shipped, Consequences, Considered options, Field observation 2026-07-27 — the `no_safe_boundary` dead-letter has 533 transcripts and no drain, Ingest is async: the client nudges, the server owns the cursor and advances on job completion, Narrowed: `_mark_frozen_prefix_consumed` is not the only writer of the `{end_offset}` shape (+3 more)
 
 ### Community 16 - "session_watcher.py"
-Cohesion: 0.05
-Nodes (67): _assistant_response_after_prompt(), _confidence(), _feedback_llm_judge_enabled(), _insert_affinity(), _insert_usage_signal(), _llm_feedback_judge_response_format(), _llm_judge_whisper_usage(), _node_usage_evidence() (+59 more)
+Cohesion: 0.06
+Nodes (58): _assistant_response_after_prompt(), _feedback_llm_judge_enabled(), _insert_affinity(), _insert_usage_signal(), _node_usage_evidence(), _normalise_text(), Session watcher — auto-ingest completed agent JSONL transcripts., Lowercase text and collapse punctuation/whitespace for matching. (+50 more)
 
-### Community 17 - "run_importance_scoring"
-Cohesion: 0.07
-Nodes (36): Importance recency: half-life decay on its own clock (#222). Independent of…, Iterate all nodes, compute weighted importance, persist changes., _recency_signal(), run_importance_scoring(), fixture, Tests for the importance scoring background job., Absolute normalization: adding a high-access outlier shouldn't shift existing…, Engine with a few nodes of varying profiles. (+28 more)
+### Community 17 - ".build_whisper_context"
+Cohesion: 0.13
+Nodes (11): _gate_score(), _prompt_log_snippet(), ndarray, Absolute relevance signal for gating decisions. Gates answer "is anything here…, True when this session already had an injection on a similar topic. Reads…, Write one whisper_decisions row per whisper call — including silence.…, Build compact whisper context for involuntary recall injection. Key differences…, Return *text* truncated to *max_len* characters at a word boundary. (+3 more)
 
 ### Community 18 - "GraphView.tsx"
 Cohesion: 0.07
 Nodes (37): BANNER_BTN_STYLE, BANNER_STYLE, clampZoomSliderValue(), DRILL_BTN_STYLE, GraphView, LEGEND_PANEL_STYLE, LEGEND_ROW_STYLE, LEGEND_SECTION_TITLE_STYLE (+29 more)
 
 ### Community 19 - "Settings"
-Cohesion: 0.05
-Nodes (11): BaseSettings, model_validator, _deprecated_key_present(), field_validator, Path, True when an LLM provider is configured (not ``"none"``)., True when the deprecated key is set in ANY configured settings source.…, Settings (+3 more)
+Cohesion: 0.06
+Nodes (5): BaseSettings, field_validator, True when an LLM provider is configured (not ``"none"``)., Settings, TestGetEncoderCaching
 
 ### Community 20 - "routes_agent.py"
 Cohesion: 0.07
 Nodes (54): connect(), delete_node(), FeedbackRequest, get_clients(), get_insights(), get_maintenance_status(), get_proposals(), list_audit_log() (+46 more)
 
-### Community 21 - "._extract_memories_llm"
-Cohesion: 0.14
-Nodes (16): _ingest_adapter_baseline_timeout(), _prompt_exceeds_provider_capacity(), The timeout the ACTIVE ingest adapter would use on its own. Adapters treat…, The prompt's ESTIMATED token count when it overflows the usable input window,…, Use configured LLM to extract memories from conversation text. Returns a list…, estimated_tokens(), prompt_overhead_chars(), Shared capacity arithmetic for ingest payloads. Imported by BOTH `config.py`… (+8 more)
+### Community 21 - "run_importance_scoring"
+Cohesion: 0.06
+Nodes (43): _commit_updates_chunked(), Background job: recompute importance scores for all memory nodes., Importance recency: half-life decay on its own clock (#222). Independent of…, Apply (importance, node_id) updates in bounded write transactions so a full-…, Iterate all nodes, compute weighted importance, persist changes., _recency_signal(), run_importance_scoring(), The all-nodes write in importance_scorer must commit in bounded chunks. (+35 more)
 
 ### Community 22 - "test_claude_cli_adapter.py"
-Cohesion: 0.07
-Nodes (60): ClaudeCliAdapter, LlmCancelledError, The call was cancelled by the host (shutdown/stop), not by the provider. Says…, _fake_popen(), _pid_alive(), integration, skipif, Belt-and-suspenders against the real binary: an operator SessionStart hook must… (+52 more)
+Cohesion: 0.08
+Nodes (50): ClaudeCliAdapter, _fake_popen(), _pid_alive(), integration, skipif, Belt-and-suspenders against the real binary: an operator SessionStart hook must…, Belt-and-suspenders against the real binary: a prompt asking to read a probe…, Consolidator-style prompt: known to answer in a single text turn… (+42 more)
 
-### Community 23 - "recovery.py"
-Cohesion: 0.11
-Nodes (20): datetime, Path, RuntimeError, Recovery-kit validation and device-loss readiness confirmation. This is the…, Validate the canonical kit and confirm a reopened native saved copy., Validate the fixed canonical kit without changing readiness., Repair a stale canonical kit before a native save operation. Returns ``True``…, Record a saved-copy proof only when its bytes equal the current valid kit. (+12 more)
+### Community 23 - "RecoveryKitError"
+Cohesion: 0.08
+Nodes (28): Path, RuntimeError, Validate the canonical kit and confirm a reopened native saved copy., Validate the fixed canonical kit without changing readiness., Repair a stale canonical kit before a native save operation. Returns ``True``…, Record a saved-copy proof only when its bytes equal the current valid kit., Clear readiness before installing a recovery-first key rotation. The ordering…, Raised when recovery material cannot be proven current and complete. (+20 more)
 
-### Community 24 - "CloudState"
+### Community 24 - "timedelta"
 Cohesion: 0.08
 Nodes (63): _as_utc(), cloud_status_payload(), CloudState, CloudStateLoadError, _ensure_writable_schema(), _existing_store_id(), is_device_loss_recovery_ready(), is_protected_and_verified() (+55 more)
 
 ### Community 25 - "routes_account.py"
-Cohesion: 0.07
-Nodes (57): account_checkout(), _account_http_error(), account_logout(), account_offer(), account_portal(), account_request_code(), account_status(), account_verify_code() (+49 more)
+Cohesion: 0.09
+Nodes (43): account_checkout(), _account_http_error(), account_logout(), account_offer(), account_portal(), account_request_code(), account_status(), account_verify_code() (+35 more)
 
 ### Community 26 - "SessionHandler"
 Cohesion: 0.04
-Nodes (48): _default_acceptance_roots(), _is_nested_or_equal(), _is_subagent_transcript(), ParkOutcome, Enum, Event, FileSystemEventHandler, Path (+40 more)
+Nodes (58): _default_acceptance_roots(), _file_hash(), _is_nested_or_equal(), _is_subagent_transcript(), ParkOutcome, Enum, Event, FileSystemEventHandler (+50 more)
 
 ### Community 27 - "run_conflict_detection"
-Cohesion: 0.07
-Nodes (57): _conflict_scope_value(), _find_conflict_candidates(), Find node pairs that might contradict each other. ``delta=False`` (default —…, Find potentially contradicting nodes and create edges. Seeds are delta-selected…, run_conflict_detection(), _conflict_response(), _create_pair(), _make_belief() (+49 more)
+Cohesion: 0.11
+Nodes (39): Find potentially contradicting nodes and create edges. Seeds are delta-selected…, run_conflict_detection(), _conflict_response(), _create_pair(), _make_belief(), Tests for LLM-based contradiction detection in conflict_detector., LLM rejects contradiction -> no edge, no proposal., Helper: create two similar nodes without auto-linking, return their IDs. (+31 more)
 
-### Community 28 - "cloud/__init__.py"
-Cohesion: 0.15
-Nodes (17): Client-side cloud primitives: encryption, snapshot bundles, key lifecycle.…, canonical_memory_dir(), _entry_for(), _LockEntry, Path, Cross-process lock for operations that act on one local memory store., Return the stable local identity used for locking one memory directory., Return the lock path without consulting cloud enrollment or ``store_id``. (+9 more)
+### Community 28 - "StoreLockTimeout"
+Cohesion: 0.14
+Nodes (20): canonical_memory_dir(), _entry_for(), _LockEntry, Path, Cross-process lock for operations that act on one local memory store., Raised when another process keeps a memory store busy past the timeout., Return the stable local identity used for locking one memory directory., Return the lock path without consulting cloud enrollment or ``store_id``. (+12 more)
 
 ### Community 29 - "test_session_watcher_flush.py"
-Cohesion: 0.05
-Nodes (44): fixture, Presence detection must not fire on a commented-out line or on a longer key…, Review M-9: the repo owner's ordered fix (warn instead of silently `continue`…, Regression for review F1: with no ~/.config/ormah/.env and no ./.env,…, The F1 fix must not over-correct into swallowing a REAL read failure…, Council R1 (Cursor): a floor of `>= flush_chars` compares bytes to chars and…, A multi-turn slice must never exceed the conversation budget — break BEFORE…, A single turn bigger than the budget can't make empty progress — commit it as… (+36 more)
-
-### Community 30 - "parse_node"
 Cohesion: 0.04
-Nodes (63): Row, IndexBuilder, Path, Index builder: full rebuild and incremental updates from markdown files., Update index for changed/new files. Returns (added, updated) counts., Builds and updates the SQLite index from markdown source files., Index or re-index a single file., The stored fingerprint + seq, read BEFORE _remove_node deletes the row. Only… (+55 more)
+Nodes (46): _FakeConn, fixture, Presence detection must not fire on a commented-out line or on a longer key…, Review M-9: the repo owner's ordered fix (warn instead of silently `continue`…, Regression for review F1: with no ~/.config/ormah/.env and no ./.env,…, The F1 fix must not over-correct into swallowing a REAL read failure…, Council R1 (Cursor): a floor of `>= flush_chars` compares bytes to chars and…, A multi-turn slice must never exceed the conversation budget — break BEFORE… (+38 more)
+
+### Community 30 - "MemoryNode"
+Cohesion: 0.04
+Nodes (72): MemoryNode, normalize_space(), BaseModel, Map placeholder space strings ('null', 'none', '', whitespace) to None., Advance `updated`. Call before saving any content mutation; never for read-side…, File-based CRUD for memory nodes stored as markdown files., _format_dt(), _parse_dt() (+64 more)
 
 ### Community 31 - "test_eval_whisper/test_metrics.py"
 Cohesion: 0.07
@@ -707,19 +731,19 @@ Nodes (21): compute_prompt_metrics(), f1_score(), has_false_positive(), injectio
 
 ### Community 32 - "test_duplicate_merger.py"
 Cohesion: 0.08
-Nodes (52): Find near-duplicate nodes and create merge proposals. Uses a multi-signal…, run_duplicate_detection(), _create_pair(), _duplicate_response(), _make_fact(), Tests for LLM-based duplicate consolidation in duplicate_merger., With llm_provider='none', LLM is never called., For medium-confidence pairs, proposal contains merged content preview. (+44 more)
+Nodes (53): Find near-duplicate nodes and create merge proposals. Uses a multi-signal…, run_duplicate_detection(), _create_pair(), _duplicate_response(), _make_fact(), Tests for LLM-based duplicate consolidation in duplicate_merger., With llm_provider='none', LLM is never called., For medium-confidence pairs, proposal contains merged content preview. (+45 more)
 
 ### Community 33 - "JobTracker"
 Cohesion: 0.08
-Nodes (40): JobStatus, JobTracker, Any, Track background job execution status for observability., Wrap a job function with tracking. Returns a no-arg callable for the scheduler., Snapshot of a single job's health., Thread-safe registry of background job execution outcomes., Yield True if this caller claimed the job, False if it was already running. An… (+32 more)
+Nodes (39): JobStatus, JobTracker, Any, Track background job execution status for observability., Wrap a job function with tracking. Returns a no-arg callable for the scheduler., Snapshot of a single job's health., Thread-safe registry of background job execution outcomes., Yield True if this caller claimed the job, False if it was already running. An… (+31 more)
 
 ### Community 34 - "llm/__init__.py"
-Cohesion: 0.08
-Nodes (34): LLMAdapter, Abstract base class for LLM adapters., Send *prompt* to the LLM and return the raw response text. Returns ``None`` on…, Interface that all LLM backends must implement., Claude CLI LLM adapter — headless `claude -p` via subscription auth (no paid…, _get_or_create_adapter(), get_adapter(), LLM adapter package — pluggable backends for background jobs. (+26 more)
+Cohesion: 0.11
+Nodes (25): LLMAdapter, Abstract base class for LLM adapters., Send *prompt* to the LLM and return the raw response text. Returns ``None`` on…, Interface that all LLM backends must implement., _get_or_create_adapter(), get_adapter(), LLM adapter package — pluggable backends for background jobs., Build an adapter from the application settings. Returns ``None`` when the… (+17 more)
 
-### Community 35 - "CreateNodeRequest"
-Cohesion: 0.03
-Nodes (66): CreateNodeRequest, BaseModel, An edge another writer already created must not raise., test_conflict_edge_write_is_idempotent(), No signal when claude_maintenance_enabled=False., No signal when maintenance was run within the interval., Signal appears when no maintenance has ever been run., TestWhisperSignal (+58 more)
+### Community 35 - "get_watermark"
+Cohesion: 0.25
+Nodes (12): get_watermark(), Shared seq-watermark helpers for incremental background jobs (#81). Generalizes…, Return the seq of the last fully-processed node for *key*, or 0., set_watermark(), Tests for the shared seq-watermark helpers (#81)., Mass reindex re-allocates seq; every incremental cursor must be cleared…, test_default_is_zero(), test_full_rebuild_resets_all_incremental_watermarks() (+4 more)
 
 ### Community 36 - "Tauri Bundle Config"
 Cohesion: 0.04
@@ -727,11 +751,11 @@ Nodes (46): app, security, windows, withGlobalTauri, build, beforeBuildCommand, 
 
 ### Community 37 - "test_whisper_out.py"
 Cohesion: 0.08
-Nodes (31): Find a transcript JSONL for a session ID across supported clients., _resolve_transcript_path(), _concurrent_appender(), _concurrent_drainer(), _isolate_cache(), _make_transcript(), _mock_client(), _outbox_records() (+23 more)
+Nodes (29): _concurrent_appender(), _concurrent_drainer(), _isolate_cache(), _make_transcript(), _mock_client(), _outbox_records(), fixture, skipif (+21 more)
 
-### Community 38 - "server_manager.py"
-Cohesion: 0.07
-Nodes (33): CalledProcessError, _called_process_error_output(), _find_manual_server_pids(), install_autostart(), install_launchd_agent(), install_systemd_service(), is_first_run(), _is_ormah_server_start_command() (+25 more)
+### Community 38 - "CloudKeyError"
+Cohesion: 0.11
+Nodes (32): _cmd_cloud_init(), _atomic_write_0600(), CloudKeyError, _ensure_recovery_kit_can_be_rewritten(), extract_recovery_kit_format_version(), extract_store_id_from_text(), import_key(), install_store_id() (+24 more)
 
 ### Community 39 - "test_confirmed_use_contract.py"
 Cohesion: 0.06
@@ -741,41 +765,41 @@ Nodes (63): fts_only(), _make_nodes(), fixture, parametrize, Contract tests for 
 Cohesion: 0.08
 Nodes (61): _add_member(), build_bundle(), BundleError, BundleInfo, _check_dest(), _iter_bundle_files(), _member_allowed(), open_bundle() (+53 more)
 
-### Community 41 - "context_builder.py"
-Cohesion: 0.06
-Nodes (26): _first_sentence_truncate(), _gate_score(), _has_topical_overlap(), _prompt_log_snippet(), ndarray, Builds whisper context for involuntary recall injection., Absolute relevance signal for gating decisions. Gates answer "is anything here…, Return the first sentence of content, capped to max_len. (+18 more)
+### Community 41 - "GraphIndex"
+Cohesion: 0.07
+Nodes (24): _first_sentence_truncate(), _has_topical_overlap(), Builds whisper context for involuntary recall injection., Return the first sentence of content, capped to max_len., Extract meaningful topical tokens from text., Return True when prompt tokens overlap node title/content tokens., _topic_tokens(), GraphIndex (+16 more)
 
 ### Community 42 - "forgetting_manager.py"
 Cohesion: 0.13
 Nodes (30): _archival_rows(), _aware(), _backfill_legacy_archived_at(), _cap_guard(), _connectivity(), _eligibility_guard(), _evaluate_protection(), _forget_score() (+22 more)
 
 ### Community 43 - "CloudCryptoError"
-Cohesion: 0.17
-Nodes (27): Identity, Recipient, CloudCryptoError, decrypt_bytes(), encrypt_bytes(), generate_identity(), identity_from_str(), identity_to_str() (+19 more)
+Cohesion: 0.18
+Nodes (26): Identity, Recipient, CloudCryptoError, decrypt_bytes(), encrypt_bytes(), generate_identity(), identity_from_str(), identity_to_str() (+18 more)
 
 ### Community 44 - "CLI Adapter Tests"
 Cohesion: 0.08
 Nodes (44): _mock_response(), Tests for the CLI adapter., Run the CLI with given args, returning (exit_code, stdout, stderr)., Create a mock httpx.Response., When cwd is missing, space should be None (no space key in body)., Nudge appears at the Nth prompt (default 10)., Nudge never appears when interval is 0., Each session_id gets its own counter. (+36 more)
 
 ### Community 45 - "_make_node_dict"
-Cohesion: 0.07
-Nodes (20): _make_node_dict(), Standing rules use a typed applicability channel without biasing facts., Whisper outputs a flat ranked list — top 2 full, rest title+ID only., A weak query's least-bad match: blended ~0.9 (rank-relative top) but the cross-…, A genuinely relevant match under-ranked by the bi-encoder: the cross-encoder…, Topic-shift suppression only fires for topics that were served (I9)., Turn 1 was gate-rejected (logged was_injected=0); turn 2 on the same topic must…, Turn 1 injected (was_injected=1); turn 2 on the same topic is correctly… (+12 more)
+Cohesion: 0.08
+Nodes (17): _make_node_dict(), Standing rules use a typed applicability channel without biasing facts., Whisper outputs a flat ranked list — top 2 full, rest title+ID only., A weak query's least-bad match: blended ~0.9 (rank-relative top) but the cross-…, A genuinely relevant match under-ranked by the bi-encoder: the cross-encoder…, Topic-shift suppression only fires for topics that were served (I9)., Turn 1 was gate-rejected (logged was_injected=0); turn 2 on the same topic must…, Turn 1 injected (was_injected=1); turn 2 on the same topic is correctly… (+9 more)
 
 ### Community 46 - "api.ts"
 Cohesion: 0.10
 Nodes (40): AdminTask, AgentInfo, BackupInfo, BackupStatus, CloudStatus, createBackup(), del(), fetchAdminTasks() (+32 more)
 
 ### Community 47 - "routes_admin.py"
-Cohesion: 0.07
-Nodes (53): HTTPException, _backup_service_from_request(), backup_status(), _backup_status_payload(), _backup_to_dict(), BackupSettingsUpdate, cloud_status(), create_backup() (+45 more)
+Cohesion: 0.10
+Nodes (42): HTTPException, _backup_service_from_request(), backup_status(), _backup_status_payload(), _backup_to_dict(), BackupSettingsUpdate, cloud_status(), create_backup() (+34 more)
 
 ### Community 48 - "run_setup"
-Cohesion: 0.09
-Nodes (26): backfill_transcripts(), configure_llm(), _cost_hint(), _disable_llm(), _enable_llm(), _estimate_cost(), _persist_env_delta(), _prompt_choice() (+18 more)
+Cohesion: 0.07
+Nodes (32): AgentDescriptor, backfill_transcripts(), configure_agent_maintenance(), configure_llm(), _cost_hint(), _detected_agents(), _disable_llm(), _enable_llm() (+24 more)
 
 ### Community 49 - "ContextBuilder"
-Cohesion: 0.05
-Nodes (28): ContextBuilder, Builds agent context from core memories., Whisper formatting: flat list, top 2 full, rest title-only., Topic-shift detection: skip injection when prompt is on the same topic., High similarity to recent prompts → skip whisper., Low similarity to recent prompts → proceed with whisper., Underspecified follow-up prompts should still search even on same topic., Empty recent_prompts (cold start) → always inject. (+20 more)
+Cohesion: 0.09
+Nodes (16): ContextBuilder, Builds agent context from core memories., Whisper formatting: flat list, top 2 full, rest title-only., Whisper should return empty string on failure, not dump everything., Prompts of 2 chars or less (e.g. 'y', 'ok') should return empty., Prompts of 3+ chars should proceed normally., Whisper should respect max_nodes., Total nodes in output should be <= max_nodes, even with identity nodes. (+8 more)
 
 ### Community 50 - "ui/src/App.tsx"
 Cohesion: 0.09
@@ -783,11 +807,11 @@ Nodes (31): App(), DEFAULT_EDGE_TYPES, Filters, PanelId, ThemeTransitionState, E
 
 ### Community 51 - "billing.py"
 Cohesion: 0.10
-Nodes (33): BaseException, NoReturn, BillingError, BillingErrorCode, BillingOffer, _canonical_account_id(), _canonical_uuid4(), CheckoutHandoff (+25 more)
+Nodes (35): BaseException, NoReturn, BillingError, BillingErrorCode, BillingOffer, _canonical_account_id(), _canonical_uuid4(), CheckoutHandoff (+27 more)
 
 ### Community 52 - "test_ingest_extraction.py"
 Cohesion: 0.05
-Nodes (42): Split content into pieces at line (turn) boundaries; each piece is <=hard_cap.…, _split_for_extraction(), Extraction error classification: timeout/call-failure must not read as 'no…, If every chunk's call fails while a provider is configured, the whole…, Extracted memories below ingest_min_confidence are dropped before node creation., A single line (turn) longer than hard_cap is split into <=hard_cap pieces,…, An oversized turn between normal turns is split without dropping any turn or…, A variable payload against a fixed provider timeout is the bug. The hint must… (+34 more)
+Nodes (42): Extraction error classification: timeout/call-failure must not read as 'no…, If every chunk's call fails while a provider is configured, the whole…, Extracted memories below ingest_min_confidence are dropped before node creation., A single line (turn) longer than hard_cap is split into <=hard_cap pieces,…, An oversized turn between normal turns is split without dropping any turn or…, A variable payload against a fixed provider timeout is the bug. The hint must…, Council R1, both peers: adapters treat the hint as a REPLACEMENT…, A hung provider must not be waited on indefinitely just because the payload was… (+34 more)
 
 ### Community 53 - "_insert_node"
 Cohesion: 0.10
@@ -810,8 +834,8 @@ Cohesion: 0.05
 Nodes (41): graphology, graphology-layout, graphology-layout-forceatlas2, jsdom, lucide-react, sigma, @tauri-apps/api, dependencies (+33 more)
 
 ### Community 58 - "setup.py"
-Cohesion: 0.04
-Nodes (72): _candidate_project_roots(), _claude_code_detected(), _cloud_recovery_paths(), CloudRecoveryPreflightError, _codex_agents_target(), _codex_detected(), configure_pi_extension(), _detect_claude_plugin_scope() (+64 more)
+Cohesion: 0.05
+Nodes (50): _claude_code_detected(), _claude_code_unwire(), CloudRecoveryPreflightError, _codex_detected(), configure_pi_extension(), _enable_codex_feature(), _find_binary(), install_pi_agents() (+42 more)
 
 ### Community 59 - "backup.py"
 Cohesion: 0.09
@@ -834,8 +858,8 @@ Cohesion: 0.14
 Nodes (13): _make_node(), mock_hybrid(), fixture, Tests for temporal query filters (created_after / created_before)., Temporal + type filters should combine with AND semantics., HybridSearch with mocked internals — no real DB or encoder., Run search with all three nodes returned by both retrievers., _run_search() (+5 more)
 
 ### Community 64 - "run_uninstall"
-Cohesion: 0.07
-Nodes (18): _claude_code_unwire(), Remove ormah agent definitions from ~/.claude/agents/., Remove ormah slash command definitions from ~/.claude/commands/., Remove the ormah instructions block from ~/.claude/CLAUDE.md., Delete the fastembed model cache entries that ormah downloaded., Remove Ormah while preserving zero-knowledge cloud recovery material., _remove_claude_agents(), _remove_claude_commands() (+10 more)
+Cohesion: 0.09
+Nodes (17): _cloud_recovery_paths(), _get_running_server_data_dir(), Return the data directory of the running ormah server by inspecting its open…, Return uv-tool paths owned by the Ormah install. The desktop app installs the…, Best-effort cleanup for uv-installed Ormah command files. This only removes the…, Return recovery artifacts that uninstall must never delete., Delete Ormah config while retaining zero-knowledge recovery material., Remove Ormah while preserving zero-knowledge cloud recovery material. (+9 more)
 
 ### Community 65 - "ProtectionOperationKind"
 Cohesion: 0.10
@@ -845,21 +869,21 @@ Nodes (30): LocalOperation, LocalOperationStatus, ProtectionOperationCoordinator
 Cohesion: 0.16
 Nodes (30): EdgeType, str, _connect(), _filter_user_node(), _make_result(), Tests for spreading activation in recall., contradicts propagates less activation than supports, and is labelled as…, Empty results in, empty results out. (+22 more)
 
-### Community 67 - "TestClient"
-Cohesion: 0.08
-Nodes (38): TestClient, bound_intent_state(), build_client(), client(), fake_client(), FakeCloudClient, fixture, parametrize (+30 more)
+### Community 67 - "test_account_billing_routes.py"
+Cohesion: 0.09
+Nodes (24): bound_intent_state(), build_client(), client(), fake_client(), FakeCloudClient, fixture, parametrize, Tests for local account-linked billing handoffs. (+16 more)
 
 ### Community 68 - "CloudClient"
-Cohesion: 0.08
-Nodes (47): BaseTransport, _client_version(), CloudClient, CloudError, get_or_create_device_id(), Any, Path, RuntimeError (+39 more)
+Cohesion: 0.09
+Nodes (41): BaseTransport, CloudClient, CloudError, Any, RuntimeError, Small synchronous client for the metadata-only Ormah Cloud API., Return validated, display-safe subscription price metadata., Start or resolve a Stripe Checkout session for a pending Protect intent. (+33 more)
 
 ### Community 69 - "routes_protection.py"
-Cohesion: 0.07
-Nodes (64): backup_now(), bind_intent(), cancel_intent(), cancel_restore(), confirm_recovery_kit(), confirm_restore(), ConfirmRecoveryKitRequest, _coordinator() (+56 more)
-
-### Community 70 - "ok"
 Cohesion: 0.08
-Nodes (21): fail(), ok(), play_finale(), Shared output formatting for CLI and setup — matches install.sh visual style., Play a ~2.5s terminal animation: 'ormah' dissolves into a sphere. TTY only —…, Reset color detection cache (for testing)., Section header: \\n==> msg (bold)., Success: [ok] msg (green). (+13 more)
+Nodes (61): backup_now(), bind_intent(), _cached_entitlement(), cancel_intent(), cancel_restore(), confirm_recovery_kit(), confirm_restore(), ConfirmRecoveryKitRequest (+53 more)
+
+### Community 70 - "ormah/cli.py"
+Cohesion: 0.04
+Nodes (90): CalledProcessError, cmd_eval_recall_import_labels(), main(), Entry point for MCP stdio server., _backup_service(), _backup_to_dict(), _cloud_client(), _cmd_account_login() (+82 more)
 
 ### Community 71 - "test_eval_recall/test_metrics.py"
 Cohesion: 0.10
@@ -871,15 +895,15 @@ Nodes (29): main(), _node_source(), plan_cleanup(), _print_table(), Path, Perfor
 
 ### Community 73 - "run_auto_linker"
 Cohesion: 0.11
-Nodes (26): _get_watermark(), Automatic edge creation based on embedding similarity., Render one candidate pair for a batched link prompt (#87)., Return the seq of the last fully-processed node, or 0 if unset., Nodes with seq strictly greater than the watermark, ascending, bounded., Incrementally link nodes with seq above the watermark, judging candidate pairs…, _render_link_pair(), run_auto_linker() (+18 more)
+Nodes (30): _get_watermark(), Return the seq of the last fully-processed node, or 0 if unset., Nodes with seq strictly greater than the watermark, ascending, bounded., Incrementally link nodes with seq above the watermark, judging candidate pairs…, run_auto_linker(), _select_nodes_after(), Pairs already checked should not trigger a second LLM call on re-run., Pairs classified as 'none' should be recorded in auto_link_checked. (+22 more)
 
 ### Community 74 - "cli_adapter.py"
-Cohesion: 0.09
-Nodes (42): _api(), _client(), cmd_ingest(), cmd_ingest_session(), cmd_node(), cmd_outdated(), cmd_recall(), cmd_remember() (+34 more)
+Cohesion: 0.08
+Nodes (49): _api(), _client(), cmd_ingest(), cmd_ingest_session(), cmd_node(), cmd_outdated(), cmd_recall(), cmd_remember() (+41 more)
 
-### Community 75 - "node.py"
-Cohesion: 0.09
-Nodes (44): FSRS retrievability-based tier demotion for stale working memories., Auto-demote working nodes whose FSRS retrievability drops below threshold.…, run_decay(), Tier promotion/demotion and core cap enforcement., Enum, Core domain models for memory nodes., Tier, UpdateNodeRequest (+36 more)
+### Community 75 - "_remove_codex_md_block"
+Cohesion: 0.12
+Nodes (14): _codex_unwire(), Remove Ormah agent definitions from ~/.codex/agents/., Remove ormah entry from ~/.codex/config.toml., Remove the ormah instructions block from the active Codex AGENTS file., Remove a top-level TOML table block while preserving surrounding content., Write or update the Ormah MCP entry in ~/.codex/config.toml., _remove_codex_agents(), _remove_codex_mcp_config() (+6 more)
 
 ### Community 76 - "test_merge_undo.py"
 Cohesion: 0.08
@@ -889,25 +913,25 @@ Nodes (35): _create_node(), Tests for execute_merge and undo_merge operations., 
 Cohesion: 0.10
 Nodes (35): _make_node(), Conditional seq allocation driven by a persisted content fingerprint (#126)., auto_cluster dual-writes `space`: straight into SQLite AND into the markdown., Content feeds the embedding and the judge prompt., Type is shown to the LLM judge., Tags feed FTS, never the linker., A row whose file on disk no longer matches its file_hash has a pending reindex.…, A row whose file matches its hash is stamped, so the upgrade does not requeue… (+27 more)
 
-### Community 78 - "get_ormah_bin_path"
-Cohesion: 0.11
-Nodes (14): get_ormah_bin_path(), Find the absolute path to the ormah binary., _claude_desktop_wire(), _codex_wire(), configure_claude_desktop(), install_codex_agents(), install_codex_md(), Register ormah MCP server in Claude Desktop config (if installed). Returns True… (+6 more)
+### Community 78 - "configure_codex_mcp"
+Cohesion: 0.20
+Nodes (7): _codex_wire(), configure_codex_mcp(), install_codex_agents(), Register Ormah MCP server in Codex config., Install Ormah custom agent definitions into ~/.codex/agents/., TestConfigureCodexMcp, TestInstallCodexAgents
 
 ### Community 79 - "test feedback schema"
 Cohesion: 0.11
 Nodes (34): _index_exists(), _make_db_without_new_tables(), _make_legacy_affinity_db(), Path, Tests for whisper_log, affinity, and review_log schema additions., Feedback is capped per whisper event, not per whole session., Create a DB, init schema, then drop the three new tables to simulate an older…, Calling _migrate() on an already-migrated DB must not raise. (+26 more)
 
-### Community 80 - "test_hybrid_search.py"
-Cohesion: 0.03
-Nodes (93): Fuse multiple ranked lists using weighted Reciprocal Rank Fusion. Each list…, _reciprocal_rank_fusion(), Convert natural language query to FTS5-compatible queries. Returns a list of…, _sanitize_fts_query(), _make_titled_hybrid(), Tests for hybrid search scoring mechanics. These test the RRF fusion, threshold…, A node with valid_until in the past should be completely excluded from results., A node with valid_until in the future should not be filtered. (+85 more)
+### Community 80 - "_make_titled_hybrid"
+Cohesion: 0.06
+Nodes (34): _make_titled_hybrid(), A node with valid_until in the past should be completely excluded from results., A node with valid_until in the future should not be filtered., confidence=0.0 should give 0.4x factor (not 0.7x), widening the gap between…, With 10 results in both lists, min-max normalization should produce a score…, Two results at adjacent ranks in both lists (spread ~1.6%) should use max-norm…, A single result should use max-norm fallback and score > 0.7., Question query with FTS and vec disagreement — semantic match should still win… (+26 more)
 
-### Community 81 - "_mark_idle"
-Cohesion: 0.04
-Nodes (93): _frozen_unchanged(), True when this file is still EXACTLY the one the freeze examined, so re-…, _drain_all(), _handler_with_spool(), _mark_idle(), _partial_unterminated(), Path, Backdate mtime so _ingest_session treats the transcript as finished (idle… (+85 more)
+### Community 81 - "test_cloud_cli.py"
+Cohesion: 0.17
+Nodes (20): CLI tests for the `ormah cloud` group., `ormah cloud kit` is the recovery path when init/rotate is interrupted between…, Fresh-machine import must adopt the kit's store id, not mint a new one — the…, A damaged store_id line must abort the whole import before any key material is…, _run(), test_cloud_init_import_key(), test_cloud_init_imports_recovery_kit_from_stdin(), test_cloud_init_json() (+12 more)
 
-### Community 82 - "SessionWatch"
-Cohesion: 0.12
-Nodes (20): Re-admit new LLM calls after a RECOVERABLE cancel (the watcher's startup…, resume_llm_adapters(), _drain_handlers(), A live watch root: its directory, always-on handler + spool, and — only when…, Poll until no handler has an in-flight ingest, so nothing touches the DB after…, Shared shutdown/rollback sequence (ADR-0004 slice 2): stop, cancel (rollback-…, Periodic safety net: recreate any dead Observer, then reconcile each DISCOVERY…, run_session_reconcile() (+12 more)
+### Community 82 - "TestClient"
+Cohesion: 0.09
+Nodes (37): FastAPI, TestClient, protection_app(), fixture, Path, app_and_client(), fixture, The guard is only atomic against a SHARED tracker. It was created inside the… (+29 more)
 
 ### Community 83 - "validate_case"
 Cohesion: 0.11
@@ -917,13 +941,13 @@ Nodes (13): CorpusError, load_corpus(), Exception, Path, Load and validate whisp
 Cohesion: 0.14
 Nodes (48): Soft-delete dead-weight archival nodes, then purge expired tombstones., run_forgetting(), ConnectRequest, _archival_count(), _backdate_tombstone(), _break(), _enable(), _exists() (+40 more)
 
-### Community 85 - "llm_client.py"
-Cohesion: 0.06
-Nodes (46): aborted(), begin_cancel(), begin_lifespan(), epoch_changed(), note_call_finished(), note_call_started(), Single authority for LLM call cancellation (ADR-0004 slice 2 redesign).…, Cancel the current epoch. Returns how many calls were in flight when it landed.… (+38 more)
+### Community 85 - "reset_adapter"
+Cohesion: 0.10
+Nodes (25): Clear the cached adapters (useful for test isolation)., reset_adapter(), integration, skipif, End-to-end: --json-schema -> structured_output round-trips for the consolidate…, test_real_claude_cli_consolidate_creates_node_with_valid_type(), test_llm_generate_none_provider(), _concurrent_first_use() (+17 more)
 
 ### Community 86 - "get_fastembed_cache_dir"
-Cohesion: 0.13
-Nodes (19): get_fastembed_cache_dir(), get_model_cache_dirname(), is_model_cached(), Path, Helpers for locating and inspecting the shared Ormah model cache., Return the effective shared model cache directory., Resolve a fastembed model name to its on-disk cache directory name., Return True when the model's expected fastembed cache directory exists. (+11 more)
+Cohesion: 0.08
+Nodes (24): get_fastembed_cache_dir(), get_model_cache_dirname(), is_model_cached(), Path, Helpers for locating and inspecting the shared Ormah model cache., Return the effective shared model cache directory., Resolve a fastembed model name to its on-disk cache directory name., Return True when the model's expected fastembed cache directory exists. (+16 more)
 
 ### Community 87 - "test pair batch"
 Cohesion: 0.09
@@ -937,25 +961,25 @@ Nodes (28): searchNodes(), formatDate(), InsightsPanel(), Props, Props, SearchRe
 Cohesion: 0.04
 Nodes (45): 10. Tornar documentação operacional confiável, 11. Tornar eval reproduzível, 12. Revisar os 18 commits upstream antes de novas features locais, 13. Durable Mutation Coordinator, 14. Embedding Index Generations, 15. Durable Work Ledger, 16. Memórias com evidência e validade por afirmação, 17. Retrieval Policy traceável (+37 more)
 
-### Community 90 - "parse_transcript"
-Cohesion: 0.07
-Nodes (24): parse_transcript(), Parse a supported JSONL transcript into cleaned conversation text. Reads line…, Path, Write a list of dicts as JSONL to a temp file and return the path., safe_* must exclude a dangling user turn; raw fields still include it., A trailing pair with NO completion signal (no stop_reason field) is not safe…, tool_use followed by a text assistant must form ONE pair, not fragment. The…, A trailing tool-only assistant (no text) leaves the pair pending (known… (+16 more)
+### Community 90 - "TestSafeBoundary"
+Cohesion: 0.06
+Nodes (16): A trailing pair with NO completion signal (no stop_reason field) is not safe…, A trailing tool-only assistant (no text) leaves the pair pending (known…, A multi-record assistant response at EOF must not be committed mid-stream. The…, Once the next user turn arrives, the full multi-record response is one safe…, A terminal stop_reason (Claude Code) closes the response immediately — the safe…, A multi-record response (tool_use then end_turn) is one safe pair, never split…, If the user interrupts a non-terminal response, the next user turn still closes…, A slice that begins with assistant records (a cursor left mid-response by an… (+8 more)
 
 ### Community 91 - "recall/cli.py"
-Cohesion: 0.14
-Nodes (17): _check_fail_below(), _check_regression(), cmd_eval_recall_export_for_labeling(), cmd_eval_recall_run(), _corpus_files_for_label(), _make_engine(), Path, CLI handlers for `ormah eval recall` commands. (+9 more)
+Cohesion: 0.16
+Nodes (16): _check_fail_below(), _check_regression(), cmd_eval_recall_export_for_labeling(), cmd_eval_recall_run(), _corpus_files_for_label(), _make_engine(), Path, CLI handlers for `ormah eval recall` commands. (+8 more)
 
-### Community 92 - "_atomic_write"
-Cohesion: 0.08
-Nodes (16): _atomic_write(), _install_hooks(), _is_ormah_hook(), _merge_hooks(), Remove ormah whisper hooks from ~/.codex/hooks.json., True when a hook entry is one Ormah installs (argv-aware, not substring).…, Merge Ormah hook groups into an existing hooks dict, preserving co-tenants. For…, Remove Ormah hook entries while preserving every untouched matcher. Returns the… (+8 more)
+### Community 92 - "_is_ormah_hook"
+Cohesion: 0.13
+Nodes (11): _hooks_manifest_wires_ormah(), _is_ormah_hook(), Remove ormah whisper hooks from ~/.codex/hooks.json., True when a hook entry is one Ormah installs (argv-aware, not substring).…, Remove Ormah hook entries while preserving every untouched matcher. Returns the…, True when a plugin's hooks.json is a real manifest declaring an Ormah hook. An…, _remove_codex_hooks(), _strip_ormah_hooks() (+3 more)
 
-### Community 93 - "protection.py"
-Cohesion: 0.07
-Nodes (62): RestoreProgress, Build a BackupService from a Settings-like object., service_from_settings(), key_file_exists(), _cloud_error_code(), _finalize_is_definitively_expired(), _is_quota_error(), datetime (+54 more)
+### Community 93 - "restore.py"
+Cohesion: 0.10
+Nodes (41): RestoreProgress, Result of restoring a memory backup., RestoreResult, _candidate_blobs(), cleanup_abandoned_cloud_restores(), CloudRestoreError, CloudRestoreResult, CloudRestoreValidationError (+33 more)
 
 ### Community 94 - "run_setup_json"
-Cohesion: 0.12
-Nodes (23): AgentDescriptor, configure_agent_maintenance(), detect_clients(), _detected_agents(), _get_agent(), Ask whether to enable automatic agent-backed maintenance. Returns True if…, Legacy flat detection dict — kept for backwards compatibility., Non-interactive agent wiring for the Mac app's one-click setup button. Wires… (+15 more)
+Cohesion: 0.17
+Nodes (17): detect_clients(), Legacy flat detection dict — kept for backwards compatibility., Non-interactive agent wiring for the Mac app's one-click setup button. Wires…, run_setup_json(), _isolate_claude_home(), fixture, Tests for the non-interactive JSON setup path used by the Mac app., Structurally block every test in this file from touching the real ~/.claude —… (+9 more)
 
 ### Community 95 - "TestSubmitFeedbackBasic"
 Cohesion: 0.11
@@ -966,36 +990,36 @@ Cohesion: 0.15
 Nodes (24): _default_engine(), _labels_for(), main(), Any, Path, In-context relevance-gate eval (the ship gate). Run pre-merge with a live…, Return the list of provenance labels the real extractor emits for a snippet., Construct the real MemoryEngine the way the codebase does (see… (+16 more)
 
 ### Community 97 - "_NeverEofProc"
-Cohesion: 0.11
-Nodes (4): _FakeProc, _NeverEofProc, A child whose pipes NEVER reach EOF — models the setsid grandchild that…, Minimal fake Popen result. Mirrors real subprocess.Popen semantics closely…
+Cohesion: 0.09
+Nodes (8): _FakeProc, _NeverEofProc, A child whose pipes NEVER reach EOF — models the setsid grandchild that…, MEDIUM-E (council, Codex): a provider timeout still returns None in this slice…, B-1: base subprocess.run's timeout path does process.kill(); process.wait() --…, Minimal fake Popen result. Mirrors real subprocess.Popen semantics closely…, test_generate_returns_none_on_timeout(), test_timeout_reaps_via_wait_and_never_an_unbounded_communicate()
 
-### Community 98 - "configure_claude_hooks"
-Cohesion: 0.18
-Nodes (6): configure_claude_hooks(), Write Claude Code hook config to global settings using absolute paths., Non-list value on a claimed event (nested schema drift) must leave file…, A non-iterable 'hooks' value inside a matcher triggers the backstop: file is…, TestConfigureClaudeHooks, TestConfigureClaudeHooksMerge
+### Community 98 - "2026-08-19-hippocampus-flake-condition-waiting/00-overview.md"
+Cohesion: 0.15
+Nodes (8): File Structure, Global Constraints, Tasks, test_hippocampus Condition-Based Waiting — Implementation Plan, Task 1: Build the clean island, Task 2: `_wait_until` and the ingestion wait (line 83), Task 3: The debounce wait (line 169), Task 4: Verify against the baseline and ship
 
 ### Community 99 - "run_whisper_eval"
-Cohesion: 0.13
-Nodes (13): _aggregate(), _aggregate_by_category(), PromptResult, Whisper eval runner — seeds DB, calls full pipeline, collects metrics per…, Aggregate metrics across prompt results. Noise and non-noise are separated., Run the whisper eval pipeline over *cases*., run_whisper_eval(), integration (+5 more)
+Cohesion: 0.19
+Nodes (6): Run the whisper eval pipeline over *cases*., run_whisper_eval(), integration, End-to-end integration coverage for the whisper eval harness., test_run_whisper_eval_end_to_end_with_real_engine(), TestRunWhisperEval
 
 ### Community 100 - "test_mutation_stamping.py"
-Cohesion: 0.18
-Nodes (27): _backdate(), _create(), Mutation-stamping guarantees (Sync v1 Step 0). Every content mutation must…, Create a node with auto-linking suppressed, return its id., Phase-2 repaired defines edges must live in the self node's markdown so they…, Parse the tombstone file for a node from deleted/., _reset_adapter(), test_auto_cluster_advances_updated() (+19 more)
+Cohesion: 0.17
+Nodes (28): _backdate(), _create(), Mutation-stamping guarantees (Sync v1 Step 0). Every content mutation must…, Create a node with auto-linking suppressed, return its id., Phase-2 repaired defines edges must live in the self node's markdown so they…, Parse the tombstone file for a node from deleted/., _reset_adapter(), test_auto_cluster_advances_updated() (+20 more)
 
 ### Community 101 - "start_scheduler"
-Cohesion: 0.08
-Nodes (30): BackgroundScheduler, Vector-store reconciliation job: backfill missing embeddings (#32)., Reconcile the vector store. Raises if the store is left incomplete. Unlike the…, run_embedding_backfill(), datetime, Event, APScheduler job registration for background processing., One shared factor for all four jobs, so distinct nominal offsets stay distinct… (+22 more)
+Cohesion: 0.06
+Nodes (40): BackgroundScheduler, Vector-store reconciliation job: backfill missing embeddings (#32)., Reconcile the vector store. Raises if the store is left incomplete. Unlike the…, run_embedding_backfill(), datetime, Event, APScheduler job registration for background processing., One shared factor for all four jobs, so distinct nominal offsets stay distinct… (+32 more)
 
 ### Community 102 - "whisper/cli.py"
-Cohesion: 0.11
-Nodes (25): _check_fail_below(), cmd_eval_whisper_import_labels(), cmd_eval_whisper_mine(), _make_engine(), CLI handler for `ormah eval whisper run`., Parse 'f1=0.65,suppression=0.90' and check thresholds. Returns 1 if any fails.…, _connect_ro(), _draft_expected() (+17 more)
+Cohesion: 0.10
+Nodes (26): Environment-independent Settings overrides shared by the eval harnesses. A bare…, _check_fail_below(), cmd_eval_whisper_import_labels(), cmd_eval_whisper_mine(), _make_engine(), CLI handler for `ormah eval whisper run`., Parse 'f1=0.65,suppression=0.90' and check thresholds. Returns 1 if any fails.…, _connect_ro() (+18 more)
 
-### Community 103 - "extract_json"
-Cohesion: 0.15
-Nodes (19): _llm_check_duplicate(), Ask LLM whether two nodes are duplicates and get merged content. Returns parsed…, extract_json(), Extract a JSON document from an LLM response. Thinking-capable models (e.g.…, Tests for fence-tolerant LLM JSON parsing shared across background jobs.…, A fenced-but-valid classification must yield the real relationship, not an…, Genuinely unparseable output (no JSON anywhere) yields an "error" result, never…, test_auto_linker_recovers_fenced_response_instead_of_poisoning() (+11 more)
+### Community 103 - "test_hybrid_search.py"
+Cohesion: 0.10
+Nodes (19): Tests for hybrid search scoring mechanics. These test the RRF fusion, threshold…, All identity tokens should be in the stop words list., If vector search fails, results should still come from FTS alone., Should never return more results than the limit., When tags filter is provided, get_tags_batch should be called once., Verify that FTS query uses bm25 column weights (title 10x, tags 5x). This is an…, FTS5 with porter stemmer matches morphological variants (live → lives)., A long document with moderate vector similarity scores lower than a short one… (+11 more)
 
 ### Community 104 - "test_routes.py"
-Cohesion: 0.07
-Nodes (14): get, Request, Canonical stats API route., Canonical stats payload for tray, CLI, UI, and diagnostics., stats(), client(), fixture, Tests for API routes. (+6 more)
+Cohesion: 0.08
+Nodes (14): health(), Tests for API routes., CH2: with no scheduler, a degraded fallback makes /admin/health degraded., Inverse: a healthy fallback (flag False) leaves health ok., Issue #90 (dev council follow-up): a Phase 1 with a broken finder must still…, CR2: scheduler present + embedding_backfill last run failed -> health degraded., A later success after an error leaves health ok., test_health_degraded_when_no_scheduler_and_fallback_failing() (+6 more)
 
 ### Community 105 - "desktop ui package"
 Cohesion: 0.07
@@ -1005,45 +1029,45 @@ Nodes (26): dependencies, framer-motion, react, react-dom, devDependencies, @typ
 Cohesion: 0.23
 Nodes (7): MemoryNode, Manages tier transitions and enforces the core memory cap., Promote a node to a higher tier. Returns True if promoted., Demote a node to a lower tier. Returns True if demoted., If core nodes exceed the cap, demote least-accessed ones to working. Nodes in…, TierManager, Tier
 
-### Community 107 - "format_report"
-Cohesion: 0.30
-Nodes (9): _collect_failures(), _fmt(), format_report(), Format whisper eval results as a human-readable table., WhisperEvalResult, _make_eval_result(), _make_result(), Tests for eval/whisper/report.py. (+1 more)
+### Community 107 - "whisper/runner.py"
+Cohesion: 0.17
+Nodes (16): _collect_failures(), _fmt(), format_report(), Format whisper eval results as a human-readable table., _aggregate(), _aggregate_by_category(), PromptResult, Whisper eval runner — seeds DB, calls full pipeline, collects metrics per… (+8 more)
 
-### Community 108 - "test_file_cache.py"
-Cohesion: 0.27
-Nodes (10): _make_node(), MemoryNode, Tests for FileStore in-memory ID-to-path cache., If the cached path no longer exists, _find_file still finds via glob., test_cache_cleared_on_delete(), test_cache_hit_on_load(), test_cache_populated_on_save(), test_find_file_returns_none_for_missing() (+2 more)
+### Community 108 - "parse_transcript"
+Cohesion: 0.16
+Nodes (8): parse_transcript(), Parse a supported JSONL transcript into cleaned conversation text. Reads line…, Path, Write a list of dicts as JSONL to a temp file and return the path., safe_* must exclude a dangling user turn; raw fields still include it., tool_use followed by a text assistant must form ONE pair, not fragment. The…, TestParseTranscript, _write_jsonl()
 
 ### Community 109 - "test_server_manager.py"
 Cohesion: 0.07
 Nodes (19): Tests for server lifecycle helpers: port-conflict detection and launchd plist., A ThrottleInterval backstops genuine crash loops., A healthy Ormah listener makes a duplicate foreground start a no-op., A foreign listener must make the supervisor retry instead of going dormant., A bound, listening socket is reported as in use., When the port is free, uvicorn is launched as normal., A port with no listener is reported as free., An IPv6 host literal must not fail the pre-flight probe. (+11 more)
 
-### Community 110 - "_remove_mcp_from_json"
-Cohesion: 0.22
-Nodes (7): _claude_desktop_unwire(), Unregister ormah MCP server from supported AI clients., Remove ormah entry from mcpServers in a JSON config file., _remove_mcp_from_json(), _remove_mcp_registration(), ~/.claude.json holds the user's whole Claude Code config, and a later change…, TestRemoveMcpFromJson
+### Community 110 - "IndexBuilder"
+Cohesion: 0.06
+Nodes (38): Row, IndexBuilder, Path, Index builder: full rebuild and incremental updates from markdown files., Update index for changed/new files. Returns (added, updated) counts., Builds and updates the SQLite index from markdown source files., Index or re-index a single file., The stored fingerprint + seq, read BEFORE _remove_node deletes the row. Only… (+30 more)
 
-### Community 111 - "GraphIndex"
-Cohesion: 0.09
-Nodes (14): GraphIndex, Any, Query nodes by created timestamp, ordered by created DESC. Returns up to…, Full-text search using FTS5. Uses AND semantics for multi-token queries (all…, Graph queries on the SQLite index., Fetch multiple nodes in a single query, keyed by ID., Fetch tags for multiple nodes in a single query, keyed by node ID., Get neighbors up to `depth` hops using recursive CTE. (+6 more)
+### Community 111 - "node.py"
+Cohesion: 0.08
+Nodes (48): FSRS retrievability-based tier demotion for stale working memories., Auto-demote working nodes whose FSRS retrievability drops below threshold.…, run_decay(), Tier promotion/demotion and core cap enforcement., Enum, Core domain models for memory nodes., Tier, UpdateNodeRequest (+40 more)
 
-### Community 112 - "LiteLLMEmbeddingAdapter"
-Cohesion: 0.27
-Nodes (4): LiteLLMEmbeddingAdapter, ndarray, Produces embeddings via litellm.embedding()., TestLiteLLMAdapter
+### Community 112 - "seed_case"
+Cohesion: 0.21
+Nodes (17): clear_eval_db(), datetime, Seed the isolated recall eval DB with memories from a corpus case., Return a created datetime for *mem*, or None for 'now'. Supports ``created``…, Clear eval DB and seed with memories from *case*. Memories are inserted with…, Remove all nodes from the eval DB and file store., seed_case(), _seed_created() (+9 more)
 
 ### Community 113 - "setup_logging"
-Cohesion: 0.18
-Nodes (15): _JSONFormatter, Path, Logging configuration — text or JSON format., Configure the root logger. Args: log_format: ``"text"`` for human-readable…, Text formatter that redacts API-key values from the final rendered line., Emit one JSON object per log line. Fields: ``ts``, ``level``, ``logger``,…, _RedactingFormatter, setup_logging() (+7 more)
+Cohesion: 0.20
+Nodes (13): _JSONFormatter, Path, Configure the root logger. Args: log_format: ``"text"`` for human-readable…, Emit one JSON object per log line. Fields: ``ts``, ``level``, ``logger``,…, setup_logging(), Tests for structured logging setup., test_json_formatter_basic(), test_json_formatter_exception() (+5 more)
 
 ### Community 114 - "test_setup.py"
 Cohesion: 0.06
-Nodes (21): _print_setup_summary(), Remove ormah whisper hooks from ~/.claude/settings.json., _remove_claude_hooks(), Path, Tests for ormah setup and server manager., Verify that run_uninstall deletes the actual memory directory regardless of…, Helper: run uninstall with a faked settings.memory_dir., Old ormah used Path('memory') — server runs from ~, so data is at ~/memory. (+13 more)
+Nodes (19): _print_setup_summary(), Delete the fastembed model cache entries that ormah downloaded., _remove_fastembed_cache(), Path, Tests for ormah setup and server manager., Verify that run_uninstall deletes the actual memory directory regardless of…, Helper: run uninstall with a faked settings.memory_dir., Old ormah used Path('memory') — server runs from ~, so data is at ~/memory. (+11 more)
 
 ### Community 115 - "test_backup.py"
-Cohesion: 0.20
-Nodes (24): Create a backup when automatic backups are enabled and due., run_auto_backup(), _active_self(), MemoryNode, Path, _save_node(), _save_self_node(), _service() (+16 more)
+Cohesion: 0.21
+Nodes (23): Create a backup when automatic backups are enabled and due., run_auto_backup(), _active_self(), MemoryNode, Path, _save_node(), _save_self_node(), _service() (+15 more)
 
 ### Community 116 - "extract_time_params"
-Cohesion: 0.16
-Nodes (9): extract_time_params(), Parse lightweight time references and return…, Backwards-compatible wrapper around module-level :func:`extract_time_params`., Tests for extract_time_params (bounded time windows)., last 2 weeks' uses rolling previous-period: 4w ago → 2w ago., last 1 week' (N=1) extends to now, not rolling., last 3 months' uses rolling: 6m ago → 3m ago., PromptClassifier._extract_time_params still works. (+1 more)
+Cohesion: 0.21
+Nodes (7): extract_time_params(), Parse lightweight time references and return…, Tests for extract_time_params (bounded time windows)., last 2 weeks' uses rolling previous-period: 4w ago → 2w ago., last 1 week' (N=1) extends to now, not rolling., last 3 months' uses rolling: 6m ago → 3m ago., TestTimeExtraction
 
 ### Community 117 - "_make_engine_with_encoder"
 Cohesion: 0.13
@@ -1053,9 +1077,9 @@ Nodes (11): _make_engine_with_encoder(), Create a mock engine with a hybrid sear
 Cohesion: 0.07
 Nodes (22): PromptIntent, Result of classifying a user prompt., TestPromptIntent, Precision helpers should favor the most relevant whisper candidate., Context-enhanced search using recent prompts., Underspecified follow-up prompts should use recent context in search., The reranker must score the same context-enhanced query that search ran on, not…, Fully specified prompts should not be polluted by recent context. (+14 more)
 
-### Community 119 - "PromptClassifier"
-Cohesion: 0.09
-Nodes (21): PromptClassifier, Embedding-based intent classifier for whisper-inject prompts., Classify prompt intent using cosine similarity to archetype embeddings. Lazy-…, Classify *prompt* and return an intent with search-param overrides., ControlledEncoder, ndarray, Tests for the embedding-based prompt intent classifier., Test classification decisions with controlled cosine similarities. (+13 more)
+### Community 119 - "ControlledEncoder"
+Cohesion: 0.13
+Nodes (13): ControlledEncoder, ndarray, Test classification decisions with controlled cosine similarities., When prompt vector is identical to an archetype, it should match., When prompt doesn't match any archetype, return general., Conversational only applies when it's the sole match., If conversational + temporal both match, conversational is removed., Conversational should win when other matches are far below its score. (+5 more)
 
 ### Community 120 - "mcp_adapter.py"
 Cohesion: 0.16
@@ -1065,17 +1089,17 @@ Nodes (18): AsyncClient, _coerce_list(), _dispatch(), _format_maintenance_batche
 Cohesion: 0.08
 Nodes (23): compilerOptions, allowImportingTsExtensions, baseUrl, isolatedModules, jsx, lib, module, moduleResolution (+15 more)
 
-### Community 122 - "background/__init__.py"
-Cohesion: 0.13
-Nodes (16): main(), CLI: python -m eval.maintenance.cli {mine|run|report} ... Local A/B eval gate…, _connect_ro(), mine_pairs(), Mine auto-link candidate pairs from a production store, read-only (#87 eval).…, agreement(), Agreement metrics for the single-vs-batched maintenance eval (#87 gate). Gate…, _load_pairs() (+8 more)
+### Community 122 - "maintenance/cli.py"
+Cohesion: 0.23
+Nodes (9): main(), CLI: python -m eval.maintenance.cli {mine|run|report} ... Local A/B eval gate…, _connect_ro(), mine_pairs(), Mine auto-link candidate pairs from a production store, read-only (#87 eval).…, agreement(), Agreement metrics for the single-vs-batched maintenance eval (#87 gate). Gate…, test_agreement_and_gate() (+1 more)
 
 ### Community 123 - "seed_case"
 Cohesion: 0.14
 Nodes (14): clear_eval_db(), _parse_dt(), datetime, Seed the isolated whisper eval DB with memories from a corpus case., Parse an ISO/RFC3339 datetime string into a timezone-aware UTC datetime. Uses…, Remove all nodes from the eval DB and file store. When *preserve_self* is True,…, Return a datetime for *field* from corpus memory *mem*. Supported formats: -…, Clear eval DB and seed with memories from *case*. Memories are inserted with… (+6 more)
 
 ### Community 124 - "parser.py"
-Cohesion: 0.06
-Nodes (44): main(), Measure the realised raw span per slice under the content budget, to size the…, _assistant_is_terminal(), _coerce_entry(), _conversation_from_turns(), _extract_assistant_text(), extract_user_prompts(), _extract_user_text() (+36 more)
+Cohesion: 0.09
+Nodes (27): main(), Measure the realised raw span per slice under the content budget, to size the…, _assistant_is_terminal(), _coerce_entry(), _conversation_from_turns(), _extract_assistant_text(), extract_user_prompts(), _extract_user_text() (+19 more)
 
 ### Community 125 - "test_eval_recall/test_report.py"
 Cohesion: 0.19
@@ -1101,13 +1125,13 @@ Nodes (22): App(), goGraph(), retrySetup(), Phase, TitleBar(), AgentInfo, Instal
 Cohesion: 0.06
 Nodes (31): 1. Are "assigned to me" and "the lifecycle work" the same thing?, #209 — the pending merge-proposal queue is unbounded `bug`, #218 — `signals.strength` has no variance in any channel `bug`, #219 — nothing reclaims disk `enhancement`, #220 — separate surfaced results from confirmed memory use `bug`, #221 — bound stability reinforcement and add a per-day cooldown `bug`, #222 — stop importance from permanently blocking working-tier decay `bug`, #223 — reversible promotion + the seven-day initial lease `enhancement` (+23 more)
 
-### Community 131 - "llm_generate"
-Cohesion: 0.15
-Nodes (17): llm_generate(), Maintenance path: swallow cancel/timeout to None (unchanged contract)., _bisect(), build_batch_prompt(), _diagnostic_pair_id(), _judge_chunk(), _judge_singles(), parse_batch_verdicts() (+9 more)
+### Community 131 - "run_eval"
+Cohesion: 0.19
+Nodes (16): _aggregate(), _eval_case(), EvalResult, Recall eval runner: orchestrates per-case seeding, retrieval, and scoring., Compute aggregate metrics across all prompt results. Returns None for each…, Run the recall eval pipeline over *cases*. Returns EvalResult with per-case and…, Seed and evaluate a single corpus case., run_eval() (+8 more)
 
-### Community 132 - "timedelta"
-Cohesion: 0.15
-Nodes (17): _decision(), Rewritten from the old global vacation guard, which the opportunity guard…, History for a pattern the user already deleted is not actionable., Detection is a pure read; only task 4's job writes., Insert one whisper_decisions row directly — this is the job's only input., council I2. Pattern rots, is repaired, resumes matching, rots AGAIN. Without…, An unresolved pending proposal must not be filed twice. The pattern rots, a…, Irrelevance, not rot: <scheduled-task> matching zero means this install never… (+9 more)
+### Community 132 - "_node_dict"
+Cohesion: 0.17
+Nodes (13): _node_dict(), Convert a DB row to a plain node dict for candidate lists., mock_hybrid(), mock_hybrid_blended(), fixture, HybridSearch with blending enabled (default settings)., A result in FTS but not in vector results should score lower than one in both., Results below min_result_score should be excluded. With normalized RRF +… (+5 more)
 
 ### Community 133 - "MemoryEngine facade"
 Cohesion: 0.12
@@ -1117,25 +1141,25 @@ Nodes (21): Eval gating deliberately excluded from CI, ContextBuilder, FileStore
 Cohesion: 0.13
 Nodes (21): Connection (typed weighted edge), Core cap enforcement (50 nodes), CreateNodeRequest, EdgeType and activation factors, FSRS stability field, MemoryNode, Proposal (merge/conflict/decay), Tier (core / working / archival) (+13 more)
 
-### Community 135 - "stored_or_encoded"
-Cohesion: 0.15
-Nodes (17): embedding_text(), Canonical probe text for embeddings. Single source of truth: every vector in…, Build text for embedding. Truncates content to avoid topic averaging in long…, Vector storage and search using sqlite-vec., Return the stored embedding for *node_id*, re-encoding only if it is missing.…, stored_or_encoded(), _CountingEncoder, _ExplodingEncoder (+9 more)
+### Community 135 - "TestWhisperTopicShift"
+Cohesion: 0.11
+Nodes (10): Topic-shift detection: skip injection when prompt is on the same topic., High similarity to recent prompts → skip whisper., Low similarity to recent prompts → proceed with whisper., Underspecified follow-up prompts should still search even on same topic., Empty recent_prompts (cold start) → always inject., None recent_prompts (cold start) → always inject., topic_shift_enabled=False → never skip, even if same topic., If encoder raises, should fall through to normal whisper. (+2 more)
 
 ### Community 136 - "Design — Issue #223: reversible promotion and the seven-day initial lease"
 Cohesion: 0.08
 Nodes (23): 1. `src/ormah/config.py`, 2. `src/ormah/lifecycle.py`, 3. `src/ormah/models/node.py`, 4. `src/ormah/store/markdown.py`, 5. `src/ormah/index/schema.sql` and `src/ormah/index/db.py`, 5b. `src/ormah/index/builder.py` — amendment, 2026-08-18, 6. `src/ormah/engine/memory_engine.py`, 7. `src/ormah/background/consolidator.py` (+15 more)
 
-### Community 137 - ".generate"
-Cohesion: 0.13
-Nodes (14): _capture_pgid(), _cleanup_persisted_stub(), _kill_group_or_proc(), HIGH-2/HIGH-1 (council-pr, Codex): signal a child's WHOLE process group by its…, SIGTERM the child's process group (stored pgid); fall back to per-PID…, SIGKILL the child's process group (stored pgid); fall back to per-PID kill()., Best-effort: delete the child's own transcript stub. Even with --no-session-…, Snapshot the child's process-group id AT SPAWN, while the leader is guaranteed… (+6 more)
+### Community 137 - "claude_cli_adapter.py"
+Cohesion: 0.15
+Nodes (15): _capture_pgid(), _cleanup_persisted_stub(), _kill_group_or_proc(), Claude CLI LLM adapter — headless `claude -p` via subscription auth (no paid…, HIGH-2/HIGH-1 (council-pr, Codex): signal a child's WHOLE process group by its…, SIGTERM the child's process group (stored pgid); fall back to per-PID…, SIGKILL the child's process group (stored pgid); fall back to per-PID kill()., Best-effort: delete the child's own transcript stub. Even with --no-session-… (+7 more)
 
-### Community 138 - "ormah/cli.py"
-Cohesion: 0.08
-Nodes (59): cmd_eval_recall_import_labels(), main(), Entry point for MCP stdio server., _backup_service(), _backup_to_dict(), _cloud_client(), _cmd_account_login(), _cmd_account_logout() (+51 more)
+### Community 138 - "test_routes_admin_run_task.py"
+Cohesion: 0.22
+Nodes (7): The manual task-trigger routes must not start a job that is already running,…, A manual trigger during the scheduled run used to start a second concurrent run…, The route returned {'status': 'completed'} unconditionally — a run that blew up…, run-all calls the runners directly too — same hole., test_run_all_skips_a_task_that_is_already_running(), test_run_task_rejects_a_job_that_is_already_running(), test_run_task_reports_a_failure_instead_of_completed()
 
-### Community 139 - "_redact_secrets"
-Cohesion: 0.36
-Nodes (6): LogRecord, Redact known API-key values from log text., Redact strings inside JSON log extras without changing non-secret types., _redact_obj(), _redact_secrets(), test_redact_secrets_replaces_env_values()
+### Community 139 - "test_cli_cloud_backup.py"
+Cohesion: 0.10
+Nodes (20): Restore source-of-truth memory files from a backup. A safety backup of the…, Rebuild the SQLite index from restored markdown node files., Replace target-local identity state with the restored graph's pointer., Prepare a verified cloud snapshot and delegate replacement to BackupService., restore_cloud_snapshot(), _cloud_status(), _local_status_service(), MemoryNode (+12 more)
 
 ### Community 140 - "test_main_backfill_fallback.py"
 Cohesion: 0.08
@@ -1145,9 +1169,9 @@ Nodes (32): _CancellableEngine, _monkeypatch_run_embedding_backfill(), fixture, 
 Cohesion: 0.13
 Nodes (20): Whisper path, Whisper candidate diagnostics and retention, Flat markdown whisper formatter, Prompt intent classification, Selective query enhancement for follow-ups, Session prompt ring buffer, Topic-shift skip, Whisper pipeline (involuntary recall) (+12 more)
 
-### Community 142 - "conflict_detector.py"
-Cohesion: 0.25
-Nodes (7): _llm_check_conflict(), Detect contradictions between memory nodes., Render one candidate pair for a batched conflict prompt (#87)., Ask LLM whether two nodes contradict each other. Returns parsed dict or None if…, _render_conflict_pair(), judge_pairs(), Judge every pair; result aligned by index. None = no verdict this run. *k*…
+### Community 142 - "_FakeEngine"
+Cohesion: 0.12
+Nodes (16): _FakeEngine, Raw bytes >> cleaned chars. See 01-content-budget.md for why plain-text padding…, Records the char length of every content payload sent to ingestion., A flush that drains the whole closed delta (sub-cap) must not re-schedule —…, Review I-2: max_raw_bytes has to actually reach parse_transcript through…, Review I-2b: the SIBLING production leg -- SessionHandler._run_job ->…, Primary production trigger: an ACTIVE (non-idle) session with MULTIPLE closed…, An active session whose total closed content stays below flush_chars never gets… (+8 more)
 
 ### Community 143 - "auto_linker edge-write hardening — Overview"
 Cohesion: 0.08
@@ -1161,41 +1185,41 @@ Nodes (25): batch_fetch_affinity(), compute_affinity_boost(), ndarray, Affinity 
 Cohesion: 0.36
 Nodes (7): Proposal, ProposalStatus, ProposalType, BaseModel, Enum, str, Proposal models for merge/conflict/decay actions.
 
-### Community 146 - "get_watermark"
-Cohesion: 0.11
-Nodes (25): _composite_score(), _find_merge_candidates(), Detect near-duplicate memories and create merge proposals., Jaccard similarity on lowercased word sets., Weighted composite duplicate score., Find node pairs that might be duplicates. ``delta=False`` (default — agent…, Render one candidate pair for a batched duplicate prompt (#87)., Levenshtein-ratio similarity between two titles. Returns 0.0 if either is None. (+17 more)
+### Community 146 - "HybridSearch"
+Cohesion: 0.06
+Nodes (43): HybridSearch, Hybrid search combining FTS5 + vector search with Reciprocal Rank Fusion. Uses…, Combines FTS5 full-text search with sqlite-vec vector search., _make_hybrid(), _make_node(), Unit tests for the raw_cosine absolute-signal contract in HybridSearch. The…, A node found only via FTS (no vector hit) must carry no raw_cosine., A node with a genuine vector measurement keeps its raw_cosine. (+35 more)
 
-### Community 147 - "run_auto_cluster"
-Cohesion: 0.13
-Nodes (21): Automatic space/cluster assignment for unassigned nodes., Assign unassigned nodes to spaces based on their connections., run_auto_cluster(), normalize_space(), Map placeholder space strings ('null', 'none', '', whitespace) to None., _connect(), auto_cluster must not propagate the placeholder 'null' space (#22 council…, Startup migration re-locks legacy identity memories once (#22 council C). (+13 more)
+### Community 147 - "extract_json"
+Cohesion: 0.03
+Nodes (84): Automatic space/cluster assignment for unassigned nodes., _llm_classify_link(), Automatic edge creation based on embedding similarity., Render one candidate pair for a batched link prompt (#87)., Ask LLM to classify the relationship between two nodes. Returns a dict with…, _render_link_pair(), _llm_check_conflict(), Detect contradictions between memory nodes. (+76 more)
 
 ### Community 148 - "test_stats.py"
-Cohesion: 0.12
-Nodes (19): _log_decision(), _log_whisper(), fixture, Tests for the canonical /stats endpoint., Candidates that were logged but not injected don't count as used., GET /agent/clients returns the agent list with detection and wired status., silence_rate + injection_rate must cover all prompts., Insert a synthetic whisper_log row mirroring context_builder's writer. (+11 more)
+Cohesion: 0.10
+Nodes (22): get, Request, Canonical stats API route., Canonical stats payload for tray, CLI, UI, and diagnostics., stats(), _log_decision(), _log_whisper(), Tests for the canonical /stats endpoint. (+14 more)
 
-### Community 149 - "entitlements.py"
-Cohesion: 0.09
-Nodes (42): _cached_entitlement(), Classify local entitlement state without network access during polling., AccountStatus, get_account_status(), Any, Return token-free account status using the canonical entitlement policy., _status_from_cache(), client_from_settings() (+34 more)
+### Community 149 - "account.py"
+Cohesion: 0.08
+Nodes (50): AccountStatus, _close_owned(), get_account_status(), logout_account(), LogoutResult, Any, Shared local account application service for CLI and desktop adapters., Verify one OTP, persist the token privately, and update live settings. (+42 more)
 
 ### Community 150 - "visual.ts"
 Cohesion: 0.23
 Nodes (13): applyAppearance(), buildGraph(), NOTE: store the domain node type under `nodeType`, NOT `type` — sigma, seedPosition(), computeSelfRoles(), displayNodeSize(), edgeColor(), nodeLabel() (+5 more)
 
 ### Community 151 - "_find_link_candidates"
-Cohesion: 0.16
-Nodes (9): _find_link_candidates(), Find node pairs that need link classification. Returns up to *limit* pairs as…, Tests for the run_maintenance two-call protocol., Create n nodes with similar content and return their IDs., _seed_similar_nodes(), TestApplyMaintenanceResults, TestFindLinkCandidates, Issue #90 council R2 finding 1: a DB/encoder failure inside the finder must not… (+1 more)
+Cohesion: 0.17
+Nodes (8): _find_link_candidates(), Find node pairs that need link classification. Returns up to *limit* pairs as…, test_find_candidates_uses_window_without_advancing(), Tests for the run_maintenance two-call protocol., Create n nodes with similar content and return their IDs., _seed_similar_nodes(), TestApplyMaintenanceResults, TestFindLinkCandidates
 
 ### Community 152 - "routes_ui.py"
 Cohesion: 0.19
 Nodes (14): get_graph(), get_insights(), get_node_detail(), get, Request, UI API routes for the web graph explorer., Search nodes for the UI, returning structured results. Uses the same hybrid…, Graph data for the explorer. Default (no ``space``): the *active graph* — non-… (+6 more)
 
-### Community 153 - "configure_codex_mcp"
-Cohesion: 0.09
-Nodes (17): _codex_unwire(), configure_codex_mcp(), Remove Ormah agent definitions from ~/.codex/agents/., Remove ormah entry from ~/.codex/config.toml., Remove the ormah instructions block from the active Codex AGENTS file., Remove a top-level TOML table block while preserving surrounding content., Write or update the Ormah MCP entry in ~/.codex/config.toml., Register Ormah MCP server in Codex config. (+9 more)
-
-### Community 154 - "conftest.py"
+### Community 153 - "conftest.py"
 Cohesion: 0.16
 Nodes (18): _clean_llm_cancel_epoch(), db(), engine(), file_store(), _is_real_ormah_path(), _is_relative_to(), isolate_fastembed_cache(), _isolate_settings_from_global_env() (+10 more)
+
+### Community 154 - "_decision"
+Cohesion: 0.14
+Nodes (14): _decision(), Rewritten from the old global vacation guard, which the opportunity guard…, History for a pattern the user already deleted is not actionable., Detection is a pure read; only task 4's job writes., Insert one whisper_decisions row directly — this is the job's only input., council I2. Pattern rots, is repaired, resumes matching, rots AGAIN. Without…, Irrelevance, not rot: <scheduled-task> matching zero means this install never…, test_a_second_rot_episode_gets_a_fresh_proposal() (+6 more)
 
 ### Community 155 - "test_cli_account.py"
 Cohesion: 0.16
@@ -1210,8 +1234,8 @@ Cohesion: 0.13
 Nodes (18): CI desktop job (Tauri + UI), uv sidecar download step, Bundled runtime (uv sidecar installs ormah from PyPI), Menubar tray presence (weekly whispers-used counter), Ormah Desktop (Tauri v2 app), desktop-product-bridge (trusted recovery handoff), Frozen ormah-server sidecar binaries directory, Desktop bootstrap UI HTML shell (+10 more)
 
 ### Community 158 - "TestReleaseVersionVerification"
-Cohesion: 0.18
-Nodes (7): CompletedProcess, Path, Tests for release packaging metadata and CLI fallbacks., TestBuildMetadata, TestEvalCliFallback, TestReleaseVersionVerification, TestReleaseWorkflow
+Cohesion: 0.21
+Nodes (6): CompletedProcess, Path, Tests for release packaging metadata and CLI fallbacks., TestBuildMetadata, TestReleaseVersionVerification, TestReleaseWorkflow
 
 ### Community 159 - "scenario"
 Cohesion: 0.13
@@ -1226,8 +1250,8 @@ Cohesion: 0.20
 Nodes (13): _create_node(), Tests for audit logging on delete, update, and mark_outdated., Helper to create a node, returns (id, slug)., delete_node should move the markdown file to deleted/ instead of removing it., Deleting a node writes a full snapshot to the audit log., Updating a node logs the old state and changed fields., Marking a node outdated logs the reason and old valid_until., list_audit_log filters by node_id and operation. (+5 more)
 
 ### Community 162 - "Database"
-Cohesion: 0.10
-Nodes (17): Database, Path, Insert one prompt payload shared by its candidate log rows., Run migrations for existing databases., Manages per-thread SQLite connections with WAL mode and serialized writes., Backfill content_fingerprint for rows whose file on disk hasn't changed. A row…, Add candidate-stage diagnostics without rebuilding feedback history., Record which synthetic pattern fired, so rot detection has a signal (#143). (+9 more)
+Cohesion: 0.06
+Nodes (32): Database, Path, SQLite database connection management., Insert one prompt payload shared by its candidate log rows., Run migrations for existing databases., Manages per-thread SQLite connections with WAL mode and serialized writes., Backfill content_fingerprint for rows whose file on disk hasn't changed. A row…, Add candidate-stage diagnostics without rebuilding feedback history. (+24 more)
 
 ### Community 163 - "compilerOptions"
 Cohesion: 0.11
@@ -1238,12 +1262,16 @@ Cohesion: 0.33
 Nodes (5): After both tasks, File Structure, Global Constraints, Review Relevance Is Not Confirmed Use — Implementation Plan, Tasks
 
 ### Community 165 - "normalize_conflict_type"
-Cohesion: 0.16
-Nodes (16): _llm_classify_link(), Ask LLM to classify the relationship between two nodes. Returns a dict with…, normalize_conflict_type(), normalize_link_type(), Normalize LLM responses to canonical edge/conflict types., Map a raw LLM conflict type to a canonical value. Unknown values default to…, Map a raw LLM link type to a canonical value. Unknown values default to…, Tests for LLM response normalization functions. (+8 more)
+Cohesion: 0.19
+Nodes (14): normalize_conflict_type(), normalize_link_type(), Normalize LLM responses to canonical edge/conflict types., Map a raw LLM conflict type to a canonical value. Unknown values default to…, Map a raw LLM link type to a canonical value. Unknown values default to…, Tests for LLM response normalization functions., test_canonical_conflict_types_pass_through(), test_canonical_link_types_pass_through() (+6 more)
 
 ### Community 166 - "test_llm_cancel.py"
 Cohesion: 0.11
 Nodes (15): Re-admit NEW calls after a RECOVERABLE cancel (the watcher's startup rollback).…, resume(), _clean_epoch(), fixture, Epoch semantics for LLM cancellation (ADR-0004 slice 2 redesign). These tests…, The watcher logs this count; it replaces the old "processes terminated" number., R4 regression. A resume() re-admits NEW calls; it must never un-cancel a call…, A final cancel must not outlive its lifespan: the llm_client adapter caches are… (+7 more)
+
+### Community 167 - "test_whisper_context.py"
+Cohesion: 0.12
+Nodes (11): Tests for whisper context (involuntary recall injection)., Tests for the per-session prompt buffer in the whisper route., Buffer should accumulate prompts per session., Different session IDs should have independent buffers., Exploration piggybacks on real injections; it never breaks silence (I6)., The prompt is embedded (encode) exactly once per whisper call (I15).…, Space param still filters results correctly., TestEncodeOncePerWhisper (+3 more)
 
 ### Community 168 - "Review relevance is not confirmed use"
 Cohesion: 0.15
@@ -1258,12 +1286,12 @@ Cohesion: 0.19
 Nodes (8): _insert_node(), When topical results survive, identity should still be included., identity-only intent with no search results should stay silent (no graph dump)., Reranker should only affect non-identity search results. Identity nodes are…, Identity results should be suppressed when no topical results survive., Low-scoring identity results should be suppressed when no topical results…, High-scoring identity results should survive even without topical results., TestWhisperIdentityGating
 
 ### Community 171 - "test_protection_routes.py"
-Cohesion: 0.06
-Nodes (19): FakeProtectionService, _operation(), _poll(), protection_app(), fixture, parametrize, Path, ProtectionOperation (+11 more)
+Cohesion: 0.09
+Nodes (13): _poll(), parametrize, The only signal a second machine leaves is a snapshot this device did not…, Not knowing what the cloud holds must never break protection status., test_long_operations_return_202_and_poll_safe_results(), test_malformed_recovery_digest_is_rejected_before_service_work(), test_mutation_routes_forbid_extra_fields(), test_remote_degrades_without_taking_the_panel_down() (+5 more)
 
-### Community 172 - "test_scoring_signals.py"
-Cohesion: 0.08
-Nodes (29): _lifecycle(), _make_node(), fixture, Tests for recency, access frequency, and tier scoring signals in hybrid search., A core node should outrank an archival node with the same base score., Boosts should not override a large relevance gap. RRF base scores are small…, Build a minimal node dict with scoring-relevant fields., Going from 0→5 accesses should give a larger boost than 15→20. (+21 more)
+### Community 172 - "_find_conflict_candidates"
+Cohesion: 0.12
+Nodes (16): _conflict_scope_value(), _find_conflict_candidates(), Find node pairs that might contradict each other. ``delta=False`` (default —…, Default call (agent path) keeps today's selection: nodes below the watermark…, Neighbors are age-unfiltered: an OLD node below the watermark is still…, Agent path calls the finder directly; the cursor must not move., Fail-closed (overview invariant): a seed with text but NO persisted vector must…, A seed whose pairs are all prefiltered still appears in the drained list (it… (+8 more)
 
 ### Community 173 - "Changes"
 Cohesion: 0.13
@@ -1290,28 +1318,28 @@ Cohesion: 0.26
 Nodes (19): run_drain(), claim(), enqueue_boundary_in_name(), enqueue_overwrite(), fresh_root(), key_for(), Path, _racer() (+11 more)
 
 ### Community 180 - "_claude_code_wire"
-Cohesion: 0.18
-Nodes (10): _claude_code_wire(), install_claude_agents(), install_claude_commands(), Install ormah custom agent definitions into ~/.claude/agents/., Install ormah slash command definitions into ~/.claude/commands/., A stale enabled flag must not cost the user the whisper., Deliberate: the CLI hooks are global and serve every other project., Fail-open: an unparseable config must not silently disable the whisper. (+2 more)
+Cohesion: 0.11
+Nodes (15): _claude_code_wire(), _claude_desktop_unwire(), install_claude_agents(), install_claude_commands(), Remove ormah entry from mcpServers in a JSON config file., Install ormah custom agent definitions into ~/.claude/agents/., Install ormah slash command definitions into ~/.claude/commands/., _remove_mcp_from_json() (+7 more)
 
-### Community 181 - "HybridSearch"
-Cohesion: 0.09
-Nodes (25): _node_dict(), Convert a DB row to a plain node dict for candidate lists., HybridSearch, Combines FTS5 full-text search with sqlite-vec vector search., _make_node(), Unit tests for HybridSearch title boost score capping. Verifies that…, Multiple query tokens matching title → high title_bonus, but still capped., Even with tier boost + recency + access, final_score capped at 1.0. (+17 more)
+### Community 181 - "_sanitize_fts_query"
+Cohesion: 0.12
+Nodes (15): Full-text search using FTS5. Uses AND semantics for multi-token queries (all…, Convert natural language query to FTS5-compatible queries. Returns a list of…, _sanitize_fts_query(), what is the user's name' should inject about_self into FTS tokens., grapes' has no identity token — should NOT inject about_self., does the user like grapes' should inject about_self., A query with only identity tokens (all stopped) should fall back to raw tokens…, my email' should inject about_self alongside 'email'. (+7 more)
 
 ### Community 182 - "VectorStore"
-Cohesion: 0.08
-Nodes (27): Hybrid search combining FTS5 + vector search with Reciprocal Rank Fusion. Uses…, Any, ndarray, Serialize a numpy float32 vector to bytes for sqlite-vec., sqlite-vec backed vector storage., Insert or update a vector for a node. The DELETE + INSERT pair runs inside a…, Batch insert/update vectors in a single transaction., Find nearest neighbors. Returns results with cosine similarity scores. (+19 more)
+Cohesion: 0.06
+Nodes (43): embedding_text(), Canonical probe text for embeddings. Single source of truth: every vector in…, Build text for embedding. Truncates content to avoid topic averaging in long…, Any, ndarray, Vector storage and search using sqlite-vec., Return the stored embedding for *node_id*, re-encoding only if it is missing.…, Serialize a numpy float32 vector to bytes for sqlite-vec. (+35 more)
 
 ### Community 183 - "match synthetic pattern"
 Cohesion: 0.20
 Nodes (5): match_synthetic_pattern(), The source of the pattern that matched, or None when the prompt is human.…, Which pattern fired — the signal rot detection needs (#143)., The empty regex matches everything and returns "" — falsy but REAL. Callers…, TestMatchSyntheticPattern
 
 ### Community 185 - "patch"
-Cohesion: 0.04
-Nodes (39): patch, _StopServerResult, _claude_code_is_wired(), _claude_code_plugin_provides_hooks(), configure_codex_hooks(), generate_server_wrapper(), Write env dict to the global config file, preserving comments and ordering.…, Generate daemon wrapper with explicit, scoped API-key inheritance. (+31 more)
+Cohesion: 0.03
+Nodes (52): patch, detect_space_from_cwd(), Detect the project space from the current working directory. Tries git repo…, _StopServerResult, _claude_code_is_wired(), _claude_code_plugin_provides_hooks(), configure_claude_hooks(), configure_codex_hooks() (+44 more)
 
-### Community 186 - "test_memory_engine.py"
-Cohesion: 0.05
-Nodes (33): _generate_title(), Generate a short title from the first line/sentence of content., Tests for the memory engine., whisper fires onboarding nudge exactly once when identity is empty., Identity protection must be active on the production call path (I3)., Reranker unavailable (fresh install, model downloading) must degrade to…, Desktop setup may cache the reranker after the server already started. The next…, Whisper may load an already-cached reranker, but must not download it. (+25 more)
+### Community 186 - "NodeType"
+Cohesion: 0.03
+Nodes (57): _generate_title(), Generate a short title from the first line/sentence of content., The ingest extraction prompt contract: rules, response schema, rendered…, NodeType, Tests for the memory engine., whisper fires onboarding nudge exactly once when identity is empty., Identity protection must be active on the production call path (I3)., Reranker unavailable (fresh install, model downloading) must degrade to… (+49 more)
 
 ### Community 187 - "TestConsolidationSignatureSkip"
 Cohesion: 0.15
@@ -1341,13 +1369,13 @@ Nodes (15): Canvas-First Design (chrome minimized, no sidebar or legend), Node C
 Cohesion: 0.21
 Nodes (4): cmd_eval_whisper_run(), Tests for eval whisper CLI wiring., TestEvalWhisperCLI, TestMakeEngine
 
-### Community 195 - "unwire_one"
-Cohesion: 0.40
-Nodes (5): delete, Remove ormah hooks/MCP/instructions for a single agent., unwire_one(), Remove ormah hooks/MCP/instructions for a single agent. Returns {unwired,…, unwire_agent()
+### Community 195 - "_remove_claude_md_block"
+Cohesion: 0.18
+Nodes (8): Remove a sentinel-wrapped markdown block from a target file., Remove the ormah instructions block from ~/.claude/CLAUDE.md., Remove the ormah instructions block from ~/.pi/agent/AGENTS.md., _remove_claude_md_block(), _remove_markdown_block(), _remove_pi_md_block(), TestRemoveClaudeMdBlock, TestRemovePiMdBlock
 
-### Community 196 - "main"
-Cohesion: 0.70
-Nodes (4): main(), Path, sha_map(), step()
+### Community 196 - "_merge_hooks"
+Cohesion: 0.23
+Nodes (5): _install_hooks(), _merge_hooks(), Merge Ormah hook groups into an existing hooks dict, preserving co-tenants. For…, Read a JSON hooks config, merge Ormah hooks preserving co-tenants, write back.…, TestMergeHooks
 
 ### Community 197 - "Reconciling #126 (pair-verdict invalidation) with #208 (lock-order hoist) in IndexBuilder"
 Cohesion: 0.17
@@ -1374,36 +1402,40 @@ Cohesion: 0.22
 Nodes (13): ConversationLog, ingest_conversation(), ingest_file(), ingest_nudge(), NudgeRequest, BaseModel, post, Request (+5 more)
 
 ### Community 203 - "MemoryEngine"
-Cohesion: 0.04
-Nodes (47): get_encoder(), Get or create a cached embedding adapter. Args: settings: Application Settings…, apply_identity_space_invariants(), MemoryEngine, MemoryNode, Update a memory node. Returns formatted confirmation or None., Delete a memory node from disk and index. Returns confirmation or None., Soft-delete a node only if ``guard(conn)`` still holds inside the write txn.… (+39 more)
+Cohesion: 0.03
+Nodes (78): _get_or_create_ingest_adapter(), ingest_llm_generate(), ingest_provider_configured(), Shared LLM facade for background tasks. All callers import ``llm_generate``…, Ingest path: PROPAGATE LlmCancelledError. The engine maps it to a provider-wide…, True when a server-side extraction adapter is available (ingest provider !=…, _resolve_ingest_model(), _resolve_ingest_provider() (+70 more)
 
-### Community 204 - ".recall_search"
-Cohesion: 0.10
-Nodes (14): Any, datetime, Search memories and return formatted results. If default_space is set and no…, Return tray-facing usage counters and their window metadata., Return whisper outcome aggregates from whisper_decisions. ``whisper_decisions``…, Return the canonical stats payload for tray, CLI, UI, and diagnostics., Supplement results with SQL-based recent nodes when temporal filters are…, Apply multiplicative space factors to search scores and re-sort. Current… (+6 more)
+### Community 204 - "FakeProtectionService"
+Cohesion: 0.23
+Nodes (3): FakeProtectionService, _operation(), ProtectionOperation
 
-### Community 205 - "detect_space_from_cwd"
-Cohesion: 0.16
-Nodes (19): detect_space_from_cwd(), detect_space_from_dir(), Shared space detection for CLI and MCP adapters., Detect the project space from an explicit directory path. Tries git repo…, Detect the project space from the current working directory. Tries git repo…, Resolve space: explicit flag > ORMAH_SPACE env > cwd detection., resolve_space(), Tests for shared space detection. (+11 more)
+### Community 205 - "LlmCancelledError"
+Cohesion: 0.22
+Nodes (10): LlmCancelledError, LlmTimeoutError, Exception, Shared LLM adapter error types., The provider call exceeded its time budget. Distinct from a fast failure…, The call was cancelled by the host (shutdown/stop), not by the provider. Says…, HIGH-2 (council-pr R3, Codex): a setsid grandchild escapes the group kill AND…, The maintenance path keeps its None-on-failure contract, so consolidator,… (+2 more)
 
-### Community 206 - "run_mcp_stdio"
-Cohesion: 0.40
-Nodes (5): Server, create_mcp_server(), Run the MCP server over stdio transport., Create an MCP server that delegates to the HTTP API., run_mcp_stdio()
+### Community 206 - "TestWhisperRerankerBlendIntegration"
+Cohesion: 0.14
+Nodes (8): Integration tests: blended reranker through the full whisper pipeline. These…, When ALL cross-encoder scores are strongly negative (< -5), results are…, When at least one CE score is > -5, results are NOT suppressed., Custom blend_alpha should affect which results survive., Verify max_doc_chars is forwarded to reranker., Embedding min_score pre-filters; the 0.40 post-boost floor further filters.…, The reranker should change the order of results in the output., TestWhisperRerankerBlendIntegration
+
+### Community 207 - "test_parser.py"
+Cohesion: 0.14
+Nodes (17): Tests for agent JSONL transcript normalization., A transcript whose RAW bytes dwarf its CLEANED conversation. Each turn carries…, The regression Amendment 3 exists to kill: tool-heavy turns must BATCH. Each…, A multi-turn slice's committed conversation stays within the budget — break…, The commit-site asymmetry: at the terminal-assistant site the budget check runs…, The progress guard: a lone turn bigger than the budget can't be shrunk, so it…, Tiny conversation, enormous raw span: the content budget is nowhere near full,…, A lone turn whose raw span exceeds the ceiling is committed anyway. Without… (+9 more)
 
 ### Community 208 - "Whisper: detect rotted synthetic-prompt patterns and propose corrections — Design"
 Cohesion: 0.10
 Nodes (20): 1. `whisper_health` is not a table — nothing persisted can be "re-contaminated", 2. The `Proposal` Pydantic model is dead code — there is nothing to "widen", 3. Absence from `retrieval_events` does not identify a filtered prompt, 4. The `ReviewQueue` UI exists and is orphaned, 5. "Matches zero" is the wrong rot criterion, Branch strategy, Component 1 — `match_synthetic_pattern()` (`src/ormah/engine/prompt_classifier.py`), Component 2 — record the match (`whisper_decisions`) (+12 more)
 
-### Community 209 - "find_rotted_patterns"
-Cohesion: 0.12
-Nodes (24): find_rotted_patterns(), _proposed_action(), datetime, Detect synthetic-prompt patterns that stopped matching (#143). The #134…, Stable text derived ONLY from the pattern — this string is the dedup key. Never…, Propose corrections for synthetic patterns that went quiet (#143). Proposes,…, A live pattern that matched before and has now gone quiet., Live patterns whose last match predates the rot window. Pure read. Rot is… (+16 more)
+### Community 209 - "test_synthetic_pattern_monitor.py"
+Cohesion: 0.13
+Nodes (22): Rot detection for the synthetic-prompt pattern list (#143)., council C1. With the filter off nothing writes silent_synthetic, so every…, council I4. One match months ago is not evidence of a live workflow., The old global guard was satisfied by ONE prompt after a month away and…, The mirror case: the marker really did stop, and there was plenty of traffic in…, Telling the user to remove from .env a pattern that is not in their .env is an…, Settings isolated from the user's global .env (which carries an llm_provider…, 0 makes APScheduler fire every second, forever, and tracked() logs each run as… (+14 more)
 
 ### Community 210 - "NodeFileHandler"
 Cohesion: 0.19
 Nodes (9): NodeFileHandler, callable, FileSystemEventHandler, Observer, Path, File system watcher for memory node changes., Watches memory/nodes/ for file changes and triggers re-indexing., Start watching the nodes directory for changes. (+1 more)
 
-### Community 211 - "validate_llm_runtime_config"
-Cohesion: 0.22
-Nodes (9): Server-startup guard — deliberately NOT a pydantic validator (council C2): the…, validate_llm_runtime_config(), provider=ollama with the (Anthropic) default llm_model must fail at SERVER…, council C3: ORMAH_LLM_MODEL= (empty string) overrides the default and must be…, The Anthropic default is only wrong for ollama — claude_cli keeps working., test_validate_llm_runtime_config_accepts_explicit_ollama_model(), test_validate_llm_runtime_config_keeps_claude_cli_default(), test_validate_llm_runtime_config_rejects_empty_ollama_model() (+1 more)
+### Community 211 - "test_validate_llm_runtime_config_keeps_claude_cli_default"
+Cohesion: 0.33
+Nodes (4): provider=ollama with the (Anthropic) default llm_model must fail at SERVER…, The Anthropic default is only wrong for ollama — claude_cli keeps working., test_validate_llm_runtime_config_keeps_claude_cli_default(), test_validate_llm_runtime_config_rejects_ollama_with_anthropic_default()
 
 ### Community 212 - "Design — forgetting gate #6 must ignore non-value-bearing edges"
 Cohesion: 0.17
@@ -1426,8 +1458,8 @@ Cohesion: 0.23
 Nodes (8): _FakeStdioServer, asyncio, test_call_tool_connect_error_recommends_supervised_start(), test_dispatch_polls_until_phase1_batches_are_ready(), test_dispatch_polls_until_phase2_apply_completes(), test_dispatch_submit_feedback_includes_whisper_log_id(), test_dispatch_uses_extended_timeout_for_maintenance(), test_run_mcp_stdio_generates_session_id_and_runs_server()
 
 ### Community 217 - "EmbeddingAdapter"
-Cohesion: 0.09
-Nodes (18): EmbeddingAdapter, ndarray, Abstract base class for embedding adapters., Interface that all embedding backends must implement., Encode a single text string to a normalized vector., Encode a batch of texts to normalized vectors., Encode a search query. Override to add model-specific query prefixes., Return the dimensionality of the embedding vectors. (+10 more)
+Cohesion: 0.05
+Nodes (29): EmbeddingAdapter, ndarray, Abstract base class for embedding adapters., Interface that all embedding backends must implement., Encode a single text string to a normalized vector., Encode a batch of texts to normalized vectors., Encode a search query. Override to add model-specific query prefixes., Return the dimensionality of the embedding vectors. (+21 more)
 
 ### Community 218 - "Suppressing selection with a fact, not with the cursor (ADR-0004)"
 Cohesion: 0.18
@@ -1441,13 +1473,13 @@ Nodes (4): Remove temporal phrases from *prompt*, returning the topical residue.
 Cohesion: 0.29
 Nodes (6): Context, Decision, Design: ADR-0004 Fix A — stop dead-lettering `no_safe_boundary`, Risks / non-goals, Test changes, What does not change
 
-### Community 221 - "run_whisper_log_cleanup"
+### Community 221 - "_remove_claude_hooks"
 Cohesion: 0.24
-Nodes (10): datetime, Bounded retention for high-volume whisper candidate diagnostics., Delete one bounded batch of stale, unreferenced rejected candidates. Injected…, run_whisper_log_cleanup(), _event(), Tests for normalized whisper payload retention., test_cleanup_deletes_only_stale_unreferenced_rejections(), test_cleanup_is_bounded_and_idempotent() (+2 more)
+Nodes (4): Remove ormah whisper hooks from ~/.claude/settings.json., _remove_claude_hooks(), TestRemoveClaudeHooks, TestRemoveClaudeHooksPluginWrapper
 
-### Community 222 - "install_pi_md"
-Cohesion: 0.21
-Nodes (7): install_pi_agents(), install_pi_md(), _pi_wire(), Install ormah instructions into Pi's AGENTS.md (global or project)., Install the Ormah maintenance subagent prompt into Pi's agent directory., TestInstallPiAgents, TestInstallPiMd
+### Community 222 - "llm_cancel.py"
+Cohesion: 0.14
+Nodes (15): aborted(), begin_cancel(), begin_lifespan(), epoch_changed(), note_call_finished(), note_call_started(), Single authority for LLM call cancellation (ADR-0004 slice 2 redesign).…, Cancel the current epoch. Returns how many calls were in flight when it landed.… (+7 more)
 
 ### Community 223 - "test_miner.py"
 Cohesion: 0.46
@@ -1457,17 +1489,21 @@ Nodes (12): _decision(), _log(), _make_db(), _node(), Path, Regression tests for
 Cohesion: 0.23
 Nodes (12): Whisper eval case schema (memories, prompts, expectations), Six ormah_* Pi memory tools proxied to the HTTP API, Ormah-Pi extension (Pi coding agent memory layer), Pi transcript capture (compact/shutdown to POST /ingest/conversation), Pi whisper injection (POST /agent/whisper before each prompt), Ormah-Pi end-user setup playbook, Codex Ormah guidance block, maintenance_due whisper signal handling (+4 more)
 
-### Community 225 - "safe_error_message"
-Cohesion: 0.21
-Nodes (10): Guarded scheduler adapters for shared cloud protection operations., Run one scheduled backup, swallowing every exception at the scheduler boundary., Run weekly verification, swallowing every exception at the scheduler boundary., run_cloud_backup(), run_restore_verification(), Return a useful error without returning or logging credential-bearing material., safe_error_message(), test_persisted_error_keeps_nonsecret_path_for_cli_diagnostics() (+2 more)
+### Community 225 - "transfer.py"
+Cohesion: 0.20
+Nodes (11): download_file(), put_file(), Path, Data-plane transfers for service-issued presigned URLs., Stream an encrypted bundle to a presigned object URL., Stream a presigned object download to disk., sha256_file(), _validated_put_headers() (+3 more)
 
 ### Community 226 - "should_rewind"
-Cohesion: 0.16
-Nodes (11): Result of parsing a supported agent transcript., Gate the leading-orphan recovery on forward progress (ADR-0003, bug #149).…, should_rewind(), TranscriptResult, ADR-0003: rewind only on NO forward progress; an orphan-with-progress is…, The #149 byte pattern: end_turn boundary, then an assistant 'API Error' record…, A genuine legacy cursor parked mid-response: orphan AND no forward progress., No-progress alone (in-flight tail) must not rewind — only orphan+no-progress… (+3 more)
+Cohesion: 0.19
+Nodes (9): Gate the leading-orphan recovery on forward progress (ADR-0003, bug #149).…, should_rewind(), ADR-0003: rewind only on NO forward progress; an orphan-with-progress is…, The #149 byte pattern: end_turn boundary, then an assistant 'API Error' record…, A genuine legacy cursor parked mid-response: orphan AND no forward progress., No-progress alone (in-flight tail) must not rewind — only orphan+no-progress…, ADR-0003 large-orphan variant: a giant orphan fragment before the first user…, ADR-0003 accepted-loss pinning (council R1, Cursor+Codex): a GENUINE legacy… (+1 more)
+
+### Community 227 - "TestWhisperDecisions"
+Cohesion: 0.35
+Nodes (3): Record a whisper call skipped because the prompt was machine-generated. Called…, Every whisper call writes exactly one whisper_decisions row (I10)., TestWhisperDecisions
 
 ### Community 228 - "start_session_watcher"
-Cohesion: 0.04
-Nodes (70): The one spool-root path every caller must use -- never reach for /tmp. The…, A short stable hash identifying one watch root's spool. Roots must not share a…, root_key(), spool_root(), _commit_state(), _configured_watch_roots(), _expand_watch_dir(), _load_state() (+62 more)
+Cohesion: 0.03
+Nodes (87): Re-admit new LLM calls after a RECOVERABLE cancel (the watcher's startup…, resume_llm_adapters(), _commit_state(), _configured_watch_roots(), _drain_handlers(), _expand_watch_dir(), _load_state(), A live watch root: its directory, always-on handler + spool, and — only when… (+79 more)
 
 ### Community 229 - "Problemas de ingestão"
 Cohesion: 0.10
@@ -1477,25 +1513,21 @@ Nodes (20): A conta do arquivo de 3,8 MB — corrigida após medição, A pergun
 Cohesion: 0.40
 Nodes (4): Global Constraints, Out of scope, recall_search_structured Keyword-Only Tuning Parameters — Implementation Plan, Task 1: Keyword-only tuning parameters on `recall_search_structured`
 
-### Community 231 - "main.py"
-Cohesion: 0.07
-Nodes (32): BaseHTTPMiddleware, AgentMiddleware, Request, Response, Request middleware for agent_id extraction and logging., begin_llm_lifespan(), cancel_active_llm_calls(), Cancel every in-flight LLM call. Returns how many calls the cancel invalidated.… (+24 more)
+### Community 231 - "ormah/__init__.py"
+Cohesion: 0.18
+Nodes (9): _is_reserved_api_path(), get, Serve the SPA index.html for all non-API routes., serve_spa(), parametrize, Tests for the FastAPI app shell., test_local_admin_failure_disables_only_sensitive_routes(), test_spa_fallback_allows_frontend_routes() (+1 more)
 
 ### Community 232 - "TestRecallFloorAndSpaceOrdering"
 Cohesion: 0.30
 Nodes (5): Deliberate recall: wider pool, space scores before the cut, relevance floor…, Cross-space noise penalized below the floor is dropped, not padded., A current-space match outside the old `limit` window survives the cut., A newer other-space node must NOT outrank an older current-space node., TestRecallFloorAndSpaceOrdering
 
-### Community 233 - "test_cloud_cli.py"
-Cohesion: 0.14
-Nodes (23): cloud_paths(), fixture, CLI tests for the `ormah cloud` group., `ormah cloud kit` is the recovery path when init/rotate is interrupted between…, Fresh-machine import must adopt the kit's store id, not mint a new one — the…, Point every cloud path at tmp and return the key path., A damaged store_id line must abort the whole import before any key material is…, _run() (+15 more)
-
-### Community 234 - "test_cli_cloud_backup.py"
-Cohesion: 0.08
-Nodes (23): Restore source-of-truth memory files from a backup. A safety backup of the…, Rebuild the SQLite index from restored markdown node files., Replace target-local identity state with the restored graph's pointer., Result of restoring a memory backup., RestoreResult, _cloud_status(), _local_status_service(), MemoryNode (+15 more)
+### Community 233 - "live_patterns"
+Cohesion: 0.40
+Nodes (5): live_patterns(), (pattern_source, origin) for every pattern the filter would apply today.…, One regex must yield one entry, or it yields two proposals (council I1)., test_live_patterns_dedups_an_operator_copy_of_a_builtin(), test_live_patterns_includes_builtins_and_operator_entries()
 
 ### Community 235 - "test_run_stats.py"
-Cohesion: 0.20
-Nodes (11): Issue #90: maintenance runs return a stats dict., At the 1440-minute defaults the nominal offsets (5/15/30/45) are unscaled —…, Issue #90 council R3 finding 2: scaling each job by ITS OWN interval let jobs…, Same as above for duplicate_merger's finder (also only reachable via…, _spy_add_job(), test_auto_linker_returns_stats(), test_conflict_detector_stats_shape(), test_duplicate_merger_stats_shape() (+3 more)
+Cohesion: 0.16
+Nodes (13): Issue #90: maintenance runs return a stats dict., At the 1440-minute defaults the nominal offsets (5/15/30/45) are unscaled —…, Issue #90 council R3 finding 2: scaling each job by ITS OWN interval let jobs…, Issue #90 council R2 finding 1: a DB/encoder failure inside the finder must not…, Same as above for duplicate_merger's finder (also only reachable via…, _spy_add_job(), test_auto_linker_returns_stats(), test_conflict_detector_stats_shape() (+5 more)
 
 ### Community 236 - "GraphView component (Cytoscape rendering + selection)"
 Cohesion: 0.18
@@ -1518,20 +1550,20 @@ Cohesion: 0.17
 Nodes (30): available_update(), available_update_store(), check(), check_desktop_update(), check_now(), concise_notes(), current_status(), desktop_update_status() (+22 more)
 
 ### Community 241 - "test_auto_linker.py"
-Cohesion: 0.06
-Nodes (46): _edges_between(), Tests for LLM-based edge type classification in auto_linker., LLM returns None -> no edge created (no heuristic fallback)., With llm_provider='none', LLM is never called and no edges are created., Pairs already checked should not trigger a second LLM call on re-run., Pairs classified as 'none' should be recorded in auto_link_checked., Re-writing a node's content bumps its seq to the head (crit#2 mechanism)., A direct metadata UPDATE (not via the builder) must not change seq. (+38 more)
+Cohesion: 0.12
+Nodes (17): Tests for LLM-based edge type classification in auto_linker., Re-writing a node's content bumps its seq to the head (crit#2 mechanism)., A direct metadata UPDATE (not via the builder) must not change seq., Council C1 regression: LLM down -> exactly one batch attempt, watermark held., Cursor regression: no pair is judged once the edge budget is spent (K=1 path)., A pair whose edge write blows up must not abort the whole run., Progress, not just survival (Codex R1, critical #2): the failing pair parks the…, A run that dies must say so in its return value — the job tracker and the admin… (+9 more)
 
-### Community 242 - "set_cloud_backup_enabled"
-Cohesion: 0.21
-Nodes (10): persist_settings_delta(), Structured persistence for cloud protection settings., Persist only keys changed by a caller, serialized with every other writer., Persist and apply cloud protection without dropping unrelated settings., set_cloud_backup_enabled(), env_path(), fixture, test_cloud_setting_does_not_change_runtime_when_persistence_fails() (+2 more)
+### Community 242 - "client.py"
+Cohesion: 0.11
+Nodes (24): _client_version(), get_or_create_device_id(), persist_account_credentials(), Path, HTTP client and local account identity for the Ormah Cloud service., Return this installation's stable UUIDv4, creating it with mode 0600., Persist account credentials without dropping unrelated environment keys., _uuid4() (+16 more)
 
 ### Community 243 - "Session-watcher live-loss safety net — Implementation Plan"
 Cohesion: 0.11
 Nodes (13): Acceptance (issue #59), Branch, File map, Out of scope (YAGNI), Run tests with the working-tree interpreter, Session-watcher live-loss safety net — Implementation Plan, Tasks (do in order), Task 1: Config — reconcile interval + per-tick cap (+5 more)
 
-### Community 244 - "test_hybrid_search_raw_cosine.py"
-Cohesion: 0.33
-Nodes (6): _make_hybrid(), _make_node(), Unit tests for the raw_cosine absolute-signal contract in HybridSearch. The…, A node found only via FTS (no vector hit) must carry no raw_cosine., A node with a genuine vector measurement keeps its raw_cosine., TestRawCosineContract
+### Community 244 - "safe_error_message"
+Cohesion: 0.21
+Nodes (10): Guarded scheduler adapters for shared cloud protection operations., Run one scheduled backup, swallowing every exception at the scheduler boundary., Run weekly verification, swallowing every exception at the scheduler boundary., run_cloud_backup(), run_restore_verification(), Return a useful error without returning or logging credential-bearing material., safe_error_message(), test_persisted_error_keeps_nonsecret_path_for_cli_diagnostics() (+2 more)
 
 ### Community 245 - "Ormah Desktop App Icon (canonical 512px master)"
 Cohesion: 0.36
@@ -1553,9 +1585,9 @@ Nodes (9): Ormah system map, auto_cluster job, CLI adapter (sync HTTP client), M
 Cohesion: 0.25
 Nodes (9): age encryption envelope (client-side, private identity never leaves device), Ormah Cloud control plane (auth, entitlement, reservation, metadata), R2 data plane (ciphertext transfer), Immutable pending-to-committed promotion, Presigned URL (single-operation, single-key, short-lived storage permission), Recovery kit (store_id + retained age secret identities), Snapshot (committed encrypted cloud recovery point, server ULID), store_id (UUIDv4 identity of one local memory graph) (+1 more)
 
-### Community 250 - "llm_errors.py"
-Cohesion: 0.29
-Nodes (6): LlmTimeoutError, Exception, Shared LLM adapter error types., The provider call exceeded its time budget. Distinct from a fast failure…, The maintenance path keeps its None-on-failure contract, so consolidator,…, test_llm_generate_swallows_cancel_and_timeout()
+### Community 250 - "2026-08-19-claude-cli-fixed-system-prompt/00-overview.md"
+Cohesion: 0.13
+Nodes (9): Council round 1 (2026-08-19) — findings folded in, Fixed --system-prompt in ClaudeCliAdapter — Implementation Plan, Global Constraints, Tasks (execute in order — Task 1 MUST precede any code edit), Task 1: Baseline legs — BEFORE any code change, Task 2: Fixed `_SYSTEM_PROMPT` constant in argv (TDD), Task 3: Per-call usage/cost log line (TDD), Task 4: AFTER legs + calibrated quality gate (+1 more)
 
 ### Community 251 - "Design — session-watcher live-loss safety net"
 Cohesion: 0.11
@@ -1585,13 +1617,21 @@ Nodes (8): Claude plugin ormah-maintenance agent, Two-call run_maintenance proto
 Cohesion: 0.54
 Nodes (8): /ormah:setup command, /ormah:status command, /ormah:upgrade command, Ormah Claude Code plugin (manifest, hooks, MCP, commands), Plugin first-run flow (install, setup, claude-md install), ormah claude-md install (scope-matched guidance block), Claude plugin setup playbook, ormah setup --skip-client-setup (plugin-safe setup contract)
 
+### Community 258 - "PromptClassifier"
+Cohesion: 0.16
+Nodes (8): Get or create the prompt intent classifier (uses engine's encoder)., PromptClassifier, Classify prompt intent using cosine similarity to archetype embeddings. Lazy-…, Classify *prompt* and return an intent with search-param overrides., Tests for the embedding-based prompt intent classifier., An encoder that returns zero vectors should not crash., TestContinuationIntent, TestLazyInit
+
 ### Community 259 - "_create_pair"
-Cohesion: 0.10
-Nodes (25): _apply_edge(), Record a link decision: write to auto_link_checked and optionally create an…, _create_pair(), Helper: create two similar nodes without auto-linking, return their IDs., A concurrent writer created the same edge between collection and apply.…, The winner of the race already wrote its Connection to the file. We must not…, The winner committed the DB row but crashed before saving its markdown. The…, An INSERT OR IGNORE that inserted nothing is not a creation. Counting it as one… (+17 more)
+Cohesion: 0.14
+Nodes (19): _apply_edge(), Record a link decision: write to auto_link_checked and optionally create an…, _create_pair(), Helper: create two similar nodes without auto-linking, return their IDs., A concurrent writer created the same edge between collection and apply.…, The winner of the race already wrote its Connection to the file. We must not…, The winner committed the DB row but crashed before saving its markdown. The…, An INSERT OR IGNORE that inserted nothing is not a creation. Counting it as one… (+11 more)
 
 ### Community 260 - "Avaliação profunda — ormah Beta (`local-main`) — 2026-07-13"
 Cohesion: 0.11
 Nodes (17): 10. Riscos & não verificado, 1. Sumário executivo, 2. Estado vivo do Beta (snapshot), 3. Arquitetura & código — verdictos dos hotspots, 4. Testes & operações, 5. Tecnologia — manter × trocar (pesquisa 2025-2026, com fontes), 6. Produto de memória — onde o valor vaza, 7.1 Log de produção contaminado por processos de teste — **[V mecanismo]** (+9 more)
+
+### Community 261 - "Path"
+Cohesion: 0.09
+Nodes (23): _candidate_project_roots(), _codex_agents_target(), _detect_claude_plugin_scope(), _enabled_plugin_keys(), _get_claude_md_target(), install_claude_md(), install_codex_md(), _install_markdown_block() (+15 more)
 
 ### Community 262 - "Setup: skip the Claude Code wiring the ormah plugin already provides — Design"
 Cohesion: 0.11
@@ -1641,13 +1681,17 @@ Nodes (17): 1. Problem, 2. What is already correct on `upstream/main`, 3. The ac
 Cohesion: 0.50
 Nodes (5): Case-design rules (labels precede runs, >=6 memories, named distractors), Whisper golden corpus (golden/golden.jsonl, local-only), Mined provisional cases (ormah eval whisper mine), Whisper F1 baselines table (2026-07-03), Maintenance decision rules (honest none, submit all evaluated pairs)
 
-### Community 275 - "seed_case"
-Cohesion: 0.21
-Nodes (17): clear_eval_db(), datetime, Seed the isolated recall eval DB with memories from a corpus case., Return a created datetime for *mem*, or None for 'now'. Supports ``created``…, Clear eval DB and seed with memories from *case*. Memories are inserted with…, Remove all nodes from the eval DB and file store., seed_case(), _seed_created() (+9 more)
+### Community 274 - "generate_server_wrapper"
+Cohesion: 0.29
+Nodes (3): generate_server_wrapper(), Generate daemon wrapper with explicit, scoped API-key inheritance., TestGenerateServerWrapper
 
-### Community 276 - "db.py"
-Cohesion: 0.15
-Nodes (12): SQLite database connection management., _init_db(), Concurrency tests for the thread-local Database connection model., Regression: vec0 module is loaded per connection; a fresh thread must still be…, A read on thread B returns promptly while thread A holds a write tx., test_each_thread_gets_distinct_connection(), test_read_during_write_does_not_block(), test_vector_search_works_from_worker_thread() (+4 more)
+### Community 275 - "_run_fusion"
+Cohesion: 0.17
+Nodes (12): Run search with controlled FTS and vector outputs., A result with strong semantic match should outrank one with only keyword match., A result strong in both FTS and vector should outrank single-source results., Vector results below similarity_threshold should not contribute to scoring., Search should use get_nodes_batch instead of individual get_node calls., High-similarity vector result should score significantly higher than low-…, _run_fusion(), test_batch_node_fetch_used() (+4 more)
+
+### Community 276 - "background/__init__.py"
+Cohesion: 0.24
+Nodes (9): _load_pairs(), Single-vs-batched A/B runner for the maintenance auto-link eval (#87). Runs the…, Adapt a mined pair to the {node, other, match_id} shape the linker uses., Normalize a link verdict to a relationship label, 'error' when unusable., _relationship(), run(), _to_link_pair(), R3 + R5 regression. A child that HANDLES SIGTERM and exits 0 emits partial… (+1 more)
 
 ### Community 277 - "build"
 Cohesion: 0.47
@@ -1661,9 +1705,9 @@ Nodes (5): main(), Path, _read_plugin_version(), _read_project_version(), verify
 Cohesion: 0.33
 Nodes (6): files, ormah-pi.ts, src, pi, extensions, agents
 
-### Community 280 - "run_eval"
-Cohesion: 0.19
-Nodes (16): _aggregate(), _eval_case(), EvalResult, Recall eval runner: orchestrates per-case seeding, retrieval, and scoring., Compute aggregate metrics across all prompt results. Returns None for each…, Run the recall eval pipeline over *cases*. Returns EvalResult with per-case and…, Seed and evaluate a single corpus case., run_eval() (+8 more)
+### Community 280 - "find_rotted_patterns"
+Cohesion: 0.29
+Nodes (10): find_rotted_patterns(), _proposed_action(), datetime, Detect synthetic-prompt patterns that stopped matching (#143). The #134…, Stable text derived ONLY from the pattern — this string is the dedup key. Never…, Propose corrections for synthetic patterns that went quiet (#143). Proposes,…, A live pattern that matched before and has now gone quiet., Live patterns whose last match predates the rot window. Pure read. Rot is… (+2 more)
 
 ### Community 281 - "`frozen_until` Implementation Plan — Overview"
 Cohesion: 0.33
@@ -1741,9 +1785,9 @@ Nodes (13): 4.1 Declara como *shipped* algo que nunca foi mesclado, 4.2 A premis
 Cohesion: 0.14
 Nodes (13): base-status (I2), beta-keep (150 commits) — MUST survive the Task 6 merge (not in any PR, not upstream), chore/style (4), config (2), dedup/maintenance (17), delta-manifest — Beta-only commits classification (Task 1, 2026-07-10), docs (19), index/rebuild (3) (+5 more)
 
-### Community 344 - "install_claude_md"
-Cohesion: 0.29
-Nodes (3): install_claude_md(), Install ormah instructions into a Claude Code CLAUDE.md file., TestInstallClaudeMd
+### Community 344 - "test_file_cache.py"
+Cohesion: 0.27
+Nodes (10): _make_node(), MemoryNode, Tests for FileStore in-memory ID-to-path cache., If the cached path no longer exists, _find_file still finds via glob., test_cache_cleared_on_delete(), test_cache_hit_on_load(), test_cache_populated_on_save(), test_find_file_returns_none_for_missing() (+2 more)
 
 ### Community 345 - "Spec — isolate `test_setup.py` from the developer's machine"
 Cohesion: 0.14
@@ -1757,9 +1801,17 @@ Nodes (7): Lock, LoggingHandler, main(), poll_disk_truth(), Event, FileSystemEve
 Cohesion: 0.14
 Nodes (13): 0. Baseline: what "clear duplicate" means operationally today, 1. Wrong auto-merge of near-duplicates (case 1 misfires), 2. Contradiction misclassified as duplicate (the case 3 / case 1 boundary), 3. Undo is asymmetric: the kept node is unrecoverable (undo fidelity, part 1), 4. Undo fidelity after downstream edits (undo fidelity, part 2), 5. Proposal invalidation races on merge/delete (agreed mechanic, not yet built), 6. Queue re-growth and starvation under "leave both alone, reconsider later" (case 2), 7. Interaction with #223's promotion path (active-only candidacy) (+5 more)
 
+### Community 348 - "TestExtractionSchema"
+Cohesion: 0.20
+Nodes (5): confidence:0.0 is a legitimate, falsy value — must survive the `is None` check…, Regression: a memory 'content' that quotes a ```-fenced code block must not…, The fallback (`result`) extraction path is not --json-schema-constrained, so a…, content:null hits the same crash mode as the other three fields:…, TestExtractionSchema
+
 ### Community 349 - "TestStopOffsetCeiling"
 Cohesion: 0.20
 Nodes (7): ADR-0004 Task 3: ``stop_offset`` is an ABSOLUTE hard ceiling — no turn is…, Byte offset after the first ``upto`` records, matching ``_write_jsonl``'s…, The flagged leak: ``max_conversation_chars`` commits an oversized FIRST turn…, Everything closed at or before the ceiling is committed; the first turn that…, The non-nudge lane passes ``stop_offset=None`` and must parse exactly as before., The ceiling must also clamp the Codex ``task_complete`` closure site, not only…, TestStopOffsetCeiling
+
+### Community 350 - "TestMarkOutdated"
+Cohesion: 0.15
+Nodes (6): feedback_engine(), fixture, Tests for the mark_outdated feedback tool., Engine with a node to give feedback on., An outdated memory should get a lower score in search., TestMarkOutdated
 
 ### Community 351 - "Port #221 (bounded reinforcement) onto local-main's post-#220 API — Implementation Plan"
 Cohesion: 0.29
@@ -1781,6 +1833,14 @@ Nodes (12): Approach decision (settled), Components (focused files, one responsi
 Cohesion: 0.15
 Nodes (12): Acceptance criteria, Approach (B): observer-first + catch-up routed through the handler + shared semaphore, Components changed, Confirmed decisions, Design: session-watcher catch-up off the bind path (#52), Error handling, Fan-out bound, Problem (+4 more)
 
+### Community 356 - "load_identities"
+Cohesion: 0.28
+Nodes (9): current_recipient(), load_identities(), All identities for decryption, current first., The encryption recipient (public key of the current identity)., Read and cryptographically validate every age identity in a file., _validated_identity_strings(), End-to-end: a bundle encrypted to the current key opens with identities re-…, test_kit_keys_open_real_bundle() (+1 more)
+
+### Community 357 - "_edges_between"
+Cohesion: 0.14
+Nodes (14): _edges_between(), LLM returns None -> no edge created (no heuristic fallback)., With llm_provider='none', LLM is never called and no edges are created., Return all edges between two nodes., Malformed LLM JSON → recorded as result='error' (no edge), so the node resolves., LLM classifies as supports -> edge created with type supports., LLM classifies as contradicts -> edge created with type contradicts., LLM classifies as none -> no edge created. (+6 more)
+
 ### Community 358 - "Design — Graph active-first com drill-down de espaço (#22 slice 1)"
 Cohesion: 0.15
 Nodes (12): 1. Backend — `/ui/graph` ganha gating por tier + drill por espaço, 2. Frontend — default active + sub-view focado por espaço, 3. Interação com features do PR#17 (não regredir), 4. Componentes e fronteiras, 5. Testes (TDD), 6. Fora de escopo (explícito), 7. Acceptance criteria cobertos por esta fatia, 8. Ajustes pós-council (2026-06-29) (+4 more)
@@ -1801,13 +1861,17 @@ Nodes (12): Behavioural note, Delivery, Design, Evidence, Incidental benefit, in
 Cohesion: 0.15
 Nodes (12): ADR-0004 — repairing the two defects that break H1 in the ingest spool, Constraints discovered before designing, Decisions, Defect 1 — the backoff cap guards the product, not the arithmetic, Defect 2 — a deleted transcript is classed as an external failure, Not in scope, Problem, Risks (+4 more)
 
-### Community 363 - "configure_claude_code_mcp"
-Cohesion: 0.22
-Nodes (6): configure_claude_code_mcp(), _merge_json_file(), Read a JSON file, deep-merge updates, and write back., Register ormah MCP server in Claude Code user config. Uses ``claude mcp add``…, TestConfigureClaudeCodeMcp, TestMergeJsonFile
+### Community 363 - "get_ormah_bin_path"
+Cohesion: 0.11
+Nodes (13): get_ormah_bin_path(), Find the absolute path to the ormah binary., _claude_desktop_wire(), configure_claude_code_mcp(), configure_claude_desktop(), _merge_json_file(), Read a JSON file, deep-merge updates, and write back., Register ormah MCP server in Claude Code user config. Uses ``claude mcp add``… (+5 more)
 
-### Community 364 - "config.py"
-Cohesion: 0.05
-Nodes (40): FastAPI, load_or_create_local_admin_token(), Path, Request, Owner-only capability authentication for sensitive local API routes., Load this installation's local API capability, creating it mode 0600., Reject sensitive requests that did not originate on this machine., Authenticate a native local caller without exposing the cloud account token. (+32 more)
+### Community 364 - "local_auth.py"
+Cohesion: 0.14
+Nodes (18): load_or_create_local_admin_token(), Path, Request, Owner-only capability authentication for sensitive local API routes., Load this installation's local API capability, creating it mode 0600., Reject sensitive requests that did not originate on this machine., Authenticate a native local caller without exposing the cloud account token., require_local_admin() (+10 more)
+
+### Community 365 - "test_consolidator.py"
+Cohesion: 0.22
+Nodes (7): consolidation_engine(), fixture, Tests for the memory consolidation background job., Engine with several similar working memories., test_consolidation_settings_defaults(), test_consolidation_settings_env_override(), test_inverted_cluster_bounds_returns_empty_and_warns()
 
 ### Community 366 - "Investigação — pipeline de whisper — 2026-07-15"
 Cohesion: 0.17
@@ -1820,6 +1884,14 @@ Nodes (11): 1. `_is_ormah_hook` — single source of truth (existing), 2. `_merg
 ### Community 368 - "LLM Cancellation Redesign — Single Global Epoch"
 Cohesion: 0.17
 Nodes (11): Acceptance criteria, Consequences, Known risks, LLM Cancellation Redesign — Single Global Epoch, Out of scope, Ownership: who cancels, and when, The adapter becomes a pure epoch consumer, The design (+3 more)
+
+### Community 369 - "test_ingest_provider.py"
+Cohesion: 0.22
+Nodes (8): Proves --no-session-persistence survives the full get_adapter -> generate…, test_extraction_uses_ingest_adapter_not_maintenance(), test_get_adapter_model_override_beats_settings_model(), test_get_adapter_provider_override_beats_settings(), test_ingest_model_falls_back_to_llm_model_when_empty(), test_ingest_path_generate_carries_no_session_persistence(), test_ingest_provider_falls_back_to_llm_provider_when_empty(), test_settings_accepts_claude_cli_and_ingest_provider()
+
+### Community 370 - "Design: fixed `--system-prompt` in ClaudeCliAdapter"
+Cohesion: 0.18
+Nodes (10): argv change, Constant, Decision, Design: fixed `--system-prompt` in ClaudeCliAdapter, Known risk, Out of scope, Problem, Tests (TDD — red before green) (+2 more)
 
 ### Community 372 - "Handoff — ADR-0004 slice 3 (`no_safe_boundary`): plano revisado 5×, nada implementado (2026-07-28)"
 Cohesion: 0.18
@@ -1884,6 +1956,10 @@ Nodes (8): Beta ↔ Upstream Sync — Implementation Plan (overview), Clone / re
 ### Community 388 - "Delta-selection for dedup/conflict (#81) — Implementation Plan Overview"
 Cohesion: 0.22
 Nodes (8): Delta-selection for dedup/conflict (#81) — Implementation Plan Overview, Files, Known limitations (documented in the PR body, out of scope), Load-bearing invariants (every task must preserve), Pre-flight (once, before Task 1), Reconciliation note (#95 / judge_pairs), Tasks, Verification (after Task 5)
+
+### Community 389 - "Design — remove the wall-clock race from `test_hippocampus.py`"
+Cohesion: 0.18
+Nodes (10): Approach, Call sites, Component, Design — remove the wall-clock race from `test_hippocampus.py`, Error handling, Out of scope, Problem, Root cause (+2 more)
 
 ### Community 390 - "Ingest batches are sized to a recall sweet spot, not the context window; delta ordered first"
 Cohesion: 0.25
@@ -2009,6 +2085,18 @@ Nodes (5): Global Constraints, Non-goals, Root causes and why each fix is shaped
 Cohesion: 0.15
 Nodes (12): Approach, Body, Design, Error handling, Issue #232 — Explicit filter parameters on the recall boundary, Out of scope, Problem, Severity: the typo is latent, not active (+4 more)
 
+### Community 425 - "_deprecated_key_present"
+Cohesion: 0.25
+Nodes (4): model_validator, _deprecated_key_present(), Path, True when the deprecated key is set in ANY configured settings source.…
+
+### Community 426 - "_reciprocal_rank_fusion"
+Cohesion: 0.25
+Nodes (8): Fuse multiple ranked lists using weighted Reciprocal Rank Fusion. Each list…, _reciprocal_rank_fusion(), A node in both lists should score higher than one in only one list., Higher weight should give proportionally higher contribution., test_rrf_empty_lists(), test_rrf_overlap_accumulates(), test_rrf_single_list(), test_rrf_weights_scale_contribution()
+
+### Community 427 - "TestIngestConfidence"
+Cohesion: 0.29
+Nodes (4): Auto-ingested memories should default to confidence=0.7., If the LLM specifies confidence, it should be used., dry_run results should include the confidence value., TestIngestConfidence
+
 ### Community 428 - "Problema 3 — o churn de `seq` (refutado como causa do backlog)"
 Cohesion: 0.40
 Nodes (5): A cadeia de código (confirmada, elo a elo), Conclusão, Estado atual (12:35 -03, Agente 5), Por que a cadeia não explica o backlog, Problema 3 — o churn de `seq` (refutado como causa do backlog)
@@ -2021,9 +2109,9 @@ Nodes (4): 3a. `buildSpaceLegend`, 3b. `scopeLabel`, 3c. `createRequestGuard` (F
 Cohesion: 0.25
 Nodes (7): Acceptance Criteria → Task Map, Bounded Stability Reinforcement (#221) — Implementation Plan, File Structure, Final Gate (after Task 6), Global Constraints, Setup (once, before Task 1), Task Order
 
-### Community 431 - ".get_whisper_context"
-Cohesion: 0.33
-Nodes (3): Get compact whisper context for involuntary recall injection., Return non-expired identity-linked memories for a project/global scope., Return the one-time first-session onboarding nudge when identity is empty.
+### Community 431 - "main"
+Cohesion: 0.70
+Nodes (4): main(), Path, sha_map(), step()
 
 ### Community 432 - "Recovery drops an orphan fragment rather than re-ingesting the whole transcript"
 Cohesion: 0.50
@@ -2045,45 +2133,49 @@ Nodes (3): Task 2: Add `_claude_code_plugin_provides_hooks()`, The two states th
 Cohesion: 0.50
 Nodes (3): Task 2: Always-on Ingest worker — drains the spool; Observer becomes optional, Test disposition — the plan undercounted the fallout (re-plan 2026-07-23), The drain loop
 
-### Community 437 - "memory_engine.py"
-Cohesion: 0.15
-Nodes (17): is_maintenance_due_signal(), Shared wording for the agent-backed maintenance whisper signal., Return true for the current signal line and the legacy bare marker., Central facade for all memory operations., # NOTE: index_single calls _remove_node internally which wipes edges,, _excerpt(), _feedback_id_suffix(), format_node() (+9 more)
+### Community 437 - ".recall_search"
+Cohesion: 0.12
+Nodes (18): Search memories and return formatted results. If default_space is set and no…, Supplement results with SQL-based recent nodes when temporal filters are…, Apply multiplicative space factors to search scores and re-sort. Current…, Enrich search results with graph neighbors via spreading activation. Takes the…, Best-effort prompt vector for feedback affinity matching., Search memories and return structured results (list of dicts). Same logic as…, has_temporal_phrases(), Return True if *prompt* contains explicit temporal phrases. Unlike… (+10 more)
 
-### Community 464 - "LocalAdapter"
-Cohesion: 0.24
-Nodes (4): LocalAdapter, ndarray, Wraps fastembed with lazy loading and caching., TestLocalAdapter
-
-### Community 552 - "TestExtractionSchema"
-Cohesion: 0.20
-Nodes (5): confidence:0.0 is a legitimate, falsy value — must survive the `is None` check…, Regression: a memory 'content' that quotes a ```-fenced code block must not…, The fallback (`result`) extraction path is not --json-schema-constrained, so a…, content:null hits the same crash mode as the other three fields:…, TestExtractionSchema
-
-### Community 553 - "_commit_updates_chunked"
+### Community 552 - "TestSpaceScoring"
 Cohesion: 0.31
-Nodes (6): _commit_updates_chunked(), Apply (importance, node_id) updates in bounded write transactions so a full-…, The all-nodes write in importance_scorer must commit in bounded chunks., _RecordingDB, test_commit_updates_chunked_empty(), test_commit_updates_chunked_splits_into_batches()
+Nodes (5): Tests for score-based space prioritization in MemoryEngine., Same-space results score higher than otherwise-identical cross-project results., A high-relevance cross-project result still beats a weak current-project result., Global (space=None) results get the global boost factor., TestSpaceScoring
+
+### Community 553 - "test_full_rebuild_resets_watermark"
+Cohesion: 0.50
+Nodes (4): _set_watermark(), A mass reindex must not leave a stale watermark hiding the whole store., test_full_rebuild_resets_watermark(), test_watermark_roundtrip()
 
 ### Community 555 - "test_admin_embedding_backfill_task.py"
 Cohesion: 0.20
 Nodes (5): embedding_backfill must be a registered admin task in the sleep-cycle (#32)., C1/I1: a failed task yields status=degraded AND HTTP 503 (not 200)., Happy path stays a plain dict (HTTP 200) with status=completed., test_run_all_tasks_completed_returns_dict_when_all_ok(), test_run_all_tasks_degraded_returns_503_when_a_task_raises()
 
 ### Community 556 - "init_key"
-Cohesion: 0.09
-Nodes (46): _cmd_cloud_init(), _atomic_write_0600(), current_recipient(), get_or_create_store_id(), init_key(), load_identities(), load_identity_strings(), Path (+38 more)
+Cohesion: 0.07
+Nodes (52): _cmd_cloud_kit(), Regenerate the recovery kit from the existing key file (idempotent)., extract_store_id(), get_or_create_store_id(), init_key(), load_identity_strings(), Test/migration helper; product rotation must update the recovery kit first., UUIDv4 per memory store, persisted at <memory_dir>/.store_id. (+44 more)
+
+### Community 557 - "cloud_paths"
+Cohesion: 0.67
+Nodes (3): cloud_paths(), fixture, Point every cloud path at tmp and return the key path.
 
 ### Community 558 - "test_recall_concurrency.py"
 Cohesion: 0.33
 Nodes (6): Concurrency regression: recall must be safe when routes run in the threadpool.…, engine.graph.conn must resolve to the calling thread's own connection., Hammering recall_search from many threads must not raise (shared-conn race)., _remember(), test_concurrent_recall_does_not_raise(), test_graph_conn_is_per_thread()
 
-### Community 559 - "TestSessionBufferRoute"
-Cohesion: 0.33
-Nodes (4): Tests for the per-session prompt buffer in the whisper route., Buffer should accumulate prompts per session., Different session IDs should have independent buffers., TestSessionBufferRoute
+### Community 559 - "logging_setup.py"
+Cohesion: 0.27
+Nodes (8): LogRecord, Logging configuration — text or JSON format., Redact known API-key values from log text., Redact strings inside JSON log extras without changing non-secret types., Text formatter that redacts API-key values from the final rendered line., _redact_obj(), _redact_secrets(), _RedactingFormatter
 
-### Community 561 - "live_patterns"
+### Community 562 - "unwire_one"
 Cohesion: 0.40
-Nodes (5): live_patterns(), (pattern_source, origin) for every pattern the filter would apply today.…, One regex must yield one entry, or it yields two proposals (council I1)., test_live_patterns_dedups_an_operator_copy_of_a_builtin(), test_live_patterns_includes_builtins_and_operator_entries()
+Nodes (5): delete, Remove ormah hooks/MCP/instructions for a single agent., unwire_one(), Remove ormah hooks/MCP/instructions for a single agent. Returns {unwired,…, unwire_agent()
 
-### Community 564 - "test_synthetic_pattern_monitor.py"
-Cohesion: 0.13
-Nodes (22): Rot detection for the synthetic-prompt pattern list (#143)., council C1. With the filter off nothing writes silent_synthetic, so every…, council I4. One match months ago is not evidence of a live workflow., The old global guard was satisfied by ONE prompt after a month away and…, The mirror case: the marker really did stop, and there was plenty of traffic in…, Telling the user to remove from .env a pattern that is not in their .env is an…, Settings isolated from the user's global .env (which carries an llm_provider…, 0 makes APScheduler fire every second, forever, and tracked() logs each run as… (+14 more)
+### Community 563 - "test_migration_seq.py"
+Cohesion: 0.33
+Nodes (5): Tests for nodes.seq column migration and backfill., Regression: a pre-seq DB must migrate without 'no such column: seq'.…, Existing nodes get a monotonic seq ordered by created ASC., test_init_schema_migrates_legacy_db_without_seq(), test_seq_column_backfilled_by_created()
+
+### Community 578 - "run_mcp_stdio"
+Cohesion: 0.40
+Nodes (5): Server, create_mcp_server(), Run the MCP server over stdio transport., Create an MCP server that delegates to the HTTP API., run_mcp_stdio()
 
 ## Ambiguous Edges - Review These
 - `Frozen ormah-server sidecar binaries directory` → `Bundled runtime (uv sidecar installs ormah from PyPI)`  [AMBIGUOUS]
@@ -2100,9 +2192,9 @@ Nodes (22): Rot detection for the synthetic-prompt pattern list (#143)., council
   docs/banner.png · relation: rationale_for
 
 ## Knowledge Gaps
-- **1307 isolated node(s):** `Mental model (the one thing that prevents every problem)`, `Remotes — keep these names`, `Golden rules`, `Import gate — run it before trusting any test number from an island`, `Evidence gate — the Beta's data describes `local-main`, never `upstream/main`` (+1302 more)
+- **1339 isolated node(s):** `Global Constraints`, `Council round 1 (2026-08-19) — findings folded in`, `Tasks (execute in order — Task 1 MUST precede any code edit)`, `Task 1: Baseline legs — BEFORE any code change`, `Task 2: Fixed `_SYSTEM_PROMPT` constant in argv (TDD)` (+1334 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **143 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **150 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
@@ -2119,5 +2211,5 @@ _Questions this graph is uniquely positioned to answer:_
   _Edge tagged AMBIGUOUS (relation: rationale_for) - confidence is low._
 - **What is the exact relationship between `Teal Orb Glyph Beneath the Wordmark` and `Memory-as-Constellation Metaphor`?**
   _Edge tagged AMBIGUOUS (relation: rationale_for) - confidence is low._
-- **Why does `Settings` connect `Settings` to `ProtectionOperationPhase`, `consolidator.py`, `ormah/cli.py`, `test_config.py`, `seed_case`, `test_stats.py`, `._extract_memories_llm`, `CloudState`, `routes_account.py`, `conftest.py`, `test_cli_account.py`, `run_eval`, `test_session_watcher_flush.py`, `parse_node`, `llm/__init__.py`, `test_confirmed_use_contract.py`, `CloudCryptoError`, `test_scoring_signals.py`, `test_synthetic_pattern_monitor.py`, `HybridSearch`, `VectorStore`, `memory_engine.py`, `test_ingest_extraction.py`, `test_account_auth_routes.py`, `test_temporal_search.py`, `TestClient`, `test cleanup auto ingested`, `MemoryEngine`, `test_hybrid_search.py`, `validate_llm_runtime_config`, `llm_client.py`, `test pair batch`, `recall/cli.py`, `run_whisper_log_cleanup`, `protection.py`, `TestSubmitFeedbackBasic`, `test relevance runner`, `run_whisper_eval`, `whisper/cli.py`, `test_routes.py`, `TierManager`, `test_cli_cloud_backup.py`, `config.py`, `set_cloud_backup_enabled`, `test_backup.py`, `test_hybrid_search_raw_cosine.py`, `background/__init__.py`, `seed_case`?**
-  _High betweenness centrality (0.069) - this node is a cross-community bridge._
+- **Why does `MemoryEngine` connect `MemoryEngine` to `test_session_watcher.py`, `main.py`, `run_eval`, `CreateNodeRequest`, `session_watcher.py`, `HybridSearch`, `extract_json`, `Settings`, `conftest.py`, `SessionHandler`, `test_session_watcher_flush.py`, `MemoryNode`, `Database`, `test_confirmed_use_contract.py`, `TestSpaceScoring`, `MaintenanceManager`, `GraphIndex`, `ContextBuilder`, `test_ingest_extraction.py`, `.recall_search`, `VectorStore`, `FileStore`, `NodeType`, `ProtectionOperationKind`, `EdgeType`, `test_account_billing_routes.py`, `test cleanup auto ingested`, `LlmCancelledError`, `TestClient`, `run_forgetting`, `get_fastembed_cache_dir`, `recall/cli.py`, `TestSubmitFeedbackBasic`, `test relevance runner`, `TestWhisperDecisions`, `start_session_watcher`, `start_scheduler`, `whisper/cli.py`, `run_whisper_eval`, `TierManager`, `IndexBuilder`, `node.py`, `seed_case`, `test_backup.py`, `seed_case`?**
+  _High betweenness centrality (0.063) - this node is a cross-community bridge._
