@@ -8,7 +8,7 @@
 
 **Interfaces:**
 - Consumes: Task 1's stopped daemon and backup.
-- Produces: `detector.py` with CLI `python detector.py <pairs.jsonl> <out.json>`, writing `{"link": {pair_id: label}, "dup": {...}, "conflict": {...}, "counts": {...}}`. Task 5 runs the **same file, unmodified** to produce `after.json`.
+- Produces: `detector.py` with CLI `python detector.py <pairs.jsonl> <out.json>`, writing `{"link": {pair_id: label}, "dup": {...}, "conflict": {...}, "link_payload": {pair_id: {...}}, "dup_payload": {...}, "conflict_payload": {...}, "counts": {...}}`. The `*_payload` maps carry the fields production acts on (`merged_title`, `merged_content`, `evolved_node`, `reason`) — the coarse label alone cannot tell a human whether an irreversible merge changed for the better. Task 5 runs the **same file, unmodified** to produce `after.json`.
 
 **This must run before any adapter edit.** A BEFORE leg taken after the change is not a baseline.
 
@@ -33,15 +33,20 @@ Write exactly this to `~/.cache/ormah-ab-20260819/detector.py`:
 
 ```python
 """BEFORE/AFTER detector. Judges one mined corpus through all three production judges
-via the production batched route (pair_batch.judge_pairs at K=10) and records one label
-per pair per judge. Applies nothing: no merge, no edge, no watermark."""
+via the production batched route (pair_batch.judge_pairs at K=10) and records, per pair
+per judge, both a coarse label and the fields production actually acts on. Applies
+nothing: no merge, no edge, no watermark."""
 import json
 import logging
+import os
+import sqlite3
 import sys
 
 from ormah.background import auto_linker, conflict_detector, duplicate_merger
 from ormah.background.llm import normalize_conflict_type, normalize_link_type, pair_batch
 from ormah.config import Settings
+
+DB = os.path.expanduser("~/.local/share/ormah/memory/index.db")
 
 # INFO, not the default. Two things depend on it: pair_batch's fallback warnings, and the
 # `claude -p usage:` line Task 4 adds — Task 5 reads cache_write straight out of this stream
@@ -54,11 +59,19 @@ K = 10
 
 
 def load(path):
-    """Load mined pairs, dropping any with NULL content.
+    """Load mined pairs, dropping any with NULL content, and add `created`.
 
     `content` is nullable in `nodes` (schema.sql) and every renderer does
     `content[:2000]` with no guard, so a NULL row would abort the whole run
     mid-flight and lose the pairs already judged.
+
+    `created` is added here rather than in the miner. `eval.maintenance.miner`
+    selects `id, title, content, type, space` only (miner.py:32,55), so every pair
+    would reach `_render_conflict_pair` as `created: unknown`
+    (conflict_detector.py:72,74) — and the conflict rules use dates to separate
+    evolution from tension. Enriching here keeps the audited miner untouched: the
+    superseded plan's per-judge miners diverging from production is the failure
+    class this plan exists to avoid.
     """
     rows, skipped = [], 0
     with open(path, encoding="utf-8") as f:
@@ -71,24 +84,51 @@ def load(path):
                 skipped += 1
                 continue
             rows.append(r)
-    return rows, skipped
+
+    ids = {n["id"] for r in rows for n in (r["node_a"], r["node_b"])}
+    created = {}
+    if ids:
+        conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        try:
+            q = f"SELECT id, created FROM nodes WHERE id IN ({','.join('?' * len(ids))})"
+            created = dict(conn.execute(q, tuple(ids)).fetchall())
+        finally:
+            conn.close()
+    missing = 0
+    for r in rows:
+        for n in (r["node_a"], r["node_b"]):
+            if created.get(n["id"]) is None:
+                missing += 1
+            else:
+                n["created"] = created[n["id"]]
+    return rows, skipped, missing
 
 
+# The three label_* functions mirror the SINGLE-pair path exactly, and that is the whole
+# point. `parse_batch_verdicts` validates `pair_id` and nothing else (pair_batch.py), so a
+# batched verdict can arrive as `{"pair_id": 3}` with no decision field at all — which is
+# what a refusal or a degraded reply looks like. Production's single path calls that an
+# error: `if "is_duplicate" not in result: return None` (duplicate_merger.py:146) and
+# `if "conflict" not in result: return None` (conflict_detector.py:109). If this detector
+# mapped a missing field to `distinct` / `none` instead, a refusal would be recorded as the
+# SAFE class, would not raise `*_error`, and — when BEFORE was already the safe class —
+# would not even show up as a divergence. That is precisely the blindness this plan replaced
+# the automatic gate to remove, and the duplicate judge merges memories irreversibly.
 def label_link(v):
-    if v is None:
+    if not isinstance(v, dict) or "relationship" not in v:
         return "error"
-    rel = v.get("relationship", "error")
+    rel = v.get("relationship")
     return "error" if rel == "error" else normalize_link_type(rel)
 
 
 def label_dup(v):
-    if v is None:
+    if not isinstance(v, dict) or "is_duplicate" not in v:
         return "error"
     return "duplicate" if v.get("is_duplicate") else "distinct"
 
 
 def label_conflict(v):
-    if v is None:
+    if not isinstance(v, dict) or "conflict" not in v:
         return "error"
     if not v.get("conflict"):
         return "none"
@@ -98,12 +138,23 @@ def label_conflict(v):
     return normalize_conflict_type(str(v.get("type") or "tension"))
 
 
+# What the label throws away and production acts on. `merged_title`/`merged_content`
+# overwrite the kept memory; `evolved_node` picks the direction of the `evolved_from` edge.
+# A label-only record can read "no divergence" while merged content silently loses detail
+# or an edge reverses, so Task 5 shows these to the human reviewer alongside the flip.
+def payload(v, keys):
+    if not isinstance(v, dict):
+        return {"_raw": repr(v)[:200]}
+    return {k: v[k] for k in keys if k in v}
+
+
 def main(pairs_path, out_path):
     settings = Settings()
     settings.maintenance_pairs_per_call = K
-    rows, skipped = load(pairs_path)
+    rows, skipped, missing_created = load(pairs_path)
     ids = [r["pair_id"] for r in rows]
-    out = {"counts": {"pairs": len(rows), "skipped_null_content": skipped, "k": K}}
+    out = {"counts": {"pairs": len(rows), "skipped_null_content": skipped,
+                      "missing_created": missing_created, "k": K}}
 
     # auto_linker and duplicate_merger judge pairs keyed {node, other}
     # (duplicate_merger.py:514, auto_linker.py:573); conflict_detector keys them
@@ -120,6 +171,7 @@ def main(pairs_path, out_path):
         judge_single=lambda p: auto_linker._llm_classify_link(settings, p["node"], p["other"]),
         k=K)
     out["link"] = dict(zip(ids, [label_link(v) for v in link]))
+    out["link_payload"] = dict(zip(ids, [payload(v, ("relationship", "reason")) for v in link]))
 
     dup = pair_batch.judge_pairs(
         settings, duplicate_merger._LLM_DUP_INSTRUCTIONS, no_pairs,
@@ -128,6 +180,8 @@ def main(pairs_path, out_path):
             settings, p["node"], p["other"]),
         k=K)
     out["dup"] = dict(zip(ids, [label_dup(v) for v in dup]))
+    out["dup_payload"] = dict(zip(ids, [
+        payload(v, ("merged_title", "merged_content", "reason")) for v in dup]))
 
     conflict = pair_batch.judge_pairs(
         settings, conflict_detector._LLM_CONFLICT_INSTRUCTIONS, ab_pairs,
@@ -136,6 +190,8 @@ def main(pairs_path, out_path):
             settings, c["node_a"], c["node_b"]),
         k=K)
     out["conflict"] = dict(zip(ids, [label_conflict(v) for v in conflict]))
+    out["conflict_payload"] = dict(zip(ids, [
+        payload(v, ("type", "same_subject", "evolved_node", "reason")) for v in conflict]))
 
     for judge in ("link", "dup", "conflict"):
         labels = out[judge].values()
@@ -173,9 +229,11 @@ cd /Users/andre/Documents/GitHub/Tools/ormah && \
     ~/.cache/ormah-ab-20260819/pairs.jsonl \
     ~/.cache/ormah-ab-20260819/before.json
 ```
-Expected: a counts block naming `pairs`, `skipped_null_content`, `k: 10`, and a per-judge `*_error` count. Runtime ~5 min for ~18 `claude -p` calls.
+Expected: a counts block naming `pairs`, `skipped_null_content`, `missing_created`, `k: 10`, and a per-judge `*_error` count. Runtime ~5 min for ~18 `claude -p` calls.
 
 **Read the error counts now, not later.** If any judge's `*_error` is above ~20% of pairs, the BEFORE leg itself is unhealthy and the AFTER comparison would be noise on noise — STOP and report rather than proceeding.
+
+`missing_created` above zero means nodes the miner returned are no longer in the store (or predate the column). A handful is fine — those pairs reach the conflict judge as `created: unknown`, exactly as before this enrichment. If it approaches the pair count, the DB path is wrong: check `DB` in the script before reading any verdict, since the conflict judge separates evolution from tension by date.
 
 - [ ] **Step 5: Capture the BEFORE parse-and-fallback evidence**
 

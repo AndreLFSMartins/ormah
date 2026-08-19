@@ -8,7 +8,15 @@
 
 **Interfaces:**
 - Consumes: Task 3's green test file. Nothing else.
-- Produces: one `logger.info` per call, message prefix `claude -p usage:`, fields `in= out= cache_read= cache_write= cost_usd=`. Task 6 greps exactly `claude -p usage` in `~/.local/share/ormah/logs/ormah.log`.
+- Produces: one `logger.info` per call, message prefix `claude -p usage:`, fields `session= in= out= cache_read= cache_write= cost_usd=`. Task 6 greps exactly `claude -p usage` in `~/.local/share/ormah/logs/ormah.log`.
+
+**Why `session=` is in the line.** Task 6 Step 7 has to tell a daemon `claude -p` transcript
+on disk from the operator's own interactive Claude Code sessions, and a timestamp cannot:
+whoever runs that task is inside such a session, so an unattributed `find` always returns
+files and decides nothing. The envelope already carries `session_id`
+(`tests/fixtures/claude_cli_envelope.json`), and the adapter already uses it for
+`_cleanup_persisted_stub` (`claude_cli_adapter.py:344`) — logging it costs one format field
+and turns that check from decorative into decisive. It is an id, not content.
 
 **Why this is load-bearing and not nice-to-have.** It is what makes the cost claim re-verifiable in production. Without it, measuring cost needs an external shim wrapped around the binary — which is exactly how the withdrawn 3.0× number got recorded and never re-checked.
 
@@ -24,6 +32,7 @@ Append to `tests/test_background/test_claude_cli_adapter.py` (`import logging` a
 def test_usage_logged_from_envelope(monkeypatch, caplog):
     envelope = json.dumps({
         "result": "ok", "is_error": False, "total_cost_usd": 0.0061,
+        "session_id": "4b8c1d2e-0000-4000-8000-abcdefabcdef",
         "usage": {"input_tokens": 3, "output_tokens": 9,
                   "cache_read_input_tokens": 25000, "cache_creation_input_tokens": 110},
     })
@@ -33,6 +42,8 @@ def test_usage_logged_from_envelope(monkeypatch, caplog):
     lines = [r.message for r in caplog.records if "claude -p usage" in r.message]
     assert len(lines) == 1
     assert "cache_write=110" in lines[0] and "cost_usd=0.0061" in lines[0]
+    # Task 6 Step 7 matches daemon transcripts on this id; without it that check cannot decide.
+    assert "session=4b8c1d2e-0000-4000-8000-abcdefabcdef" in lines[0]
 
 
 def test_usage_logged_even_for_is_error_envelope(monkeypatch, caplog):
@@ -77,7 +88,9 @@ In `generate()`, immediately after `if not isinstance(envelope, dict): return No
             # would understate cost exactly when the provider is misbehaving. Log only, never
             # persisted; a missing `usage` key emits nothing and raises nothing.
             logger.info(
-                "claude -p usage: in=%s out=%s cache_read=%s cache_write=%s cost_usd=%s",
+                "claude -p usage: session=%s in=%s out=%s cache_read=%s cache_write=%s "
+                "cost_usd=%s",
+                envelope.get("session_id"),
                 usage.get("input_tokens"), usage.get("output_tokens"),
                 usage.get("cache_read_input_tokens"), usage.get("cache_creation_input_tokens"),
                 envelope.get("total_cost_usd"),

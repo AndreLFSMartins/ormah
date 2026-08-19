@@ -23,7 +23,7 @@
 - `ORMAH_MAINTENANCE_PAIRS_PER_CALL` stays 10 (K deferred by André to issue #87, spec "Out of scope"). The detector runs at K=10 because that is what production runs, not to change it.
 - All commands run from the repo root with `.venv/bin/python`.
 - **Do not modify `eval/maintenance/report.py`** — it is the #87 gate and belongs to a separate change.
-- **Known-failing test baseline:** `tests/test_conflict_claims_investigation.py::test_forgetting_gate6_ignores_edge_type_contradicts_protects_like_supports` fails deterministically on `local-main` before this change (re-verified 2026-08-19: full suite = **1 failed, 2627 passed, 12 deselected in 96.54s**). Every gate asserts "no failures BEYOND this baseline", never `exit 0` — `make test` exits 1 today.
+- **Known-failing test baseline:** `tests/test_conflict_claims_investigation.py::test_forgetting_gate6_ignores_edge_type_contradicts_protects_like_supports` fails deterministically on `local-main` before this change (re-verified 2026-08-19: full suite = **1 failed, 2627 passed, 12 deselected in 96.54s**). Every gate asserts "no failures BEYOND this baseline", never `exit 0` — `make test` exits 1 today. **After this change the expected count is `1 failed, 2634 passed`**: Task 3 adds four tests and Task 4 adds three. Accepting "≥ 2627" would let all seven vanish unnoticed, so Task 6 asserts the exact number.
 - **Budget:** ~40 `claude -p` calls total (~$0.50, ~15 min wall clock) — estimate, from 60 pairs × 3 judges × 2 rounds at K=10 priced off the spec's arm A / arm D cost per call.
 
 ## The system prompt constant — a correction to the spec
