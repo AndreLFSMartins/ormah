@@ -1,10 +1,13 @@
-"""Centralized memory-lifecycle math (#221, decided in #191).
+"""The single definition of Ormah's memory-lifecycle math.
 
-The FSRS curve used to be written out in the engine and in every background job
-that needed it, so a curve change meant editing three call sites that could
-silently diverge. Everything numeric about retrievability, spacing, and
-reinforcement lives here instead: pure functions, no I/O, no settings object, no
-database. Callers pass the knobs in.
+Every numeric rule about retrievability, spacing, and reinforcement lives here,
+so the engine and the background jobs share one curve rather than each carrying
+a copy that can drift. Changing how memory decays or strengthens means editing
+this module and nothing else.
+
+Pure functions only: no I/O, no settings object, no database. Callers own the
+state and pass the knobs in, which keeps the curve independently testable and
+free of any caller's lifecycle.
 """
 
 from __future__ import annotations
