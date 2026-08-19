@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>test_hippocampus Condition-Based Waiting</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">test_hippocampus Condition-Based Waiting</div>
+  <a href="#overview">Overview</a>
+  <a href="#architecture" class="lvl-3">Architecture</a>
+  <a href="#tech-stack" class="lvl-3">Tech Stack</a>
+  <a href="#spec-reference" class="lvl-3">Spec Reference</a>
+  <a href="#file-structure" class="lvl-3">File Structure</a>
+  <a href="#global-constraints">Global Constraints</a>
+  <a href="#task-1-build-the-clean-island">Task 1: Build the clean island</a>
+  <a href="#task-1-files" class="lvl-3">Files</a>
+  <a href="#task-1-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-2-wait-until-and-the-ingestion-wait">Task 2: `_wait_until` and the ingestion wait (line 83)</a>
+  <a href="#task-2-files" class="lvl-3">Files</a>
+  <a href="#task-2-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-3-the-debounce-wait">Task 3: The debounce wait (line 169)</a>
+  <a href="#task-3-files" class="lvl-3">Files</a>
+  <a href="#task-3-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#task-4-verify-and-ship">Task 4: Verify against the baseline and ship</a>
+  <a href="#task-4-files" class="lvl-3">Files</a>
+</nav>
+<main>
+<div class="eyebrow">Implementation Plan</div>
+
+<h1><em>test_hippocampus</em> Condition-Based Waiting</h1>
+
+<p class="statement">Remove fixed wall-clock budgets from `tests/test_background/test_hippocampus.py` so a loaded CI runner stops reddening unrelated PRs.</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="big">4</div>
+    <div class="label">Tasks</div>
+  </div>
+  <div class="metric">
+    <div class="big">1</div>
+    <div class="label">File changed</div>
+  </div>
+  <div class="metric">
+    <div class="big">2</div>
+    <div class="label">Commits</div>
+  </div>
+</div>
+
+<h2 id="overview">Overview</h2>
+
+<p>This plan targets a flaky test suite caused by fixed timeout budgets that fail under CI load. By replacing wall-clock sleeps with condition-based polling, tests become resilient to runner latency without sacrificing their ability to detect real regressions.</p>
+
+<h3 id="architecture">Architecture</h3>
+
+<p>Add one private polling helper (`_wait_until`) to the test file and route two waits that block on asynchronous work through it. No production code changes. The work lands as a clean island cut from `upstream/main` and ships as an upstream PR.</p>
+
+<h3 id="tech-stack">Tech Stack</h3>
+
+<ul>
+  <li>Python 3.11+</li>
+  <li>pytest (`asyncio_mode = auto`)</li>
+  <li>watchdog</li>
+  <li>ruff (line-length 100, target py311)</li>
+</ul>
+
+<h3 id="spec-reference">Spec Reference</h3>
+
+<p>Full design specification: <code>docs/superpowers/specs/2026-08-19-hippocampus-flake-condition-waiting-design.md</code></p>
+
+<h3 id="file-structure">File Structure</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Path</th>
+      <th>Responsibility</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>tests/test_background/test_hippocampus.py</code></td>
+      <td>The only file modified. Gains `_wait_until` and two converted waits.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="global-constraints">Global Constraints</h2>
+
+<ul>
+  <li>Only `tests/test_background/test_hippocampus.py` may be modified. Nothing under `src/`.</li>
+  <li>`time.monotonic()`, never `time.time()`, for deadlines.</li>
+  <li>Helper default timeout `10.0`, poll interval `0.01`.</li>
+  <li>The helper returns the last predicate value; it never raises. The original assertion stays the one that fails.</li>
+  <li>`time.sleep(0.05)` inside the debounce test's write loop is deliberate and stays.</li>
+  <li>Commit trailer: `Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;`.</li>
+  <li>Every pytest number must come from a run made through the import gate in Task 1, Step 4 (`env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python`), or it does not count.</li>
+</ul>
+
+<div class="phase p-o"><span class="pn">1</span> Build the clean island</div>
+
+<h2 id="task-1-build-the-clean-island">Task 1: Build the clean island</h2>
+
+<h3 id="task-1-files">Files</h3>
+
+<ul>
+  <li>Create: worktree `../ormah-wt-hippocampus-flake` on branch `fix/hippocampus-test-flake`</li>
+</ul>
+
+<h3 id="task-1-interfaces">Interfaces</h3>
+
+<ul>
+  <li><strong>Produces:</strong> an island whose `git log upstream/main..HEAD` is empty, and a venv whose `ormah.__file__` resolves inside the island.</li>
+</ul>
+
+<details>
+  <summary><strong>Step 1: Cut the island from `upstream/main`</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah
+git fetch upstream
+git worktree add -b fix/hippocampus-test-flake \
+  /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake upstream/main
+</code></pre>
+</details>
+
+<details>
+  <summary><strong>Step 2: Prove the island is clean</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+git log --oneline upstream/main..HEAD
+</code></pre>
+  <p><strong>Expected:</strong> no output. Any line here means the branch was cut from the wrong base — delete the worktree and redo Step 1.</p>
+</details>
+
+<details>
+  <summary><strong>Step 3: Give the island its own venv</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+python3 -m venv .venv
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/pip install -e ".[dev]"
+</code></pre>
+</details>
+
+<details>
+  <summary><strong>Step 4: Run the import gate</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"
+</code></pre>
+  <p><strong>Expected:</strong> a path containing `ormah-wt-hippocampus-flake/`. If it points at `Tools/ormah/src`, STOP — the shell's `VIRTUAL_ENV` leaked and every test number from this island would describe `local-main` instead.</p>
+</details>
+
+<div class="phase p-b"><span class="pn">2</span> `_wait_until` and the ingestion wait</div>
+
+<h2 id="task-2-wait-until-and-the-ingestion-wait">Task 2: `_wait_until` and the ingestion wait (line 83)</h2>
+
+<h3 id="task-2-files">Files</h3>
+
+<ul>
+  <li>Modify: `tests/test_background/test_hippocampus.py` — add helper after the module constants; rewrite `test_new_file_triggers_ingestion`</li>
+</ul>
+
+<h3 id="task-2-interfaces">Interfaces</h3>
+
+<ul>
+  <li><strong>Produces:</strong> `_wait_until(predicate, timeout=10.0, interval=0.01)` — returns the last value of `predicate()`, truthy on success, falsy on timeout. Task 3 consumes it.</li>
+</ul>
+
+<details>
+  <summary><strong>Step 1: Write the failing test</strong></summary>
+  <p>Add to `tests/test_background/test_hippocampus.py`. It injects the latency a loaded runner produces, deterministically:</p>
+  <pre><code class="language-python">def test_new_file_ingestion_survives_a_slow_pipeline(engine, tmp_path, monkeypatch):
+    """A pipeline slower than any fixed budget must still be observed."""
+    watch_dir = tmp_path / "watch"
+    watch_dir.mkdir()
+
+    engine.settings.hippocampus_watch_dirs = [watch_dir]
+    engine.settings.hippocampus_enabled = True
+    engine.settings.hippocampus_debounce_seconds = 0.1
+
+    real_ingest = hippocampus._ingest_file
+
+    def slow_ingest(*args, **kwargs):
+        time.sleep(1.5)          # exceeds the old 0.5s budget by 3x
+        return real_ingest(*args, **kwargs)
+
+    monkeypatch.setattr(hippocampus, "_ingest_file", slow_ingest)
+
+    with patch(_LLM_PATCH, return_value=_LLM_RESPONSE):
+        observers = start_hippocampus(engine)
+        try:
+            (watch_dir / "new_session.md").write_text(_SAMPLE_MD)
+            state = _wait_until(lambda: _load_state(watch_dir)) or {}
+            assert "new_session.md" in state
+        finally:
+            stop_hippocampus(observers)
+</code></pre>
+  <p>This needs `from ormah.background import hippocampus` added to the imports.</p>
+</details>
+
+<details>
+  <summary><strong>Step 2: Run it to verify it fails</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest \
+  tests/test_background/test_hippocampus.py::test_new_file_ingestion_survives_a_slow_pipeline -v
+</code></pre>
+  <p><strong>Expected:</strong> FAIL with `NameError: name '_wait_until' is not defined`.</p>
+</details>
+
+<details>
+  <summary><strong>Step 3: Add the helper</strong></summary>
+  <p>Insert after `_SAMPLE_MD`:</p>
+  <pre><code class="language-python">def _wait_until(predicate, timeout=10.0, interval=0.01):
+    """Poll until predicate() is truthy. Returns its last value.
+
+    Returns rather than raises so the caller's own assertion is the one that
+    fails, keeping the failure message specific to the behaviour under test.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(interval)
+    return predicate()
+</code></pre>
+</details>
+
+<details>
+  <summary><strong>Step 4: Run it to verify it passes</strong></summary>
+  <p>Same command as Step 2. <strong>Expected:</strong> PASS, in roughly 1.6s.</p>
+</details>
+
+<details>
+  <summary><strong>Step 5: Prove the helper does not mask a real regression</strong></summary>
+  <p>Temporarily change `slow_ingest` to `return False` without calling `real_ingest`, re-run Step 2's command, and confirm it FAILS with `assert 'new_session.md' in {}` after ~10s. Then revert to the Step 1 body. Do not commit the temporary edit.</p>
+</details>
+
+<details>
+  <summary><strong>Step 6: Convert the original test</strong></summary>
+  <p>In `test_new_file_triggers_ingestion`, replace these two lines:</p>
+  <pre><code class="language-python">            # Wait for debounce + processing
+            time.sleep(0.5)
+            state = _load_state(watch_dir)
+</code></pre>
+  <p>with:</p>
+  <pre><code class="language-python">            state = _wait_until(lambda: _load_state(watch_dir)) or {}
+</code></pre>
+</details>
+
+<details>
+  <summary><strong>Step 7: Run the whole file</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest \
+  tests/test_background/test_hippocampus.py -v > out.txt 2>&1
+echo "PYTEST_EXIT=$?" >> out.txt
+tail -20 out.txt
+</code></pre>
+  <p><strong>Expected:</strong> all tests pass, `PYTEST_EXIT=0`. Never pipe pytest straight into `tail` — the exit code becomes `tail`'s.</p>
+</details>
+
+<details>
+  <summary><strong>Step 8: Commit</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+git add tests/test_background/test_hippocampus.py
+git commit -m "test(hippocampus): wait on the condition, not on a fixed budget
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;"
+</code></pre>
+</details>
+
+<div class="phase p-g"><span class="pn">3</span> The debounce wait</div>
+
+<h2 id="task-3-the-debounce-wait">Task 3: The debounce wait (line 169)</h2>
+
+<h3 id="task-3-files">Files</h3>
+
+<ul>
+  <li>Modify: `tests/test_background/test_hippocampus.py` — `test_debounce_prevents_duplicate_ingestion`</li>
+</ul>
+
+<h3 id="task-3-interfaces">Interfaces</h3>
+
+<ul>
+  <li><strong>Consumes:</strong> `_wait_until` from <a href="#task-2-wait-until-and-the-ingestion-wait">Task 2</a>.</li>
+</ul>
+
+<details>
+  <summary><strong>Step 1: Measure the real margin before changing anything</strong></summary>
+  <p>The arithmetic read off the code says this test is far tighter than the one that failed on CI: `debounce_seconds=0.3`, five writes at 0.05s intervals end at t≈0.25s, the surviving timer fires at t≈0.55s, and the `time.sleep(0.5)` expires at t≈0.75s — leaving ~0.2s minus ingestion. Confirm it, do not trust it:</p>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest \
+  tests/test_background/test_hippocampus.py::test_debounce_prevents_duplicate_ingestion \
+  -v --durations=1
+</code></pre>
+  <p>Record the duration. If the measured margin contradicts the arithmetic above, stop and report it — the conversion is still correct, but the spec's framing would need updating.</p>
+</details>
+
+<details>
+  <summary><strong>Step 2: Convert the wait</strong></summary>
+  <p>Replace:</p>
+  <pre><code class="language-python">        # Wait for debounce
+        time.sleep(0.5)
+
+    assert call_count == 1
+</code></pre>
+  <p>with:</p>
+  <pre><code class="language-python">        # The debounced timer must fire at all — poll rather than budget for it.
+        _wait_until(lambda: call_count >= 1)
+        # Proving no SECOND call arrives inherently needs a window. A slow runner
+        # makes this half fail toward a false pass, never a false failure.
+        time.sleep(handler.debounce_seconds * 2)
+
+    assert call_count == 1
+</code></pre>
+</details>
+
+<details>
+  <summary><strong>Step 3: Run the test</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest \
+  tests/test_background/test_hippocampus.py::test_debounce_prevents_duplicate_ingestion -v
+</code></pre>
+  <p><strong>Expected:</strong> PASS.</p>
+</details>
+
+<details>
+  <summary><strong>Step 4: Prove it still catches a broken debounce</strong></summary>
+  <p>Temporarily change `HippocampusHandler(engine, watch_dir, debounce_seconds=0.3)` to `debounce_seconds=0.01`, so each write's timer fires before the next write cancels it. Re-run Step 3 and confirm it FAILS with `assert 5 == 1` (or another count above 1). Revert to `0.3`. Do not commit the temporary edit.</p>
+</details>
+
+<details>
+  <summary><strong>Step 5: Commit</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+git add tests/test_background/test_hippocampus.py
+git commit -m "test(hippocampus): poll for the debounced call instead of budgeting for it
+
+Co-Authored-By: Claude Opus 5 (1M context) &lt;noreply@anthropic.com&gt;"
+</code></pre>
+</details>
+
+<div class="phase p-o"><span class="pn">4</span> Verify and ship</div>
+
+<h2 id="task-4-verify-and-ship">Task 4: Verify against the baseline and ship</h2>
+
+<h3 id="task-4-files">Files</h3>
+
+<ul>
+  <li>No new edits. Verification and publication only.</li>
+</ul>
+
+<details>
+  <summary><strong>Step 1: Lint</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m ruff check src/ tests/
+</code></pre>
+  <p><strong>Expected:</strong> `All checks passed!`</p>
+</details>
+
+<details>
+  <summary><strong>Step 2: Full suite, both gate halves</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest tests/ -q > out.txt 2>&1
+echo "PYTEST_EXIT=$?" >> out.txt
+tail -25 out.txt
+</code></pre>
+  <p><strong>Expected:</strong> 12 failed (down from the measured baseline of 13), with `test_new_file_triggers_ingestion` absent from the list.</p>
+  <p>This count corroborates; it does not prove. The baseline itself contains this 50/50 flake, so one run could reach 12 by luck. <strong>The proof is Task 2 Step 4 and Task 3 Step 4</strong> — the converted tests passing under injected latency that breaks the old ones, and still failing when the behaviour is genuinely broken. Report the count and the injected-latency results together, never the count alone.</p>
+</details>
+
+<details>
+  <summary><strong>Step 3: Confirm the island stayed clean</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+git log --oneline upstream/main..HEAD
+git diff --stat upstream/main...HEAD
+</code></pre>
+  <p><strong>Expected:</strong> exactly the two commits from Tasks 2 and 3, and one file changed — `tests/test_background/test_hippocampus.py`. Any `src/` path or any commit you did not write means STOP.</p>
+</details>
+
+<details>
+  <summary><strong>Step 4: Push to the fork</strong></summary>
+  <pre><code class="language-bash">cd /Users/andre/Documents/GitHub/Tools/ormah-wt-hippocampus-flake
+git push fork fix/hippocampus-test-flake
+</code></pre>
+  <p>The pre-push hook is fail-closed on `PROTECTED` paths. A block here means something local-only rode along — read the hook's output rather than reaching for `--no-verify`.</p>
+</details>
+
+<details>
+  <summary><strong>Step 5: Open the PR through the council gate</strong></summary>
+  <p>Run `/council-pr`. Base `r-spade:main`, head `fork:fix/hippocampus-test-flake`.</p>
+  <p>The PR body must carry the evidence that this is a test defect, not a product change: the two CI run IDs (32254168112 on the doc-only PR #247, 32160547915 on the unrelated PR #234), the 0.136s measured latency against the 0.5s budget, and the note that PR #234 — the head of the lifecycle landing order — is currently red on this flake.</p>
+</details>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:f0e8162d67bb48634d477915a0bdda10b53b14260121c61345c097a9e610c96e -->
