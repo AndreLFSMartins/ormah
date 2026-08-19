@@ -124,8 +124,13 @@ echo "PYTEST_EXIT=$?" >> out.txt
 ```
 
 Compare the result against the measured `upstream/main` baseline of 13 known-red tests
-(memory `988fca91`), not against a plan's description of it. Success means 12 red, with
+(memory `988fca91`), not against a plan's description of it. Expect 12 red, with
 `test_new_file_triggers_ingestion` the one removed.
+
+That count is corroboration, not proof. The baseline itself contains this 50/50 flake, so a
+single suite run could land on 12 by luck alone. **The decisive evidence is step 2** — the
+converted test passing under injected latency that makes the old one fail. A suite run
+showing 12 red without that step proves nothing.
 
 ## Out of scope
 
