@@ -74,7 +74,14 @@ def test_missing_usage_never_breaks_parse(monkeypatch, caplog):
 - [ ] **Step 2: Run them — the first two must fail on the log assertion**
 
 Run: `.venv/bin/python -m pytest tests/test_background/test_claude_cli_adapter.py -q -k "usage or is_error_envelope"`
-Expected: `test_usage_logged_from_envelope` and `test_usage_logged_even_for_is_error_envelope` FAIL (`assert len(lines) == 1` → 0). `test_missing_usage_never_breaks_parse` may already pass — that is fine, it is the regression guard for the third case.
+
+**This filter collects FOUR tests, not three** (council round 5, measured: `-k "usage or
+is_error_envelope"` already collects `1/36` today). The pre-existing
+`test_returns_none_on_is_error_envelope` matches `is_error_envelope` and is swept in. It is
+unrelated to this task and must stay green throughout — do not "fix" it, and do not read its
+presence as something having gone wrong.
+
+Expected: `test_usage_logged_from_envelope` and `test_usage_logged_even_for_is_error_envelope` FAIL (`assert len(lines) == 1` → 0). `test_missing_usage_never_breaks_parse` may already pass — that is fine, it is the regression guard for the third case. `test_returns_none_on_is_error_envelope` passes, as it does today.
 
 - [ ] **Step 3: Implement**
 
@@ -100,7 +107,9 @@ In `generate()`, immediately after `if not isinstance(envelope, dict): return No
 - [ ] **Step 4: Run the three tests — all green**
 
 Run: `.venv/bin/python -m pytest tests/test_background/test_claude_cli_adapter.py -q -k "usage or is_error_envelope"`
-Expected: 3 passed.
+Expected: **4 passed** — this task's three, plus the pre-existing
+`test_returns_none_on_is_error_envelope` the filter also matches (see Step 2). `3 passed`
+here means one of the three new tests did not get collected.
 
 - [ ] **Step 5: Run the whole adapter file — no regressions**
 

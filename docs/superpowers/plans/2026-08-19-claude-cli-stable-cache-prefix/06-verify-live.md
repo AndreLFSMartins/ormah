@@ -31,7 +31,14 @@ that nobody has read yet, and the old marker would still satisfy `test -s`. Requ
 `GO-AHEAD`'s content to equal the current sidecar's digest means any re-run of Task 5 changes
 the sidecar, changes the digest, and invalidates the old approval automatically:
 
+**Run this block with `bash <file>` or paste it into a subshell `( … )`, never bare into an
+interactive shell** (X-8, council round 5): every guard below ends in `exit 1`, which closes
+the operator's terminal rather than just refusing the step. The `exit` is deliberate — this
+gate must be able to stop a scripted run — so the fix is where it is invoked, not what it
+does.
+
 ```bash
+( set -e
 C=~/.cache/ormah-ab-20260819
 test -s "$C/GO-AHEAD" || {
   echo "STOP — GO-AHEAD missing or empty. See the note at the end of Task 5 Step 9 for what"
@@ -59,6 +66,7 @@ grep -q "PASS — both smoke cases clean" "$C/smoke.txt" || {
   exit 1
 }
 echo "GO-AHEAD present, Task 5 smoke clean — proceeding."
+)
 ```
 
 - [ ] **Step 1: Full suite against the known baseline**
@@ -117,7 +125,7 @@ whole failure this step exists to catch.
 previous version only checked `required_key in data` and rejected an empty value when it
 happened to be a list — `{"memories": "garbage"}` or `{"title": 7}` passed clean despite being
 schema-invalid, because `ClaudeCliAdapter`'s structured-output fallback can hand callers raw
-text without CLI-side enforcement (`claude_cli_adapter.py:348-353`). `jsonschema` is already a
+text without CLI-side enforcement (`claude_cli_adapter.py:348-357`). `jsonschema` is already a
 dependency; validate the whole payload against the imported schema object, not a shape
 approximation of it.
 
@@ -127,7 +135,7 @@ would be silently swallowed right before the daemon restart this step exists to 
 
 **Parse the way production parses (Cursor, council round 4 round 3).** `ClaudeCliAdapter`'s
 documented schema fallback can hand callers a fenced string — `'```json\n{...}\n```'` — when
-`structured_output` is null (`claude_cli_adapter.py:348-353`, asserted verbatim by
+`structured_output` is null (`claude_cli_adapter.py:348-357`, asserted verbatim by
 `test_generate_schema_falls_back_to_result_when_structured_null`). A bare `json.loads(out)`
 raises on that fence and blocks a restart production would have accepted; all three real
 callers (`memory_engine.py:3127`, `consolidator.py:300`, `session_watcher.py:295`) call
@@ -392,6 +400,22 @@ exactly the calls the id-match cannot see are the ones most likely to leave a fi
 That is why the second check is a set difference against the pre-restart snapshot, and why an
 unattributable new file is **inconclusive, never clean**.
 
+**An empty pattern file INVERTS both greps on this machine — guard it explicitly (X-7,
+council round 5, proven by execution).** macOS ships BSD grep, where `grep -Ff <empty-file>`
+matches **everything** and `grep -vFf <empty-file>` matches **nothing** — the opposite of GNU
+grep, and the opposite of what this step needs. Measured here:
+
+```
+grep -Ff  <empty> new.txt  ->  prints every line, exit 0
+grep -vFf <empty> new.txt  ->  prints nothing,    exit 1
+```
+
+`daemon-sessions.txt` is empty exactly in the case the bullets below call *inconclusive* (no
+usage line carried a `session=` yet). Unguarded, that case would print every new transcript
+under the **BLOCKING** heading and an empty unattributable list — a fabricated exfiltration
+report, and the wrong one to hand a human. The `if` below is what makes the empty case read
+as what it is.
+
 ```bash
 C=~/.cache/ormah-ab-20260819
 
@@ -405,11 +429,18 @@ find ~/.claude/projects -name "*.jsonl" | sort > "$C/transcripts-after.txt"
 comm -13 "$C/transcripts-before.txt" "$C/transcripts-after.txt" > "$C/transcripts-new.txt"
 
 echo "--- new transcripts since the restart ---"; wc -l < "$C/transcripts-new.txt"
-echo "--- matching a known daemon session id (BLOCKING if any) ---"
-grep -Ff "$C/daemon-sessions.txt" "$C/transcripts-new.txt" || echo "  none"
+if [ ! -s "$C/daemon-sessions.txt" ]; then
+  # X-7: never hand an empty pattern file to grep here — see the note above.
+  echo "--- check (a) INCONCLUSIVE: no daemon session id was logged at all ---"
+  echo "    Nothing to match against. This does NOT mean clean; report it as inconclusive."
+  cp "$C/transcripts-new.txt" "$C/transcripts-unattributable.txt"
+else
+  echo "--- matching a known daemon session id (BLOCKING if any) ---"
+  grep -Ff "$C/daemon-sessions.txt" "$C/transcripts-new.txt" || echo "  none"
+  grep -vFf "$C/daemon-sessions.txt" "$C/transcripts-new.txt" \
+    > "$C/transcripts-unattributable.txt" || true
+fi
 echo "--- new but NOT attributable to a daemon session id ---"
-grep -vFf "$C/daemon-sessions.txt" "$C/transcripts-new.txt" > "$C/transcripts-unattributable.txt" \
-  || true
 cat "$C/transcripts-unattributable.txt"
 ```
 

@@ -87,8 +87,9 @@ def main(src, dst):
     for r in rows:
         for n in (r["node_a"], r["node_b"]):
             if created.get(n["id"]) is None:
-                # Absent from the store, or created is NULL. Leave the key out so the
-                # renderer's own `created: unknown` fallback applies, and count it.
+                # Absent from the store — `created` itself is `TEXT NOT NULL` in
+                # schema.sql, so a row that IS there always has one. Leave the key out so
+                # the renderer's own `created: unknown` fallback applies, and count it.
                 missing += 1
             else:
                 n["created"] = created[n["id"]]
@@ -156,11 +157,23 @@ K = 10
 
 # X-1 (council round 4): pair_batch's own fallback log line only fires when a chunk of size
 # > 1 exhausts its unparseable-probe budget. The recursive bisect-to-singleton base case
-# (pair_batch.py:163-164, `if len(idx) == 1: return _judge_singles(...)`) calls the
-# single-pair path with NO log line at all — a fully unparseable 10-pair batch makes 10 extra
-# `claude -p` calls that `grep "pairs individually"` cannot see. Counting actual invocations
-# of the judge_single callback is the only path-independent measure: batch mode never calls
-# it unless some fallback happened, logged or not.
+# (pair_batch.py, `if len(idx) == 1: return _judge_singles(...)` inside _judge_chunk) calls
+# the single-pair path with NO log line at all — a fully unparseable 10-pair batch makes 10
+# extra `claude -p` calls that `grep "pairs individually"` cannot see. Counting actual
+# invocations of the judge_single callback is the only path-independent measure of the
+# fallback.
+#
+# X-6 (council round 5, PROVEN BY EXECUTION): the counter is NOT purely a fallback signal.
+# That same `if len(idx) == 1` guard fires for the LAST CHUNK when the corpus size is not a
+# multiple of K, with no fallback of any kind — a perfect batch reply still routes that
+# leftover pair through judge_single. Measured with a faked-but-valid batch reply:
+#   60 pairs, K=10 -> judge_single 0x   |   61 pairs -> 1x   |   51 pairs -> 1x
+# The corpus is `60 minus the NULL-content pairs freeze.py drops`, so its size is arbitrary
+# and a size ending in 1 inflates every judge's counter by exactly 1. STRUCTURAL_SINGLES
+# below is that known offset, recorded next to the raw count so a human never reads a
+# structural leftover as a parse failure. It is identical in every leg (the corpus is
+# frozen), so the BEFORE/AFTER comparison in Task 5 Step 3 is unaffected — only the absolute
+# baseline needed the correction.
 FALLBACK_CALLS = {"link": 0, "dup": 0, "conflict": 0}
 
 
@@ -319,14 +332,24 @@ def main(pairs_path, out_path):
     out["conflict_payload"] = dict(zip(ids, [
         payload(v, ("type", "same_subject", "evolved_node", "explanation")) for v in conflict]))
 
+    # X-6: the leftover last chunk goes through judge_single with no fallback whatsoever
+    # (see the comment on FALLBACK_CALLS). Exactly one pair per judge, and only when the
+    # corpus size leaves a remainder of 1 against K.
+    structural = 1 if len(rows) % K == 1 else 0
+    out["counts"]["structural_singles_per_judge"] = structural
+
     for judge in ("link", "dup", "conflict"):
         labels = out[judge].values()
         out["counts"][f"{judge}_error"] = sum(1 for x in labels if x == "error")
         # The authoritative fallback signal (X-1, council round 4) — how many pairs this
         # judge fell back to single-pair calls for, silent bisection included. Compare this
         # across legs in Task 5 Step 3, not the log grep, which structurally cannot see the
-        # silent path (pair_batch.py:163-164 logs nothing at the length==1 base case).
+        # silent path (pair_batch's `len(idx) == 1` base case logs nothing).
         out["counts"][f"{judge}_singles"] = FALLBACK_CALLS[judge]
+        # ...minus the known structural leftover (X-6). This is the number that actually
+        # means "a batch reply was unusable"; the raw one above is kept so the two can be
+        # told apart rather than silently reconciled.
+        out["counts"][f"{judge}_singles_fallback"] = max(0, FALLBACK_CALLS[judge] - structural)
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, sort_keys=True)
@@ -356,7 +379,7 @@ Expected: **no output**. Any line here means an edit landed before the baseline 
 
 ```bash
 rm -f ~/.cache/ormah-ab-20260819/before.json
-cd /Users/andre/Documents/GitHub/Tools/ormah && cd /Users/andre/Documents/GitHub/Tools/ormah && \
+cd /Users/andre/Documents/GitHub/Tools/ormah && \
   .venv/bin/python ~/.cache/ormah-ab-20260819/detector.py \
     ~/.cache/ormah-ab-20260819/corpus.jsonl \
     ~/.cache/ormah-ab-20260819/before.json
@@ -372,10 +395,18 @@ Expected: a counts block naming `pairs`, `corpus_sha256`, `k: 10`, and a per-jud
 The fallback into `_judge_singles` is the failure mode no agreement-based gate can see: a
 broken `pair_id` turns N/10 calls into N, destroying the saving. Step 3's `{judge}_singles`
 counters in the JSON output are the **authoritative** signal — they count every actual call
-to the single-pair path, including the silent bisect-to-singleton base case
-(`pair_batch.py:163-164`) that logs nothing. The log grep below is a secondary,
-human-readable cross-check only; a rise in `{judge}_singles` with no matching log line is
-expected, not a bug.
+to the single-pair path, including the silent bisect-to-singleton base case that logs
+nothing. The log grep below is a secondary, human-readable cross-check only; a rise in
+`{judge}_singles` with no matching log line is expected, not a bug.
+
+**Read `{judge}_singles_fallback`, not `{judge}_singles`, when asking "did parsing break?"**
+(X-6, council round 5, proven by execution). The same `len(idx) == 1` guard that makes the
+bisection silent also fires for the **leftover last chunk** when the corpus size is not a
+multiple of K — with no fallback at all. Measured against a valid batch reply: 60 pairs → 0
+single calls, 61 pairs → 1, 51 pairs → 1. Since `freeze.py` drops NULL-content pairs, the
+corpus size is arbitrary, so a size ending in `1` adds exactly one structural call per judge.
+`structural_singles_per_judge` in the counts records that offset and
+`{judge}_singles_fallback` is the raw count with it removed.
 
 ```bash
 set -o pipefail
