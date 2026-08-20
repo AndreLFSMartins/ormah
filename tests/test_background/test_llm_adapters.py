@@ -201,3 +201,51 @@ def test_llm_generate_none_provider():
         assert result is None
     finally:
         reset_adapter()
+
+
+# --- claude_cli: workspace resolution and fail-closed degradation ---
+
+class _FakeClaudeSettings:
+    llm_provider: str = "claude_cli"
+    llm_model: str = "claude-haiku-4-5"
+    claude_cli_timeout_seconds: int = 160
+    claude_cli_bin: str = "/bin/claude"
+    claude_cli_max_concurrency: int = 1
+
+    def __init__(self, memory_dir):
+        self.memory_dir = memory_dir
+
+
+def test_get_adapter_hands_the_resolved_workspace_to_the_adapter(tmp_path):
+    settings = _FakeClaudeSettings(memory_dir=tmp_path / "data" / "memory")
+
+    adapter = get_adapter(settings)
+
+    expected = tmp_path / "data" / "cli-workspace" / "judge"
+    assert adapter.workspace_dir == expected
+    # The factory does the materialising, so the file is on disk before any call is made.
+    assert (expected / "CLAUDE.md").exists()
+
+
+def test_get_adapter_uses_the_route_name_for_the_workspace(tmp_path):
+    settings = _FakeClaudeSettings(memory_dir=tmp_path / "data" / "memory")
+
+    adapter = get_adapter(settings, workspace="ingest")
+
+    assert adapter.workspace_dir == tmp_path / "data" / "cli-workspace" / "ingest"
+
+
+def test_get_adapter_returns_none_and_logs_when_the_workspace_is_unsafe(tmp_path, caplog):
+    import logging
+
+    settings = _FakeClaudeSettings(memory_dir=tmp_path / "data" / "memory")
+    unsafe = tmp_path / "data" / "cli-workspace" / "judge" / ".claude"
+    unsafe.mkdir(parents=True)
+
+    with caplog.at_level(logging.ERROR, logger="ormah.background.llm"):
+        adapter = get_adapter(settings)
+
+    # None is the established "no LLM available" contract -- the same thing provider="none"
+    # returns -- so the route degrades through a path every caller already handles.
+    assert adapter is None
+    assert str(unsafe) in caplog.text
