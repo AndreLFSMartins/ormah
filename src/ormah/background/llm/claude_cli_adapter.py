@@ -375,6 +375,20 @@ class ClaudeCliAdapter(LLMAdapter):
             return None
         if not isinstance(envelope, dict):
             return None
+        usage = envelope.get("usage")
+        if isinstance(usage, dict):
+            # Best-effort observability: the envelope already carries billing truth. Logged
+            # BEFORE the is_error branch below — a failed call still bills, and dropping it
+            # would understate cost exactly when the provider is misbehaving. Log only, never
+            # persisted; a missing `usage` key emits nothing and raises nothing.
+            logger.info(
+                "claude -p usage: session=%s in=%s out=%s cache_read=%s cache_write=%s "
+                "cost_usd=%s",
+                envelope.get("session_id"),
+                usage.get("input_tokens"), usage.get("output_tokens"),
+                usage.get("cache_read_input_tokens"), usage.get("cache_creation_input_tokens"),
+                envelope.get("total_cost_usd"),
+            )
         _cleanup_persisted_stub(str(envelope.get("session_id") or envelope.get("sessionId") or ""))
         if envelope.get("is_error"):
             logger.warning("claude -p returned is_error envelope: %s", str(envelope.get("subtype"))[:100])

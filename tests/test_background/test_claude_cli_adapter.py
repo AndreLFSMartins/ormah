@@ -1244,3 +1244,45 @@ def test_a_cancelled_call_never_has_its_partial_output_accepted(monkeypatch):
 
     assert "raised" in outcome, f"cancelled output was accepted: {outcome.get('result')!r}"
     llm_cancel.begin_lifespan()
+
+
+def test_usage_logged_from_envelope(monkeypatch, caplog):
+    envelope = json.dumps({
+        "result": "ok", "is_error": False, "total_cost_usd": 0.0061,
+        "session_id": "4b8c1d2e-0000-4000-8000-abcdefabcdef",
+        "usage": {"input_tokens": 3, "output_tokens": 9,
+                  "cache_read_input_tokens": 25000, "cache_creation_input_tokens": 110},
+    })
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout=envelope))
+    with caplog.at_level(logging.INFO, logger="ormah.background.llm.claude_cli_adapter"):
+        assert ClaudeCliAdapter(model="haiku", bin_path="/bin/claude").generate("hi") == "ok"
+    lines = [r.message for r in caplog.records if "claude -p usage" in r.message]
+    assert len(lines) == 1
+    assert "cache_write=110" in lines[0] and "cost_usd=0.0061" in lines[0]
+    # Task 6 Step 7 matches daemon transcripts on this id; without it that check cannot decide.
+    assert "session=4b8c1d2e-0000-4000-8000-abcdefabcdef" in lines[0]
+
+
+def test_usage_logged_even_for_is_error_envelope(monkeypatch, caplog):
+    # An is_error envelope is still a BILLED call. Logging after the is_error return would
+    # silently understate cost precisely when the provider is misbehaving.
+    envelope = json.dumps({
+        "result": "", "is_error": True, "subtype": "error_during_execution",
+        "total_cost_usd": 0.0042,
+        "usage": {"input_tokens": 3, "output_tokens": 0,
+                  "cache_read_input_tokens": 25000, "cache_creation_input_tokens": 110},
+    })
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout=envelope))
+    with caplog.at_level(logging.INFO, logger="ormah.background.llm.claude_cli_adapter"):
+        assert ClaudeCliAdapter(model="haiku", bin_path="/bin/claude").generate("hi") is None
+    lines = [r.message for r in caplog.records if "claude -p usage" in r.message]
+    assert len(lines) == 1
+    assert "cost_usd=0.0042" in lines[0]
+
+
+def test_missing_usage_never_breaks_parse(monkeypatch, caplog):
+    envelope = json.dumps({"result": "ok", "is_error": False})
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout=envelope))
+    with caplog.at_level(logging.INFO, logger="ormah.background.llm.claude_cli_adapter"):
+        assert ClaudeCliAdapter(model="haiku", bin_path="/bin/claude").generate("hi") == "ok"
+    assert not [r for r in caplog.records if "claude -p usage" in r.message]
