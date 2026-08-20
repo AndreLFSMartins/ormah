@@ -90,7 +90,7 @@ def test_reinforcement_anchors_on_last_accessed_not_a_lagging_last_review(engine
     )
     engine.db.conn.commit()
 
-    engine._touch_access(node_id)
+    engine._record_confirmed_use(node_id)
 
     assert _row(engine, node_id)["stability"] == pytest.approx(1.50, abs=0.01)
 
