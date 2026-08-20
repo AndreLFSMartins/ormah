@@ -9,7 +9,6 @@ import re
 import shutil
 import signal
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -47,6 +46,10 @@ _DENY_TOOLS = [
 ]
 _HARDENED_SETTINGS = json.dumps({
     "disableAllHooks": True,
+    # Without this the CLI falls back to its thinking-on default the moment the operator's
+    # settings stop being read. Measured: 13,682 thinking tokens and ttft 9.6s -> 152.4s,
+    # which is what blew the timeout and got 34c41cd reverted.
+    "alwaysThinkingEnabled": False,
     "permissions": {"defaultMode": "default", "allow": [], "deny": _DENY_TOOLS},
 })
 
@@ -170,11 +173,17 @@ class ClaudeCliAdapter(LLMAdapter):
         timeout: int = 120,
         bin_path: str | None = None,
         max_concurrency: int = 1,
+        *,
+        workspace_dir: Path,
     ) -> None:
         self.model = model
         self.timeout = timeout
         self.bin_path = bin_path or shutil.which("claude") or "claude"
         self.max_concurrency = max(1, max_concurrency)
+        # Keyword-only and required: there is no safe default. None-means-tempdir would
+        # silently restore the contaminated behaviour, and a real default would make the
+        # test suite write into the operator's HOME.
+        self.workspace_dir = workspace_dir
 
     def generate(
         self,
@@ -211,6 +220,9 @@ class ClaudeCliAdapter(LLMAdapter):
             "--no-session-persistence",
             "--permission-mode", "default",
             "--settings", _HARDENED_SETTINGS,
+            # "project" reads the CLAUDE.md in cwd (ours) instead of the operator's user-level
+            # file. Never "" -- that drops the operator's settings wholesale, thinking included.
+            "--setting-sources", "project",
         ]
         if schema is not None:
             argv += ["--json-schema", json.dumps(schema)]
@@ -225,7 +237,7 @@ class ClaudeCliAdapter(LLMAdapter):
             try:
                 proc = subprocess.Popen(
                     argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, text=True, cwd=tempfile.gettempdir(), env=env,
+                    stderr=subprocess.PIPE, text=True, cwd=self.workspace_dir, env=env,
                     # HIGH-2: own session/process group so a cancel/timeout can SIGTERM the whole
                     # group (parent + any forked grandchild that inherited our stdout/stderr),
                     # not just the tracked direct PID — otherwise a grandchild keeps the pipe

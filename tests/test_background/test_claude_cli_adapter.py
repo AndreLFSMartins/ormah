@@ -99,6 +99,18 @@ def _fake_popen(stdout="", returncode=0, communicate_raises=None, construct_rais
     return popen
 
 
+# The tests never spawn a real child -- Popen is always faked -- so this path is only ever
+# handed to the fake as `cwd`. It is deliberately NOT created on disk.
+WORKSPACE = Path("/tmp/ormah-judge-workspace-under-test")
+
+
+def _adapter(**kwargs):
+    """Build the adapter with a stand-in workspace. `workspace_dir` is required and has no safe
+    default in production, so every test supplies one; overriding it stays possible per call."""
+    kwargs.setdefault("workspace_dir", WORKSPACE)
+    return ClaudeCliAdapter(**kwargs)
+
+
 class _NeverEofProc:
     """A child whose pipes NEVER reach EOF — models the setsid grandchild that survives our group
     kill and keeps the write end of our inherited stdout open. communicate() honours its timeout
@@ -153,7 +165,7 @@ class _NeverEofProc:
 def test_prompt_goes_on_stdin_not_argv(monkeypatch):
     popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
     monkeypatch.setattr(subprocess, "Popen", popen)
-    ClaudeCliAdapter(model="haiku").generate("SECRET transcript text")
+    _adapter(model="haiku").generate("SECRET transcript text")
     assert "SECRET transcript text" not in popen.argv
     assert "input" not in popen.kwargs           # never passed via Popen kwargs
     assert popen.proc.input == "SECRET transcript text"  # only ever via communicate(input=...)
@@ -162,13 +174,13 @@ def test_prompt_goes_on_stdin_not_argv(monkeypatch):
 def test_generate_parses_result_from_envelope(monkeypatch):
     envelope = json.dumps({"type": "result", "result": '{"memories": []}'})
     monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout=envelope))
-    assert ClaudeCliAdapter(model="haiku").generate("hi") == '{"memories": []}'
+    assert _adapter(model="haiku").generate("hi") == '{"memories": []}'
 
 
 def test_argv_pins_model_and_json_output(monkeypatch):
     popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
     monkeypatch.setattr(subprocess, "Popen", popen)
-    ClaudeCliAdapter(model="haiku", bin_path="/bin/claude").generate("hi")
+    _adapter(model="haiku", bin_path="/bin/claude").generate("hi")
     assert popen.argv[0] == "/bin/claude" and "-p" in popen.argv
     assert popen.argv[popen.argv.index("--model") + 1] == "haiku"
     assert popen.argv[popen.argv.index("--output-format") + 1] == "json"
@@ -183,13 +195,13 @@ def test_returns_none_on_is_error_envelope(monkeypatch):
         "subtype": "error_during_execution", "result": "boom",
     })
     monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout=envelope))
-    assert ClaudeCliAdapter(model="haiku").generate("hi") is None
+    assert _adapter(model="haiku").generate("hi") is None
 
 
 def test_argv_denies_all_tools(monkeypatch):
     popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
     monkeypatch.setattr(subprocess, "Popen", popen)
-    ClaudeCliAdapter(model="haiku").generate("hi")
+    _adapter(model="haiku").generate("hi")
     # Tool denial is via --settings permissions (NOT --allowed-tools "", which is inert under an
     # inherited defaultMode:bypassPermissions). defaultMode "default" escapes the inherited
     # bypass; allow [] drops inherited allow rules; deny lists the built-in tools by bare name
@@ -209,13 +221,13 @@ def test_child_env_strips_api_key(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-be-removed")
     popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
     monkeypatch.setattr(subprocess, "Popen", popen)
-    ClaudeCliAdapter(model="haiku").generate("hi")
+    _adapter(model="haiku").generate("hi")
     assert "ANTHROPIC_API_KEY" not in popen.kwargs["env"]
 
 
 def test_returns_none_on_nonzero_exit(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout="", returncode=2))
-    assert ClaudeCliAdapter(model="haiku").generate("hi") is None
+    assert _adapter(model="haiku").generate("hi") is None
 
 
 def test_generate_returns_none_on_timeout(monkeypatch, caplog):
@@ -227,7 +239,7 @@ def test_generate_returns_none_on_timeout(monkeypatch, caplog):
     proc = _NeverEofProc()
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: proc)
     with caplog.at_level(logging.WARNING):
-        result = ClaudeCliAdapter(model="haiku", timeout=1).generate("hi")
+        result = _adapter(model="haiku", timeout=1).generate("hi")
     assert result is None                      # returned, never raised
     assert proc.killed, "the deadline path must kill the child"
     assert proc.wait_calls >= 1, "the deadline path must reap via wait()"
@@ -250,7 +262,7 @@ def test_timeout_reaps_via_wait_and_never_an_unbounded_communicate(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: proc)
 
     start = time.monotonic()
-    result = ClaudeCliAdapter(model="haiku", timeout=1).generate("hi")
+    result = _adapter(model="haiku", timeout=1).generate("hi")
     elapsed = time.monotonic() - start
 
     assert result is None
@@ -277,7 +289,7 @@ def test_generate_respects_timeout_hint(monkeypatch):
         return p
 
     monkeypatch.setattr(subprocess, "Popen", popen)
-    adapter = ClaudeCliAdapter(model="haiku", timeout=3)
+    adapter = _adapter(model="haiku", timeout=3)
 
     start = time.monotonic()
     assert adapter.generate("hi", timeout_hint_seconds=1) is None
@@ -295,11 +307,11 @@ def test_generate_respects_timeout_hint(monkeypatch):
 
 def test_returns_none_on_bad_json(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout="not json"))
-    assert ClaudeCliAdapter(model="haiku").generate("hi") is None
+    assert _adapter(model="haiku").generate("hi") is None
 
 
 def test_concurrency_is_bounded(monkeypatch):
-    a = ClaudeCliAdapter(model="haiku", max_concurrency=1)
+    a = _adapter(model="haiku", max_concurrency=1)
     inside = []
 
     def popen(argv, **kwargs):
@@ -362,7 +374,7 @@ def test_response_format_adds_json_schema_and_reads_structured_output(monkeypatc
         )
 
     monkeypatch.setattr(mod.subprocess, "Popen", _fake_popen_call)
-    adapter = mod.ClaudeCliAdapter(model="claude-haiku-4-5-20251001")
+    adapter = _adapter(model="claude-haiku-4-5-20251001")
     schema = {
         "type": "object",
         "properties": {"is_duplicate": {"type": "boolean"}},
@@ -384,7 +396,7 @@ def test_generate_schema_returns_structured_output_when_present(monkeypatch):
     })
     monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout=envelope))
     schema = {"type": "object", "properties": {"relationship": {"type": "string"}}}
-    raw = ClaudeCliAdapter(model="haiku").generate(
+    raw = _adapter(model="haiku").generate(
         "hi", response_format={"type": "json_schema", "json_schema": {"schema": schema}}
     )
     assert json.loads(raw) == {"relationship": "related_to", "reason": "x"}
@@ -398,7 +410,7 @@ def test_generate_schema_falls_back_to_result_when_structured_null(monkeypatch):
     })
     monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout=envelope))
     schema = {"type": "object", "properties": {"summary": {"type": "string"}}}
-    raw = ClaudeCliAdapter(model="haiku").generate(
+    raw = _adapter(model="haiku").generate(
         "hi", response_format={"type": "json_schema", "json_schema": {"schema": schema}}
     )
     assert raw == fenced_result
@@ -409,7 +421,7 @@ def test_generate_schema_returns_none_when_structured_null_and_result_blank(monk
     envelope = json.dumps({"result": "", "is_error": False, "structured_output": None})
     monkeypatch.setattr(subprocess, "Popen", _fake_popen(stdout=envelope))
     schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
-    raw = ClaudeCliAdapter(model="haiku").generate(
+    raw = _adapter(model="haiku").generate(
         "hi", response_format={"type": "json_schema", "json_schema": {"schema": schema}}
     )
     assert raw is None
@@ -427,7 +439,7 @@ def test_cancel_set_raises_even_when_child_exits_cleanly(monkeypatch):
     returncode. ADR-0004 slice 2: the cancel is now the module-level llm_cancel epoch, not an
     instance-scoped flag."""
 
-    adapter = ClaudeCliAdapter(model="haiku")
+    adapter = _adapter(model="haiku")
     llm_cancel.begin_lifespan()
 
     class _CleanExitOnCancelProc:
@@ -479,7 +491,7 @@ def test_cancel_during_poll_loop_raises_within_a_poll_interval(monkeypatch):
 
     The bound is observed IN-THREAD: no fd is closed from the cancelling thread (that would be
     undefined behaviour while communicate()'s selector is blocked on it)."""
-    adapter = ClaudeCliAdapter(model="haiku", timeout=60)  # a deliberately long provider budget
+    adapter = _adapter(model="haiku", timeout=60)  # a deliberately long provider budget
     proc = _NeverEofProc()
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: proc)
     llm_cancel.begin_lifespan()
@@ -528,7 +540,7 @@ def test_cancel_history_survives_a_resume_racing_the_final_gate(monkeypatch):
 
     A monotonic cancel epoch (now the module-level llm_cancel authority) fixes it: resume()
     re-opens admission for NEW calls without erasing the history of calls already in flight."""
-    adapter = ClaudeCliAdapter(model="haiku")
+    adapter = _adapter(model="haiku")
     llm_cancel.begin_lifespan()
 
     class _CancelThenResumeProc:
@@ -581,7 +593,7 @@ def test_previous_era_semaphore_waiter_never_spawns_after_cancel_resume(monkeypa
 
     Fixed by capturing the era at ENTRY (before the semaphore) plus an (a)+(b) admission check.
     Affects the maintenance path, which has semaphore waiters; ingest has a single drain thread."""
-    adapter = ClaudeCliAdapter(model="haiku", max_concurrency=1, timeout=30)
+    adapter = _adapter(model="haiku", max_concurrency=1, timeout=30)
     llm_cancel.begin_lifespan()
 
     popen_calls = []
@@ -669,14 +681,14 @@ def test_popen_creation_failure_is_fast_failure(monkeypatch):
         subprocess, "Popen",
         _fake_popen(construct_raises=FileNotFoundError("no claude binary")),
     )
-    assert ClaudeCliAdapter(model="haiku").generate("hi") is None
+    assert _adapter(model="haiku").generate("hi") is None
 
 
 def test_adapter_generates_again_after_a_rollback_cancellation(monkeypatch):
     """council R6: a recoverable cancellation (startup rollback) must not poison the process —
     begin_cancel(final=False) then resume() -> generate() works."""
     llm_cancel.begin_lifespan()
-    adapter = ClaudeCliAdapter(model="haiku")
+    adapter = _adapter(model="haiku")
     llm_cancel.begin_cancel(final=False)
     llm_cancel.resume()
     monkeypatch.setattr(
@@ -705,7 +717,7 @@ def test_cancel_between_creation_and_registration(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", popen)
 
-    adapter = ClaudeCliAdapter(model="haiku")
+    adapter = _adapter(model="haiku")
     outcome = {}
 
     def _run():
@@ -776,7 +788,7 @@ def test_cancel_kills_whole_process_group_not_just_parent(tmp_path, monkeypatch)
     script.chmod(0o755)
     monkeypatch.setenv("MARKER_DIR", str(marker))
 
-    adapter = ClaudeCliAdapter(model="haiku", bin_path=str(script), timeout=120)
+    adapter = _adapter(model="haiku", bin_path=str(script), timeout=120)
     outcome = {}
 
     def _run():
@@ -845,7 +857,7 @@ def test_group_sigkill_escalation_reaps_sigterm_ignoring_grandchild(tmp_path, mo
     script.chmod(0o755)
     monkeypatch.setenv("MARKER_DIR", str(marker))
 
-    adapter = ClaudeCliAdapter(model="haiku", bin_path=str(script), timeout=120)
+    adapter = _adapter(model="haiku", bin_path=str(script), timeout=120)
     outcome = {}
 
     def _run():
@@ -916,7 +928,7 @@ def test_cancel_is_bounded_even_with_a_detached_setsid_grandchild(tmp_path, monk
     script.chmod(0o755)
     monkeypatch.setenv("MARKER_DIR", str(marker))
 
-    adapter = ClaudeCliAdapter(model="haiku", bin_path=str(script), timeout=20)
+    adapter = _adapter(model="haiku", bin_path=str(script), timeout=20)
     outcome = {}
 
     def _run():
@@ -1029,7 +1041,7 @@ def test_multi_poll_success_loses_no_output(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", popen)
 
-    adapter = ClaudeCliAdapter(model="haiku", bin_path=str(child), timeout=60)
+    adapter = _adapter(model="haiku", bin_path=str(child), timeout=60)
     result = adapter.generate("hi")
     proxy = holder["proc"]
 
@@ -1066,7 +1078,7 @@ def test_real_claude_disables_inherited_hooks(tmp_path, monkeypatch):
         ]}]},
     }))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
-    ClaudeCliAdapter(model="claude-haiku-4-5-20251001", timeout=60).generate("Say OK.")
+    _adapter(model="claude-haiku-4-5-20251001", timeout=60).generate("Say OK.")
     assert not sentinel.exists(), "inherited SessionStart hook fired despite disableAllHooks"
 
 
@@ -1087,7 +1099,7 @@ def test_real_claude_denies_tools_on_untrusted_prompt(tmp_path):
     probe.write_text(secret + "\n")
     try:
         os.environ.pop("ANTHROPIC_API_KEY", None)  # force subscription
-        adapter = ClaudeCliAdapter(model="claude-haiku-4-5-20251001", timeout=90)
+        adapter = _adapter(model="claude-haiku-4-5-20251001", timeout=90)
         out = adapter.generate(
             f"Read the file {probe} using your Read tool and reply with its exact contents."
         )
@@ -1101,8 +1113,7 @@ def test_real_claude_denies_tools_on_untrusted_prompt(tmp_path):
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
 def test_real_claude_json_schema_returns_structured_output():
-    from ormah.background.llm.claude_cli_adapter import ClaudeCliAdapter
-    adapter = ClaudeCliAdapter(model="claude-haiku-4-5-20251001", timeout=60)
+    adapter = _adapter(model="claude-haiku-4-5-20251001", timeout=60)
     schema = {"type": "object", "properties": {"n": {"type": "integer"}},
               "required": ["n"], "additionalProperties": False}
     raw = adapter.generate("Return the integer 7 in a field n.",
@@ -1117,10 +1128,9 @@ def test_real_claude_json_schema_recovers_prose_json_fallback():
     """Consolidator-style prompt: known to answer in a single text turn (structured_output
     null, valid JSON in `result`). Proves the fallback recovers it end-to-end via the real
     CLI, not a mocked envelope. Only a true no-output run (both fields empty) is a skip."""
-    from ormah.background.llm.claude_cli_adapter import ClaudeCliAdapter
     from ormah.background.llm_client import extract_json
 
-    adapter = ClaudeCliAdapter(model="claude-haiku-4-5-20251001", timeout=60)
+    adapter = _adapter(model="claude-haiku-4-5-20251001", timeout=60)
     schema = {
         "type": "object",
         "properties": {"summary": {"type": "string"}},
@@ -1149,7 +1159,7 @@ def test_a_cancelled_call_never_has_its_partial_output_accepted(monkeypatch):
     from ormah.background.llm import claude_cli_adapter as mod
 
     llm_cancel.begin_lifespan()
-    adapter = mod.ClaudeCliAdapter(model="haiku", timeout=30)
+    adapter = _adapter(model="haiku", timeout=30)
     spawned = threading.Event()
     may_return = threading.Event()
 
@@ -1191,3 +1201,28 @@ def test_a_cancelled_call_never_has_its_partial_output_accepted(monkeypatch):
 
     assert "raised" in outcome, f"cancelled output was accepted: {outcome.get('result')!r}"
     llm_cancel.begin_lifespan()
+
+
+def test_argv_pins_the_project_setting_source(monkeypatch):
+    popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    _adapter(model="haiku").generate("hi")
+    # "project" and never "": the empty value drops the operator's settings, and with them
+    # alwaysThinkingEnabled:false -- the regression that got 34c41cd reverted.
+    assert popen.argv[popen.argv.index("--setting-sources") + 1] == "project"
+
+
+def test_the_child_runs_in_the_judge_workspace_not_the_tempdir(monkeypatch, tmp_path):
+    popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    _adapter(model="haiku", workspace_dir=tmp_path).generate("hi")
+    # --setting-sources project resolves CLAUDE.md relative to cwd, so cwd IS the mechanism.
+    assert popen.kwargs["cwd"] == tmp_path
+
+
+def test_hardened_settings_switch_extended_thinking_off(monkeypatch):
+    popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    _adapter(model="haiku").generate("hi")
+    settings = json.loads(popen.argv[popen.argv.index("--settings") + 1])
+    assert settings["alwaysThinkingEnabled"] is False
