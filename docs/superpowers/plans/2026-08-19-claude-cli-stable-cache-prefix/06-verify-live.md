@@ -71,11 +71,11 @@ echo "GO-AHEAD present, Task 5 smoke clean — proceeding."
 
 - [ ] **Step 1: Full suite against the known baseline**
 
-Expected: **`1 failed, 2634 passed, 12 deselected`**, the single failure being
+Expected: **`1 failed, 2635 passed, 12 deselected`**, the single failure being
 `tests/test_conflict_claims_investigation.py::test_forgetting_gate6_ignores_edge_type_contradicts_protects_like_supports`.
 
-**2634, not 2627.** The pre-change baseline is 2627 passing; Task 3 adds four tests and
-Task 4 adds three, so seven new tests must show up. Accepting "at least 2627" would let all
+**2635, not 2628.** The pre-change baseline is 2628 passing; Task 3 adds four tests and
+Task 4 adds three, so seven new tests must show up. Accepting "at least 2628" would let all
 seven vanish — or fail — without the gate noticing, and a test that silently stops running is
 exactly the regression this step exists to catch.
 
@@ -96,7 +96,7 @@ grep -E "^[0-9]+ (failed|passed)|passed," /tmp/ormah-suite.txt | tail -1
 Judge it on three things, all three required:
 
 - the `FAILED` count is exactly **1**, and that line is the `test_forgetting_gate6_...` one. Any other FAILED line is a regression from this change — STOP, do not restart the daemon, and report;
-- the passed count is exactly **2634**. Below it, tests disappeared or the seven new ones did not all land; above it, something else changed in the tree and the comparison is no longer clean;
+- the passed count is exactly **2635**. Below it, tests disappeared or the seven new ones did not all land; above it, something else changed in the tree and the comparison is no longer clean;
 - `12 deselected`, unchanged (the integration-marked tests, still excluded by `addopts`).
 
 - [ ] **Step 2: Lint the whole tree**
@@ -108,7 +108,7 @@ Expected: `All checks passed!`
 
 Tasks 2 and 5 only ever exercised the three pair judges, which run **without** `--json-schema`.
 But the two flags land on *every* `ClaudeCliAdapter` call, and three callers pass a schema:
-ingest (`memory_engine.py:3099`), consolidation (`consolidator.py:294`) and the whisper
+ingest (`memory_engine.py:3101`), consolidation (`consolidator.py:294`) and the whisper
 feedback judge (`session_watcher.py:212`). The repo's real-schema Claude tests are
 `integration`-marked and excluded by `addopts = -m 'not integration'`, so Step 1 did not cover
 them either. Restarting first would put the new prefix in front of all three with no
@@ -138,7 +138,7 @@ documented schema fallback can hand callers a fenced string — `'```json\n{...}
 `structured_output` is null (`claude_cli_adapter.py:348-357`, asserted verbatim by
 `test_generate_schema_falls_back_to_result_when_structured_null`). A bare `json.loads(out)`
 raises on that fence and blocks a restart production would have accepted; all three real
-callers (`memory_engine.py:3127`, `consolidator.py:300`, `session_watcher.py:295`) call
+callers (`memory_engine.py:3130`, `consolidator.py:300`, `session_watcher.py:295`) call
 `extract_json(raw)` first. Do the same here.
 
 ```bash
@@ -165,7 +165,7 @@ INJECTION = ("we decided to keep the store as a single SQLite file, no external 
 
 # The adapter appends `--json-schema` ONLY for this envelope shape
 # (claude_cli_adapter.py:205-206); a bare schema dict silently takes the schema-LESS route
-# and would prove nothing. Production builds it the same way at memory_engine.py:3099,
+# and would prove nothing. Production builds it the same way at memory_engine.py:3101,
 # consolidator.py:294 and session_watcher.py:212.
 def rf(schema):
     return {"type": "json_schema", "json_schema": {"schema": schema}}
