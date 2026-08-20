@@ -1087,7 +1087,23 @@ class Settings(BaseSettings):
 
     @property
     def llm_enabled(self) -> bool:
-        """True when an LLM provider is configured (not ``"none"``)."""
+        """True when an LLM provider is configured (not ``"none"``).
+
+        This is a FIVE-subsystem master switch, not a per-job flag, and it deliberately ignores
+        ``ingest_llm_provider``. Flipping the provider to ``"none"`` takes down ``auto_linker``,
+        ``conflict_detector``, ``duplicate_merger``, ``consolidator`` and the ``session_watcher``
+        feedback judge together.
+
+        It also fails SILENTLY GREEN: those jobs return ``{"skipped": "llm_disabled"}``, which
+        ``job_tracker.failure_reason`` does not classify as a failure, so the sleep cycle records
+        a success and reports ``status: "completed"`` for work that never ran. Decay and forgetting
+        are NOT gated here and keep pruning, and ``MemoryEngine._auto_link_node`` keeps writing
+        untyped ``related_to`` edges with no LLM at all -- so the graph keeps shrinking and stops
+        being curated, with nothing in the health output to show for it.
+
+        Anyone wanting to quiet ONE job needs code: the per-job settings are intervals only and
+        the validator rejects anything below 1 minute.
+        """
         return self.llm_provider != "none"
 
     @property
