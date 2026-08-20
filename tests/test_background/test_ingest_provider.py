@@ -7,8 +7,10 @@ from ormah.background.llm.ollama_adapter import OllamaAdapter
 from ormah.config import Settings
 
 
-def test_get_adapter_provider_override_beats_settings():
-    s = Settings(llm_provider="ollama")
+def test_get_adapter_provider_override_beats_settings(tmp_path):
+    # memory_dir is explicit because the claude_cli branch materialises a judge workspace
+    # under it, and Settings' default resolves to the developer's real home directory.
+    s = Settings(llm_provider="ollama", memory_dir=tmp_path / "memory")
     assert isinstance(get_adapter(s, provider="claude_cli", model="haiku"), ClaudeCliAdapter)
     assert isinstance(get_adapter(s), OllamaAdapter)  # unchanged when no override
 
@@ -47,7 +49,10 @@ def test_extraction_uses_ingest_adapter_not_maintenance(monkeypatch):
     s = Settings(llm_provider="ollama", ingest_llm_provider="claude_cli", ingest_llm_model="haiku")
     captured = {}
 
-    def fake_get_adapter(settings, provider=None, model=None, num_ctx=None):
+    # `workspace` mirrors the real get_adapter signature: neither llm_client call site passes it
+    # today, so omitting it would still pass -- and would break silently the day the per-route
+    # workspace mechanism is actually used.
+    def fake_get_adapter(settings, provider=None, model=None, num_ctx=None, workspace="judge"):
         captured["provider"] = provider
         captured["model"] = model
         captured["num_ctx"] = num_ctx
@@ -61,7 +66,7 @@ def test_extraction_uses_ingest_adapter_not_maintenance(monkeypatch):
     assert captured["num_ctx"] == s.ollama_num_ctx
 
 
-def test_ingest_path_generate_carries_no_session_persistence(monkeypatch):
+def test_ingest_path_generate_carries_no_session_persistence(monkeypatch, tmp_path):
     """Proves --no-session-persistence survives the full get_adapter -> generate ingest
     path, so `claude -p` writes no .jsonl transcript under ~/.claude that the session
     watcher could re-ingest (recursion suppressed at the source, not via a guard).
@@ -74,6 +79,8 @@ def test_ingest_path_generate_carries_no_session_persistence(monkeypatch):
         llm_provider="ollama",
         ingest_llm_provider="claude_cli",
         ingest_llm_model="claude-haiku-4-5-20251001",
+        # See the sibling test: the claude_cli branch writes a judge workspace under memory_dir.
+        memory_dir=tmp_path / "memory",
     )
 
     captured = {}

@@ -23,6 +23,8 @@ _REAL_ORMAH_PATHS = (
     _REAL_HOME / ".cache" / "ormah",
     _REAL_HOME / ".config" / "ormah",
 )
+# Where ensure_workspace() lands when Settings.memory_dir keeps its home-anchored default.
+_REAL_CLI_WORKSPACE = _REAL_HOME / ".local" / "share" / "ormah" / "cli-workspace"
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -53,6 +55,7 @@ def prevent_tests_mutating_real_ormah_install(monkeypatch):
     """Fail fast if a test tries to delete the developer's real Ormah install."""
     real_unlink = Path.unlink
     real_rmtree = shutil.rmtree
+    real_mkdir = Path.mkdir
 
     def assert_safe_to_delete(path: Path) -> None:
         if _is_real_ormah_path(path):
@@ -69,8 +72,30 @@ def prevent_tests_mutating_real_ormah_install(monkeypatch):
         assert_safe_to_delete(Path(path))
         return real_rmtree(path, *args, **kwargs)
 
+    def guarded_mkdir(self, *args, **kwargs):
+        # Creation, not just deletion. Settings.memory_dir defaults to Path.home()/... and that
+        # default is evaluated once at class-definition time, so a test that builds a bare
+        # Settings() and reaches get_adapter's claude_cli branch materialises a judge workspace
+        # in the developer's home directory. Guarding only unlink/rmtree let that through.
+        #
+        # Scoped to cli-workspace rather than to every _REAL_ORMAH_PATHS entry on purpose: two
+        # OTHER paths are written by production code that runs during tests for unrelated
+        # reasons -- setup_logging() creates ~/.local/share/ormah/logs at `import ormah.main`,
+        # and _save_nudge_counters() writes ~/.cache/ormah. Those are real isolation gaps, but
+        # they predate the workspace and closing them means changing import-time behaviour.
+        if _is_relative_to(self.expanduser(), _REAL_CLI_WORKSPACE) or (
+            self.expanduser() == _REAL_CLI_WORKSPACE
+        ):
+            raise AssertionError(
+                f"Test attempted to create the real judge workspace {self}. Pass "
+                "memory_dir=tmp_path to Settings() instead of relying on its default, which "
+                "resolves to the developer's home directory."
+            )
+        return real_mkdir(self, *args, **kwargs)
+
     monkeypatch.setattr(Path, "unlink", guarded_unlink)
     monkeypatch.setattr(shutil, "rmtree", guarded_rmtree)
+    monkeypatch.setattr(Path, "mkdir", guarded_mkdir)
 
 
 @pytest.fixture(autouse=True)
