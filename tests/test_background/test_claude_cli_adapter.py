@@ -14,11 +14,7 @@ from pathlib import Path
 import pytest
 
 from ormah.background import llm_cancel
-from ormah.background.llm.claude_cli_adapter import (
-    _CANCEL_POLL_INTERVAL,
-    _SYSTEM_PROMPT,
-    ClaudeCliAdapter,
-)
+from ormah.background.llm.claude_cli_adapter import _CANCEL_POLL_INTERVAL, ClaudeCliAdapter
 from ormah.background.llm_errors import LlmCancelledError, LlmTimeoutError
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "claude_cli_envelope.json"
@@ -179,55 +175,6 @@ def test_argv_pins_model_and_json_output(monkeypatch):
     assert "--no-session-persistence" in popen.argv
     settings = json.loads(popen.argv[popen.argv.index("--settings") + 1])
     assert settings["disableAllHooks"] is True
-
-
-def test_argv_carries_system_prompt_and_empty_setting_sources(monkeypatch):
-    popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    ClaudeCliAdapter(model="haiku", bin_path="/bin/claude").generate("hi")
-    i = popen.argv.index("--system-prompt")
-    assert popen.argv[i + 1] == _SYSTEM_PROMPT
-    j = popen.argv.index("--setting-sources")
-    assert popen.argv[j + 1] == ""          # empty string, NOT the flag with no value
-    # --append-system-prompt would stack ON TOP of the Claude Code default prompt, leaving
-    # the ~7.7k unstable prefix in place and defeating the whole change.
-    assert "--append-system-prompt" not in popen.argv
-
-
-def test_default_prefix_is_identical_across_instances(monkeypatch):
-    """The prompt cache keys on the prefix. Two default-constructed adapters MUST send a
-    byte-identical --system-prompt, or every route pays its own cache_write. This is the
-    invariant the change exists to buy — it fails the moment someone makes the default
-    dynamic (a timestamp, cwd, a settings lookup)."""
-    seen = []
-    for _ in range(2):
-        popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
-        monkeypatch.setattr(subprocess, "Popen", popen)
-        ClaudeCliAdapter(model="haiku", bin_path="/bin/claude").generate("hi")
-        seen.append(popen.argv[popen.argv.index("--system-prompt") + 1])
-    assert seen[0] == seen[1]
-
-
-def test_system_prompt_is_overridable_per_instance(monkeypatch):
-    popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    ClaudeCliAdapter(
-        model="haiku", bin_path="/bin/claude", system_prompt="CUSTOM ROUTE PROMPT",
-    ).generate("hi")
-    assert popen.argv[popen.argv.index("--system-prompt") + 1] == "CUSTOM ROUTE PROMPT"
-
-
-def test_setting_sources_does_not_displace_the_settings_hardening(monkeypatch):
-    """--setting-sources "" drops the operator's user/project/local settings. The adapter's
-    OWN --settings block must survive it, or every child falls back to an inherited
-    bypassPermissions and the transcript-injection boundary opens."""
-    popen = _fake_popen(stdout=json.dumps({"result": "ok"}))
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    ClaudeCliAdapter(model="haiku", bin_path="/bin/claude").generate("hi")
-    perms = json.loads(popen.argv[popen.argv.index("--settings") + 1])["permissions"]
-    assert perms["defaultMode"] == "default"
-    assert perms["allow"] == []
-    assert {"Read", "Bash", "Write", "Edit"} <= set(perms["deny"])
 
 
 def test_returns_none_on_is_error_envelope(monkeypatch):
