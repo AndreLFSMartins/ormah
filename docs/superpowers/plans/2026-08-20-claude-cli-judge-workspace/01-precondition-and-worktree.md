@@ -72,16 +72,28 @@ cd /Users/andre/Documents/GitHub/Tools/ormah-wt-judge-ws
 Expected, exactly: `1 failed, 2628 passed, 12 deselected` with the single failure being
 `tests/test_conflict_claims_investigation.py::test_forgetting_gate6_ignores_edge_type_contradicts_protects_like_supports`.
 
-Note: that test file is **untracked** — it is listed in `.git/info/exclude`, so a fresh worktree
-does **not** contain it. If the counts come back as `2622 passed` with no failures, that is why:
-copy the file across before comparing, or record the fresh-worktree numbers as the local baseline
-and use those consistently for the rest of the plan. Do not proceed with two different baselines.
+Note: **four** test files are untracked — `.git/info/exclude` lines 53–57 list them, and a fresh
+worktree contains none of them. Together they are worth 13 tests, so without them the worktree
+returns `1 failed, 2616 passed, 11 deselected` and every later number is incomparable. Copy all
+four, not just the failing one:
 
 ```bash
-cp /Users/andre/Documents/GitHub/Tools/ormah/tests/test_conflict_claims_investigation.py \
-   /Users/andre/Documents/GitHub/Tools/ormah-wt-judge-ws/tests/
+for f in test_conflict_claims_investigation.py test_conflict_edge_rebuild_survival.py \
+         test_proposal_claims_investigation.py test_whisper_claims_investigation.py; do
+  cp "/Users/andre/Documents/GitHub/Tools/ormah/tests/$f" \
+     "/Users/andre/Documents/GitHub/Tools/ormah-wt-judge-ws/tests/$f"
+done
 ```
 
+Verify by diff rather than by count — a count matching for the wrong reason is the failure mode:
+
+```bash
+( cd /Users/andre/Documents/GitHub/Tools/ormah && find tests -name '*.py' | sort ) > /tmp/live.txt
+( cd /Users/andre/Documents/GitHub/Tools/ormah-wt-judge-ws && find tests -name '*.py' | sort ) > /tmp/wt.txt
+diff /tmp/live.txt /tmp/wt.txt && echo "same test files"
+```
+
+`.git/info/exclude` is shared with worktrees, so the copies do not dirty `git status`.
 Re-run the suite after copying and confirm `1 failed, 2628 passed, 12 deselected`.
 
 - [ ] **Step 6: Confirm ruff is clean in the worktree**

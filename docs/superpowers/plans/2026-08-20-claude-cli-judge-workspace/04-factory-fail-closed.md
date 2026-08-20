@@ -88,9 +88,12 @@ cd /Users/andre/Documents/GitHub/Tools/ormah-wt-judge-ws
 .venv/bin/python -m pytest tests/test_background/test_llm_adapters.py -q 2>&1 | tail -6
 ```
 
-Expected: failures. The first two fail with
-`TypeError: __init__() missing 1 required keyword-only argument: 'workspace_dir'` (the factory does
-not pass it yet); the third fails on `assert adapter is None` because no exception is caught yet.
+Expected: all three fail, each for its own structural reason. The **first and third** fail with
+`TypeError: ClaudeCliAdapter.__init__() missing 1 required keyword-only argument: 'workspace_dir'`
+(the factory does not pass it yet). The **second** fails with
+`TypeError: get_adapter() got an unexpected keyword argument 'workspace'`, because the parameter
+does not exist on the signature yet. What matters is that all three are red before the
+implementation edits — not which TypeError lands where.
 
 - [ ] **Step 3: Write the minimal implementation**
 

@@ -70,13 +70,28 @@ grep -c "_adapter(" tests/test_background/test_claude_cli_adapter.py
 
 Expected: `35` (the 32 pre-existing constructions plus the 3 new calls added in Step 1).
 
-The import line survives untouched because it has no `(` after the class name — confirm:
+**The blanket `sed` over-reaches at two sites.** Two tests construct through the module object as
+`mod.ClaudeCliAdapter(...)`; the substitution turns those into `mod._adapter(...)`, which resolves
+against the *adapter module* rather than the test module and raises
+`AttributeError: module 'ormah.background.llm.claude_cli_adapter' has no attribute '_adapter'`.
+Strip the `mod.` prefix at both sites so they go through the module-level helper like every other
+construction — that is what the substitution intends:
 
 ```bash
-grep -n "import ClaudeCliAdapter" tests/test_background/test_claude_cli_adapter.py
+grep -n "mod\._adapter(" tests/test_background/test_claude_cli_adapter.py
 ```
 
-Expected: one line, still naming `ClaudeCliAdapter`.
+The import lines survive untouched because they have no `(` after the class name — confirm:
+
+```bash
+grep -n "ClaudeCliAdapter" tests/test_background/test_claude_cli_adapter.py | grep import
+```
+
+Expected: **three** lines — the top-level import (which reads
+`from … import _CANCEL_POLL_INTERVAL, ClaudeCliAdapter`, so a `"import ClaudeCliAdapter"` pattern
+misses it) plus two function-local imports inside the `integration`-marked tests. Those two become
+dead once their constructions route through `_adapter`; delete them in Step 6 when ruff flags them
+as `F401` — they are orphans this step created.
 
 Now add the helper immediately after the `_fake_popen` definition (which ends around line 99):
 

@@ -186,7 +186,11 @@ curl -s -o /dev/null -w "%{http_code}\n" --max-time 10 http://localhost:8787/
 launchctl list | grep com.ormah.server.dev
 ```
 
-Expected: `200`, and an exit status of `0` in the launchctl line. Until this step the daemon is
+Expected: `200`, and a **new PID** in the launchctl line. Do not gate on the exit-status column
+being `0` — it reports the last exit of the *previous* instance, which `kickstart -k` just killed
+with SIGTERM, so it reads `-15` and stays that way until the current process exits. Confirm health
+by the PID being alive (`ps -p <pid>`) and the log showing `Background scheduler started` plus the
+ingest workers. Until this step the daemon is
 still serving the pre-merge code, which is correct and intentional throughout Tasks 0–7.
 
 - [ ] **Step 9: Prune the worktree**
