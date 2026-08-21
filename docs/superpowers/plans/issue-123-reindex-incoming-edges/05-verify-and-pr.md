@@ -33,7 +33,7 @@ echo "PYTEST_EXIT=$?" >> final.txt
 tail -6 final.txt
 ```
 
-Expected: **`3 failed, 1955 passed, 1 deselected`** and `PYTEST_EXIT=1`.
+Expected: **`3 failed, 1956 passed, 1 deselected`** and `PYTEST_EXIT=1`.
 
 **`PYTEST_EXIT=1` is the correct outcome here, and the three failures must be exactly the three
 `tests/test_setup.py::TestConfigureCodexMcp` failures the pristine island already had** (see the
@@ -42,13 +42,14 @@ overview: they patch `ormah.setup.shutil.which` while `configure_codex_mcp` call
 `FAILED` lines of `final.txt` against `baseline.txt` — the sets must be identical. A fourth
 failure, or a different one, is a regression and blocks the PR.
 
-The passed count is task 1's baseline (**1949**) **plus 6**:
+The passed count is task 1's baseline (**1949**) **plus 7**:
 
 | Task | New tests |
 |---|---|
 | 1 | 3 — `index_single` reindex, `touch_updated`, `incremental_update` |
 | 3 | 2 — over-correction guard, canonicalisation guard |
 | 4 | 1 — `D -> kept` survives the merge |
+| 4b | 1 — a skipped remap still retargets the neighbour's markdown |
 
 A different delta means tests were added or lost somewhere unplanned — account for every one
 before continuing.
