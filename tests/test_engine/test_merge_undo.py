@@ -343,3 +343,46 @@ def test_merge_preserves_third_party_incoming_edge(engine):
     assert after[0]["weight"] == 0.8
     assert after[0]["reason"] == "third party"
     assert after[0]["created"] == before[0]["created"], "the row was recreated, not preserved"
+
+
+def test_merge_retargets_neighbour_markdown_when_the_remap_is_skipped(engine):
+    """A neighbour's markdown must be retargeted even when its DB row remap is skipped.
+
+    Before #123's builder fix, index_single(kept) wiped the kept node's incoming edges, so
+    the "edge already exists" check in the remap loop never matched and affected_node_ids
+    always picked up the neighbour. With the fix, those edges survive the reindex — so when
+    the neighbour ALSO already declares a direct edge to the kept node, the check now fires
+    and skips the DB insert. If affected_node_ids is only populated after that check, the
+    neighbour is never queued for a markdown rewrite, and its markdown keeps a Connection
+    pointing at the soft-deleted removed node — a dangling target that resurrects a stale
+    edge on a rebuild from disk or an undo.
+    """
+    from ormah.models.node import Connection
+
+    original_threshold = engine.settings.auto_link_similarity_threshold
+    engine.settings.auto_link_similarity_threshold = 999.0
+    try:
+        id_a, _ = _create_node(
+            engine, title="Kept", content="This node will be kept because much longer"
+        )
+        id_b, _ = _create_node(engine, title="Removed", content="Shorter content")
+        id_c, _ = _create_node(engine, title="Neighbour", content="A third node")
+    finally:
+        engine.settings.auto_link_similarity_threshold = original_threshold
+
+    # C already points at both A (kept) and B (about to be removed).
+    node_c = engine.file_store.load(id_c)
+    node_c.connections.append(
+        Connection(target=id_a, edge=EdgeType.supports, weight=0.8, reason="c to a")
+    )
+    node_c.connections.append(
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.6, reason="c to b")
+    )
+    engine.file_store.save(node_c)
+    engine.builder.index_single(engine.file_store._path_for(node_c))
+
+    engine.execute_merge(id_a, id_b)
+
+    targets = [c.target for c in engine.file_store.load(id_c).connections]
+    assert id_b not in targets, "neighbour markdown still points at the soft-deleted node"
+    assert id_a in targets, "neighbour markdown was never retargeted to the kept node"

@@ -1977,6 +1977,21 @@ class MemoryEngine:
                 if new_source == new_target:
                     continue
 
+                # Track which nodes need their markdown files updated. This MUST run even when
+                # the row below is skipped by the "edge already exists" check: the neighbour's
+                # OWN markdown still declares a connection to the removed node's id, and unless
+                # it is queued here that dangling target survives a rebuild from disk or an undo
+                # (#123). Before #123's builder fix, index_single(kept) wiped every edge pointing
+                # at kept, so the existence check below never matched and this add always ran;
+                # now those edges survive the reindex, the check fires, and without moving this
+                # above it the neighbour would never get rewritten. Runs AFTER the self-loop skip
+                # on purpose: a self-loop only arises when source_id is the KEPT node's own edge
+                # to removed, and queuing kept.id here would rewrite the kept node's OWN
+                # connection into a self-loop in markdown, starving the dedicated prune block
+                # below (which matches c.target == removed.id) of anything to prune.
+                if edge["source_id"] != removed.id:
+                    affected_node_ids.add(edge["source_id"])
+
                 # Skip if edge already exists in either direction
                 existing = conn.execute(
                     "SELECT 1 FROM edges WHERE "
@@ -1992,10 +2007,6 @@ class MemoryEngine:
                     "VALUES (?, ?, ?, ?, ?)",
                     (new_source, new_target, edge["edge_type"], edge["weight"], edge["created"]),
                 )
-
-                # Track which nodes need their markdown files updated
-                if edge["source_id"] != removed.id:
-                    affected_node_ids.add(edge["source_id"])
 
             # Clean up auto-linker checked pairs:
             # - removed node: delete all (node is gone)
