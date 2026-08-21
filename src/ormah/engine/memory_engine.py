@@ -7,7 +7,6 @@ import hashlib
 from contextlib import contextmanager
 from functools import wraps
 import logging
-import math
 import re
 import threading
 import uuid
@@ -15,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ormah import lifecycle
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
@@ -54,6 +54,11 @@ _EMBEDDING_SCHEMA_VERSION = 2
 # anything not listed here, and every negative signal, does not reinforce.
 # auto_heuristic is excluded pending #218 signal calibration.
 _CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge"})
+
+# Lifecycle-model version. 1 = the legacy FSRS seed (previously recorded as the
+# boolean meta key 'fsrs_migrated'); 2 = bounded reinforcement (#221). An integer
+# so a future curve migration can tell which model produced the stored values.
+LIFECYCLE_MODEL_VERSION = 2
 
 
 def _generate_title(content: str, max_chars: int = 60) -> str:
@@ -162,13 +167,69 @@ class MemoryEngine:
         self._warmup_reranker()
 
     def _migrate_fsrs(self) -> None:
-        """Seed FSRS stability from access_count on first run, updating both DB and markdown."""
-        fsrs_migrated = self.db.conn.execute(
-            "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
-        ).fetchone()
-        if fsrs_migrated:
+        """Seed FSRS stability once, and record the store's lifecycle-model version."""
+        version = self._lifecycle_model_version()
+        if version >= LIFECYCLE_MODEL_VERSION:
             return
 
+        if version == 0:
+            self._seed_stability_from_access_count()
+
+        with self.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                "('lifecycle_model_version', ?)",
+                (str(LIFECYCLE_MODEL_VERSION),),
+            )
+            # Keep the legacy flag in sync so rolling back to a binary that only
+            # knows 'fsrs_migrated' does not reseed a store built under #221.
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
+            )
+
+    def _lifecycle_model_version(self) -> int:
+        """Read the store's lifecycle-model version, upgrading the legacy flag.
+
+        Stores written before #221 only carry the boolean 'fsrs_migrated' key,
+        which could say migrated/not-migrated and nothing else; it maps to
+        version 1.
+
+        An ambiguous signal fails closed at 1 (already migrated), because the
+        only action version 0 unlocks is a destructive one: the seed overwrites
+        stability and rewrites the Markdown. Skipping a needed seed leaves
+        defaults in place; running an unneeded one destroys real values. Only
+        the total absence of any signal — no version key, no legacy flag, and
+        no node carrying last_review — returns 0.
+        """
+        row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'lifecycle_model_version'"
+        ).fetchone()
+        if row:
+            try:
+                return int(row["value"])
+            except (TypeError, ValueError):
+                return 1
+
+        legacy = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
+        ).fetchone()
+        if legacy:
+            return 1
+
+        # No meta at all. SQLite is derived and excluded from backups
+        # (backup.py:331-334), so this is also what a fresh-device restore or a
+        # deleted index looks like — not only a genuinely pre-FSRS store. Ask
+        # the durable source instead: last_review lives in the Markdown
+        # frontmatter (markdown.py:72-73) and is restored on rebuild
+        # (builder.py:161), so any store that ever seeded or reinforced carries
+        # it. Seeding over that would overwrite stability the user actually earned.
+        reviewed = self.db.conn.execute(
+            "SELECT 1 FROM nodes WHERE last_review IS NOT NULL LIMIT 1"
+        ).fetchone()
+        return 1 if reviewed else 0
+
+    def _seed_stability_from_access_count(self) -> None:
+        """Seed FSRS stability from access_count, updating both DB and markdown."""
         rows = self.db.conn.execute(
             "SELECT id, access_count, last_accessed FROM nodes"
         ).fetchall()
@@ -196,9 +257,6 @@ class MemoryEngine:
                             pass
                     self.file_store.save(node)
 
-            conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
-            )
         logger.info("FSRS data migration complete: seeded %d nodes from access_count", len(rows))
 
     def _seed_initial_maintenance_grace_period(self) -> None:
@@ -1969,25 +2027,51 @@ class MemoryEngine:
 
     @_serialized_memory_operation
     def _record_confirmed_use(self, node_id: str) -> None:
-        """Record a confirmed use: update access stats and FSRS stability on disk and DB."""
+        """Record confirmed use, updating stability only when it is off cooldown.
+
+        Serialized because the cooldown is a check-then-write pair (#221,
+        council round 3): the recall paths that call this are not themselves
+        serialized, so two concurrent recalls would both read a stale
+        last_review and both bump stability. _memory_operation_lock is an
+        RLock, so the call sites that already hold it re-enter safely.
+
+        Lock order: this decorator acquires the memory lock before the body
+        opens db.transaction(), i.e. memory-lock -> db-lock. The inverse order
+        (db-lock -> memory-lock, via file_store calls inside a transaction)
+        exists in _seed_stability_from_access_count, _migrate_identity_tiers,
+        and _ensure_self_node, but all three run only from startup() before the
+        server serves, so the two orders never interleave today. Invariant this
+        depends on: never call file_store inside db.transaction() outside
+        startup().
+        """
         node = self.file_store.load(node_id)
         if node is None:
             return
         now = datetime.now(timezone.utc)
 
-        # FSRS stability update. Node.stability is Field(ge=0.0), so 0 is a valid
-        # persisted value that would divide by zero here — and, once past that, keep
-        # new_stability pinned at 0 forever. decay_manager and importance_scorer already
-        # guard this same division; this was the one consumer that did not, and the
-        # ZeroDivisionError landed in the caller's isolating except as a silent lost
-        # reinforcement on a claim that had already been committed.
-        review_anchor = node.last_review or node.last_accessed
-        days_since = max((now - review_anchor).total_seconds() / 86400, 0.001)
-        stability = node.stability if node.stability else self.settings.fsrs_initial_stability
-        retrievability = math.exp(-days_since / stability)
-        new_stability = stability * self.settings.fsrs_stability_growth * (retrievability ** -0.2)
-        node.stability = round(min(new_stability, self.settings.fsrs_max_stability), 2)
-        node.last_review = now
+        # One numeric stability update per node per cooldown window (#221): the
+        # old formula let ten same-session touches compound to ~57x. last_accessed
+        # below still advances on every call, and Task 4 repoints decay and
+        # importance at it, so a node in active use never reads as stale even
+        # though last_review now lags by up to one cooldown window.
+        if lifecycle.reinforcement_due(
+            node.last_review, now, self.settings.fsrs_reinforcement_cooldown_days
+        ):
+            # reinforcement cooldown can leave last_review a full window behind
+            # a use that already landed inside it (PR #239 review comment):
+            # last_accessed is the actual spacing signal, last_review only gates.
+            anchor = node.last_accessed or node.last_review
+            days_since = max((now - anchor).total_seconds() / 86400, 0.0)
+            node.stability = lifecycle.reinforced_stability(
+                node.stability,
+                days_since,
+                growth_factor=self.settings.fsrs_growth_factor,
+                growth_exponent=self.settings.fsrs_growth_exponent,
+                spacing_cap=self.settings.fsrs_spacing_cap,
+                max_stability=self.settings.fsrs_max_stability,
+                initial_stability=self.settings.fsrs_initial_stability,
+            )
+            node.last_review = now
 
         # Standard access tracking
         node.last_accessed = now
@@ -1996,8 +2080,15 @@ class MemoryEngine:
         self.file_store.save(node)
         with self.db.transaction() as conn:
             conn.execute(
-                "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, last_review = ? WHERE id = ?",
-                (node.access_count, node.last_accessed.isoformat(), node.stability, node.last_review.isoformat(), node_id),
+                "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, "
+                "last_review = ? WHERE id = ?",
+                (
+                    node.access_count,
+                    node.last_accessed.isoformat(),
+                    node.stability,
+                    node.last_review.isoformat() if node.last_review else None,
+                    node_id,
+                ),
             )
 
     # --- Private helpers ---

@@ -30,13 +30,13 @@ connections: list[Connection]  # Outgoing edges to other nodes
 # Scoring
 confidence: float           # [0.0-1.0] How certain we are (default: 1.0)
 importance: float           # [0.0-1.0] Computed by importance_scorer job; see 05 - Background Jobs
-access_count: int           # Times this node has been accessed/recalled
+access_count: int           # Number of confirmed uses
 
 # Temporal
 created: datetime           # When first stored (UTC)
 updated: datetime           # Last modification (UTC)
-last_accessed: datetime     # Last confirmed use (UTC) — not a search hit
-last_review: datetime | None # Last FSRS review (spaced repetition)
+last_accessed: datetime     # Last confirmed use (UTC), not a search hit; the decay/spacing anchor
+last_review: datetime | None # Last numeric stability update; gated by the reinforcement cooldown, so it can lag last_accessed
 valid_until: datetime | None # Expiry date (set by mark_outdated)
 
 # FSRS (Spaced Repetition)
