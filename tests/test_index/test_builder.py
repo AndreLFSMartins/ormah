@@ -274,3 +274,96 @@ def test_incremental_update_preserves_incoming_edges(engine):
     assert len(rows) == 1, "incremental_update destroyed the incoming edge (#123)"
     assert rows[0]["source_id"] == id_a
     assert rows[0]["weight"] == 0.6, "weight 0.6 (not the 0.5 default) proves this is A's row"
+
+
+def test_removing_a_node_still_drops_its_incoming_edges(engine):
+    """When the file is really gone, incoming edges MUST die (the mirror of #123).
+
+    `edges.target_id` is `REFERENCES nodes(id) ON DELETE CASCADE`: an edge pointing at a
+    node that no longer exists is a foreign-key violation. A fix that simply never deleted
+    incoming edges would pass every other test in this file and leave orphan rows behind.
+    """
+    from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
+
+    id_a, _ = engine.remember(
+        CreateNodeRequest(content="A fact.", type=NodeType.fact), agent_id="t")
+    id_b, _ = engine.remember(
+        CreateNodeRequest(content="Another fact.", type=NodeType.fact), agent_id="t")
+
+    node_a = engine.file_store.load(id_a)
+    node_a.connections.append(
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.9)
+    )
+    engine.file_store.save(node_a)
+    engine.builder.index_single(engine.file_store._path_for(node_a))
+
+    assert engine.db.conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE target_id = ?", (id_b,)
+    ).fetchone()[0] == 1, "sanity: the edge must exist before B's file is deleted"
+
+    # B genuinely leaves the store: its markdown file is gone from disk.
+    path_b = engine.file_store._path_for(engine.file_store.load(id_b))
+    path_b.unlink()
+    engine.builder.incremental_update()
+
+    assert engine.db.conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE id = ?", (id_b,)
+    ).fetchone()[0] == 0, "the removed node must be gone from the index"
+    assert engine.db.conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE target_id = ?", (id_b,)
+    ).fetchone()[0] == 0, "orphan edge survived the removal of its target"
+
+
+def test_reindex_keeps_the_incumbent_canonical_direction(engine):
+    """When both files declare the same link, the incumbent row wins — stably.
+
+    `_index_file_edges` skips inserting A -> B when the reverse B -> A already exists with
+    the same edge type (builder.py:208-214). Before #123 was fixed, reindexing B destroyed both
+    directions, so B's own declaration was reinserted and the surviving direction was
+    whichever node happened to be reindexed last. Now the incumbent survives and B's
+    declaration is skipped: deterministic, and NOT a regression.
+
+    Auto-linking is suppressed around `remember()` (same idiom as
+    `test_mutation_stamping.py`): "A fact." and "Another fact." are similar enough that the
+    real encoder crosses `auto_link_similarity_threshold`, which would otherwise plant an
+    unrelated `related_to` B -> A edge (persisted into B's own markdown, same as any other
+    connection) before this test ever declares its own `supports` connection -- a confound
+    unrelated to the canonicalisation mechanism under test.
+    """
+    from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
+
+    original_threshold = engine.settings.auto_link_similarity_threshold
+    engine.settings.auto_link_similarity_threshold = 999.0
+    try:
+        id_a, _ = engine.remember(
+            CreateNodeRequest(content="A fact.", type=NodeType.fact), agent_id="t")
+        id_b, _ = engine.remember(
+            CreateNodeRequest(content="Another fact.", type=NodeType.fact), agent_id="t")
+    finally:
+        engine.settings.auto_link_similarity_threshold = original_threshold
+
+    node_a = engine.file_store.load(id_a)
+    node_a.connections.append(
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.9)
+    )
+    engine.file_store.save(node_a)
+
+    node_b = engine.file_store.load(id_b)
+    node_b.connections.append(
+        Connection(target=id_a, edge=EdgeType.supports, weight=0.2)
+    )
+    engine.file_store.save(node_b)
+
+    # A is indexed first, so A -> B becomes the incumbent row.
+    engine.builder.index_single(engine.file_store._path_for(node_a))
+    engine.builder.index_single(engine.file_store._path_for(node_b))
+
+    rows = engine.db.conn.execute(
+        "SELECT source_id, weight FROM edges "
+        "WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
+        (id_a, id_b, id_b, id_a),
+    ).fetchall()
+
+    assert len(rows) == 1, "the pair must be represented by exactly one canonical row"
+    assert rows[0]["source_id"] == id_a, "reindexing B flipped the canonical direction"
+    assert rows[0]["weight"] == 0.9, "A's weight, not B's 0.2 — the incumbent's row is the one kept"
