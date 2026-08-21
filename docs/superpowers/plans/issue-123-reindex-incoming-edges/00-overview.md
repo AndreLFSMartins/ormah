@@ -27,16 +27,30 @@ fires on a node that still exists.
   `env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/pip install -e ".[dev]"`.
 - **Import gate before trusting any test number.** The printed path MUST contain `ormah-wt-123/`:
   `env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"`
-- **Clean `HOME` for every test run**, and never pipe pytest to `tail` (the exit code becomes
-  tail's): `env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest tests/ -q
-  > out.txt 2>&1; echo "PYTEST_EXIT=$?" >> out.txt`
+- **Clean, symlink-RESOLVED `HOME` for every test run**, and never pipe pytest to `tail` (the
+  exit code becomes tail's). On macOS `mktemp -d` returns a path under `/tmp` or `/var`, both
+  symlinks; `test_detect_returns_none_for_home` compares `Path.cwd()` (resolved) against
+  `Path.home()` (not resolved) and fails spuriously unless `HOME` is resolved first:
+
+  ```bash
+  H=$(mktemp -d); H=$(cd "$H" && pwd -P)
+  env -u VIRTUAL_ENV -u PYTHONPATH HOME=$H .venv/bin/python -m pytest tests/ -q > out.txt 2>&1
+  echo "PYTEST_EXIT=$?" >> out.txt
+  ```
 - **Lint:** `ruff check src/ tests/`, `target-version = py311`, `line-length = 100`.
 - **Do not touch** `docs/`, `graphify-out/`, `CLAUDE.md`, `INSTRUCTIONS.md`, `SESSION_LOG.md`,
   `.council/`, `FORK-WORKFLOW.md` on the island — the pre-push hook rejects them, fail-closed.
 - **Do not add** `tests/test_proposal_claims_investigation.py` or its three siblings to the island.
   They are untracked one-off investigation files (`.git/info/exclude:53-57`), not part of the suite.
-- The island's baseline is the tracked suite only. On `local-main @ 1034bfd` the tracked suite is
-  green (2647 passed / 1 failed, the single failure being in one of those excluded files).
+- **The island's baseline is NOT zero failures.** Measured on a pristine
+  `upstream/main @ 9a7c524` island, before a single line was changed, with the resolved-`HOME`
+  recipe above: **3 failed, 1949 passed**. All three are
+  `tests/test_setup.py::TestConfigureCodexMcp` and all three are a pre-existing upstream test
+  bug, not a #123 regression: the tests patch `ormah.setup.shutil.which`, but
+  `configure_codex_mcp` (`setup.py:629`) calls `_find_binary("codex")`, which the patch does not
+  intercept. They fail on any machine with the `codex` CLI installed and pass everywhere else.
+  **Out of scope for this PR.** Task 5 compares against `3 failed, 1949 passed`, not against zero.
+  Re-derive the exact numbers on your own island — do not copy these.
 
 ## Task sequence
 
@@ -63,6 +77,40 @@ Task 6 exists because task 7 has no success criterion without it. It is **not** 
 cannot settle whether `r-spade/ormah:main` needs the repair — the bug has been in `main` since
 2026-07-14, and this store is not that store.
 
+## Re-anchored against `upstream/main @ 9a7c524` (2026-08-21)
+
+The plan as council reviewed it was authored by reading **`local-main`**, while its own Global
+Constraints require the island to be cut from **`upstream/main`**. The two trees differ by 248
+lines in `builder.py`, 224 in `tests/test_index/test_builder.py` and 1030 in `memory_engine.py`,
+so every line citation and several code primitives were wrong for the tree the work actually
+happens on. Verified against the built island, not inferred:
+
+| The plan assumed (`local-main`) | The island (`upstream/main @ 9a7c524`) |
+|---|---|
+| append after `test_reindex_preserves_the_edge_reason` (ends `:216`) | that test **does not exist**; `test_builder.py` is 152 lines, 4 tests — append at end of file |
+| `Connection(..., reason=...)` | `Connection` has **only** `target`, `edge`, `weight`. No `reason` field, and `_index_file_edges` (`:216-222`) never writes the `edges.reason` column |
+| `_remove_node` call sites `:161` / `:176` / `:200` | **`:104`** (`incremental_update`, production) / **`:113`** (genuine removal) / **`:122`** (`index_single`) |
+| `index_single` calls `_remove_node(node.id, keep_vectors=unchanged)` | calls `_remove_node(node.id)` — no kwarg, no `unchanged` in scope |
+| `nodes` write lists `space_locked`, `archived_at`, `content_fingerprint` | `nodes` has **19 columns**, none of those three (`schema.sql:3-23`) |
+| stale comments at `:169-172` and `:204` (`_prior_row`, `pending_removal`) | neither symbol exists on the island — that step is dropped |
+| `engine` fixture at `conftest.py:172` | `conftest.py:118` |
+
+**The mechanism survived the re-anchor unchanged.** `_remove_node` (`builder.py:224`) still runs
+`DELETE FROM edges WHERE source_id = ? OR target_id = ?` followed by `DELETE FROM nodes`, and
+`_index_file_nodes_only` still writes with `INSERT OR REPLACE INTO nodes`. All three destruction
+paths, all three call sites, and the `ON DELETE CASCADE` on both `edges` columns
+(`schema.sql:26-27`) are identical. Everything council approved about the *design* still holds.
+
+Two consequences for the tests: `reason` is replaced everywhere by `weight` as the
+row-identity discriminator (the values were already distinct from the 0.5 default), and task 4's
+`created`-preservation assertion carries the "same row, not a rebuilt one" proof on its own.
+
+Because the `content_fingerprint` machinery does not exist on the island, `keep_vectors` inverts
+into `drop_vector` with **constant** arguments rather than `not unchanged`: `:104` becomes
+`_clear_derived(node.id)` (was `keep_vectors=True`) and `:122` becomes
+`_clear_derived(node.id, drop_vector=True)` (was the `keep_vectors=False` default). Both preserve
+today's vector behaviour exactly.
+
 ## What council round 1 changed
 
 Reviewed 2026-08-21 by Cursor and Codex; both returned `needs-attention`, 10 findings, none
@@ -71,8 +119,9 @@ rejected. The mechanism was approved unchanged — the `_clear_derived` / `_remo
 one PR. Five things changed:
 
 1. **Task 1 gained a third red test** for `incremental_update`. `_remove_node` has three call
-   sites; `index_single` (`builder.py:200`) is not the one the 60 s index updater uses
-   (`builder.py:161`). A fix confined to `index_single` passed the original two tests.
+   sites; `index_single` (`builder.py:122` on the island) is not the one the 60 s index updater
+   uses (`builder.py:104`). A fix confined to `index_single` passed the original two tests.
+   (Council cited these as `:200` and `:161` — `local-main`'s numbering. Same two call sites.)
 2. **Task 4 gained a `D -> kept` test, written before the deletion.** No existing merge test
    builds a third party pointing at the kept node, and `original_edges` only captures edges
    touching the *removed* node — so the old "the merge suite stays green" proof was vacuous.

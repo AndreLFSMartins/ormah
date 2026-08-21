@@ -1,5 +1,11 @@
 # Task 6: Measure the drift — the acceptance number for task 7
 
+
+> ⚠️ **Measures the Beta's live store on purpose.** This task reads
+> `~/.local/share/ormah/memory/index.db`, a product of `local-main` — that is intentional and is
+> why its numbers may never be cited in a PR against `upstream/main`. It writes no code, so the
+> `upstream/main` re-anchor of tasks 1-5 does not apply to it.
+
 Read `00-overview.md` first.
 
 > **This task writes no shippable code and opens no PR.** It produces three numbers that become

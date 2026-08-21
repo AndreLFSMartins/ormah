@@ -27,12 +27,22 @@ Expected: a path containing `ormah-wt-123/`. Anything else invalidates every num
 - [ ] **Step 2: Full suite, clean HOME, exit code captured**
 
 ```bash
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest tests/ -q > final.txt 2>&1
+H=$(mktemp -d); H=$(cd "$H" && pwd -P)   # resolve the symlink — see the overview's constraints
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$H .venv/bin/python -m pytest tests/ -q > final.txt 2>&1
 echo "PYTEST_EXIT=$?" >> final.txt
-tail -5 final.txt
+tail -6 final.txt
 ```
 
-Expected: `PYTEST_EXIT=0`, zero failures, and the passed count equal to task 1's baseline **plus 6**:
+Expected: **`3 failed, 1955 passed, 1 deselected`** and `PYTEST_EXIT=1`.
+
+**`PYTEST_EXIT=1` is the correct outcome here, and the three failures must be exactly the three
+`tests/test_setup.py::TestConfigureCodexMcp` failures the pristine island already had** (see the
+overview: they patch `ormah.setup.shutil.which` while `configure_codex_mcp` calls
+`_find_binary("codex")`, so they fail on any machine with the `codex` CLI installed). Diff the
+`FAILED` lines of `final.txt` against `baseline.txt` — the sets must be identical. A fourth
+failure, or a different one, is a regression and blocks the PR.
+
+The passed count is task 1's baseline (**1949**) **plus 6**:
 
 | Task | New tests |
 |---|---|
@@ -114,12 +124,13 @@ The PR body must carry, in this order:
    order-dependent. Reviewers will otherwise read it as a regression.
 5. The four new tests and what each one catches — in particular that
    `test_removing_a_node_still_drops_its_incoming_edges` is what stops the naive over-correction.
-6. Why no background job changes: `auto_linker` (`:258`), `conflict_detector` (`:241-245`) and
-   `duplicate_merger` (`:266-271`) all skip a pair already recorded in `auto_link_checked`, and
-   `_invalidate_checked_pairs` only fires on a content-fingerprint change — which is why the loss
-   was permanent. Once nothing destroys the edges, nothing needs to recreate them. `consolidator`
-   keys on `consolidation_checked` by signature and is unaffected. A reviewer will ask; answer it
-   in the body rather than in a comment thread.
+6. Why no background job changes: `auto_linker` (`:235`), `conflict_detector` (`:167`) and
+   `duplicate_merger` (`:193`) all skip a pair already recorded in `auto_link_checked`, and on
+   this branch **nothing ever invalidates those rows** — which is why the loss was permanent:
+   the edge died on reindex and the cached verdict kept every job from re-proposing it. Once
+   nothing destroys the edges, nothing needs to recreate them. `consolidator` keys on
+   `consolidation_checked` by signature and is unaffected. A reviewer will ask; answer it in the
+   body rather than in a comment thread.
 
 Do **not** cite the Beta's index numbers (32k edges, the 221.7 s rebuild) as evidence in the PR.
 `~/.local/share/ormah/memory/index.db` is a product of `local-main`, which runs ~729 commits and
@@ -127,8 +138,8 @@ several unlanded PRs ahead of `upstream/main`. Those numbers describe a differen
 
 - [ ] **Step 8: Report back, then stop**
 
-Report: the `PYTEST_EXIT` line and passed count from step 2, the ruff line, the commit list from
-step 4, and the PR URL.
+Report: the `PYTEST_EXIT` line, the passed count **and the FAILED-line diff against
+`baseline.txt`** from step 2, the ruff line, the commit list from step 4, and the PR URL.
 
 Task 6 may run at any time after this — it writes no code and opens no PR. **Task 7 may not
 start until this PR is merged into `r-spade/ormah:main`**, proved by

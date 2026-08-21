@@ -13,9 +13,9 @@ Read `00-overview.md` first — its Global Constraints apply to every step here.
 
 ## ⚠️ Line numbers differ on the island
 
-This file diverges sharply between `local-main` and `upstream/main`: the block below sits at
-`:2009` on the Beta and at `:1548` on `upstream/main`. **Locate both blocks by their comment text,
-never by line number:**
+This file diverges sharply between `local-main` and `upstream/main` (1030 lines). On the island
+at `9a7c524` the capture block's comment is at `:1548` and the restore block's at `:1606`, but
+**locate both by their comment text, never by line number:**
 
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah-wt-123
@@ -32,9 +32,9 @@ code path that never mentions `_clear_derived`. If it goes red, task 2 is incomp
 do not reinstate the workaround.
 
 **The existing suite cannot deliver that proof.** Council round 1 caught this, both peers
-independently, and it was verified against the code:
+independently, and it was re-verified against the island's code:
 
-- `test_merge_remaps_edges` (`:84`) creates only `B -> C` — an edge *out of* the removed node —
+- `test_merge_remaps_edges` (`tests/test_engine/test_merge_undo.py:84`) creates only `B -> C` — an edge *out of* the removed node —
   and asserts it was remapped to `A -> C`. `test_merge_skips_self_loop_edges` creates `B -> A`.
   Neither creates a **third party pointing at the kept node** (`D -> kept`).
 - `original_edges` (`memory_engine.py`, `SELECT ... WHERE source_id = ? OR target_id = ?` with
@@ -49,9 +49,15 @@ passes. Step 0 fixes that before anything is deleted.
 Write this BEFORE deleting anything. With task 2 landed and the workaround still present it must
 pass; after the deletion it must still pass. That is the whole proof.
 
-The edge must carry a `reason`, and `ConnectRequest` has no `reason` field — only `Connection`
-does. So `D -> kept` is built through **D's markdown**, the same idiom task 1 uses, not through
-`engine.connect()`.
+`D -> kept` is built through **D's markdown**, the same idiom task 1 uses, not through
+`engine.connect()` — the markdown path is what `index_single` re-reads, so it is the path the
+workaround existed to protect.
+
+**`Connection` on the island has no `reason` field** (`models/node.py:42-45`), so the row's
+identity is pinned by `weight` (0.8, not the 0.5 default) and, decisively, by `created`: a
+recreated row would carry `node_d.created`, and the assertion that it is unchanged is what
+separates "preserved" from "rebuilt". `_create_node` (`:8`) and `EdgeType` (module-level import,
+`:5`) are already in the file; only `Connection` needs importing.
 
 Append to `tests/test_engine/test_merge_undo.py`:
 
@@ -70,17 +76,17 @@ def test_merge_preserves_third_party_incoming_edge(engine):
     id_b, _ = _create_node(engine, title="Removed", content="Shorter content")
     id_d, _ = _create_node(engine, title="Third", content="An unrelated third node")
 
-    # D -> kept, declared in D's own markdown so it carries a reason.
+    # D -> kept, declared in D's own markdown — the path index_single re-reads.
     node_d = engine.file_store.load(id_d)
     node_d.connections.append(
-        Connection(target=id_a, edge=EdgeType.supports, weight=0.8, reason="third party")
+        Connection(target=id_a, edge=EdgeType.supports, weight=0.8)
     )
     engine.file_store.save(node_d)
     engine.builder.index_single(engine.file_store._path_for(node_d))
 
     def third_party():
         return engine.db.conn.execute(
-            "SELECT source_id, target_id, edge_type, weight, reason, created FROM edges "
+            "SELECT source_id, target_id, edge_type, weight, created FROM edges "
             "WHERE source_id = ? AND target_id = ?",
             (id_d, id_a),
         ).fetchall()
@@ -93,15 +99,15 @@ def test_merge_preserves_third_party_incoming_edge(engine):
     after = third_party()
     assert len(after) == 1, "merge destroyed the third-party incoming edge (#123)"
     assert after[0]["edge_type"] == "supports"
-    assert after[0]["weight"] == 0.8
-    assert after[0]["reason"] == "third party"
+    assert after[0]["weight"] == 0.8, "weight 0.8, not the 0.5 default — this is D's declared row"
     assert after[0]["created"] == before[0]["created"], "the row was recreated, not preserved"
 ```
 
 Run it with the workaround still in place:
 
 ```bash
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
+H=$(mktemp -d); H=$(cd "$H" && pwd -P)
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$H .venv/bin/python -m pytest \
   tests/test_engine/test_merge_undo.py -q -k third_party > merge-teeth.txt 2>&1
 echo "PYTEST_EXIT=$?" >> merge-teeth.txt
 cat merge-teeth.txt
@@ -164,7 +170,8 @@ flag the leftover as unused.
 - [ ] **Step 5: Run the merge suite**
 
 ```bash
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
+H=$(mktemp -d); H=$(cd "$H" && pwd -P)
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$H .venv/bin/python -m pytest \
   tests/test_engine/test_merge_undo.py -q > merge.txt 2>&1
 echo "PYTEST_EXIT=$?" >> merge.txt
 cat merge.txt
@@ -182,7 +189,8 @@ green; diagnose why `index_single` is still destroying incoming edges.
 The merge path touches undo, tags and checked-pair cleanup, so the narrow file is not enough:
 
 ```bash
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
+H=$(mktemp -d); H=$(cd "$H" && pwd -P)
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$H .venv/bin/python -m pytest \
   tests/test_engine/ -q > engine.txt 2>&1
 echo "PYTEST_EXIT=$?" >> engine.txt
 tail -3 engine.txt

@@ -3,15 +3,20 @@
 Read `00-overview.md` first — its Global Constraints apply to every step here.
 
 **Files:**
-- Modify: `src/ormah/index/builder.py` — `_remove_node` (`:368-390`), its three call sites
-  (`:161`, `:176`, `:200`), the `INSERT OR REPLACE INTO nodes` in `_index_file_nodes_only`
-  (`:238-270`), and two stale comments (`:169-172`, `:204`)
+- Modify: `src/ormah/index/builder.py` — `_remove_node` (`:224-247`), two of its three call sites
+  (`:104` and `:122`; `:113` stays), and the `INSERT OR REPLACE INTO nodes` in
+  `_index_file_nodes_only` (`:135-155`)
+- **Do not touch** `src/ormah/engine/memory_engine.py:1137` or `:1573`. Both call
+  `self.builder._remove_node(<id>)` with no keyword, both are genuine removals (a deleted node and
+  a merged-away node), and both stay correct once the `keep_vectors` keyword is gone.
 - Test: `tests/test_index/test_builder.py` (the three tests from task 1)
 
 **Interfaces:**
 - Consumes: the three failing tests from task 1.
 - Produces: `IndexBuilder._clear_derived(node_id: str, *, drop_vector: bool = False) -> None`
   and `IndexBuilder._remove_node(node_id: str) -> None` (the `keep_vectors` keyword is gone).
+  Nothing outside `builder.py` passes `keep_vectors` — verified by
+  `grep -rn keep_vectors src/ tests/` on the island.
   Task 3's tests call neither directly — they go through `index_single` and `incremental_update`.
 
 ## Why both changes are in one task
@@ -21,9 +26,9 @@ leaves the tests red:
 
 | # | Location | Statement |
 |---|---|---|
-| 1 | `builder.py:381` | `DELETE FROM edges WHERE source_id = ? OR target_id = ?` |
-| 2 | `builder.py:384` | `DELETE FROM nodes WHERE id = ?` — cascade |
-| 3 | `builder.py:240` | `INSERT OR REPLACE INTO nodes` — REPLACE is DELETE+INSERT, cascade again |
+| 1 | `builder.py:236-238` | `DELETE FROM edges WHERE source_id = ? OR target_id = ?` |
+| 2 | `builder.py:240` | `DELETE FROM nodes WHERE id = ?` — cascade |
+| 3 | `builder.py:135` | `INSERT OR REPLACE INTO nodes` — REPLACE is DELETE+INSERT, cascade again |
 
 Measured on sqlite 3.53.1 against an existing incoming edge: `INSERT OR REPLACE` 1 -> 0,
 `DELETE FROM nodes` 1 -> 0, `INSERT ... ON CONFLICT(id) DO UPDATE` 1 -> **1**. The true upsert is
@@ -49,9 +54,11 @@ trailing `pass`) with:
         its source, and `_index_file_edges` reinserts exactly that set.
 
         Args:
-            drop_vector: delete the `node_vectors` row so the embedding is regenerated. True
-                only when the content fingerprint changed — dropping it on an unchanged-content
-                reindex is permanent loss, because nothing re-embeds it.
+            drop_vector: delete the `node_vectors` row so the embedding is regenerated. The
+                two callers keep exactly today's behaviour: `incremental_update` leaves it
+                False (it used `keep_vectors=True`, and it never re-embeds — dropping the
+                vector there is permanent loss), and `index_single` passes True (it used the
+                `keep_vectors=False` default, and its callers re-embed afterwards).
         """
         conn = self.db.conn
         conn.execute("DELETE FROM node_tags WHERE node_id = ?", (node_id,))
@@ -86,11 +93,11 @@ trailing `pass`) with:
 
 - [ ] **Step 2: Point the two reindex call sites at `_clear_derived`**
 
-Both, not one. `:161` is the production path (the 60 s index updater) and `:200` is the
-single-file reindex; `:176` stays on the genuine-removal `_remove_node`. Changing only `:200`
+Both, not one. `:104` is the production path (the 60 s index updater) and `:122` is the
+single-file reindex; `:113` stays on the genuine-removal `_remove_node`. Changing only `:122`
 is the failure mode task 1's third test exists to catch.
 
-`builder.py:161`, inside `incremental_update`'s update branch. Change:
+`builder.py:104`, inside `incremental_update`'s update branch. Change:
 
 ```python
                         self._remove_node(node.id, keep_vectors=True)
@@ -102,42 +109,47 @@ to:
                         self._clear_derived(node.id)
 ```
 
-`builder.py:200`, inside `index_single`. Change:
+`builder.py:122`, inside `index_single`. Change:
 
 ```python
-            self._remove_node(node.id, keep_vectors=unchanged)
+            self._remove_node(node.id)
 ```
 
 to:
 
 ```python
-            self._clear_derived(node.id, drop_vector=not unchanged)
+            self._clear_derived(node.id, drop_vector=True)
 ```
 
-Leave `builder.py:176` (`self._remove_node(node_id)` in the `pending_removal` loop) exactly as it
-is — that is the genuine-removal path, and it now calls a method with no keyword at all.
+`drop_vector=True` is not an arbitrary choice: `index_single` reached `_remove_node` through the
+`keep_vectors=False` default, so it has always dropped the vector. Passing True keeps that
+behaviour byte-for-byte. (On `local-main` this call site carries a `keep_vectors=unchanged`
+argument driven by a content fingerprint; that machinery does not exist on `upstream/main`, so
+there is no `unchanged` in scope here. Do not invent one.)
+
+Leave `builder.py:113` (`self._remove_node(node_id)`, in the loop over `removed_ids`) exactly as
+it is — that is the genuine-removal path, and it now calls a method with no keyword at all.
 
 - [ ] **Step 3: Convert the node write to a true upsert**
 
-In `_index_file_nodes_only`, change the statement that begins `INSERT OR REPLACE INTO nodes`. Keep
-the parameter tuple below it byte-for-byte unchanged — only the SQL string changes:
+In `_index_file_nodes_only` (`builder.py:130`), change the statement that begins
+`INSERT OR REPLACE INTO nodes`. Keep the parameter tuple below it byte-for-byte unchanged — only
+the SQL string changes:
 
 ```python
         conn.execute(
             """
             INSERT INTO nodes
-            (id, type, tier, source, space, space_locked, title, content, created, updated,
+            (id, type, tier, source, space, title, content, created, updated,
              last_accessed, access_count, confidence, importance,
-             valid_until, stability, last_review, archived_at, file_path, file_hash,
-             content_fingerprint)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?)
+             valid_until, stability, last_review, file_path, file_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 type = excluded.type,
                 tier = excluded.tier,
                 source = excluded.source,
                 space = excluded.space,
-                space_locked = excluded.space_locked,
                 title = excluded.title,
                 content = excluded.content,
                 created = excluded.created,
@@ -149,42 +161,32 @@ the parameter tuple below it byte-for-byte unchanged — only the SQL string cha
                 valid_until = excluded.valid_until,
                 stability = excluded.stability,
                 last_review = excluded.last_review,
-                archived_at = excluded.archived_at,
                 file_path = excluded.file_path,
-                file_hash = excluded.file_hash,
-                content_fingerprint = excluded.content_fingerprint
+                file_hash = excluded.file_hash
             """,
 ```
 
-`nodes` has 22 columns: the 21 written here plus `seq`, which the block immediately below assigns
-with its own `UPDATE`. `id` is the conflict key, so 20 columns are updated. There is no column
-outside that set, so nothing that `REPLACE` used to reset to its default is now silently preserved.
+`nodes` has 19 columns (`schema.sql:3-23`): the 18 written here plus `seq`, which the block
+immediately below assigns with its own `UPDATE`. `id` is the conflict key, so 17 columns are
+updated. There is no column outside that set, so nothing that `REPLACE` used to reset to its
+default is now silently preserved. `seq` is the one column whose pre-write value differs between
+the two forms — `REPLACE` reset it to 0, the upsert keeps the old value — and it does not matter,
+because the `UPDATE nodes SET seq = ?` two statements later overwrites it either way.
 
-- [ ] **Step 4: Fix the two comments that now describe the wrong method**
+- [x] **Step 4: DROPPED on re-anchor — nothing to fix here**
 
-`builder.py:169-172`, in the `pending_removal` guard. Replace the sentence
-`_remove_node here runs with keep_vectors=False, so a node dropped on a transient read error loses
-its vector permanently` with:
-
-```python
-            # Only a COMPLETE scan proves absence. _remove_node here deletes the node row and its
-            # vector, so a node dropped on a transient read error loses its vector permanently —
-            # nothing re-embeds it — and _remove_node does not clear the checked-pair tables, so
-            # the node would come back as new (prior=None) carrying stale verdicts, defeating #126.
-```
-
-`builder.py:204`, the `_prior_row` docstring first line. Change
-`read BEFORE _remove_node deletes the row` to:
-
-```python
-        """The stored fingerprint + seq, read BEFORE the upsert overwrites the row.
-```
+This step told you to rewrite two comments citing `_prior_row` and a `pending_removal` guard.
+Neither symbol exists on `upstream/main` (`grep -n "_prior_row\|pending_removal\|content_fingerprint"
+src/ormah/index/builder.py` returns nothing on the island) — they are `local-main` code. Skip it.
+The one comment that does mention the old behaviour is `_remove_node`'s own docstring, and step 1
+replaces that wholesale.
 
 - [ ] **Step 5: Run the three tests and verify they PASS**
 
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah-wt-123
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
+H=$(mktemp -d); H=$(cd "$H" && pwd -P)
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$H .venv/bin/python -m pytest \
   tests/test_index/test_builder.py -q -k "incoming_edges" > green.txt 2>&1
 echo "PYTEST_EXIT=$?" >> green.txt
 cat green.txt
@@ -193,24 +195,25 @@ cat green.txt
 Expected: `3 passed`, `PYTEST_EXIT=0`.
 
 **Then prove each test has teeth, one call site at a time.** All three go green together, which
-hides whether each is actually pinning its own path. Revert `builder.py:161` alone to the old
-`_remove_node(..., keep_vectors=True)` and re-run: only
-`test_incremental_update_preserves_incoming_edges` may go red. Restore it, revert `:200` alone:
-only the other two may go red. A test that stays green through the revert of the line it claims to
+hides whether each is actually pinning its own path. Revert `builder.py:104` alone to the old
+`_remove_node(node.id, keep_vectors=True)` and re-run: only
+`test_incremental_update_preserves_incoming_edges` may go red. Restore it, revert `:122` alone
+to `_remove_node(node.id)`: only the other two may go red. A test that stays green through the revert of the line it claims to
 cover is not testing that line. This is why task 1 has three tests and not two — the original pair
-went through `index_single` only, and `:161` is what runs in production every 60 s.
+went through `index_single` only, and `:104` is what runs in production every 60 s.
 
 - [ ] **Step 6: Run the whole builder + index suite**
 
 ```bash
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
+H=$(mktemp -d); H=$(cd "$H" && pwd -P)
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$H .venv/bin/python -m pytest \
   tests/test_index/ -q > index.txt 2>&1
 echo "PYTEST_EXIT=$?" >> index.txt
 tail -3 index.txt
 ```
 
-Expected: `PYTEST_EXIT=0`. `test_reindex_preserves_the_edge_reason` (`:190`) must still pass — it
-covers the outgoing direction and is the sibling of the new tests.
+Expected: `PYTEST_EXIT=0`. `test_full_rebuild` and `test_incremental_update` must still pass —
+they are the existing coverage of the paths this task changes.
 
 - [ ] **Step 7: Lint**
 
@@ -236,7 +239,8 @@ Split \`_remove_node\` into \`_clear_derived\` (reindex: leaves the node row alo
 and clears only \`source_id\` edges) and \`_remove_node\` (genuine removal: full
 delete, where the cascade is correct), and make the node write a true upsert.
 
-\`keep_vectors\` inverts into \`drop_vector\` rather than disappearing: index_single
-legitimately drops the vector when the content fingerprint changed, so the
-embedding is regenerated."
+\`keep_vectors\` inverts into \`drop_vector\` rather than disappearing, with both
+call sites keeping today's behaviour exactly: incremental_update never
+re-embeds, so it keeps the vector; index_single already dropped it via the
+old default, and its callers re-embed afterwards."
 ```

@@ -11,6 +11,10 @@ Read `00-overview.md` first — its Global Constraints apply to every step here.
   public `index_single` and `incremental_update`.
 - Produces: nothing later tasks depend on.
 
+> **`Connection` on the island has no `reason` field** (`models/node.py:42-45`) and
+> `_index_file_edges` never writes the `edges.reason` column. Row identity is pinned with
+> `weight`, whose value in each test differs from the 0.5 default and differs between A and B.
+
 ## What these two tests are for
 
 Task 1's tests all pass under a naive "never delete incoming edges anywhere" change, which would be
@@ -19,7 +23,7 @@ the fix honest.
 
 Test 2 pins a real behaviour change that a reviewer will otherwise read as a regression.
 `_index_file_edges` skips inserting `A -> B` when the reverse `B -> A` already exists with the same
-edge type (`builder.py:352`, "avoid bidirectional duplicates"). Before the fix, reindexing B
+edge type (`builder.py:208-214`, "avoid bidirectional duplicates"). Before the fix, reindexing B
 destroyed both directions, so B's own declaration was reinserted and the surviving direction was
 whichever node was reindexed **last**. After the fix, the incumbent row survives and B's
 declaration is skipped. Both choices are arbitrary; the fix makes the outcome deterministic instead
@@ -44,7 +48,7 @@ def test_removing_a_node_still_drops_its_incoming_edges(engine):
 
     node_a = engine.file_store.load(id_a)
     node_a.connections.append(
-        Connection(target=id_b, edge=EdgeType.supports, weight=0.9, reason="because X")
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.9)
     )
     engine.file_store.save(node_a)
     engine.builder.index_single(engine.file_store._path_for(node_a))
@@ -73,7 +77,7 @@ def test_reindex_keeps_the_incumbent_canonical_direction(engine):
     """When both files declare the same link, the incumbent row wins — stably.
 
     `_index_file_edges` skips inserting A -> B when the reverse B -> A already exists with
-    the same edge type (builder.py:352). Before #123 was fixed, reindexing B destroyed both
+    the same edge type (builder.py:208-214). Before #123 was fixed, reindexing B destroyed both
     directions, so B's own declaration was reinserted and the surviving direction was
     whichever node happened to be reindexed last. Now the incumbent survives and B's
     declaration is skipped: deterministic, and NOT a regression.
@@ -87,13 +91,13 @@ def test_reindex_keeps_the_incumbent_canonical_direction(engine):
 
     node_a = engine.file_store.load(id_a)
     node_a.connections.append(
-        Connection(target=id_b, edge=EdgeType.supports, weight=0.9, reason="from A")
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.9)
     )
     engine.file_store.save(node_a)
 
     node_b = engine.file_store.load(id_b)
     node_b.connections.append(
-        Connection(target=id_a, edge=EdgeType.supports, weight=0.2, reason="from B")
+        Connection(target=id_a, edge=EdgeType.supports, weight=0.2)
     )
     engine.file_store.save(node_b)
 
@@ -102,21 +106,22 @@ def test_reindex_keeps_the_incumbent_canonical_direction(engine):
     engine.builder.index_single(engine.file_store._path_for(node_b))
 
     rows = engine.db.conn.execute(
-        "SELECT source_id, reason FROM edges "
+        "SELECT source_id, weight FROM edges "
         "WHERE (source_id = ? AND target_id = ?) OR (source_id = ? AND target_id = ?)",
         (id_a, id_b, id_b, id_a),
     ).fetchall()
 
     assert len(rows) == 1, "the pair must be represented by exactly one canonical row"
     assert rows[0]["source_id"] == id_a, "reindexing B flipped the canonical direction"
-    assert rows[0]["reason"] == "from A", "the incumbent's metadata must be the one kept"
+    assert rows[0]["weight"] == 0.9, "A's weight, not B's 0.2 — the incumbent's row is the one kept"
 ```
 
 - [ ] **Step 3: Run both**
 
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah-wt-123
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
+H=$(mktemp -d); H=$(cd "$H" && pwd -P)
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$H .venv/bin/python -m pytest \
   tests/test_index/test_builder.py -q \
   -k "still_drops_its_incoming or incumbent_canonical" > guards.txt 2>&1
 echo "PYTEST_EXIT=$?" >> guards.txt
@@ -126,7 +131,7 @@ cat guards.txt
 Expected: `2 passed`, `PYTEST_EXIT=0`.
 
 If `test_removing_a_node_still_drops_its_incoming_edges` fails, task 2's `_clear_derived` was wired
-into the `pending_removal` loop by mistake — `builder.py:176` must still call `_remove_node`.
+into the `removed_ids` loop by mistake — `builder.py:113` must still call `_remove_node`.
 
 If `test_reindex_keeps_the_incumbent_canonical_direction` fails with two rows, the reverse-edge
 skip in `_index_file_edges` was altered; it must be left exactly as it was.

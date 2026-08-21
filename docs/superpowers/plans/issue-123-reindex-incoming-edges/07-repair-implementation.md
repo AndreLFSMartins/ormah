@@ -1,5 +1,12 @@
 # Task 7: `repair_edges` — recover lost edges without a full rebuild — SEPARATE PR
 
+
+> ⚠️ **NOT re-anchored.** Tasks 0-5 were re-anchored against `upstream/main @ 9a7c524` on
+> 2026-08-21 (see `00-overview.md`); this file was not, because it belongs to a second PR that
+> cannot start until the first is merged — and `upstream/main` will have moved by then. Before
+> executing it, repeat the re-anchor check: every line number, every `Connection` field, and
+> every column list here was derived from `local-main` and must be re-derived from the island.
+
 Read `00-overview.md` first — its Global Constraints apply to every step here.
 
 > **One gate before starting: the fix must be MERGED, not merely reviewed.** Council round 1
@@ -189,7 +196,8 @@ The route test needs whatever client fixture `tests/test_api/` already uses for 
 - [ ] **Step 3: Run and verify they FAIL**
 
 ```bash
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
+H=$(mktemp -d); H=$(cd "$H" && pwd -P)
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$H .venv/bin/python -m pytest \
   tests/test_index/test_builder.py -q -k repair_edges > red.txt 2>&1
 echo "PYTEST_EXIT=$?" >> red.txt
 cat red.txt
@@ -246,7 +254,8 @@ test asserts.
 - [ ] **Step 5: Run and verify they PASS**
 
 ```bash
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
+H=$(mktemp -d); H=$(cd "$H" && pwd -P)
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$H .venv/bin/python -m pytest \
   tests/test_index/test_builder.py -q -k repair_edges > green.txt 2>&1
 echo "PYTEST_EXIT=$?" >> green.txt
 cat green.txt
