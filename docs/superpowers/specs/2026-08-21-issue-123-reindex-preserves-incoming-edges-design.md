@@ -85,16 +85,26 @@ saving. Creating a new link on A triggers a reindex of A and destroys A's *incom
 
 `_remove_node` currently fuses two different operations. Split them:
 
-- **`_clear_derived(node_id)`** — the *reindex* path. Clears `node_tags`, `nodes_fts`, and
-  `edges WHERE source_id = ?` only. Does not touch the `nodes` row, so no cascade.
+- **`_clear_derived(node_id, *, drop_vector: bool = False)`** — the *reindex* path. Clears
+  `node_tags`, `nodes_fts`, and `edges WHERE source_id = ?` only, plus `node_vectors` when
+  `drop_vector`. Does not touch the `nodes` row, so no cascade.
 - **`_remove_node(node_id)`** — the *genuine removal* path (`pending_removal`, file gone from disk).
-  Unchanged: full delete including the `nodes` row. The cascade here is correct and wanted — an
-  edge pointing at a node that no longer exists is a foreign-key violation.
+  Unchanged: full delete including the `nodes` row, always dropping the vector. The cascade here is
+  correct and wanted — an edge pointing at a node that no longer exists is a foreign-key violation.
+  The parameter disappears; the one remaining caller always wants the full delete.
 - **`_index_file_nodes_only`** — `INSERT OR REPLACE INTO nodes` becomes
   `INSERT ... ON CONFLICT(id) DO UPDATE SET <col> = excluded.<col>` for the 21 written columns.
 
-`keep_vectors` disappears as a parameter: the vector is deleted only on the genuine-removal path,
-which is what the flag existed to express.
+`keep_vectors` inverts into `drop_vector` rather than disappearing. The reindex path legitimately
+drops the vector when the content changed, so the embedding is regenerated; dropping it on an
+*unchanged*-content reindex is the permanent loss the flag was introduced to prevent. Mapping the
+three call sites, preserving today's semantics exactly:
+
+| Call site | Today | After |
+|---|---|---|
+| `builder.py:161` (`incremental_update`, update branch) | `_remove_node(id, keep_vectors=True)` | `_clear_derived(id)` |
+| `builder.py:200` (`index_single`) | `_remove_node(id, keep_vectors=unchanged)` | `_clear_derived(id, drop_vector=not unchanged)` |
+| `builder.py:176` (`pending_removal`) | `_remove_node(id)` | `_remove_node(id)` — unchanged |
 
 ### Why the upsert is a safe drop-in
 
