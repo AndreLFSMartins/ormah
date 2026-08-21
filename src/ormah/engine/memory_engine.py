@@ -1649,12 +1649,30 @@ class MemoryEngine:
             neighbor = self.file_store.load(node_id)
             if neighbor is None:
                 continue
+            # Edge types the neighbour already declares toward kept, snapshotted before any
+            # mutation below. A retarget made later in this same loop must never be mistaken
+            # for a pre-existing declaration by a subsequent connection to removed (#123).
+            existing_kept_edges = {c.edge for c in neighbor.connections if c.target == kept.id}
+            new_connections: list = []
             updated = False
             for c in neighbor.connections:
                 if c.target == removed.id:
+                    if c.edge in existing_kept_edges:
+                        # Neighbour already declares this edge type toward kept: retargeting
+                        # would create a second (source, kept, edge_type) connection, which
+                        # collides at reindex time and silently clobbers the pre-existing
+                        # edge's weight (INSERT OR REPLACE, last one wins) (#123). Drop this
+                        # connection instead. Also covers two connections to removed sharing
+                        # one edge_type: the first is retargeted below and joins
+                        # existing_kept_edges, so the second is dropped here too.
+                        updated = True
+                        continue
                     c.target = kept.id
+                    existing_kept_edges.add(c.edge)
                     updated = True
+                new_connections.append(c)
             if updated:
+                neighbor.connections = new_connections
                 neighbor.touch_updated()
                 self.file_store.save(neighbor)
 
