@@ -3332,7 +3332,7 @@ class MemoryEngine:
         # Isolated, and never propagated. The affinity and signals rows are already
         # durably committed and the route returns this value straight to the caller,
         # so raising here would report a failure for evidence that was recorded. The
-        # contract is at-most-once (see 00-overview.md): the claim stays taken and
+        # contract is at-most-once: the claim stays taken and
         # this reinforcement is simply lost, as a logged miss.
         if became_confirmed:
             try:

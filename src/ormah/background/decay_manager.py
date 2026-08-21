@@ -54,12 +54,17 @@ def run_decay(engine) -> None:
             anchor_str = row["last_accessed"] or row["last_review"]
             try:
                 anchor = datetime.fromisoformat(anchor_str)
-                days_since = (now - anchor).total_seconds() / 86400
+                days_since = max((now - anchor).total_seconds() / 86400, 0.001)
                 # A naive anchor (hand-edited or externally generated frontmatter)
                 # makes `now - anchor` raise TypeError; keep that failure scoped to
                 # this one row instead of letting the outer except abort the whole
                 # run and silently disable decay for every node in the store.
             except (ValueError, TypeError):
+                logger.warning(
+                    "Decay manager skipped node %s with invalid recency anchor %r",
+                    row["id"][:8],
+                    anchor_str,
+                )
                 continue
             # Pass the stored stability raw and let lifecycle own the zero case,
             # with the SAME fallback reinforcement uses. Hardcoding 1.0 here

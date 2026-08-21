@@ -399,6 +399,34 @@ def test_recency_signal_follows_configured_half_life():
     assert _recency_signal(7.0, 7.0) == pytest.approx(0.5)
 
 
+def test_importance_job_uses_configured_recency_half_life(engine):
+    """The full scorer reads the setting rather than hardcoding 14 days."""
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Memory used exactly one configured half-life ago",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Configured half-life",
+    ))
+    old = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    engine.settings.importance_access_weight = 0.0
+    engine.settings.importance_edge_weight = 0.0
+    engine.settings.importance_recency_weight = 1.0
+    engine.settings.importance_recency_half_life_days = 7.0
+    engine.db.conn.execute(
+        "UPDATE nodes SET importance = 0.0, last_review = ?, last_accessed = ? "
+        "WHERE id = ?",
+        (old, old, node_id),
+    )
+    engine.db.conn.commit()
+
+    run_importance_scoring(engine)
+
+    importance = engine.db.conn.execute(
+        "SELECT importance FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()["importance"]
+    assert importance == pytest.approx(0.5, abs=0.001)
+
+
 def test_recency_signal_survives_an_invalid_half_life():
     """Defence in depth (council I1): the validator should make these unreachable,
     but the guard must hold anyway. A zero or negative half-life must never raise

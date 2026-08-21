@@ -602,7 +602,7 @@ def _record_whisper_usage_signals(
     # letting one node's failure escape would abort the ingest slice, skip every later
     # node, and leave both has_llm_judge set and the claims taken — nothing would ever
     # retry them. Failures here are logged, never raised. This is the at-most-once
-    # contract, stated in 00-overview.md.
+    # contract.
     for node_id in confirmed_node_ids:
         try:
             engine._record_confirmed_use(node_id)

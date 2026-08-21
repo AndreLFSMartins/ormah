@@ -137,7 +137,7 @@ still decides which nodes survive when `core` is over its cap — see
 
 `importance_scorer` recomputes node importance from three dynamic signals:
 
-1. **Access signal**: how often the node has been used, based on `access_count`
+1. **Access signal**: how often the node's use has been *confirmed*, based on `access_count`
 2. **Edge signal**: how connected the node is in the graph, based on total edge count
 3. **Recency signal**: how recently the node was touched, using half-life decay `exp(-ln(2) * days_ago / importance_recency_half_life_days)` — independent of FSRS stability, anchored on `last_accessed` (falling back to `last_review`)
 
@@ -154,7 +154,7 @@ Access and edge counts are log-normalized against reference values, then the wei
 
 The scorer runs every `120` minutes by default and only writes a new value when the change is meaningful.
 
-This score is not static. Confirmed use — an explicit recall or a submitted positive signal (#220) — updates `access_count` and `last_accessed` on every event; `stability` and `last_review` move at most once per `fsrs_reinforcement_cooldown_days` (#221). So a memory's importance changes over time as it is used, connected, or left untouched.
+This score is not static. **Confirmed use** updates `access_count` and `last_accessed` on every event, while `last_review` and `stability` move at most once per `fsrs_reinforcement_cooldown_days` (#221) — so a memory's importance changes over time as it is used, connected, or left untouched. Merely being surfaced does not: search results, UI search, whisper injection, and graph expansion write no lifecycle fields (issue #220). Confirmed use is a deliberate `recall_node`, or qualified positive feedback — `explicit`, `implicit`, or `auto_llm_judge`. Because `access_count` now counts confirmations rather than appearances, its values are far smaller than before, and `importance_access_reference` is calibrated against the old scale.
 
 ## Walkthrough Example
 

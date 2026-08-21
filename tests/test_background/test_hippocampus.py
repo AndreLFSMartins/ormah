@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from unittest.mock import patch
 
+from watchdog.events import FileCreatedEvent
 
 from ormah.background.hippocampus import (
     HippocampusHandler,
@@ -47,6 +49,40 @@ _SAMPLE_MD = (
 )
 
 
+def _wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
+    """Wait for an asynchronous condition without relying on a fixed sleep."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    assert predicate(), f"condition was not met within {timeout} seconds"
+
+
+def _drain_timers(handler: HippocampusHandler, timeout: float = 10.0) -> None:
+    """Wait until no debounce timer is armed and no ingestion is still running.
+
+    A sleep cannot show that no second ingestion is coming: a timer armed to fire later
+    runs after the window and after the counting patch is restored, so it never reaches
+    the assertion. Waiting on the handler's own timers can, and anything still armed at
+    the deadline fails the caller instead of being quietly waited out.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        with handler._timer_lock:
+            armed = list(handler._timers.values())
+        if not armed:
+            break
+        assert time.monotonic() < deadline, f"{len(armed)} debounce timer(s) never fired"
+        for timer in armed:
+            timer.join(timeout=max(0.0, deadline - time.monotonic()))
+    # No timer is armed, but _do_ingest drops its timer before taking the ingest lock,
+    # so an empty dict alone would not prove the work is done. Holding that lock does.
+    acquired = handler._ingest_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+    assert acquired, "an ingestion was still running"
+    handler._ingest_lock.release()
+
+
 def test_initial_scan_ingests_existing_files(engine, tmp_path):
     """Files present before watcher starts get ingested on catch-up scan."""
     watch_dir = tmp_path / "watch"
@@ -79,12 +115,98 @@ def test_new_file_triggers_ingestion(engine, tmp_path):
         observers = start_hippocampus(engine)
         try:
             (watch_dir / "new_session.md").write_text(_SAMPLE_MD)
-            # Wait for debounce + processing
-            time.sleep(0.5)
+            _wait_for(lambda: "new_session.md" in _load_state(watch_dir))
             state = _load_state(watch_dir)
             assert "new_session.md" in state
         finally:
             stop_hippocampus(observers)
+
+
+def test_startup_reconciliation_catches_file_created_while_observer_starts(
+    engine, tmp_path,
+):
+    """A file landing in the scan-to-watcher handoff is still ingested."""
+    watch_dir = tmp_path / "watch"
+    watch_dir.mkdir()
+    md_file = watch_dir / "during_startup.md"
+
+    engine.settings.hippocampus_watch_dirs = [watch_dir]
+    engine.settings.hippocampus_enabled = True
+
+    class ObserverWithoutEvents:
+        def schedule(self, handler, path, recursive):
+            self.handler = handler
+
+        def start(self):
+            # Simulate a file created after the catch-up scan but before the live
+            # observer can deliver events for the directory.
+            md_file.write_text(_SAMPLE_MD)
+
+        def stop(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+    with (
+        patch("ormah.background.hippocampus.Observer", ObserverWithoutEvents),
+        patch(_LLM_PATCH, return_value=_LLM_RESPONSE),
+    ):
+        observers = start_hippocampus(engine)
+
+    try:
+        assert "during_startup.md" in _load_state(watch_dir)
+    finally:
+        stop_hippocampus(observers)
+
+
+def test_startup_event_and_reconciliation_ingest_exactly_once(engine, tmp_path):
+    """The live event and reconciliation scan share one deduplication state."""
+    watch_dir = tmp_path / "watch"
+    watch_dir.mkdir()
+    md_file = watch_dir / "during_startup.md"
+
+    engine.settings.hippocampus_watch_dirs = [watch_dir]
+    engine.settings.hippocampus_enabled = True
+    engine.settings.hippocampus_debounce_seconds = 0.05
+
+    created_observers = []
+
+    class ObserverWithStartupEvent:
+        def __init__(self):
+            created_observers.append(self)
+
+        def schedule(self, handler, path, recursive):
+            self.handler = handler
+
+        def start(self):
+            md_file.write_text(_SAMPLE_MD)
+            self.handler.on_created(FileCreatedEvent(str(md_file)))
+
+        def stop(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+    with (
+        patch("ormah.background.hippocampus.Observer", ObserverWithStartupEvent),
+        patch(_LLM_PATCH, return_value=_LLM_RESPONSE) as llm_generate,
+    ):
+        observers = start_hippocampus(engine)
+        handler = created_observers[0].handler
+        _wait_for(
+            lambda: (
+                "during_startup.md" in _load_state(watch_dir)
+                and not handler._timers
+            )
+        )
+
+    try:
+        assert "during_startup.md" in _load_state(watch_dir)
+        assert llm_generate.call_count == 1
+    finally:
+        stop_hippocampus(observers)
 
 
 def test_modified_file_re_ingested(engine, tmp_path):
@@ -165,10 +287,13 @@ def test_debounce_prevents_duplicate_ingestion(engine, tmp_path):
             handler.on_modified(FileModifiedEvent(str(md_file)))
             time.sleep(0.05)
 
-        # Wait for debounce
-        time.sleep(0.5)
+        # The debounced timer must fire at all -- wait on that, not on a budget.
+        _wait_for(lambda: call_count >= 1)
+        # Then quiesce, still inside the patch, so a late duplicate is counted rather
+        # than slipping past a fixed window with the counter already restored.
+        _drain_timers(handler)
 
-    assert call_count == 1
+        assert call_count == 1
 
 
 def test_state_file_persists(engine, tmp_path):
