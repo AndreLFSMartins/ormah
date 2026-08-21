@@ -2,10 +2,14 @@
 
 Read `00-overview.md` first — its Global Constraints apply to every step here.
 
-> **Two gates before starting.** Task 6 must have reported a `missing_live_target` materially above
-> zero, and tasks 1-5 must be pushed and reviewed. This is a second PR on its own island cut fresh
-> from `upstream/main`: carrying the repair without the builder fix repairs a store that is still
-> actively losing edges.
+> **One gate before starting: the fix must be MERGED, not merely reviewed.** Council round 1
+> rejected the earlier wording ("tasks 1-5 pushed and reviewed") from both peers independently:
+> review in the fork does not advance `upstream/main`, so a branch cut from it would carry the
+> repair **without** the builder fix — repairing a store that is still actively losing edges, and
+> risking a merge order where the repair lands first.
+>
+> Task 6 is **not** a gate. It supplies the acceptance number; it cannot cancel this task. See
+> `06-drift-measurement.md`, *Why this is not a gate*.
 
 **Files:**
 - Create: `../ormah-wt-123-repair` island, branch `fix/123-repair-lost-edges`
@@ -14,9 +18,15 @@ Read `00-overview.md` first — its Global Constraints apply to every step here.
 - Test: `tests/test_index/test_builder.py`
 
 **Interfaces:**
-- Consumes: `missing_live_target` from task 6, as the acceptance number.
-- Produces: `IndexBuilder.repair_edges() -> int`, returning the number of edge rows inserted, and
-  `POST /admin/repair-edges` returning `{"status": "repaired", "edges_inserted": <int>}`.
+- Consumes: `missing_typed` from task 6, as the acceptance number.
+- Produces: `IndexBuilder.repair_edges() -> dict`, returning `{"scanned", "inserted", "failed"}`,
+  and `POST /admin/repair-edges` returning that same shape with a `status` of `"repaired"` or
+  `"repaired_partial"`.
+
+**Why a dict and not an `int`.** Council round 1 (Codex): the earlier signature returned only the
+net row delta while swallowing every per-file exception inside the transaction, and the handler
+answered `status: "repaired"` unconditionally. A run where every file failed to parse would commit
+nothing and report success — and task 6 explicitly forbids treating a parse failure as noise.
 
 ## What this buys
 
@@ -26,9 +36,24 @@ each node's `connections` and inserts the missing `edges` rows, touching no node
 
 - [ ] **Step 1: Build the island**
 
+**Prove the fix is in the base before cutting anything.** Do not infer it from a merged PR page;
+test it.
+
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah
 git fetch upstream
+# The merge commit of the #123 fix PR, read from the PR itself — not from memory.
+FIX_SHA=$(gh pr view <PR#> --json mergeCommit -q .mergeCommit.oid)
+git merge-base --is-ancestor "$FIX_SHA" upstream/main && echo "OK: fix is in upstream/main" \
+  || { echo "STOP: the #123 fix is NOT in upstream/main yet"; exit 1; }
+```
+
+If that prints `STOP`, there are exactly two acceptable moves — wait for the merge, or stack this
+PR on the fix branch (`git worktree add -b fix/123-repair-lost-edges ../ormah-wt-123-repair
+fix/123-reindex-preserves-incoming-edges`) and mark it explicitly as stacked so it cannot merge
+independently. **Never** cut from a plain `upstream/main` that lacks the fix.
+
+```bash
 git worktree add -b fix/123-repair-lost-edges ../ormah-wt-123-repair upstream/main
 cd ../ormah-wt-123-repair
 python3 -m venv .venv
@@ -37,6 +62,14 @@ env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.
 ```
 
 Expected: a path containing `ormah-wt-123-repair/`. Anything else and every number below is void.
+
+Then prove the fix is actually in **this** tree, not just in the base you named:
+
+```bash
+grep -n "_clear_derived" src/ormah/index/builder.py
+```
+
+Expected: hits. No output means the island does not carry the fix — stop.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -63,14 +96,28 @@ def test_repair_edges_restores_a_connection_missing_from_the_index(engine):
     engine.db.conn.execute("DELETE FROM edges WHERE target_id = ?", (id_b,))
     engine.db.conn.commit()
 
-    inserted = engine.builder.repair_edges()
+    # The cheap contract: repair must not re-embed or re-index anything.
+    vectors_before = engine.db.conn.execute(
+        "SELECT COUNT(*) FROM node_vectors").fetchone()[0]
+    hashes_before = dict(engine.db.conn.execute("SELECT id, file_hash FROM nodes").fetchall())
 
-    assert inserted == 1
+    result = engine.builder.repair_edges()
+
+    assert result["inserted"] == 1
+    assert result["failed"] == 0
+    assert result["scanned"] == 2
     row = engine.db.conn.execute(
         "SELECT source_id, reason FROM edges WHERE target_id = ?", (id_b,)
     ).fetchone()
     assert row["source_id"] == id_a
     assert row["reason"] == "because X"
+
+    # Without these two, a repair_edges implemented as `full_rebuild()` plus a
+    # COUNT(edges) delta would pass every other assertion in this file.
+    assert engine.db.conn.execute(
+        "SELECT COUNT(*) FROM node_vectors").fetchone()[0] == vectors_before
+    assert dict(
+        engine.db.conn.execute("SELECT id, file_hash FROM nodes").fetchall()) == hashes_before
 
 
 def test_repair_edges_is_idempotent(engine):
@@ -89,9 +136,55 @@ def test_repair_edges_is_idempotent(engine):
     engine.file_store.save(node_a)
     engine.builder.index_single(engine.file_store._path_for(node_a))
 
-    assert engine.builder.repair_edges() == 0
-    assert engine.builder.repair_edges() == 0
+    assert engine.builder.repair_edges()["inserted"] == 0
+    assert engine.builder.repair_edges()["inserted"] == 0
+
+
+def test_repair_edges_reports_a_failed_file_instead_of_swallowing_it(engine):
+    """One unreadable file must be counted, not silently absorbed (#123).
+
+    The repair keeps going — one corrupt file must not abort the other few thousand — but
+    `failed` has to surface, or a run where every file failed reports success.
+    """
+    from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
+
+    id_a, _ = engine.remember(
+        CreateNodeRequest(content="A fact.", type=NodeType.fact), agent_id="t")
+    id_b, _ = engine.remember(
+        CreateNodeRequest(content="Another fact.", type=NodeType.fact), agent_id="t")
+
+    node_a = engine.file_store.load(id_a)
+    node_a.connections.append(
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.9, reason="because X")
+    )
+    engine.file_store.save(node_a)
+    engine.builder.index_single(engine.file_store._path_for(node_a))
+    engine.db.conn.execute("DELETE FROM edges WHERE target_id = ?", (id_b,))
+    engine.db.conn.commit()
+
+    # Corrupt B's file: valid path, unparseable frontmatter.
+    engine.file_store._path_for(engine.file_store.load(id_b)).write_text(
+        "---\nnot: [valid\n---\nbody", encoding="utf-8")
+
+    result = engine.builder.repair_edges()
+
+    assert result["failed"] == 1, "the unreadable file was swallowed"
+    assert result["scanned"] == 2
+    assert result["inserted"] == 1, "A's edge must still be repaired despite B failing"
+
+
+def test_repair_edges_route_reports_partial_failure(engine_client):
+    """The endpoint must not answer `repaired` when files failed."""
+    resp = engine_client.post("/admin/repair-edges")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) >= {"status", "scanned", "inserted", "failed"}
+    assert body["status"] == "repaired"  # clean store, nothing failed
 ```
+
+The route test needs whatever client fixture `tests/test_api/` already uses for `/admin/rebuild`
+— reuse it rather than inventing one, and put this test in that file if the fixture does not reach
+`tests/test_index/`.
 
 - [ ] **Step 3: Run and verify they FAIL**
 
@@ -102,21 +195,25 @@ echo "PYTEST_EXIT=$?" >> red.txt
 cat red.txt
 ```
 
-Expected: `2 failed` with `AttributeError: 'IndexBuilder' object has no attribute 'repair_edges'`.
+Expected: `3 failed` with `AttributeError: 'IndexBuilder' object has no attribute
+`repair_edges'`, plus the route test failing on a 404. Run the route test from wherever its
+fixture lives.
 
 - [ ] **Step 4: Implement `repair_edges`**
 
 Add to `IndexBuilder`, directly after `full_rebuild`:
 
 ```python
-    def repair_edges(self) -> int:
+    def repair_edges(self) -> dict[str, int]:
         """Reinsert edge rows declared in markdown but missing from the index (#123).
 
         Nodes, vectors and FTS are left alone — this is the cheap counterpart to
         `full_rebuild`, which re-embeds the whole store. Reuses `_index_file_edges`, so the
         FK guard and the reverse-edge canonicalisation behave exactly as in a normal index.
 
-        Returns the number of edge rows inserted.
+        Returns `{"scanned", "inserted", "failed"}`. `failed` is load-bearing: a run where
+        every file failed to parse commits nothing, and reporting only the row delta would
+        make that indistinguishable from a store that needed no repair.
         """
         # FileStore.list_paths takes L_mem. It MUST complete before the write transaction opens
         # L_db: every @serialized_memory_job background job goes L_mem -> L_db, and taking the
@@ -124,6 +221,7 @@ Add to `IndexBuilder`, directly after `full_rebuild`:
         # test_incremental_update_does_not_deadlock_against_a_memory_job.
         paths = list(self.file_store.list_paths())
 
+        failed = 0
         before = self.db.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
         with self.db.transaction():
             for path in paths:
@@ -132,10 +230,11 @@ Add to `IndexBuilder`, directly after `full_rebuild`:
                 except Exception as e:
                     # Edges are derived and best-effort: one unreadable file must not abort the
                     # repair of the other few thousand. Same rationale as full_rebuild's
-                    # edge_failures counter.
+                    # edge_failures counter. But it is COUNTED, never just logged.
+                    failed += 1
                     logger.warning("repair_edges: failed on %s: %s", path, e)
         after = self.db.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
-        return after - before
+        return {"scanned": len(paths), "inserted": after - before, "failed": failed}
 ```
 
 Two things this leans on. `_index_file_edges` calls `path.read_text()` directly instead of going
@@ -153,7 +252,7 @@ echo "PYTEST_EXIT=$?" >> green.txt
 cat green.txt
 ```
 
-Expected: `2 passed`, `PYTEST_EXIT=0`.
+Expected: `3 passed`, `PYTEST_EXIT=0` — plus the route test green in its own file.
 
 - [ ] **Step 6: Expose it over HTTP**
 
@@ -176,11 +275,20 @@ def repair_edges(request: Request):
     """Reinsert edges declared in markdown but missing from the index (#123).
 
     The cheap alternative to /rebuild: no re-embedding, no FTS rebuild.
+
+    `repaired_partial` is not cosmetic: some node files were unreadable and their
+    connections were NOT restored, so the caller must not treat the store as whole.
     """
     engine = request.app.state.engine
-    inserted = engine.builder.repair_edges()
-    return {"status": "repaired", "edges_inserted": inserted}
+    result = engine.builder.repair_edges()
+    status = "repaired_partial" if result["failed"] else "repaired"
+    return {"status": status, **result}
 ```
+
+**Consider a facade.** `/rebuild` calls `engine.rebuild_index()`, not `engine.builder.<something>`.
+Reaching through `engine.builder` from a route breaks that boundary (council round 1, Cursor —
+non-blocking). If `MemoryEngine` gains a `repair_edges()` one-liner that forwards to the builder,
+use it here and keep the route symmetric with its neighbour.
 
 - [ ] **Step 7: Full suite, lint, island gates**
 
@@ -220,7 +328,16 @@ curl -s -X POST http://localhost:8787/admin/repair-edges
 env -u VIRTUAL_ENV -u PYTHONPATH /Users/andre/Documents/GitHub/Tools/ormah/.venv/bin/python "$SCRATCH/drift.py"
 ```
 
-Expected: `missing_live_target` goes to 0, and `edges_inserted` matches the before-number.
+Expected: **`missing_typed` goes to 0** — that is the acceptance criterion, not the symmetrised
+`missing_live_target`.
+
+`edges_inserted` will **not** generally equal the before-number, and asserting that it does is a
+bug in the check, not in the repair (council round 1, Codex): `_index_file_edges` canonicalises
+reverse edges, so two reciprocal markdown declarations collapse into one row. Compare the
+before/after `missing_typed`, never the insert count against the miss count.
+
+If `failed` comes back non-zero, the response says `repaired_partial` and the store is **not**
+whole — report which files failed before re-running the drift script.
 
 **The trap:** the running daemon serves `Tools/ormah`, not this island, so `/admin/repair-edges`
 returns 404 until the Beta's tree carries the change *and* the daemon restarts. That restart is

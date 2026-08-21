@@ -42,20 +42,45 @@ fires on a node that still exists.
 
 | # | File | Deliverable |
 |---|---|---|
-| 1 | `01-island-and-red-tests.md` | Island built, import gate proved, two failing tests that pin the invariant |
-| 2 | `02-non-destructive-reindex.md` | `_clear_derived` + upsert; the two tests go green |
+| 1 | `01-island-and-red-tests.md` | Island built, import gate proved, **three** failing tests that pin the invariant — one per `_remove_node` call site that matters |
+| 2 | `02-non-destructive-reindex.md` | `_clear_derived` + upsert; the three tests go green |
 | 3 | `03-guard-tests.md` | Over-correction guard + canonicalisation guard |
-| 4 | `04-remove-merge-workaround.md` | `memory_engine` hand-restore deleted; merge tests green without it |
+| 4 | `04-remove-merge-workaround.md` | A `D -> kept` regression test **first**, then the `memory_engine` hand-restore deleted |
 | 5 | `05-verify-and-pr.md` | Full suite, ruff, island cleanliness gate, PR opened |
-| 6 | `06-drift-measurement.md` | **No code, no PR.** One number, and the go/no-go on task 7 |
-| 7 | `07-repair-implementation.md` | **Separate PR.** `repair_edges` — recovery without a full rebuild |
+| 6 | `06-drift-measurement.md` | **No code, no PR.** Three acceptance numbers — **not** a go/no-go |
+| 7 | `07-repair-implementation.md` | **Separate PR, gated on the fix being MERGED.** `repair_edges` — recovery without a full rebuild |
 
 Tasks 1-5 are one PR. Task 7 is a second PR and must not be folded into the first: a branch cut from
 `upstream/main` carrying the repair without the builder fix repairs a store that is still actively
 losing edges.
 
-Task 6 exists because task 7 has no success criterion without it, and because its answer may be
-"nothing left to repair — do not build task 7". Do not skip it to get to the code faster.
+**Task 7 starts only once the first PR is MERGED into `r-spade/ormah:main`**, proved by
+`git merge-base --is-ancestor`, never by a PR being reviewed. Review in the fork does not advance
+`upstream/main`. The alternative is an explicitly stacked PR on the fix branch.
+
+Task 6 exists because task 7 has no success criterion without it. It is **not** a gate: it produces
+`missing_typed` as the acceptance number and cannot cancel task 7. A measurement of this machine
+cannot settle whether `r-spade/ormah:main` needs the repair — the bug has been in `main` since
+2026-07-14, and this store is not that store.
+
+## What council round 1 changed
+
+Reviewed 2026-08-21 by Cursor and Codex; both returned `needs-attention`, 10 findings, none
+rejected. The mechanism was approved unchanged — the `_clear_derived` / `_remove_node` split, the
+`ON CONFLICT(id) DO UPDATE` upsert, `keep_vectors` inverting into `drop_vector`, and slices 1+3 in
+one PR. Five things changed:
+
+1. **Task 1 gained a third red test** for `incremental_update`. `_remove_node` has three call
+   sites; `index_single` (`builder.py:200`) is not the one the 60 s index updater uses
+   (`builder.py:161`). A fix confined to `index_single` passed the original two tests.
+2. **Task 4 gained a `D -> kept` test, written before the deletion.** No existing merge test
+   builds a third party pointing at the kept node, and `original_edges` only captures edges
+   touching the *removed* node — so the old "the merge suite stays green" proof was vacuous.
+3. **Task 6 stopped being a go/no-go** and its metric was corrected: it symmetrised the pair and
+   ignored `edge_type`, undercounting by 2,182 against the live store.
+4. **Task 7's gate became "merged", not "reviewed"**, with the ancestry proved by command.
+5. **`repair_edges` gained a partial-failure contract** — `{scanned, inserted, failed}` — and
+   tests that pin `node_vectors` and `file_hash` untouched, so a `full_rebuild` in disguise fails.
 
 ## Why tasks 2 and 3 are not one task
 

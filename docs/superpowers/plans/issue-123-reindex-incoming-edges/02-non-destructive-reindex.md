@@ -6,10 +6,10 @@ Read `00-overview.md` first — its Global Constraints apply to every step here.
 - Modify: `src/ormah/index/builder.py` — `_remove_node` (`:368-390`), its three call sites
   (`:161`, `:176`, `:200`), the `INSERT OR REPLACE INTO nodes` in `_index_file_nodes_only`
   (`:238-270`), and two stale comments (`:169-172`, `:204`)
-- Test: `tests/test_index/test_builder.py` (the two tests from task 1)
+- Test: `tests/test_index/test_builder.py` (the three tests from task 1)
 
 **Interfaces:**
-- Consumes: the two failing tests from task 1.
+- Consumes: the three failing tests from task 1.
 - Produces: `IndexBuilder._clear_derived(node_id: str, *, drop_vector: bool = False) -> None`
   and `IndexBuilder._remove_node(node_id: str) -> None` (the `keep_vectors` keyword is gone).
   Task 3's tests call neither directly — they go through `index_single` and `incremental_update`.
@@ -85,6 +85,10 @@ trailing `pass`) with:
 ```
 
 - [ ] **Step 2: Point the two reindex call sites at `_clear_derived`**
+
+Both, not one. `:161` is the production path (the 60 s index updater) and `:200` is the
+single-file reindex; `:176` stays on the genuine-removal `_remove_node`. Changing only `:200`
+is the failure mode task 1's third test exists to catch.
 
 `builder.py:161`, inside `incremental_update`'s update branch. Change:
 
@@ -176,7 +180,7 @@ its vector permanently` with:
         """The stored fingerprint + seq, read BEFORE the upsert overwrites the row.
 ```
 
-- [ ] **Step 5: Run the two tests and verify they PASS**
+- [ ] **Step 5: Run the three tests and verify they PASS**
 
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah-wt-123
@@ -186,7 +190,15 @@ echo "PYTEST_EXIT=$?" >> green.txt
 cat green.txt
 ```
 
-Expected: `2 passed`, `PYTEST_EXIT=0`.
+Expected: `3 passed`, `PYTEST_EXIT=0`.
+
+**Then prove each test has teeth, one call site at a time.** All three go green together, which
+hides whether each is actually pinning its own path. Revert `builder.py:161` alone to the old
+`_remove_node(..., keep_vectors=True)` and re-run: only
+`test_incremental_update_preserves_incoming_edges` may go red. Restore it, revert `:200` alone:
+only the other two may go red. A test that stays green through the revert of the line it claims to
+cover is not testing that line. This is why task 1 has three tests and not two — the original pair
+went through `index_single` only, and `:161` is what runs in production every 60 s.
 
 - [ ] **Step 6: Run the whole builder + index suite**
 

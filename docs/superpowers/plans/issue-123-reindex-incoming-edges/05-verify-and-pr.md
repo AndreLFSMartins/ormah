@@ -32,9 +32,16 @@ echo "PYTEST_EXIT=$?" >> final.txt
 tail -5 final.txt
 ```
 
-Expected: `PYTEST_EXIT=0`, zero failures, and the passed count equal to task 1's baseline **plus 4**
-(the four new tests). A different delta means tests were added or lost somewhere unplanned — account
-for every one before continuing.
+Expected: `PYTEST_EXIT=0`, zero failures, and the passed count equal to task 1's baseline **plus 6**:
+
+| Task | New tests |
+|---|---|
+| 1 | 3 — `index_single` reindex, `touch_updated`, `incremental_update` |
+| 3 | 2 — over-correction guard, canonicalisation guard |
+| 4 | 1 — `D -> kept` survives the merge |
+
+A different delta means tests were added or lost somewhere unplanned — account for every one
+before continuing.
 
 - [ ] **Step 3: Lint**
 
@@ -121,4 +128,8 @@ several unlanded PRs ahead of `upstream/main`. Those numbers describe a differen
 - [ ] **Step 8: Report back, then stop**
 
 Report: the `PYTEST_EXIT` line and passed count from step 2, the ruff line, the commit list from
-step 4, and the PR URL. Do not start task 6 — it is a separate PR with its own blocker.
+step 4, and the PR URL.
+
+Task 6 may run at any time after this — it writes no code and opens no PR. **Task 7 may not
+start until this PR is merged into `r-spade/ormah:main`**, proved by
+`git merge-base --is-ancestor`; a review is not a merge.
