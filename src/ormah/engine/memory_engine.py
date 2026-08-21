@@ -1575,6 +1575,15 @@ class MemoryEngine:
                 if new_source == new_target:
                     continue
 
+                # Track which nodes need their markdown files updated. This must run even when
+                # the row itself is skipped below as a pre-existing duplicate: since #123
+                # index_single() no longer wipes the kept node's incoming edges, so a neighbour's
+                # edge into A can already exist before this loop runs, short-circuiting the
+                # "already exists" check below. Without recording it here, that neighbour's
+                # markdown would keep pointing at the soft-deleted removed node (#123).
+                if edge["source_id"] != removed.id:
+                    affected_node_ids.add(edge["source_id"])
+
                 # Skip if edge already exists in either direction
                 existing = conn.execute(
                     "SELECT 1 FROM edges WHERE "
@@ -1590,10 +1599,6 @@ class MemoryEngine:
                     "VALUES (?, ?, ?, ?, ?)",
                     (new_source, new_target, edge["edge_type"], edge["weight"], edge["created"]),
                 )
-
-                # Track which nodes need their markdown files updated
-                if edge["source_id"] != removed.id:
-                    affected_node_ids.add(edge["source_id"])
 
             # Clean up auto-linker checked pairs:
             # - removed node: delete all (node is gone)
