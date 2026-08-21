@@ -150,3 +150,127 @@ def test_builder_never_takes_file_lock_inside_write_transaction(engine):
     assert engine.builder.incremental_update() == (0, 0)
 
     assert not violations, f"FileStore lock acquired inside db.transaction(): {violations}"
+
+
+def test_reindex_preserves_incoming_edges(engine):
+    """Reindexing a node must not destroy the edges that point AT it (#123).
+
+    The connection A -> B lives in A's markdown file. Reindexing B has no access to that
+    file and therefore no way to reconstruct the row, so it must not delete it.
+    """
+    from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
+
+    id_a, _ = engine.remember(
+        CreateNodeRequest(content="A fact.", type=NodeType.fact), agent_id="t")
+    id_b, _ = engine.remember(
+        CreateNodeRequest(content="Another fact.", type=NodeType.fact), agent_id="t")
+
+    node_a = engine.file_store.load(id_a)
+    node_a.connections.append(
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.9)
+    )
+    engine.file_store.save(node_a)
+    engine.builder.index_single(engine.file_store._path_for(node_a))
+
+    def incoming():
+        return engine.db.conn.execute(
+            "SELECT source_id, edge_type, weight FROM edges WHERE target_id = ?", (id_b,)
+        ).fetchall()
+
+    assert len(incoming()) == 1, "sanity: the edge must exist before B is reindexed"
+
+    # Reindex the TARGET — what the index updater does after any change to B's own file.
+    node_b = engine.file_store.load(id_b)
+    engine.builder.index_single(engine.file_store._path_for(node_b))
+
+    rows = incoming()
+    assert len(rows) == 1, "incoming edge destroyed by reindexing the target (#123)"
+    assert rows[0]["source_id"] == id_a
+    assert rows[0]["edge_type"] == "supports"
+    assert rows[0]["weight"] == 0.9, "weight 0.9 (not the 0.5 default) proves this is A's row"
+
+
+def test_touch_updated_does_not_drop_incoming_edges(engine):
+    """The real-world trigger: file_hash changes, content fingerprint does not (#123).
+
+    `_invalidate_checked_pairs` only fires when the CONTENT fingerprint changes, but the
+    reindex fires on any file_hash change. `touch_updated()` moves only `updated`, so the
+    edge dies while the cached pair verdict survives — and auto_linker, conflict_detector
+    and duplicate_merger all skip a pair already recorded in `auto_link_checked`. Nothing
+    ever recreates the edge; the loss stands until a full rebuild.
+
+    Self-feeding on the Beta: the auto-linker touches the node before saving, so creating
+    any new link on a node destroys that node's own incoming edges. The same shape drives
+    the importance scorer, which touched 5,216 nodes in one pass on 2026-08-21 and cost
+    ~13,800 edges in 54 minutes.
+    """
+    from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
+
+    id_a, _ = engine.remember(
+        CreateNodeRequest(content="A fact.", type=NodeType.fact), agent_id="t")
+    id_b, _ = engine.remember(
+        CreateNodeRequest(content="Another fact.", type=NodeType.fact), agent_id="t")
+
+    node_a = engine.file_store.load(id_a)
+    node_a.connections.append(
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.7)
+    )
+    engine.file_store.save(node_a)
+    engine.builder.index_single(engine.file_store._path_for(node_a))
+
+    def incoming_count():
+        return engine.db.conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE target_id = ?", (id_b,)
+        ).fetchone()[0]
+
+    assert incoming_count() == 1, "sanity: the edge must exist before the touch"
+
+    # The only delta is `updated`: file_hash changes, content fingerprint does not.
+    node_b = engine.file_store.load(id_b)
+    node_b.touch_updated()
+    engine.file_store.save(node_b)
+    engine.builder.index_single(engine.file_store._path_for(node_b))
+
+    assert incoming_count() == 1, "touch_updated() destroyed the incoming edge (#123)"
+
+
+def test_incremental_update_preserves_incoming_edges(engine):
+    """The path production actually takes: the 60s index updater (#123).
+
+    `index_single` is not the production trigger. `incremental_update` is — it walks the
+    store, sees B's file_hash changed, and calls `_remove_node(id, keep_vectors=True)` at
+    builder.py:104, a DIFFERENT call site from the one index_single uses (:122). A fix
+    applied only to index_single leaves this path destroying incoming edges once a minute.
+    """
+    from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
+
+    id_a, _ = engine.remember(
+        CreateNodeRequest(content="A fact.", type=NodeType.fact), agent_id="t")
+    id_b, _ = engine.remember(
+        CreateNodeRequest(content="Another fact.", type=NodeType.fact), agent_id="t")
+
+    node_a = engine.file_store.load(id_a)
+    node_a.connections.append(
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.6)
+    )
+    engine.file_store.save(node_a)
+    engine.builder.index_single(engine.file_store._path_for(node_a))
+
+    def incoming():
+        return engine.db.conn.execute(
+            "SELECT source_id, weight FROM edges WHERE target_id = ?", (id_b,)
+        ).fetchall()
+
+    assert len(incoming()) == 1, "sanity: the edge must exist before the updater runs"
+
+    # Change B's file so the updater sees a new file_hash, then run the REAL trigger.
+    node_b = engine.file_store.load(id_b)
+    node_b.touch_updated()
+    engine.file_store.save(node_b)
+    added, updated = engine.builder.incremental_update()
+
+    assert updated == 1, "sanity: the updater must have seen B as changed"
+    rows = incoming()
+    assert len(rows) == 1, "incremental_update destroyed the incoming edge (#123)"
+    assert rows[0]["source_id"] == id_a
+    assert rows[0]["weight"] == 0.6, "weight 0.6 (not the 0.5 default) proves this is A's row"
