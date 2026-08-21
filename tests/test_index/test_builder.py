@@ -329,6 +329,11 @@ def test_reindex_keeps_the_incumbent_canonical_direction(engine):
     unrelated `related_to` B -> A edge (persisted into B's own markdown, same as any other
     connection) before this test ever declares its own `supports` connection -- a confound
     unrelated to the canonicalisation mechanism under test.
+
+    The weights are deliberately inverted against the outcome: A, indexed first, gets the
+    LOWER weight (0.2) and B gets the HIGHER weight (0.9), so A's row surviving can only be
+    explained by index order, not by a hypothetical "higher weight wins" rule -- there is no
+    weight comparison anywhere in `_index_file_edges` or `_clear_derived`.
     """
     from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
 
@@ -344,13 +349,13 @@ def test_reindex_keeps_the_incumbent_canonical_direction(engine):
 
     node_a = engine.file_store.load(id_a)
     node_a.connections.append(
-        Connection(target=id_b, edge=EdgeType.supports, weight=0.9)
+        Connection(target=id_b, edge=EdgeType.supports, weight=0.2)
     )
     engine.file_store.save(node_a)
 
     node_b = engine.file_store.load(id_b)
     node_b.connections.append(
-        Connection(target=id_a, edge=EdgeType.supports, weight=0.2)
+        Connection(target=id_a, edge=EdgeType.supports, weight=0.9)
     )
     engine.file_store.save(node_b)
 
@@ -366,4 +371,4 @@ def test_reindex_keeps_the_incumbent_canonical_direction(engine):
 
     assert len(rows) == 1, "the pair must be represented by exactly one canonical row"
     assert rows[0]["source_id"] == id_a, "reindexing B flipped the canonical direction"
-    assert rows[0]["weight"] == 0.9, "A's weight, not B's 0.2 — the incumbent's row is the one kept"
+    assert rows[0]["weight"] == 0.2, "A's weight, not B's 0.9 — the incumbent's row is the one kept"

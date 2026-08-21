@@ -1553,7 +1553,7 @@ class MemoryEngine:
         # Save kept node, re-index, re-embed
         # NOTE: index_single rebuilds the kept node's OWN edges, so the remap of the removed
         # node's edges must still happen AFTER this step. Since #123 it no longer touches the
-        # edges pointing AT the kept node.
+        # edges pointing AT the kept node from any other node.
         kept.touch_updated()
         path = self.file_store.save(kept)
         self.builder.index_single(path)
@@ -1565,7 +1565,8 @@ class MemoryEngine:
 
             # Remap edges: point removed→kept (skip self-loops and duplicates)
             # Done AFTER index_single since that rebuilds the kept node's OWN edges. Since #123
-            # it no longer touches the edges pointing AT the kept node, so those need no rescue.
+            # it no longer touches the edges pointing AT the kept node from any other node, so
+            # those need no rescue.
             affected_node_ids: set[str] = set()
             for edge in original_edges:
                 new_source = kept.id if edge["source_id"] == removed.id else edge["source_id"]

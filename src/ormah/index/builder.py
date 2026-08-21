@@ -256,7 +256,8 @@ class IndexBuilder:
                 two callers keep exactly today's behaviour: `incremental_update` leaves it
                 False (it used `keep_vectors=True`, and it never re-embeds — dropping the
                 vector there is permanent loss), and `index_single` passes True (it used the
-                `keep_vectors=False` default, and its callers re-embed afterwards).
+                `keep_vectors=False` default, and its callers re-embed afterwards — except
+                `mark_outdated`, which does not).
         """
         conn = self.db.conn
         conn.execute("DELETE FROM node_tags WHERE node_id = ?", (node_id,))
