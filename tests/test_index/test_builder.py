@@ -586,3 +586,33 @@ def test_incremental_update_defers_removal_when_hashing_fails(db, file_store, mo
     builder.incremental_update()
     assert db.conn.execute(
         "SELECT COUNT(*) FROM nodes WHERE id = ?", (node.id,)).fetchone()[0] == 0
+
+
+def test_incremental_update_preserves_the_node_vector(engine):
+    """incremental_update must not drop the `node_vectors` row (#123).
+
+    `_clear_derived` takes `drop_vector` because `incremental_update` never re-embeds after
+    it — unlike `index_single`, whose callers always call `_index_embedding` afterwards. If
+    `incremental_update` ever passed `drop_vector=True`, the node would lose its embedding
+    and stay unsearchable by similarity until the next startup backfill picks it up.
+    """
+    from ormah.models.node import CreateNodeRequest, NodeType
+
+    node_id, _ = engine.remember(
+        CreateNodeRequest(content="A fact to embed.", type=NodeType.fact), agent_id="t")
+
+    def has_vector() -> bool:
+        return engine.db.conn.execute(
+            "SELECT 1 FROM node_vectors WHERE id = ?", (node_id,)
+        ).fetchone() is not None
+
+    assert has_vector(), "sanity: remember() must embed the node before the update runs"
+
+    # Change the node's file so the updater sees a new file_hash and reindexes it.
+    node = engine.file_store.load(node_id)
+    node.touch_updated()
+    engine.file_store.save(node)
+    added, updated = engine.builder.incremental_update()
+
+    assert updated == 1, "sanity: the updater must have seen the node as changed"
+    assert has_vector(), "incremental_update dropped the node_vectors row"
