@@ -580,3 +580,113 @@ def test_merge_retargets_a_neighbour_connection_whose_edge_type_does_not_collide
     ).fetchone()
     assert supports_row is not None and supports_row["weight"] == 0.8
     assert contradicts_row is not None and contradicts_row["weight"] == 0.6
+
+
+def test_merge_coalesces_duplicate_removed_connections_to_the_last_declaration(engine):
+    """When a neighbour declares the SAME edge type toward `removed` twice, the retarget must
+    keep the LAST declaration, matching what _index_file_edges makes effective (#123).
+
+    `_index_file_edges` writes edges with INSERT OR REPLACE on
+    (source_id, target_id, edge_type), so when a markdown file declares the same
+    (target, edge_type) pair twice, the LAST declaration wins at reindex time. C has no
+    connection to A at all here — only two declarations of C -> B, same edge type, different
+    weights — so the retargeted C -> A connection must carry the weight of the second
+    (last) one, not the first.
+    """
+    from ormah.models.node import Connection
+
+    original_threshold = engine.settings.auto_link_similarity_threshold
+    engine.settings.auto_link_similarity_threshold = 999.0
+    try:
+        id_a, _ = _create_node(
+            engine, title="Kept", content="This node will be kept because it is much longer"
+        )
+        id_b, _ = _create_node(engine, title="Removed", content="Short")
+        id_c, _ = _create_node(engine, title="Third", content="An unrelated third node entirely")
+    finally:
+        engine.settings.auto_link_similarity_threshold = original_threshold
+
+    # C declares C -> B (supports, 0.8) then C -> B (supports, 0.6) — same edge type, no
+    # connection to A at all. Last declaration (0.6) is the effective one.
+    node_c = engine.file_store.load(id_c)
+    node_c.connections.append(Connection(target=id_b, edge=EdgeType.supports, weight=0.8))
+    node_c.connections.append(Connection(target=id_b, edge=EdgeType.supports, weight=0.6))
+    engine.file_store.save(node_c)
+    engine.builder.index_single(engine.file_store._path_for(node_c))
+
+    engine.execute_merge(id_a, id_b)
+
+    # This is the step that surfaces the wrong winner in production: the 60s index updater
+    # reindexes any markdown file that changed, including C's rewritten markdown.
+    engine.builder.incremental_update()
+
+    after = engine.file_store.load(id_c)
+    a_connections = [c for c in after.connections if c.target == id_a]
+    assert len(a_connections) == 1, (
+        f"C's markdown should have exactly one connection to A, got {len(a_connections)}"
+    )
+    assert a_connections[0].weight == 0.6, (
+        f"C -> A should carry the LAST declaration's weight 0.6, got {a_connections[0].weight}"
+    )
+
+    row = engine.db.conn.execute(
+        "SELECT weight FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
+        (id_c, id_a, EdgeType.supports.value),
+    ).fetchone()
+    assert row is not None, "C -> A supports edge should exist"
+    assert row["weight"] == 0.6, (
+        f"C -> A supports edge should carry the last declaration's weight 0.6, got {row['weight']}"
+    )
+
+
+def test_merge_keeps_the_preexisting_declaration_when_duplicates_collide(engine):
+    """When a neighbour already declares the edge type toward `kept`, that pre-existing
+    declaration wins over BOTH duplicate declarations toward `removed`, no matter which of
+    the duplicates would otherwise be the last one (#123).
+
+    C declares C -> A (supports, 0.9) first, then two C -> B (supports) declarations. The
+    pre-existing C -> A connection must survive with its own weight 0.9; both C -> B
+    declarations are dropped entirely, not coalesced into a competing retarget.
+    """
+    from ormah.models.node import Connection
+
+    original_threshold = engine.settings.auto_link_similarity_threshold
+    engine.settings.auto_link_similarity_threshold = 999.0
+    try:
+        id_a, _ = _create_node(
+            engine, title="Kept", content="This node will be kept because it is much longer"
+        )
+        id_b, _ = _create_node(engine, title="Removed", content="Short")
+        id_c, _ = _create_node(engine, title="Third", content="An unrelated third node entirely")
+    finally:
+        engine.settings.auto_link_similarity_threshold = original_threshold
+
+    # C declares C -> A (supports, 0.9), then C -> B (supports, 0.8), then C -> B
+    # (supports, 0.6). The pre-existing C -> A declaration must win.
+    node_c = engine.file_store.load(id_c)
+    node_c.connections.append(Connection(target=id_a, edge=EdgeType.supports, weight=0.9))
+    node_c.connections.append(Connection(target=id_b, edge=EdgeType.supports, weight=0.8))
+    node_c.connections.append(Connection(target=id_b, edge=EdgeType.supports, weight=0.6))
+    engine.file_store.save(node_c)
+    engine.builder.index_single(engine.file_store._path_for(node_c))
+
+    engine.execute_merge(id_a, id_b)
+    engine.builder.incremental_update()
+
+    after = engine.file_store.load(id_c)
+    a_connections = [c for c in after.connections if c.target == id_a]
+    assert len(a_connections) == 1, (
+        f"C's markdown should have exactly one connection to A, got {len(a_connections)}"
+    )
+    assert a_connections[0].weight == 0.9, (
+        f"C -> A should keep its pre-existing weight 0.9, got {a_connections[0].weight}"
+    )
+
+    row = engine.db.conn.execute(
+        "SELECT weight FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
+        (id_c, id_a, EdgeType.supports.value),
+    ).fetchone()
+    assert row is not None, "C -> A supports edge should exist"
+    assert row["weight"] == 0.9, (
+        f"C -> A supports edge should keep the pre-existing weight 0.9, got {row['weight']}"
+    )
