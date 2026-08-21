@@ -43,11 +43,11 @@ def _backdate_review(engine, node_id: str, days: float) -> None:
 def test_ten_touches_in_one_day_produce_one_stability_update(engine):
     """AC4: ten uses, one numeric update, and the latest use time is recorded."""
     node_id = _make_node(engine)
-    engine._touch_access(node_id)
+    engine._record_confirmed_use(node_id)
 
     after_first = _row(engine, node_id)
     for _ in range(9):
-        engine._touch_access(node_id)
+        engine._record_confirmed_use(node_id)
     after_ten = _row(engine, node_id)
 
     assert after_ten["stability"] == after_first["stability"]
@@ -58,11 +58,11 @@ def test_ten_touches_in_one_day_produce_one_stability_update(engine):
 
 def test_a_touch_after_the_cooldown_moves_stability_again(engine):
     node_id = _make_node(engine)
-    engine._touch_access(node_id)
+    engine._record_confirmed_use(node_id)
     before = _row(engine, node_id)
 
     _backdate_review(engine, node_id, days=1.0)
-    engine._touch_access(node_id)
+    engine._record_confirmed_use(node_id)
     after = _row(engine, node_id)
 
     assert after["stability"] > before["stability"]
@@ -90,7 +90,7 @@ def test_reinforcement_anchors_on_last_accessed_not_a_lagging_last_review(engine
     )
     engine.db.conn.commit()
 
-    engine._touch_access(node_id)
+    engine._record_confirmed_use(node_id)
 
     assert _row(engine, node_id)["stability"] == pytest.approx(1.50, abs=0.01)
 
@@ -107,7 +107,7 @@ def test_a_thirty_day_old_node_is_bounded_to_double(engine):
     engine.db.conn.commit()
     _backdate_review(engine, node_id, days=30.0)
 
-    engine._touch_access(node_id)
+    engine._record_confirmed_use(node_id)
 
     assert _row(engine, node_id)["stability"] == 2.0
 
@@ -115,10 +115,10 @@ def test_a_thirty_day_old_node_is_bounded_to_double(engine):
 def test_the_cooldown_does_not_freeze_the_decay_anchor(engine):
     """last_accessed must keep moving so decay never sees an active node as stale."""
     node_id = _make_node(engine)
-    engine._touch_access(node_id)
+    engine._record_confirmed_use(node_id)
     first = _row(engine, node_id)
 
-    engine._touch_access(node_id)
+    engine._record_confirmed_use(node_id)
     second = _row(engine, node_id)
 
     assert second["last_accessed"] >= first["last_accessed"]
@@ -134,7 +134,7 @@ def test_reinforcement_survives_a_zero_stability_node(engine):
     engine.db.conn.execute("UPDATE nodes SET stability = 0.0 WHERE id = ?", (node_id,))
     engine.db.conn.commit()
 
-    engine._touch_access(node_id)
+    engine._record_confirmed_use(node_id)
 
     assert _row(engine, node_id)["stability"] > 0.0
 
@@ -145,7 +145,7 @@ def test_concurrent_touches_run_reinforcement_once(engine, monkeypatch):
     The sequential ten-touch test cannot see this: it is the *interleaving* that
     breaks the cooldown. Both threads read last_review before either writes it,
     both conclude they are off cooldown, and both reinforce. The recall paths
-    that reach _touch_access carry no @_serialized_memory_operation, so this is
+    that reach _record_confirmed_use carry no additional serialization, so this is
     the production shape, not a synthetic one.
 
     TWO construction choices, both load-bearing — read before editing:
@@ -203,7 +203,7 @@ def test_concurrent_touches_run_reinforcement_once(engine, monkeypatch):
 
     def _touch() -> None:
         try:
-            engine._touch_access(node_id)
+            engine._record_confirmed_use(node_id)
         except BaseException as exc:  # noqa: BLE001 - surfaced via `errors` below
             errors.append(exc)
 
