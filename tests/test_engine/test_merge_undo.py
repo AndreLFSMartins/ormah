@@ -299,3 +299,44 @@ def test_undo_missing_merge_returns_error(engine):
     """Undoing a non-existent merge returns an error string."""
     result = engine.undo_merge("nonexistent-id")
     assert "not found" in result
+
+
+def test_merge_preserves_third_party_incoming_edge(engine):
+    """A third node pointing AT the kept node must survive the merge (#123).
+
+    The merge path calls index_single(kept). Before #123 that destroyed every edge pointing
+    at kept, and merge_nodes hand-restored them. This test is what makes deleting that
+    workaround a proof rather than an assumption: no existing merge test creates D -> kept,
+    so the suite could stay green while exactly this edge was lost.
+    """
+    from ormah.models.node import Connection
+
+    id_a, _ = _create_node(engine, title="Kept", content="This node will be kept because longer")
+    id_b, _ = _create_node(engine, title="Removed", content="Shorter content")
+    id_d, _ = _create_node(engine, title="Third", content="An unrelated third node")
+
+    # D -> kept, declared in D's own markdown — the path index_single re-reads.
+    node_d = engine.file_store.load(id_d)
+    node_d.connections.append(
+        Connection(target=id_a, edge=EdgeType.supports, weight=0.8)
+    )
+    engine.file_store.save(node_d)
+    engine.builder.index_single(engine.file_store._path_for(node_d))
+
+    def third_party():
+        return engine.db.conn.execute(
+            "SELECT source_id, target_id, edge_type, weight, created FROM edges "
+            "WHERE source_id = ? AND target_id = ?",
+            (id_d, id_a),
+        ).fetchall()
+
+    before = third_party()
+    assert len(before) == 1, "sanity: D -> kept must exist before the merge"
+
+    engine.execute_merge(id_a, id_b)
+
+    after = third_party()
+    assert len(after) == 1, "merge destroyed the third-party incoming edge (#123)"
+    assert after[0]["edge_type"] == "supports"
+    assert after[0]["weight"] == 0.8, "weight 0.8, not the 0.5 default — this is D's declared row"
+    assert after[0]["created"] == before[0]["created"], "the row was recreated, not preserved"

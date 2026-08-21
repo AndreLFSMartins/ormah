@@ -1545,24 +1545,15 @@ class MemoryEngine:
         ).fetchall()
         original_edges = [dict(r) for r in edge_rows]
 
-        # Capture incoming edges for the kept node that aren't in its markdown.
-        # index_single calls _remove_node which wipes ALL edges (including
-        # incoming ones like self→kept "defines").  We need to restore these.
-        kept_incoming = self.db.conn.execute(
-            "SELECT source_id, target_id, edge_type, weight, created FROM edges "
-            "WHERE target_id = ? AND source_id != ?",
-            (kept.id, removed.id),
-        ).fetchall()
-        kept_incoming_edges = [dict(r) for r in kept_incoming]
-
         # Merge tags from removed into kept
         removed_tags = set(removed.tags) - set(kept.tags)
         if removed_tags:
             kept.tags.extend(sorted(removed_tags))
 
         # Save kept node, re-index, re-embed
-        # NOTE: index_single calls _remove_node internally which wipes edges,
-        # so we must remap edges and restore incoming edges AFTER this step.
+        # NOTE: index_single rebuilds the kept node's OWN edges, so the remap of the removed
+        # node's edges must still happen AFTER this step. Since #123 it no longer touches the
+        # edges pointing AT the kept node.
         kept.touch_updated()
         path = self.file_store.save(kept)
         self.builder.index_single(path)
@@ -1573,7 +1564,8 @@ class MemoryEngine:
             self.builder._remove_node(removed.id)
 
             # Remap edges: point removed→kept (skip self-loops and duplicates)
-            # Done AFTER index_single since that wipes and rebuilds edges for kept node.
+            # Done AFTER index_single since that rebuilds the kept node's OWN edges. Since #123
+            # it no longer touches the edges pointing AT the kept node, so those need no rescue.
             affected_node_ids: set[str] = set()
             for edge in original_edges:
                 new_source = kept.id if edge["source_id"] == removed.id else edge["source_id"]
@@ -1602,20 +1594,6 @@ class MemoryEngine:
                 # Track which nodes need their markdown files updated
                 if edge["source_id"] != removed.id:
                     affected_node_ids.add(edge["source_id"])
-
-            # Restore incoming edges for the kept node that were wiped by index_single
-            for edge in kept_incoming_edges:
-                existing = conn.execute(
-                    "SELECT 1 FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
-                    (edge["source_id"], edge["target_id"], edge["edge_type"]),
-                ).fetchone()
-                if not existing:
-                    conn.execute(
-                        "INSERT INTO edges (source_id, target_id, edge_type, weight, created) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (edge["source_id"], edge["target_id"], edge["edge_type"],
-                         edge["weight"], edge["created"]),
-                    )
 
             # Clean up auto-linker checked pairs:
             # - removed node: delete all (node is gone)
