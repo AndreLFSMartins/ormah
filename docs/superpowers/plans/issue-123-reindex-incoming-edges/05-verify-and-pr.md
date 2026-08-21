@@ -121,7 +121,15 @@ The PR body must carry, in this order:
    1 -> 0, `INSERT ... ON CONFLICT(id) DO UPDATE` 1 -> 1.
 4. The canonicalisation consequence from task 3, stated as a deliberate change: the surviving
    direction moves from "last reindexed wins" to "incumbent wins", i.e. deterministic instead of
-   order-dependent. Reviewers will otherwise read it as a regression.
+   order-dependent. Reviewers will otherwise read it as a regression. State the sharp edge
+   explicitly rather than letting a reviewer find it: the reverse-edge skip in
+   `_index_file_edges` was previously **unreachable** on the reindex path, because
+   `_remove_node` had already deleted the reverse row. It is now reachable. If both files
+   declare the same pair with the same `edge_type`, reindexing A drops `A -> B` and the skip
+   keeps it dropped, so A's declared weight is lost from the index while still present in
+   `A.md`. Connectivity survives — `graph.get_edges_for` is bidirectional and the pair is one
+   edge by design — but the direction and weight do not. `test_reindex_keeps_the_incumbent_
+   canonical_direction` is what pins it.
 5. The four new tests and what each one catches — in particular that
    `test_removing_a_node_still_drops_its_incoming_edges` is what stops the naive over-correction.
 6. Why no background job changes: `auto_linker` (`:235`), `conflict_detector` (`:167`) and

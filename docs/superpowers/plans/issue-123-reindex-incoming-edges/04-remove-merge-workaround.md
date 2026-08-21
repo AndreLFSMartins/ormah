@@ -158,13 +158,35 @@ Change it to:
             # it no longer touches the edges pointing AT the kept node, so those need no rescue.
 ```
 
+- [ ] **Step 3b: Correct the second stale ordering comment**
+
+Above `kept.touch_updated()` (island `:1564`), the comment reads:
+
+```python
+        # NOTE: index_single calls _remove_node internally which wipes edges,
+        # so we must remap edges and restore incoming edges AFTER this step.
+```
+
+`index_single` no longer calls `_remove_node`. Change it to:
+
+```python
+        # NOTE: index_single rebuilds the kept node's OWN edges, so the remap of the removed
+        # node's edges must still happen AFTER this step. Since #123 it no longer touches the
+        # edges pointing AT the kept node.
+```
+
+Located by comment text, not line number. The task-2 review flagged this one: the compensating
+code it justifies is now a no-op that still reads as load-bearing.
+
 - [ ] **Step 4: Confirm both names are gone**
 
 ```bash
 grep -n "kept_incoming" src/ormah/engine/memory_engine.py
+grep -n "wipes ALL edges\|wipes edges\|wipes and rebuilds" src/ormah/engine/memory_engine.py
 ```
 
-Expected: no output. Any hit means one of the two blocks was only partly removed, and ruff will
+Expected: no output from either. The second grep catches any of the four stale comments left
+behind — the task-2 review found them at `:1549`, `:1564`, `:1576` and `:1606`. Any hit means one of the two blocks was only partly removed, and ruff will
 flag the leftover as unused.
 
 - [ ] **Step 5: Run the merge suite**
