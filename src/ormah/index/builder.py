@@ -249,7 +249,10 @@ class IndexBuilder:
         this node never reads and cannot reconstruct.
 
         Only `source_id` edges are cleared. A row in `edges` belongs to the markdown file of
-        its source, and `_index_file_edges` reinserts exactly that set.
+        its source, and `_index_file_edges` reinserts that set MINUS any connection whose
+        reverse of the same edge_type already exists: if that reverse row lives only in
+        `edges` and not in any markdown, this node's own declared edge is dropped until this
+        node's file changes again or a full rebuild runs.
 
         Args:
             drop_vector: delete the `node_vectors` row so the embedding is regenerated. The

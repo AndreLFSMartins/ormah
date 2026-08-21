@@ -199,10 +199,11 @@ def test_touch_updated_does_not_drop_incoming_edges(engine):
     and duplicate_merger all skip a pair already recorded in `auto_link_checked`. Nothing
     ever recreates the edge; the loss stands until a full rebuild.
 
-    Self-feeding on the Beta: the auto-linker touches the node before saving, so creating
-    any new link on a node destroys that node's own incoming edges. The same shape drives
-    the importance scorer, which touched 5,216 nodes in one pass on 2026-08-21 and cost
-    ~13,800 edges in 54 minutes.
+    Self-feeding: the auto-linker touches the node before saving, so creating any new link
+    on a node destroys that node's own incoming edges. Any job that rewrites a node's
+    markdown and calls `touch_updated()` — the auto-linker and the importance scorer both
+    do — drives this same reindex path, so the loss compounds across the whole store
+    rather than needing a user edit.
     """
     from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
 
@@ -238,9 +239,10 @@ def test_incremental_update_preserves_incoming_edges(engine):
     """The path production actually takes: the 60s index updater (#123).
 
     `index_single` is not the production trigger. `incremental_update` is — it walks the
-    store, sees B's file_hash changed, and calls `_remove_node(id, keep_vectors=True)` at
-    builder.py:104, a DIFFERENT call site from the one index_single uses (:122). A fix
-    applied only to index_single leaves this path destroying incoming edges once a minute.
+    store, sees B's file_hash changed, and calls `_clear_derived(node.id)` at builder.py:104
+    (before #123, this called `_remove_node(id, keep_vectors=True)`), a DIFFERENT call site
+    from the one index_single uses (:122). A fix applied only to index_single leaves this
+    path destroying incoming edges once a minute.
     """
     from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
 
@@ -348,7 +350,7 @@ def test_reindex_keeps_the_incumbent_canonical_direction(engine):
     """When both files declare the same link, the incumbent row wins — stably.
 
     `_index_file_edges` skips inserting A -> B when the reverse B -> A already exists with
-    the same edge type (builder.py:208-214). Before #123 was fixed, reindexing B destroyed both
+    the same edge type (builder.py:226-232). Before #123 was fixed, reindexing B destroyed both
     directions, so B's own declaration was reinserted and the surviving direction was
     whichever node happened to be reindexed last. Now the incumbent survives and B's
     declaration is skipped: deterministic, and NOT a regression.
