@@ -88,12 +88,19 @@ Strip the leaked variables and **prove which tree you imported** before any test
 ```bash
 env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"
 #   the printed path MUST contain ormah-wt-<slug>/ — if it does not, STOP: the number is not yours
-env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest tests/ -q > out.txt 2>&1
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest tests/ -q > out.txt 2>&1
 echo "PYTEST_EXIT=$?" >> out.txt              # NEVER pipe pytest to `tail` — the exit code becomes tail's
 ```
 
-Both halves are load-bearing: without the import line the run is against the wrong tree, and
-without the redirect + `$?` a run with failures reports exit 0.
+`HOME` is the third leaked variable, and `env -u` cannot strip it. `Settings.model_config`
+reads `~/.config/ormah/.env` **before** the island's own `.env`, and the Beta's copy sets
+providers that `upstream/main` rejects — with `ORMAH_LLM_PROVIDER=claude_cli` the island's
+`conftest.py` dies at import with `ValidationError: llm_provider must be one of {'litellm',
+'ollama', 'none'}` before a single test runs. Only a clean `HOME` isolates it.
+
+All three parts are load-bearing: without the import line the run is against the wrong tree,
+without the redirect + `$?` a run with failures reports exit 0, and without the clean `HOME`
+the suite may not start at all.
 
 > If `/council-pr` push is blocked by `origin-is-upstream — refusing to push to a repo you
 > do not own`, that guard is council's, not git's — an explicit `git push fork fix/<slug>`
