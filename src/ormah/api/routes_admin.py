@@ -38,7 +38,7 @@ _TASK_DESCRIPTIONS = {
     "auto_linker": "Discovers and creates edges between semantically related memories.",
     "auto_cluster": "Groups memories into clusters based on semantic similarity and tags.",
     "consolidator": "Merges or summarizes redundant working-tier memories into consolidated entries.",
-    "decay_manager": "Applies time-based decay to memory importance, demoting stale unused memories.",
+    "decay_manager": "Demotes working memories to archival when FSRS retrievability falls below threshold.",
     "hippocampus": "Scans for structural patterns and promotes frequently accessed working memories to core.",
     "memory_backup": "Creates a local backup of memory source files when one is due.",
     "cloud_backup": "Encrypts and uploads a due cloud backup without changing the sync head.",

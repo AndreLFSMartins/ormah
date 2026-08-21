@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from pydantic import field_validator
@@ -151,7 +152,10 @@ class Settings(BaseSettings):
     # Importance: recency half-life (separate from search recency)
     importance_recency_half_life_days: float = 14.0
 
-    # Decay: skip nodes above this importance
+    # Decay gate removed in #222: working->archival now depends on retrievability
+    # alone, because cumulative access and edge counts could push importance
+    # permanently above any threshold. Kept because it is a documented setting;
+    # bounded forgetting (#28/#31) reintroduces a reader as the deletion protection gate.
     decay_importance_threshold: float = 0.5
 
     # Whisper-out (involuntary storage on compaction / session end)
@@ -566,6 +570,15 @@ class Settings(BaseSettings):
     def _fsrs_positive(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"FSRS parameter must be > 0, got {v}")
+        return v
+
+    @field_validator("importance_recency_half_life_days")
+    @classmethod
+    def _importance_half_life_positive(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError(f"importance_recency_half_life_days must be finite, got {v}")
+        if v <= 0:
+            raise ValueError(f"importance_recency_half_life_days must be > 0, got {v}")
         return v
 
     @field_validator("fsrs_max_stability")

@@ -124,9 +124,14 @@ It does not do embedding clustering or hierarchical clustering despite the name.
 ## Importance and Decay
 
 - `importance_scorer` computes a normalized multi-signal importance value
-- `decay_manager` uses FSRS-style retrievability and importance to decide whether to demote working memories
+- `decay_manager` uses FSRS-style retrievability alone to decide whether to demote working memories
 
-High-importance nodes are protected from decay.
+Importance does not protect a node from decay. Cumulative signals such as access
+and edge counts could otherwise push a stale node permanently above any threshold.
+Archival is reversible dormancy, not deletion — a demoted node stays reachable by
+deliberate recall. Use the `core` tier for permanent whisper eligibility. Importance
+still decides which nodes survive when `core` is over its cap — see
+[01 - Data Model](<./01 - Data Model.md>) for how `enforce_core_cap()` uses it.
 
 ### Importance Scorer
 
@@ -134,7 +139,7 @@ High-importance nodes are protected from decay.
 
 1. **Access signal**: how often the node's use has been *confirmed*, based on `access_count`
 2. **Edge signal**: how connected the node is in the graph, based on total edge count
-3. **Recency signal**: how retrievable the node currently is, using FSRS-style `exp(-days_ago / stability)`
+3. **Recency signal**: how recently the node was touched, using half-life decay `exp(-ln(2) * days_ago / importance_recency_half_life_days)` — independent of FSRS stability
 
 With the default configuration, those signals are weighted almost evenly:
 
@@ -150,8 +155,6 @@ Access and edge counts are log-normalized against reference values, then the wei
 The scorer runs every `120` minutes by default and only writes a new value when the change is meaningful.
 
 This score is not static. **Confirmed use** updates `access_count`, `last_accessed`, `last_review`, and `stability`, so a memory's importance changes over time as it is used, connected, or left untouched. Merely being surfaced does not: search results, UI search, whisper injection, and graph expansion write no lifecycle fields (issue #220). Confirmed use is a deliberate `recall_node`, or qualified positive feedback — `explicit`, `implicit`, or `auto_llm_judge`. Because `access_count` now counts confirmations rather than appearances, its values are far smaller than before, and `importance_access_reference` is calibrated against the old scale.
-
-Important current nuance: `importance_recency_half_life_days` exists in configuration, but the current scorer implementation uses FSRS stability for the recency term instead.
 
 ## Walkthrough Example
 

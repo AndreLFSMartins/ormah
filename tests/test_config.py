@@ -324,3 +324,23 @@ def test_reconcile_max_seconds_rejects_zero():
 def test_reconcile_max_seconds_rejects_negative():
     with pytest.raises(ValidationError, match="session_watcher_reconcile_max_seconds must be > 0"):
         _settings(session_watcher_reconcile_max_seconds=-1.0)
+
+
+# --- Importance recency half-life ---
+
+def test_importance_recency_half_life_must_be_positive():
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be > 0"):
+        _settings(importance_recency_half_life_days=0.0)
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be > 0"):
+        _settings(importance_recency_half_life_days=-14.0)
+
+
+def test_importance_recency_half_life_must_be_finite():
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be finite"):
+        _settings(importance_recency_half_life_days=float("inf"))
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be finite"):
+        _settings(importance_recency_half_life_days=float("nan"))
+
+
+def test_importance_recency_half_life_accepts_the_default():
+    assert _settings().importance_recency_half_life_days == 14.0
