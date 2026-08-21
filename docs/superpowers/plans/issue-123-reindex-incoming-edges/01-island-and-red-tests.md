@@ -130,7 +130,8 @@ def test_reindex_preserves_incoming_edges(engine):
 
     assert len(incoming()) == 1, "sanity: the edge must exist before B is reindexed"
 
-    # Reindex the TARGET — what the index updater does after any change to B's own file.
+    # Reindex the TARGET through index_single. (The 60s updater takes a different call
+    # site — that one is covered by test_incremental_update_preserves_incoming_edges.)
     node_b = engine.file_store.load(id_b)
     engine.builder.index_single(engine.file_store._path_for(node_b))
 
@@ -138,7 +139,7 @@ def test_reindex_preserves_incoming_edges(engine):
     assert len(rows) == 1, "incoming edge destroyed by reindexing the target (#123)"
     assert rows[0]["source_id"] == id_a
     assert rows[0]["edge_type"] == "supports"
-    assert rows[0]["weight"] == 0.9, "weight 0.9 (not the 0.5 default) proves this is A's row"""
+    assert rows[0]["weight"] == 0.9, "weight 0.9 (not the 0.5 default) proves this is A's row"
 ```
 
 - [ ] **Step 6: Write the second failing test**
