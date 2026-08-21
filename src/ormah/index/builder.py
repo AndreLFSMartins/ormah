@@ -158,7 +158,7 @@ class IndexBuilder:
                         added += 1
                     elif indexed[node.id] != file_hash:
                         prior = self._prior_row(node.id)  # read BEFORE the delete (#126)
-                        self._remove_node(node.id, keep_vectors=True)
+                        self._clear_derived(node.id)
                         self._index_file(path, file_hash, prior)
                         updated += 1
                 except Exception as e:
@@ -166,10 +166,10 @@ class IndexBuilder:
                     scan_complete = False
                     logger.warning("Failed to process %s: %s", path, e)
 
-            # Only a COMPLETE scan proves absence. _remove_node here runs with keep_vectors=False,
-            # so a node dropped on a transient read error loses its vector permanently — nothing
-            # re-embeds it — and _remove_node does not clear the checked-pair tables, so the node
-            # would come back as new (prior=None) carrying stale verdicts, defeating #126.
+            # Only a COMPLETE scan proves absence. _remove_node here deletes the node row and its
+            # vector, so a node dropped on a transient read error loses its vector permanently —
+            # nothing re-embeds it — and _remove_node does not clear the checked-pair tables, so
+            # the node would come back as new (prior=None) carrying stale verdicts, defeating #126.
             pending_removal = indexed_ids - disk_ids
             if scan_complete:
                 for node_id in pending_removal:
@@ -197,11 +197,11 @@ class IndexBuilder:
             unchanged = prior is not None and prior["content_fingerprint"] == content_fingerprint(
                 node.title, node.content, node.type.value, node.space
             )
-            self._remove_node(node.id, keep_vectors=unchanged)
+            self._clear_derived(node.id, drop_vector=not unchanged)
             self._index_file(path, file_hash, prior)
 
     def _prior_row(self, node_id: str) -> sqlite3.Row | None:
-        """The stored fingerprint + seq, read BEFORE _remove_node deletes the row.
+        """The stored fingerprint + seq, read BEFORE the upsert overwrites the row.
 
         Only the persisted fingerprint may serve as the baseline — see the comparison in
         _index_file_nodes_only for why the row's live columns must not.
@@ -237,13 +237,34 @@ class IndexBuilder:
 
         conn.execute(
             """
-            INSERT OR REPLACE INTO nodes
+            INSERT INTO nodes
             (id, type, tier, source, space, space_locked, title, content, created, updated,
              last_accessed, access_count, confidence, importance,
              valid_until, stability, last_review, archived_at, file_path, file_hash,
              content_fingerprint)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                type = excluded.type,
+                tier = excluded.tier,
+                source = excluded.source,
+                space = excluded.space,
+                space_locked = excluded.space_locked,
+                title = excluded.title,
+                content = excluded.content,
+                created = excluded.created,
+                updated = excluded.updated,
+                last_accessed = excluded.last_accessed,
+                access_count = excluded.access_count,
+                confidence = excluded.confidence,
+                importance = excluded.importance,
+                valid_until = excluded.valid_until,
+                stability = excluded.stability,
+                last_review = excluded.last_review,
+                archived_at = excluded.archived_at,
+                file_path = excluded.file_path,
+                file_hash = excluded.file_hash,
+                content_fingerprint = excluded.content_fingerprint
             """,
             (
                 node.id,
@@ -365,15 +386,39 @@ class IndexBuilder:
                 (node.id, c.target, c.edge.value, c.weight, node.created.isoformat(), c.reason),
             )
 
-    def _remove_node(self, node_id: str, *, keep_vectors: bool = False) -> None:
-        """Remove a node and its related data from the index.
+    def _clear_derived(self, node_id: str, *, drop_vector: bool = False) -> None:
+        """Clear what this node's own markdown produces, keeping the node row itself (#123).
+
+        This is the REINDEX path. The `nodes` row must survive: `edges.target_id` is
+        `REFERENCES nodes(id) ON DELETE CASCADE`, so deleting it — or writing it with
+        `INSERT OR REPLACE`, which is a delete underneath — destroys every edge pointing AT
+        this node. Those rows are declared in OTHER nodes' markdown files, which a reindex of
+        this node never reads and cannot reconstruct.
+
+        Only `source_id` edges are cleared. A row in `edges` belongs to the markdown file of
+        its source, and `_index_file_edges` reinserts exactly that set.
 
         Args:
-            keep_vectors: If True, preserve the node_vectors row. Used by
-                incremental_update where the markdown file changed but the
-                embedding content hasn't — deleting the vector would cause
-                permanent embedding loss since the index updater doesn't
-                re-embed.
+            drop_vector: delete the `node_vectors` row so the embedding is regenerated. True
+                only when the content fingerprint changed — dropping it on an unchanged-content
+                reindex is permanent loss, because nothing re-embeds it.
+        """
+        conn = self.db.conn
+        conn.execute("DELETE FROM node_tags WHERE node_id = ?", (node_id,))
+        conn.execute("DELETE FROM edges WHERE source_id = ?", (node_id,))
+        conn.execute("DELETE FROM nodes_fts WHERE id = ?", (node_id,))
+        if drop_vector:
+            try:
+                conn.execute("DELETE FROM node_vectors WHERE id = ?", (node_id,))
+            except Exception:
+                pass
+
+    def _remove_node(self, node_id: str) -> None:
+        """Remove a node and everything derived from it — the file is gone from disk.
+
+        The `ON DELETE CASCADE` on `edges` is correct here: an edge pointing at a node that no
+        longer exists is a foreign-key violation. For the REINDEX path, where the node survives,
+        use `_clear_derived` instead (#123).
         """
         conn = self.db.conn
         conn.execute("DELETE FROM node_tags WHERE node_id = ?", (node_id,))
@@ -383,8 +428,7 @@ class IndexBuilder:
         conn.execute("DELETE FROM nodes_fts WHERE id = ?", (node_id,))
         conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
         # Vector cleanup if table exists
-        if not keep_vectors:
-            try:
-                conn.execute("DELETE FROM node_vectors WHERE id = ?", (node_id,))
-            except Exception:
-                pass
+        try:
+            conn.execute("DELETE FROM node_vectors WHERE id = ?", (node_id,))
+        except Exception:
+            pass
