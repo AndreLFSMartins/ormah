@@ -1568,6 +1568,7 @@ class MemoryEngine:
             # it no longer touches the edges pointing AT the kept node from any other node, so
             # those need no rescue.
             affected_node_ids: set[str] = set()
+            remapped_edges: list[dict] = []
             for edge in original_edges:
                 new_source = kept.id if edge["source_id"] == removed.id else edge["source_id"]
                 new_target = kept.id if edge["target_id"] == removed.id else edge["target_id"]
@@ -1600,6 +1601,15 @@ class MemoryEngine:
                     "VALUES (?, ?, ?, ?, ?)",
                     (new_source, new_target, edge["edge_type"], edge["weight"], edge["created"]),
                 )
+                # Record only the rows this loop actually inserted, so undo_merge deletes
+                # exactly those and never a pre-existing edge it never created (#123).
+                remapped_edges.append(
+                    {
+                        "source_id": new_source,
+                        "target_id": new_target,
+                        "edge_type": edge["edge_type"],
+                    }
+                )
 
             # Clean up auto-linker checked pairs:
             # - removed node: delete all (node is gone)
@@ -1619,7 +1629,7 @@ class MemoryEngine:
             conn.execute(
                 "INSERT INTO merge_history "
                 "(id, proposal_id, kept_node_id, removed_node_id, removed_node_snapshot, "
-                "original_edges, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "original_edges, remapped_edges, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     merge_id,
                     proposal_id,
@@ -1627,6 +1637,7 @@ class MemoryEngine:
                     removed.id,
                     json.dumps(snapshot),
                     json.dumps(original_edges),
+                    json.dumps(remapped_edges),
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -1694,15 +1705,34 @@ class MemoryEngine:
         # Delete remapped edges that were created during merge
         # (edges involving kept_id that originated from removed_id)
         original_edges = json.loads(row["original_edges"])
-        with self.db.transaction() as conn:
+
+        # remapped_edges records exactly which rows execute_merge inserted, so undo deletes
+        # only those and never a pre-existing edge the merge skipped (#123). Access it
+        # defensively via row.keys(): a stale connection without the column, or a row written
+        # before this column existed, must fall back to deriving the remapped key from
+        # original_edges — today's behaviour.
+        if "remapped_edges" in row.keys() and row["remapped_edges"] is not None:
+            edges_to_delete = json.loads(row["remapped_edges"])
+        else:
+            edges_to_delete = []
             for edge in original_edges:
                 remapped_source = row["kept_node_id"] if edge["source_id"] == row["removed_node_id"] else edge["source_id"]
                 remapped_target = row["kept_node_id"] if edge["target_id"] == row["removed_node_id"] else edge["target_id"]
                 if remapped_source == remapped_target:
                     continue
+                edges_to_delete.append(
+                    {
+                        "source_id": remapped_source,
+                        "target_id": remapped_target,
+                        "edge_type": edge["edge_type"],
+                    }
+                )
+
+        with self.db.transaction() as conn:
+            for edge in edges_to_delete:
                 conn.execute(
                     "DELETE FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
-                    (remapped_source, remapped_target, edge["edge_type"]),
+                    (edge["source_id"], edge["target_id"], edge["edge_type"]),
                 )
 
             # Restore original edges (check both endpoints still exist)
