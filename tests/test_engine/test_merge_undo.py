@@ -470,3 +470,107 @@ def test_merge_retargets_neighbour_markdown_when_the_remap_is_skipped(engine):
     targets = [c.target for c in after.connections]
     assert id_b not in targets, "C's markdown still points at the removed node"
     assert id_a in targets, "C's markdown should be retargeted at the kept node"
+
+
+def test_merge_does_not_duplicate_a_collided_neighbour_connection(engine):
+    """A neighbour that already declares both C->kept and C->removed with the same edge type
+    must not end up with two connections to kept after the merge (#123).
+
+    Before the fix, execute_merge's neighbour markdown pass blindly retargets every
+    connection whose target is `removed`, so C ends up declaring `C -> A` twice with the
+    same edge type (once pre-existing, once retargeted from `C -> B`). execute_merge itself
+    does not reindex C, so this is invisible until the next incremental_update(): reindexing
+    C clears its outgoing edges and reinserts from markdown via INSERT OR REPLACE on
+    (source_id, target_id, edge_type) — last one wins, silently overwriting the pre-existing
+    0.8-weight edge with the retargeted 0.6-weight one.
+    """
+    from ormah.models.node import Connection
+
+    original_threshold = engine.settings.auto_link_similarity_threshold
+    engine.settings.auto_link_similarity_threshold = 999.0
+    try:
+        id_a, _ = _create_node(
+            engine, title="Kept", content="This node will be kept because it is much longer"
+        )
+        id_b, _ = _create_node(engine, title="Removed", content="Short")
+        id_c, _ = _create_node(engine, title="Third", content="An unrelated third node entirely")
+    finally:
+        engine.settings.auto_link_similarity_threshold = original_threshold
+
+    # C declares C -> A (supports, 0.8) and C -> B (supports, 0.6) — same edge type, so
+    # retargeting the B connection collides with the pre-existing A connection.
+    node_c = engine.file_store.load(id_c)
+    node_c.connections.append(Connection(target=id_a, edge=EdgeType.supports, weight=0.8))
+    node_c.connections.append(Connection(target=id_b, edge=EdgeType.supports, weight=0.6))
+    engine.file_store.save(node_c)
+    engine.builder.index_single(engine.file_store._path_for(node_c))
+
+    engine.execute_merge(id_a, id_b)
+
+    # This is the step that surfaces the clobber in production: the 60s index updater
+    # reindexes any markdown file that changed, including C's rewritten markdown.
+    engine.builder.incremental_update()
+
+    after = engine.file_store.load(id_c)
+    a_connections = [c for c in after.connections if c.target == id_a]
+    assert len(a_connections) == 1, (
+        f"C's markdown should have exactly one connection to A, got {len(a_connections)}"
+    )
+
+    row = engine.db.conn.execute(
+        "SELECT weight FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
+        (id_c, id_a, EdgeType.supports.value),
+    ).fetchone()
+    assert row is not None, "C -> A supports edge should exist"
+    assert row["weight"] == 0.8, (
+        f"C -> A supports edge should keep its original weight 0.8, got {row['weight']}"
+    )
+
+
+def test_merge_retargets_a_neighbour_connection_whose_edge_type_does_not_collide(engine):
+    """A neighbour connection to `removed` must still be retargeted when its edge type does
+    not collide with any connection the neighbour already has pointing at `kept` (#123).
+
+    Pins that the collision-avoidance fix does not over-correct into dropping every
+    retarget: C -> B (contradicts) has no matching C -> A (contradicts), so it must survive
+    as its own retargeted edge, distinct from the pre-existing C -> A (supports).
+    """
+    from ormah.models.node import Connection
+
+    original_threshold = engine.settings.auto_link_similarity_threshold
+    engine.settings.auto_link_similarity_threshold = 999.0
+    try:
+        id_a, _ = _create_node(
+            engine, title="Kept", content="This node will be kept because it is much longer"
+        )
+        id_b, _ = _create_node(engine, title="Removed", content="Short")
+        id_c, _ = _create_node(engine, title="Third", content="An unrelated third node entirely")
+    finally:
+        engine.settings.auto_link_similarity_threshold = original_threshold
+
+    # C declares C -> A (supports, 0.8) and C -> B (contradicts, 0.6) — different edge
+    # types, so no collision: both must survive after the merge.
+    node_c = engine.file_store.load(id_c)
+    node_c.connections.append(Connection(target=id_a, edge=EdgeType.supports, weight=0.8))
+    node_c.connections.append(Connection(target=id_b, edge=EdgeType.contradicts, weight=0.6))
+    engine.file_store.save(node_c)
+    engine.builder.index_single(engine.file_store._path_for(node_c))
+
+    engine.execute_merge(id_a, id_b)
+    engine.builder.incremental_update()
+
+    after = engine.file_store.load(id_c)
+    a_edges = {c.edge for c in after.connections if c.target == id_a}
+    assert EdgeType.supports in a_edges, "C -> A supports should still exist"
+    assert EdgeType.contradicts in a_edges, "C -> A contradicts should have been retargeted from B"
+
+    supports_row = engine.db.conn.execute(
+        "SELECT weight FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
+        (id_c, id_a, EdgeType.supports.value),
+    ).fetchone()
+    contradicts_row = engine.db.conn.execute(
+        "SELECT weight FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = ?",
+        (id_c, id_a, EdgeType.contradicts.value),
+    ).fetchone()
+    assert supports_row is not None and supports_row["weight"] == 0.8
+    assert contradicts_row is not None and contradicts_row["weight"] == 0.6
