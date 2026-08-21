@@ -2076,6 +2076,15 @@ class MemoryEngine:
             # mutation below. A retarget made later in this same loop must never be mistaken
             # for a pre-existing declaration by a subsequent connection to removed (#123).
             existing_kept_edges = {c.edge for c in neighbor.connections if c.target == kept.id}
+            # When the neighbour declares the same edge_type toward removed more than once,
+            # only the LAST declaration is retargeted. _index_file_edges writes edges with
+            # INSERT OR REPLACE on (source_id, target_id, edge_type), so the last markdown
+            # declaration is what becomes effective at reindex time — the retarget must keep
+            # that same winner, not the first one (#123).
+            last_removed_connection_by_edge: dict = {}
+            for c in neighbor.connections:
+                if c.target == removed.id:
+                    last_removed_connection_by_edge[c.edge] = c
             new_connections: list = []
             updated = False
             for c in neighbor.connections:
@@ -2085,9 +2094,14 @@ class MemoryEngine:
                         # would create a second (source, kept, edge_type) connection, which
                         # collides at reindex time and silently clobbers the pre-existing
                         # edge's weight (INSERT OR REPLACE, last one wins) (#123). Drop this
-                        # connection instead. Also covers two connections to removed sharing
-                        # one edge_type: the first is retargeted below and joins
-                        # existing_kept_edges, so the second is dropped here too.
+                        # connection instead. Covers every connection to removed sharing that
+                        # edge_type, since the pre-existing declaration always wins.
+                        updated = True
+                        continue
+                    if last_removed_connection_by_edge[c.edge] is not c:
+                        # An earlier duplicate declaration of this edge_type toward removed:
+                        # the later one (retargeted below) is the effective one after
+                        # reindexing, so drop this one silently (#123).
                         updated = True
                         continue
                     c.target = kept.id
