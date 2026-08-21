@@ -243,6 +243,96 @@ def test_undo_removes_remapped_edges(engine):
     assert len(after_undo) == 0
 
 
+def test_undo_does_not_delete_a_preexisting_collided_edge(engine):
+    """Undo must not delete an edge undo never created (Codex council finding, #123).
+
+    C declares BOTH C->A and C->B with the SAME edge_type in its own markdown. During the
+    merge, the remap loop for B->A skips the INSERT because C->A already exists (the
+    "already exists in either direction" check). undo_merge must not delete that
+    pre-existing C->A row just because it appears, remapped, in original_edges — it was
+    never inserted by execute_merge.
+    """
+    from ormah.models.node import Connection
+
+    original_threshold = engine.settings.auto_link_similarity_threshold
+    engine.settings.auto_link_similarity_threshold = 999.0
+    try:
+        id_a, _ = _create_node(
+            engine, title="Kept", content="This node is kept because its content is much longer"
+        )
+        id_b, _ = _create_node(engine, title="Removed", content="Short")
+        id_c, _ = _create_node(engine, title="Third", content="An unrelated third node entirely")
+    finally:
+        engine.settings.auto_link_similarity_threshold = original_threshold
+
+    # C -> A (weight 0.8) and C -> B (weight 0.6), same edge_type — the collision.
+    node_c = engine.file_store.load(id_c)
+    node_c.connections.append(Connection(target=id_a, edge=EdgeType.supports, weight=0.8))
+    node_c.connections.append(Connection(target=id_b, edge=EdgeType.supports, weight=0.6))
+    engine.file_store.save(node_c)
+    engine.builder.index_single(engine.file_store._path_for(node_c))
+
+    def c_to_a():
+        return engine.db.conn.execute(
+            "SELECT weight FROM edges WHERE source_id = ? AND target_id = ? "
+            "AND edge_type = 'supports'",
+            (id_c, id_a),
+        ).fetchall()
+
+    before = c_to_a()
+    assert len(before) == 1, "sanity: C -> A exists before the merge"
+
+    engine.execute_merge(id_a, id_b)
+    assert len(c_to_a()) == 1, "C -> A must survive the merge"
+
+    merge = engine.list_merges()[0]
+    engine.undo_merge(merge["id"])
+
+    after = c_to_a()
+    assert len(after) == 1, (
+        "undo deleted a pre-existing edge it never created: C -> A existed before the merge "
+        "and execute_merge skipped remapping it (already exists), but undo removed it anyway"
+    )
+    assert after[0]["weight"] == 0.8, "C -> A came back with the wrong weight"
+
+
+def test_undo_falls_back_when_remapped_edges_is_null(engine):
+    """Merge history rows written before this change (remapped_edges NULL) still undo
+    correctly: undo falls back to deriving the remapped key from original_edges."""
+    id_a, _ = _create_node(engine, title="A", content="Longer content for keeping")
+    id_b, _ = _create_node(engine, title="B", content="Short content")
+    id_c, _ = _create_node(engine, title="C", content="Neighbor node content")
+
+    # Create edge: B -> C (will be remapped to A -> C during merge)
+    engine.connect(ConnectRequest(
+        source_id=id_b, target_id=id_c, edge=EdgeType.supports, weight=0.8
+    ))
+
+    engine.execute_merge(id_a, id_b)
+
+    post_edges = engine.db.conn.execute(
+        "SELECT * FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = 'supports'",
+        (id_a, id_c),
+    ).fetchall()
+    assert len(post_edges) >= 1, "sanity: A -> C exists after merge (remapped)"
+
+    merge = engine.list_merges()[0]
+
+    # Simulate a merge_history row written before this change.
+    engine.db.conn.execute(
+        "UPDATE merge_history SET remapped_edges = NULL WHERE id = ?", (merge["id"],)
+    )
+    engine.db.conn.commit()
+
+    engine.undo_merge(merge["id"])
+
+    after_undo = engine.db.conn.execute(
+        "SELECT * FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = 'supports'",
+        (id_a, id_c),
+    ).fetchall()
+    assert len(after_undo) == 0, "fallback path must still remove the remapped edge"
+
+
 def test_undo_prefix_match(engine):
     """undo_merge supports prefix matching on merge IDs."""
     id_a, _ = _create_node(engine, title="A", content="Content A")
