@@ -303,6 +303,12 @@ class MemoryEngine:
         that fails to parse — is clamped up to 1 for the same reason. Only
         the total absence of any signal — no version key, no legacy flag, and
         no node carrying last_review — returns 0.
+
+        #223 deliberately does not bump this. The version records which
+        reinforcement model wrote a store's stability values; #223 changes a
+        creation default and adds a column, not the model. A bump would not
+        help either way — this is a store-level flag, and a real store spans
+        both eras of nodes.
         """
         row = self.db.conn.execute(
             "SELECT value FROM meta WHERE key = 'lifecycle_model_version'"
