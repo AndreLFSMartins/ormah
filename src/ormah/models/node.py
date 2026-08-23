@@ -76,6 +76,7 @@ class MemoryNode(BaseModel):
     archived_at: datetime | None = None  # when the node entered the archival tier (#28)
     valid_until: datetime | None = None
     deleted_at: datetime | None = None  # tombstone stamp; ordering for sync merges uses this, never `updated`
+    superseded_by: str | None = None  # id of the consolidation node that replaced this one; blocks automatic promotion (#223)
     space: str | None = None
     space_locked: bool = False  # user-curated space: auto_cluster must not reassign (#22)
     tags: list[str] = Field(default_factory=list)

@@ -53,6 +53,7 @@ def parse_node(text: str) -> MemoryNode:
         archived_at=_parse_dt(meta["archived_at"]) if meta.get("archived_at") else None,
         valid_until=valid_until,
         deleted_at=deleted_at,
+        superseded_by=meta.get("superseded_by"),
         space=meta.get("space"),
         space_locked=meta.get("space_locked", False),
         tags=meta.get("tags", []),
@@ -86,6 +87,8 @@ def serialize_node(node: MemoryNode) -> str:
         meta["valid_until"] = _format_dt(node.valid_until)
     if node.deleted_at is not None:
         meta["deleted_at"] = _format_dt(node.deleted_at)
+    if node.superseded_by is not None:
+        meta["superseded_by"] = node.superseded_by
     if node.title:
         meta["title"] = node.title
     if node.space:
