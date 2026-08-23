@@ -151,6 +151,9 @@ def test_promotion_writes_one_promote_audit_entry(engine):
     entries = engine.list_audit_log(node_id=node_id, operation="promote")
     assert len(entries) == 1
 
+    detail = json.loads(entries[0]["detail"])
+    assert detail == {"from": "archival", "to": "working"}
+
 
 def test_a_non_promoting_confirmed_use_writes_no_promote_entry(engine):
     node_id, _ = engine.remember(CreateNodeRequest(content="already working"))
