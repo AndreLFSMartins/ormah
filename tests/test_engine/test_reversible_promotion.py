@@ -30,9 +30,16 @@ def test_recall_node_promotes_exactly_the_requested_node(engine):
 
 def test_a_generic_derived_from_target_still_promotes(engine):
     """derived_from is a general relationship; only marked sources are blocked.
-    Testing only the marked node misses the block-everything bug the issue names."""
+    Testing only the marked node misses the block-everything bug the issue names.
+    Both `plain` and `marked` are genuine derived_from targets (each has an
+    incoming derived_from edge from a parent); only the superseded_by marker
+    tells them apart, so a gate that keys off the edge instead of the marker
+    would block both and fail this test."""
+    parent = _archive(engine, "a parent that derives both nodes below")
     plain = _archive(engine, "a derived_from target that was never superseded")
     marked = _archive(engine, "a genuinely superseded source", superseded_by="some-consolidation-id")
+    engine.connect(ConnectRequest(source_id=parent, target_id=plain, edge=EdgeType.derived_from))
+    engine.connect(ConnectRequest(source_id=parent, target_id=marked, edge=EdgeType.derived_from))
 
     engine._record_confirmed_use(plain)
     engine._record_confirmed_use(marked)
@@ -56,7 +63,6 @@ def test_a_superseded_node_is_not_promoted_but_still_tracks_access(engine):
 def test_a_working_node_is_left_alone(engine):
     """promote() guards tier ordering; a working node must not be touched by the branch."""
     node_id, _ = engine.remember(CreateNodeRequest(content="already working"))
-    engine.file_store.load(node_id)
 
     engine._record_confirmed_use(node_id)
 

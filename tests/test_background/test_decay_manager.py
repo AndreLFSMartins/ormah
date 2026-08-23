@@ -424,7 +424,6 @@ def test_a_seven_day_lease_survives_six_and_a_half_days_and_decays_after_seven(e
     def _age_it(days: float) -> None:
         node = engine.file_store.load(node_id)
         node.stability = 5.814            # Task 4 makes remember() do this; pinned here on purpose
-        node.importance = 0.0             # under decay_importance_threshold (0.5), gate is `>=`
         node.last_accessed = now - timedelta(days=days)
         engine.builder.index_single(engine.file_store.save(node))
 
