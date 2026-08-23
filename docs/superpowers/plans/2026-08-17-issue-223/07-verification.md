@@ -81,27 +81,25 @@ Expected: only your own #223 commits above `upstream/main` (`90c431e` at re-base
 
 ```bash
 env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"
-env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest tests/ -q > full.txt 2>&1
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest tests/ -q > full.txt 2>&1
 echo "PYTEST_EXIT=$?" >> full.txt
 tail -20 full.txt
 grep -E "^FAILED" full.txt
 ```
 
-Expected: the printed path contains `ormah-wt-223/`. The failure list must be **exactly** the 12 baseline names in `00-overview.md` — `tests/test_setup.py` (6), `tests/test_config.py` (2), `tests/test_background/test_consolidator.py::test_consolidation_settings_defaults`, `tests/test_background/test_hippocampus.py::test_new_file_triggers_ingestion`, and two in `tests/test_background/test_session_watcher.py`. The pass count should be `1925 + <the tests you added>`.
+Expected: the printed path contains `ormah-wt-223/`. The failure list must be **exactly** the 4 baseline names in `00-overview.md` (re-derived 2026-08-23) — `tests/test_setup.py::TestConfigureCodexMcp` (3) and `tests/test_adapters/test_space_detect.py::test_detect_returns_none_for_home`. The pass count should be `1948 + <the tests you added>`.
 
-Any new name is a regression. Do not proceed until the list matches. Compare **names**, not counts and not files: Tasks 1 and 6 append tests to `tests/test_config.py` and `tests/test_background/test_consolidator.py`, so those two files now hold both baseline failures and new passing tests.
+Any new name is a regression. Do not proceed until the list matches. Compare **names**, not counts and not files.
 
-- [ ] **Step 7: Confirm the six env-leak failures still pass in isolation**
+- [ ] **Step 7: Confirm the four baseline failures are still environmental**
+
+The three `test_setup.py` failures come from a real `codex` binary at `/opt/homebrew/bin/codex`; the `test_space_detect` one from the `HOME=$(mktemp -d)` gate itself (macOS `/tmp` → `/private/tmp`). Neither file is touched by #223 — confirm with:
 
 ```bash
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
-    tests/test_background/test_consolidator.py tests/test_background/test_hippocampus.py \
-    tests/test_background/test_session_watcher.py tests/test_config.py -q > clean.txt 2>&1
-echo "PYTEST_EXIT=$?" >> clean.txt
-tail -5 clean.txt
+git diff --name-only upstream/main...HEAD | grep -E 'test_setup|space_detect|setup\.py' && echo "STOP: baseline files touched" || echo "clean: baseline files untouched"
 ```
 
-Expected: `PYTEST_EXIT=0`. This proves the four files' failures in Step 6 are still the `~/.config/ormah/.env` leak (issue #106 / PR #128) and not something #223 introduced.
+Expected: `clean: baseline files untouched`.
 
 - [ ] **Step 8: Lint**
 
