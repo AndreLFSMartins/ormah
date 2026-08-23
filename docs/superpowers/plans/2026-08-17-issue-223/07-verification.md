@@ -75,7 +75,7 @@ Expected: `clean: no product docs`. If anything prints, revert those paths to `u
 git log --oneline upstream/main..HEAD
 ```
 
-Expected: only your own #223 commits above `06b6447` and the two dependency merges. Anything you did not write means the island was rebuilt from the wrong base.
+Expected: only your own #223 commits above `upstream/main` (`90c431e` at re-base, 2026-08-23) — no dependency merges. Anything you did not write means the island was rebuilt from the wrong base.
 
 - [ ] **Step 6: Run the full suite**
 
@@ -131,6 +131,6 @@ Do **not** push or open the PR from inside this plan. Report to André:
 
 When he approves, the push is explicit and named: `git push fork feat/223-reversible-promotion`. Never a bare `git push` (the branch has no upstream on purpose) and never toward `fork/fix/220-confirmed-use`, which would corrupt PR #234.
 
-**After PRs #234 and #239 land upstream:** `git rebase --onto upstream/main 06b6447`.
+**PRs #234 and #239 have landed and the island already sits on `upstream/main`** — no rebase step remains.
 
 **When #223 is later cherry-picked onto `local-main`:** the promotion is incomplete there. `local-main` has `archived_at` and `forgetting_manager` (#28), which the island does not, so a promoted node keeps a stale graveyard timestamp and may remain purge-eligible while sitting in `working`. The cherry-pick must additionally clear `archived_at` on the node and in the index UPDATE. Use `git cherry-pick`, not `git merge` — and first run `git log local-main..feat/223-reversible-promotion` and `git diff --name-status local-main...feat/223-reversible-promotion | grep '^D'` to check for hygiene commits that would delete `docs/superpowers/`.

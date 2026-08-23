@@ -23,11 +23,13 @@ Append to `tests/test_engine/test_reinforcement_cooldown.py`, matching the fixtu
 
 ```python
 def test_bounded_update_runs_before_the_floor(engine):
-    """Archival, S=1, last_review 30d ago -> 5.814.
+    """Archival, S=1, last used 30d ago -> 5.814.
 
     The bounded update gives 1 -> 2.0 (spacing saturates at cap 2.0); the floor
     then lifts 2.0 -> 5.814. The INVERTED order would give ~8.23
     (5.814 * (1 + 0.5 * 5.814**-0.5 * 2.0)), so equality at 5.814 catches it.
+    Since e13d733 the spacing anchor is last_accessed (last_review only opens
+    the cooldown gate), so both are backdated.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -37,7 +39,7 @@ def test_bounded_update_runs_before_the_floor(engine):
     node = engine.file_store.load(node_id)
     node.tier = Tier.archival
     node.stability = 1.0
-    node.last_review = datetime.now(timezone.utc) - timedelta(days=30)
+    node.last_accessed = node.last_review = datetime.now(timezone.utc) - timedelta(days=30)
     engine.builder.index_single(engine.file_store.save(node))
 
     engine._record_confirmed_use(node_id)

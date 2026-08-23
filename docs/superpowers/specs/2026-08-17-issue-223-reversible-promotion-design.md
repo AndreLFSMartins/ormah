@@ -5,7 +5,10 @@
 **Decision source:** #191 (closed design decision), transcribed in
 `docs/lifecycle/2026-08-14-issue-dossier.md` §4 (#223 section, lines 172-201).
 **Depends on:** #220 (confirmed-use semantics) and #221 (bounded reinforcement) — both still
-open upstream at the time of writing.
+open upstream at the time of writing. **Amendment 2026-08-23:** all three have landed
+(issues #220 via PR #234, #222 via PR #235, #221 via PR #239); `upstream/main` at `90c431e` carries every symbol this spec names
+(`_record_confirmed_use`, `_CONFIRMED_USE_SOURCES`, `LIFECYCLE_MODEL_VERSION`, `lifecycle.py`) and
+none of #223's (`superseded_by`, `promotion_floor` — verified by `git grep` on `upstream/main`).
 
 ## Problem
 
@@ -38,6 +41,16 @@ were actually superseded.
   those sources.
 
 ## Branch strategy
+
+> **Superseded 2026-08-23.** Both dependencies landed upstream before any #223 commit existed, so
+> the island `feat/223-reversible-promotion` (worktree `../ormah-wt-223`) was reset with
+> `git reset --hard upstream/main` to `90c431e` — a plain Recipe A island, no dependency merges,
+> no rebase. `git log --oneline upstream/main..HEAD` is empty at the start of implementation. The
+> subsection below is kept as history of the conflict resolution; its instructions no longer apply.
+> One behavioural delta from the landed #221 matters to this spec: `_record_confirmed_use` now
+> anchors the spacing factor on `last_accessed or last_review` (commit `e13d733`), while the
+> cooldown gate still reads `last_review`. The worked examples in the test table were updated
+> accordingly.
 
 Issue #223 needs #220 and #221 code, and neither has landed upstream. The island is cut from
 `upstream/main` and takes both dependencies as explicit merges, so the dependency boundary is one
@@ -299,8 +312,8 @@ Everything else extends the file that already owns the concern.
 | Promotion never reduces stability | `tests/test_lifecycle.py` | `promotion_floor(50.0, 5.814) == 50.0`. ⚠️ Equality at `50.0`, not `>= 5.814` — with `>=`, a `min`/`max` swap passes. |
 | Creation uses the knob | `tests/test_engine/test_memory_engine.py` | Set `fsrs_initial_stability = 9.0` (a **non-default** value) → `remember()` → `node.stability == 9.0`. ⚠️ Testing with `5.814` would pass by accident if someone also changed the model default. |
 | Before scheduler cadence | `tests/test_background/test_decay_manager.py` | `S = 5.814`, `last_accessed = now − 6.5d` → `run_decay` leaves it `working`; at `− 7.5d` it demotes. Drives the real job, not the formula. |
-| Bounded update precedes the floor | `tests/test_engine/test_reinforcement_cooldown.py` | Archival, `S = 1`, `last_review = now − 30d` → `stability == 5.814`. The bounded update gives `1 → 2.0` (spacing saturates at cap `2.0`); the floor lifts `2 → 5.814`. Inverted order would instead give ≈ **8.23** (`5.814 × (1 + 0.5 × 5.814**-0.5 × 2)`), so equality at `5.814` catches the inversion. |
-| Floor applies under cooldown | `tests/test_engine/test_reinforcement_cooldown.py` | Archival, `S = 1`, `last_review = now` → `tier == working` **and** `stability == 5.814`. ⚠️ Asserting only `tier == working` passes with the bug, and the node would re-archive in ~29 h. |
+| Bounded update precedes the floor | `tests/test_engine/test_reinforcement_cooldown.py` | Archival, `S = 1`, `last_accessed = last_review = now − 30d` (the spacing anchor is `last_accessed` since `e13d733`; `last_review` only opens the cooldown gate) → `stability == 5.814`. The bounded update gives `1 → 2.0` (spacing saturates at cap `2.0`); the floor lifts `2 → 5.814`. Inverted order would instead give ≈ **8.23** (`5.814 × (1 + 0.5 × 5.814**-0.5 × 2)`), so equality at `5.814` catches the inversion. |
+| Floor applies under cooldown | `tests/test_engine/test_reinforcement_cooldown.py` | Archival, `S = 1`, `last_review = now` (cooldown closed, so `reinforced_stability` is skipped) → `tier == working` **and** `stability == 5.814`. ⚠️ Asserting only `tier == working` passes with the bug, and the node would re-archive in ~29 h. |
 | Floor does not stack | `tests/test_engine/test_reinforcement_cooldown.py` | Two confirmed uses in one day on an archival `S = 1` node → `5.814`, not `11.628` and not `6.814`. |
 | `recall_node` promotes exactly the requested node | `tests/test_engine/test_reversible_promotion.py` | Archival A with archival neighbour B. `recall_node(A)` → A becomes `working`, **B stays `archival`**. ⚠️ Without the neighbour, an implementation promoting every id in `whisper_log_ids` passes — and `recall_node` does create `whisper_log` rows for neighbours, in `_log_feedback_candidates`. |
 | Qualified positives only | `tests/test_engine/test_confirmed_use_contract.py` (where #220's matrix lives) | Parametrised: `(1,"explicit",injected=1)` promotes · `(1,"auto_heuristic",1)` does not · `(-1,"explicit",1)` does not · `(1,"explicit",injected=0)` does not. |
