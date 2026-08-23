@@ -416,6 +416,27 @@ def test_a_node_used_today_is_not_decayed_while_its_review_lags(engine):
     assert _get_tier(engine, node_id) == "working"
 
 
+def test_a_seven_day_lease_survives_six_and_a_half_days_and_decays_after_seven(engine):
+    """Drives run_decay, not the formula: the seven-day lease must reach the job."""
+    now = datetime.now(timezone.utc)
+    node_id, _ = engine.remember(CreateNodeRequest(content="a fresh working memory"))
+
+    def _age_it(days: float) -> None:
+        node = engine.file_store.load(node_id)
+        node.stability = 5.814            # Task 4 makes remember() do this; pinned here on purpose
+        node.importance = 0.0             # under decay_importance_threshold (0.5), gate is `>=`
+        node.last_accessed = now - timedelta(days=days)
+        engine.builder.index_single(engine.file_store.save(node))
+
+    _age_it(6.5)
+    run_decay(engine)
+    assert _get_tier(engine, node_id) == Tier.working.value
+
+    _age_it(7.5)
+    run_decay(engine)
+    assert _get_tier(engine, node_id) == Tier.archival.value
+
+
 def test_zero_stability_decays_on_the_configured_initial_stability(engine, monkeypatch):
     """Decay must use the same zero fallback reinforcement uses (council round 3, I3).
 
