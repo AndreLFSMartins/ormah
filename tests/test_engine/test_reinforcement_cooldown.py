@@ -219,3 +219,60 @@ def test_concurrent_touches_run_reinforcement_once(engine, monkeypatch):
         f"cooldown ran reinforcement {len(reinforcements)} times under concurrency"
     )
     assert _row(engine, node_id)["access_count"] == 4, "every touch must still be counted"
+
+
+# --- Interaction with reversible promotion (#223) ---------------------------
+
+def test_bounded_update_runs_before_the_floor(engine):
+    """Archival, S=1, last used 30d ago -> 5.814.
+
+    The bounded update gives 1 -> 2.0 (spacing saturates at cap 2.0); the floor
+    then lifts 2.0 -> 5.814. The INVERTED order would give ~8.23
+    (5.814 * (1 + 0.5 * 5.814**-0.5 * 2.0)), so equality at 5.814 catches it.
+    Since e13d733 the spacing anchor is last_accessed (last_review only opens
+    the cooldown gate), so both are backdated.
+    """
+    node_id, _ = engine.remember(CreateNodeRequest(content="an old archived memory"))
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.archival
+    node.stability = 1.0
+    node.last_accessed = node.last_review = datetime.now(timezone.utc) - timedelta(days=30)
+    engine.builder.index_single(engine.file_store.save(node))
+
+    engine._record_confirmed_use(node_id)
+
+    promoted = engine.file_store.load(node_id)
+    assert promoted.stability == 5.814
+    assert promoted.tier is Tier.working
+
+
+def test_floor_applies_even_when_the_cooldown_blocked_the_numeric_update(engine):
+    """Asserting only tier == working passes WITH the bug — and the node would
+    re-archive in ~29 h on S=1. The stability assertion is the real gate."""
+    node_id, _ = engine.remember(CreateNodeRequest(content="recently reviewed, archived"))
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.archival
+    node.stability = 1.0
+    node.last_review = datetime.now(timezone.utc)   # on cooldown
+    engine.builder.index_single(engine.file_store.save(node))
+
+    engine._record_confirmed_use(node_id)
+
+    promoted = engine.file_store.load(node_id)
+    assert promoted.tier is Tier.working
+    assert promoted.stability == 5.814
+
+
+def test_the_floor_does_not_stack_across_two_uses_in_one_day(engine):
+    """Two confirmed uses in one day -> 5.814, not 11.628 and not 6.814."""
+    node_id, _ = engine.remember(CreateNodeRequest(content="used twice today"))
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.archival
+    node.stability = 1.0
+    node.last_review = datetime.now(timezone.utc)
+    engine.builder.index_single(engine.file_store.save(node))
+
+    engine._record_confirmed_use(node_id)
+    engine._record_confirmed_use(node_id)
+
+    assert engine.file_store.load(node_id).stability == 5.814

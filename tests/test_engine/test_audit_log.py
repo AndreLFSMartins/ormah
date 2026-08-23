@@ -136,3 +136,25 @@ def test_delete_node_soft_deletes_file(engine):
 
     # Node should no longer be loadable from store
     assert engine.file_store.load(node_id) is None
+
+
+def test_promotion_writes_one_promote_audit_entry(engine):
+    from ormah.models.node import Tier
+
+    node_id, _ = engine.remember(CreateNodeRequest(content="about to be promoted"))
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.archival
+    engine.builder.index_single(engine.file_store.save(node))
+
+    engine._record_confirmed_use(node_id)
+
+    entries = engine.list_audit_log(node_id=node_id, operation="promote")
+    assert len(entries) == 1
+
+
+def test_a_non_promoting_confirmed_use_writes_no_promote_entry(engine):
+    node_id, _ = engine.remember(CreateNodeRequest(content="already working"))
+
+    engine._record_confirmed_use(node_id)
+
+    assert engine.list_audit_log(node_id=node_id, operation="promote") == []
