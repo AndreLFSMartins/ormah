@@ -695,3 +695,28 @@ def test_memory_restore_lock_excludes_live_remember(engine):
     thread.join(timeout=2)
     assert finished.is_set()
     assert engine.file_store.load(result[0]) is not None
+
+
+def test_remember_uses_the_configured_initial_stability(engine):
+    """Set a NON-default value: testing with 5.814 would pass by accident if
+    someone also changed MemoryNode.stability's model default."""
+    from ormah.models.node import CreateNodeRequest
+
+    engine.settings.fsrs_initial_stability = 9.0
+
+    node_id, _ = engine.remember(CreateNodeRequest(content="a brand new memory"))
+
+    assert engine.file_store.load(node_id).stability == 9.0
+
+
+def test_remember_writes_the_initial_stability_to_the_index(engine):
+    from ormah.models.node import CreateNodeRequest
+
+    engine.settings.fsrs_initial_stability = 9.0
+
+    node_id, _ = engine.remember(CreateNodeRequest(content="a brand new memory"))
+
+    row = engine.db.conn.execute(
+        "SELECT stability FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+    assert row["stability"] == 9.0
