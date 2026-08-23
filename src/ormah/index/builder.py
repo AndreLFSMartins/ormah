@@ -240,10 +240,10 @@ class IndexBuilder:
             INSERT INTO nodes
             (id, type, tier, source, space, space_locked, title, content, created, updated,
              last_accessed, access_count, confidence, importance,
-             valid_until, stability, last_review, archived_at, file_path, file_hash,
-             content_fingerprint)
+             valid_until, stability, last_review, archived_at, superseded_by,
+             file_path, file_hash, content_fingerprint)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 type = excluded.type,
                 tier = excluded.tier,
@@ -262,6 +262,7 @@ class IndexBuilder:
                 stability = excluded.stability,
                 last_review = excluded.last_review,
                 archived_at = excluded.archived_at,
+                superseded_by = excluded.superseded_by,
                 file_path = excluded.file_path,
                 file_hash = excluded.file_hash,
                 content_fingerprint = excluded.content_fingerprint
@@ -285,6 +286,7 @@ class IndexBuilder:
                 node.stability,
                 node.last_review.isoformat() if node.last_review else None,
                 node.archived_at.isoformat() if node.archived_at else None,
+                node.superseded_by,
                 str(path),
                 file_hash,
                 new_fp,

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     stability REAL DEFAULT 1.0,
     last_review TEXT,
     archived_at TEXT,
+    superseded_by TEXT,
     file_path TEXT NOT NULL,
     file_hash TEXT NOT NULL,
     seq INTEGER NOT NULL DEFAULT 0,

@@ -616,3 +616,20 @@ def test_incremental_update_preserves_the_node_vector(engine):
 
     assert updated == 1, "sanity: the updater must have seen the node as changed"
     assert has_vector(), "incremental_update dropped the node_vectors row"
+
+
+def test_reindex_preserves_superseded_by(engine):
+    """INSERT OR REPLACE drops omitted columns to their DEFAULT — the marker must be
+    in the column list, or the consolidator's own update_node wipes it (#223)."""
+    from ormah.models.node import CreateNodeRequest
+
+    node_id, _ = engine.remember(CreateNodeRequest(content="a source about to be superseded"))
+
+    node = engine.file_store.load(node_id)
+    node.superseded_by = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    engine.builder.index_single(engine.file_store.save(node))
+
+    row = engine.db.conn.execute(
+        "SELECT superseded_by FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+    assert row["superseded_by"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
