@@ -271,6 +271,43 @@ def test_negative_feedback_never_confirms(engine, source):
     )
 
 
+@pytest.mark.parametrize(
+    "signal,source,was_injected,should_promote",
+    [
+        (1, "explicit", 1, True),
+        (1, "auto_heuristic", 1, False),
+        (-1, "explicit", 1, False),
+        (1, "explicit", 0, False),
+    ],
+)
+def test_only_qualified_positives_promote(engine, signal, source, was_injected, should_promote):
+    """#223: promotion needs a qualified positive on an event the agent actually saw."""
+    from ormah.models.node import Tier
+
+    node_id = _make_nodes(engine, count=1)[0]
+
+    # Seed the whisper-log event BEFORE demoting: _seed_whisper_log goes through
+    # recall_search, and an archival node scores below the relevance floor, so no
+    # row would be created. The matrix is about signal/source/was_injected, not
+    # about ranking — seeding first keeps the event identical either way.
+    if was_injected:
+        whisper_log_id = _seed_whisper_log(engine, node_id)
+    else:
+        whisper_log_id = _seed_held_back_whisper_log(engine, node_id)
+
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.archival
+    engine.builder.index_single(engine.file_store.save(node))
+
+    engine.submit_feedback(node_id, signal=signal, source=source, whisper_log_id=whisper_log_id)
+
+    expected = Tier.working if should_promote else Tier.archival
+    assert engine.file_store.load(node_id).tier is expected, (
+        f"signal={signal} source={source} was_injected={was_injected}: "
+        f"expected {expected}, got {engine.file_store.load(node_id).tier}"
+    )
+
+
 # --- Idempotency contracts (second council round: the latch, not affinity) ---
 
 def test_replaying_the_same_positive_feedback_confirms_once(engine):

@@ -65,3 +65,46 @@ def test_concurrent_recall_does_not_raise(engine):
         t.join()
 
     assert not errors, f"concurrent recall raised: {errors[:3]}"
+
+
+def test_decay_and_promotion_leave_disk_and_index_agreeing(engine):
+    """"Did not raise" does not catch divergence — this compares disk against index.
+
+    run_decay holds _memory_operation_lock for its whole run (serialized_memory_job
+    -> engine.memory_operation()), and _record_confirmed_use takes the same RLock,
+    so the two cannot interleave in-process.
+    """
+    from ormah.background.decay_manager import run_decay
+    from ormah.models.node import Tier
+
+    node_id, _ = engine.remember(CreateNodeRequest(content="contended node"))
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.archival
+    engine.builder.index_single(engine.file_store.save(node))
+
+    errors: list[BaseException] = []
+
+    def decay():
+        try:
+            run_decay(engine)
+        except BaseException as e:  # noqa: BLE001 - recorded and re-raised below
+            errors.append(e)
+
+    def promote():
+        try:
+            engine._record_confirmed_use(node_id)
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=decay), threading.Thread(target=promote)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    on_disk = engine.file_store.load(node_id).tier.value
+    in_index = engine.db.conn.execute(
+        "SELECT tier FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()["tier"]
+    assert on_disk == in_index

@@ -2601,6 +2601,29 @@ class MemoryEngine:
             )
             node.last_review = now
 
+        # Reversible promotion (#223, decided in #191). Deliberately AFTER the
+        # cooldown block: the bounded update runs on the OLD stability first, then
+        # the floor lifts the result. The floor also runs when the cooldown blocked
+        # the numeric update — otherwise a second confirmed use in one day promotes
+        # with S=1, buying a ~29 h lease that the next decay run immediately revokes.
+        # promotion_floor is max() against a constant, so running it on every
+        # promotion cannot push stability past one initial lease.
+        #
+        # superseded_by blocks ONLY consolidation sources. A generic derived_from
+        # target promotes, which is the narrowing #191 asked for over the originally
+        # proposed blanket exclusion.
+        promoted = False
+        if node.tier is Tier.archival and node.superseded_by is None:
+            node.stability = lifecycle.promotion_floor(
+                node.stability, self.settings.fsrs_initial_stability
+            )
+            # Goes through TierManager.promote(), not `node.tier = ...`: this gives
+            # #223's root cause its first production caller and brings the tier-ordering
+            # guard along. promote() calls touch_updated(), so `updated` advances — that
+            # is correct, the tier genuinely changed, and `updated` feeds LWW sync; not
+            # advancing it would let a stale remote copy win and silently re-archive.
+            promoted = self.tier_manager.promote(node, Tier.working)
+
         # Standard access tracking
         node.last_accessed = now
         node.access_count += 1
@@ -2608,14 +2631,26 @@ class MemoryEngine:
         self.file_store.save(node)
         with self.db.transaction() as conn:
             conn.execute(
-                "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, last_review = ? WHERE id = ?",
+                "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, "
+                "last_review = ?, tier = ?, updated = ? WHERE id = ?",
                 (
                     node.access_count,
                     node.last_accessed.isoformat(),
                     node.stability,
                     node.last_review.isoformat() if node.last_review else None,
+                    node.tier.value,
+                    node.updated.isoformat(),
                     node_id,
                 ),
+            )
+
+        if promoted:
+            # After the transaction: _write_audit_log opens its own, so it cannot
+            # sit inside. Same position update_node places its own audit call.
+            self._write_audit_log(
+                operation="promote",
+                node_id=node_id,
+                detail=json.dumps({"from": "archival", "to": "working"}),
             )
 
     # --- Private helpers ---
