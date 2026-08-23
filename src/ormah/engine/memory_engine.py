@@ -707,6 +707,7 @@ class MemoryEngine:
             title=title,
             content=req.content,
             confidence=req.confidence,
+            stability=self.settings.fsrs_initial_stability,
         )
 
         # Mark and promote identity nodes
