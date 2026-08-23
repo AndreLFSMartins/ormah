@@ -138,9 +138,9 @@ class IndexBuilder:
             INSERT OR REPLACE INTO nodes
             (id, type, tier, source, space, title, content, created, updated,
              last_accessed, access_count, confidence, importance,
-             valid_until, stability, last_review, file_path, file_hash)
+             valid_until, stability, last_review, superseded_by, file_path, file_hash)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?)
             """,
             (
                 node.id,
@@ -159,6 +159,7 @@ class IndexBuilder:
                 node.valid_until.isoformat() if node.valid_until else None,
                 node.stability,
                 node.last_review.isoformat() if node.last_review else None,
+                node.superseded_by,
                 str(path),
                 file_hash,
             ),
