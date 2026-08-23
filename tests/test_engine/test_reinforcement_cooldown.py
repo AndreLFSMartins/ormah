@@ -266,7 +266,11 @@ def test_floor_applies_even_when_the_cooldown_blocked_the_numeric_update(engine)
 
 
 def test_the_floor_does_not_stack_across_two_uses_in_one_day(engine):
-    """Two confirmed uses in one day -> 5.814, not 11.628 and not 6.814."""
+    """The first call is the load-bearing one: with a `+` instead of `max` it
+    would land at 6.814 instead of 5.814. After that call the node is
+    already `working`, so the second call never reaches the archival-only
+    floor branch at all -- stacking is structurally impossible here, since
+    promotion_floor is `max()` against a constant, not an accumulator."""
     node_id, _ = engine.remember(CreateNodeRequest(content="used twice today"))
     node = engine.file_store.load(node_id)
     node.tier = Tier.archival

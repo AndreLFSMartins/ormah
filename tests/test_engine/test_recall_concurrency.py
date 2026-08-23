@@ -106,7 +106,7 @@ def test_decay_and_promotion_leave_disk_and_index_agreeing(engine):
     def decay():
         try:
             run_decay(engine)
-        except BaseException as e:  # noqa: BLE001 - recorded and re-raised below
+        except BaseException as e:  # noqa: BLE001 - recorded and asserted empty below
             errors.append(e)
 
     def promote():

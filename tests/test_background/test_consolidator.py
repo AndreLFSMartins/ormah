@@ -460,5 +460,3 @@ def test_marking_precedes_demotion_so_a_crash_leaves_working_plus_marked(engine,
     node = engine.file_store.load(a)
     assert node.tier is Tier.working
     assert node.superseded_by is not None
-
-
