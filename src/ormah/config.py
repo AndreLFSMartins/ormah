@@ -167,7 +167,7 @@ class Settings(BaseSettings):
     working_decay_days: int = 14  # Deprecated: superseded by FSRS-based decay
 
     # FSRS spaced repetition decay
-    fsrs_initial_stability: float = 1.0    # days; starting stability for new nodes
+    fsrs_initial_stability: float = 5.814   # days; -7 / ln(0.3) — a seven-day unused lease
     fsrs_decay_threshold: float = 0.3      # R below this = decay candidate
     fsrs_max_stability: float = 365.0      # cap at 1 year
 
