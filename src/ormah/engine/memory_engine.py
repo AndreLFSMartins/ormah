@@ -2653,6 +2653,30 @@ class MemoryEngine:
                 detail=json.dumps({"from": "archival", "to": "working"}),
             )
 
+    @_serialized_memory_operation
+    def _mark_superseded(self, source_id: str, consolidation_id: str) -> None:
+        """Record that *source_id* was replaced by *consolidation_id* (#223).
+
+        Written here rather than through update_node because superseded_by is
+        deliberately absent from UpdateNodeRequest: it is policy state, and no
+        agent sets it. Serialized for the same reason _record_confirmed_use is —
+        this is a load-modify-save pair.
+
+        `updated` is intentionally NOT advanced here: the consolidator's
+        update_node(tier=archival) on the next line already does it, and
+        touch_updated is reserved for content mutations.
+        """
+        node = self.file_store.load(source_id)
+        if node is None:
+            return
+        node.superseded_by = consolidation_id
+        self.file_store.save(node)
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE nodes SET superseded_by = ? WHERE id = ?",
+                (consolidation_id, source_id),
+            )
+
     # --- Private helpers ---
 
     def _supplement_temporal(

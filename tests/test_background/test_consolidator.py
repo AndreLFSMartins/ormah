@@ -392,3 +392,73 @@ def test_real_claude_cli_consolidate_creates_node_with_valid_type(consolidation_
     assert new_row is not None
     assert new_row["content"]
     assert new_row["type"] in _CONSOLIDATE_RESPONSE_SCHEMA["properties"]["type"]["enum"]
+
+
+def test_consolidation_marks_sources_as_superseded(engine):
+    from ormah.background.consolidator import _apply_consolidation
+    from ormah.models.node import CreateNodeRequest, Tier
+
+    a, _ = engine.remember(CreateNodeRequest(content="source one about pytest fixtures"))
+    b, _ = engine.remember(CreateNodeRequest(content="source two about pytest fixtures"))
+
+    new_id = _apply_consolidation(engine, [a, b], "Pytest fixtures", "merged body", "fact")
+
+    for source_id in (a, b):
+        node = engine.file_store.load(source_id)
+        assert node.tier is Tier.archival
+        assert node.superseded_by == new_id
+
+
+def test_the_marker_survives_in_the_index_after_consolidation(engine):
+    """Regression for the INSERT OR REPLACE column drop (Task 3): update_node
+    re-indexes the file one line after the marker is written."""
+    from ormah.background.consolidator import _apply_consolidation
+    from ormah.models.node import CreateNodeRequest
+
+    a, _ = engine.remember(CreateNodeRequest(content="source one about ruff config"))
+    b, _ = engine.remember(CreateNodeRequest(content="source two about ruff config"))
+
+    new_id = _apply_consolidation(engine, [a, b], "Ruff config", "merged body", "fact")
+
+    row = engine.db.conn.execute(
+        "SELECT superseded_by FROM nodes WHERE id = ?", (a,)
+    ).fetchone()
+    assert row["superseded_by"] == new_id
+
+
+def test_a_superseded_source_does_not_come_back_on_confirmed_use(engine):
+    """The end-to-end point of #223's exception: consolidation sources stay buried."""
+    from ormah.background.consolidator import _apply_consolidation
+    from ormah.models.node import CreateNodeRequest, Tier
+
+    a, _ = engine.remember(CreateNodeRequest(content="source one about sqlite vec"))
+    b, _ = engine.remember(CreateNodeRequest(content="source two about sqlite vec"))
+    _apply_consolidation(engine, [a, b], "sqlite-vec", "merged body", "fact")
+
+    engine._record_confirmed_use(a)
+
+    assert engine.file_store.load(a).tier is Tier.archival
+
+
+def test_marking_precedes_demotion_so_a_crash_leaves_working_plus_marked(engine, monkeypatch):
+    """Inject a demotion failure and assert the node ended working + marked,
+    NOT archival + unmarked — the promotable node we must never create."""
+    from ormah.background.consolidator import _apply_consolidation
+    from ormah.models.node import CreateNodeRequest, Tier
+
+    a, _ = engine.remember(CreateNodeRequest(content="source one about apscheduler"))
+    b, _ = engine.remember(CreateNodeRequest(content="source two about apscheduler"))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("demotion failed")
+
+    monkeypatch.setattr(engine, "update_node", boom)
+
+    with pytest.raises(RuntimeError):
+        _apply_consolidation(engine, [a, b], "APScheduler", "merged body", "fact")
+
+    node = engine.file_store.load(a)
+    assert node.tier is Tier.working
+    assert node.superseded_by is not None
+
+

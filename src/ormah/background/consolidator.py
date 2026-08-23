@@ -188,7 +188,10 @@ def _apply_consolidation(
                         (new_id,),
                     )
 
-    # Create derived_from edges and demote originals to archival
+    # Create derived_from edges, record supersession, then demote originals to archival.
+    # Mark BEFORE demoting (#223): crashing between the two leaves the node working +
+    # marked, which is harmless because the marker only blocks automatic promotion.
+    # The reverse order would leave it archival + unmarked — a promotable node.
     for node_id in node_ids:
         try:
             engine.connect(ConnectRequest(
@@ -199,6 +202,7 @@ def _apply_consolidation(
             ))
         except Exception:
             pass
+        engine._mark_superseded(node_id, new_id)
         engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
 
     return new_id
