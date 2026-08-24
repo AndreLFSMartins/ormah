@@ -2618,17 +2618,29 @@ class MemoryEngine:
         # superseded_by blocks ONLY consolidation sources. A generic derived_from
         # target promotes, which is the narrowing #191 asked for over the originally
         # proposed blanket exclusion.
+        #
+        # And it blocks only while the consolidation node it points at still exists:
+        # a dangling marker (the replacement was deleted — the #192 scenario) would
+        # otherwise bury this memory forever with nothing left standing in for it, so
+        # the next confirmed use un-buries it. The marker itself is NOT cleared —
+        # it is the provenance record, and only the block is lifted. The extra load
+        # is cheap and rare: it runs only for an archival node that carries a marker.
         promoted = False
-        if node.tier is Tier.archival and node.superseded_by is None:
-            node.stability = lifecycle.promotion_floor(
-                node.stability, self.settings.fsrs_initial_stability
+        if node.tier is Tier.archival:
+            superseded_by_live = (
+                node.superseded_by is not None
+                and self.file_store.load(node.superseded_by) is not None
             )
-            # Goes through TierManager.promote(), not `node.tier = ...`: this gives
-            # #223's root cause its first production caller and brings the tier-ordering
-            # guard along. promote() calls touch_updated(), so `updated` advances — that
-            # is correct, the tier genuinely changed, and `updated` feeds LWW sync; not
-            # advancing it would let a stale remote copy win and silently re-archive.
-            promoted = self.tier_manager.promote(node, Tier.working)
+            if not superseded_by_live:
+                node.stability = lifecycle.promotion_floor(
+                    node.stability, self.settings.fsrs_initial_stability
+                )
+                # Goes through TierManager.promote(), not `node.tier = ...`: this gives
+                # #223's root cause its first production caller and brings the tier-ordering
+                # guard along. promote() calls touch_updated(), so `updated` advances — that
+                # is correct, the tier genuinely changed, and `updated` feeds LWW sync; not
+                # advancing it would let a stale remote copy win and silently re-archive.
+                promoted = self.tier_manager.promote(node, Tier.working)
 
         # Standard access tracking
         node.last_accessed = now

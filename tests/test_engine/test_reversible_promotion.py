@@ -34,10 +34,14 @@ def test_a_generic_derived_from_target_still_promotes(engine):
     Both `plain` and `marked` are genuine derived_from targets (each has an
     incoming derived_from edge from a parent); only the superseded_by marker
     tells them apart, so a gate that keys off the edge instead of the marker
-    would block both and fail this test."""
+    would block both and fail this test.
+
+    The marker must point at a node that really exists: a dangling marker no longer
+    blocks (see test_a_dangling_superseded_by_no_longer_blocks_promotion)."""
     parent = _archive(engine, "a parent that derives both nodes below")
     plain = _archive(engine, "a derived_from target that was never superseded")
-    marked = _archive(engine, "a genuinely superseded source", superseded_by="some-consolidation-id")
+    replacement, _ = engine.remember(CreateNodeRequest(content="the consolidation node"))
+    marked = _archive(engine, "a genuinely superseded source", superseded_by=replacement)
     engine.connect(ConnectRequest(source_id=parent, target_id=plain, edge=EdgeType.derived_from))
     engine.connect(ConnectRequest(source_id=parent, target_id=marked, edge=EdgeType.derived_from))
 
@@ -50,7 +54,8 @@ def test_a_generic_derived_from_target_still_promotes(engine):
 
 def test_a_superseded_node_is_not_promoted_but_still_tracks_access(engine):
     """Blocking promotion must not silently swallow the access bookkeeping."""
-    marked = _archive(engine, "superseded but still read", superseded_by="some-consolidation-id")
+    replacement, _ = engine.remember(CreateNodeRequest(content="the consolidation node"))
+    marked = _archive(engine, "superseded but still read", superseded_by=replacement)
     before = engine.file_store.load(marked).access_count
 
     engine._record_confirmed_use(marked)
@@ -67,6 +72,32 @@ def test_a_working_node_is_left_alone(engine):
     engine._record_confirmed_use(node_id)
 
     assert engine.file_store.load(node_id).tier is Tier.working
+
+
+def test_a_dangling_superseded_by_no_longer_blocks_promotion(engine):
+    """Self-healing against permanent burial (#192 scenario): the consolidation node
+    the marker points at was deleted, so nothing is left to represent this memory.
+    The block is lifted on the next confirmed use — but the marker itself stays,
+    because it is the provenance record, not the lock."""
+    dangling = "00000000-0000-0000-0000-000000000000"
+    marked = _archive(engine, "superseded by a node that no longer exists", superseded_by=dangling)
+
+    engine._record_confirmed_use(marked)
+
+    after = engine.file_store.load(marked)
+    assert after.tier is Tier.working
+    assert after.superseded_by == dangling
+
+
+def test_a_live_superseded_by_still_blocks_promotion(engine):
+    """The discriminator is whether the consolidation node is still loadable, pinned
+    directly next to the dangling case: same marker field, opposite outcome."""
+    replacement, _ = engine.remember(CreateNodeRequest(content="the live consolidation node"))
+    marked = _archive(engine, "a genuinely superseded source", superseded_by=replacement)
+
+    engine._record_confirmed_use(marked)
+
+    assert engine.file_store.load(marked).tier is Tier.archival
 
 
 def test_promotion_is_written_to_the_index_too(engine):
