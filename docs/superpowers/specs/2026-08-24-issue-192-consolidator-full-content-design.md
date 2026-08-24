@@ -49,7 +49,7 @@ When a cluster does not fit, it is **split**, never truncated. Nodes that cannot
 ### 1. `config.py` — one new setting
 
 ```python
-consolidation_max_prompt_chars: int = 40000   # ~20k tokens; 5 sources of 8k chars with headroom
+consolidation_max_prompt_chars: int = 24000   # ~12k tokens; see "Measured sizing" below
 ```
 
 Validator: `>= 4000`. Below that the template's own 2,440-char overhead leaves no room for two
@@ -86,6 +86,8 @@ it is the repo's single chars→tokens heuristic, its only dependency is the lea
 and duplicating the constant would let the two estimates drift. If a second consumer makes the
 name actively misleading, renaming the module is a separate mechanical change.
 
+With the 24000 default that is `12000 + 4096 = 16096` tokens.
+
 `workspace` stays at its `"judge"` default — it only selects the `cwd` of the `claude_cli`
 subprocess, so a new workspace would be surface without gain.
 
@@ -109,6 +111,32 @@ discovery to compensate is a separate change and is not made here.
 `subclusters_queued`, `subclusters_consolidated` and `nodes_skipped_oversized`.
 `clusters_consolidated` keeps its name and now counts consolidated sub-clusters — it is the same
 quantity operators already read as "how many LLM consolidations happened this run".
+
+## Measured sizing (2026-08-24)
+
+Measured against `~/.local/share/ormah/memory/index.db` (5,923 nodes, 301 consolidation events
+reconstructed from `derived_from` edges). Per the FORK-WORKFLOW evidence gate this store is a
+product of `local-main`, but what is measured here is memory content size, which does not depend
+on which branch produced it.
+
+| Metric | chars |
+|---|---|
+| Largest single node, any tier | 5,513 |
+| p99.9 of `length(content)`, all tiers | 3,527 |
+| Worst real consolidation event (full prompt) | 12,961 |
+| p99 over the 301 real events | 9,950 |
+| Worst plausible cluster today (5 largest `working`) | 11,886 |
+| Absolute theoretical worst (5 largest nodes in the store) | 24,038 |
+
+At any budget >= 16,000 **none** of the 301 historical events would have been split. The split is
+a safety net for the tail, not the common path — which is why the budget is sized at 1.85x the
+worst real event rather than above the theoretical worst. Sizing for 24,038 would pay permanent
+KV cache to never exercise a mechanism that handles that case correctly.
+
+Two caveats recorded with the numbers. Four events carry a single `derived_from` source, which
+`consolidation_min_cluster_size=2` makes impossible — almost certainly edges lost to the open
+issue #123 (reindex destroys inbound edges). And the issue's own worst case of 7,943 chars no
+longer exists in the store; today's maximum is 5,513.
 
 ## Flow
 
