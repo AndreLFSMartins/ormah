@@ -2641,6 +2641,14 @@ class MemoryEngine:
                 # is correct, the tier genuinely changed, and `updated` feeds LWW sync; not
                 # advancing it would let a stale remote copy win and silently re-archive.
                 promoted = self.tier_manager.promote(node, Tier.working)
+                if promoted:
+                    # local-main only (#28): archived_at does not exist upstream, so the
+                    # #223 PR cannot carry this. update_node already resets the graveyard
+                    # clock when a node leaves archival; promote() bypasses that path, and
+                    # a working node holding archived_at is a state update_node never
+                    # produces — forgetting_manager reads `archived_at is None` as
+                    # "un-aged, protect it", so the stale value is a live contradiction.
+                    node.archived_at = None
 
         # Standard access tracking
         node.last_accessed = now
@@ -2650,7 +2658,7 @@ class MemoryEngine:
         with self.db.transaction() as conn:
             conn.execute(
                 "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, "
-                "last_review = ?, tier = ?, updated = ? WHERE id = ?",
+                "last_review = ?, tier = ?, updated = ?, archived_at = ? WHERE id = ?",
                 (
                     node.access_count,
                     node.last_accessed.isoformat(),
@@ -2658,6 +2666,7 @@ class MemoryEngine:
                     node.last_review.isoformat() if node.last_review else None,
                     node.tier.value,
                     node.updated.isoformat(),
+                    node.archived_at.isoformat() if node.archived_at else None,
                     node_id,
                 ),
             )

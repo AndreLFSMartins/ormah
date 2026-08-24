@@ -55,3 +55,24 @@ def test_re_entering_archival_restamps_fresh(engine):
     engine.update_node(node_id, UpdateNodeRequest(tier=Tier.working))   # clears
     engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))  # re-stamps
     assert _archived_at(engine, node_id) is not None
+
+
+def test_confirmed_use_promotion_clears_archived_at(engine):
+    """#223's promotion must clear the graveyard clock, like update_node already does.
+
+    local-main only: `archived_at` is #28 and does not exist upstream, so #223's
+    `_record_confirmed_use` promotes through TierManager.promote() without touching it.
+    A working node carrying archived_at is a state update_node never produces, and
+    forgetting_manager reads `archived_at is None` as "un-aged, protect it".
+    """
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="promote me back", type=NodeType.fact, tier=Tier.working, title="p"))
+    engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
+    assert _archived_at(engine, node_id) is not None, "sanity: the clock must be running"
+
+    engine._record_confirmed_use(node_id)
+
+    node = engine.file_store.load(node_id)
+    assert node.tier is Tier.working, "sanity: the node must actually have been promoted"
+    assert node.archived_at is None, "the file still carries a stale graveyard clock"
+    assert _archived_at(engine, node_id) is None, "the index still carries it"
