@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consolidated nodes are terminal for cluster discovery</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">Consolidated nodes are terminal for cluster discovery</div>
+  <a href="#context">Context</a>
+  <a href="#problem">The problem</a>
+  <a href="#decision">Decision</a>
+  <a href="#trade-offs" class="lvl-3">Trade-offs accepted</a>
+  <a href="#alternatives" class="lvl-3">Alternatives rejected</a>
+  <a href="#implementation">Implementation</a>
+  <a href="#exclusion-predicate" class="lvl-3">Exclusion predicate</a>
+  <a href="#query-updates" class="lvl-3">Query updates</a>
+  <a href="#scope" class="lvl-3">Scope of change</a>
+  <a href="#tests">Test specification</a>
+  <a href="#test-unit" class="lvl-3">Unit: discovery never returns a consolidated id</a>
+  <a href="#test-e2e" class="lvl-3">End to end: the issue's scenario</a>
+  <a href="#test-fixture" class="lvl-3">Fixture validation</a>
+  <a href="#out-of-scope">Out of scope</a>
+  <a href="#verification">Verification gates</a>
+</nav>
+<main>
+<article class="spec">
+  <header class="spec-header">
+    <p class="eyebrow">Design specification</p>
+    <h1><em>Consolidated nodes are terminal</em> for cluster discovery</h1>
+    <p class="meta">Issue r-spade/ormah#261 · 2026-08-25</p>
+  </header>
+
+  <div class="metrics">
+    <div class="metric">
+      <div class="big">1</div>
+      <div class="label">File changed</div>
+    </div>
+    <div class="metric">
+      <div class="big">2</div>
+      <div class="label">Test cases</div>
+    </div>
+    <div class="metric">
+      <div class="big">0</div>
+      <div class="label">Migrations</div>
+    </div>
+  </div>
+
+  <section>
+    <h2 id="context">Context</h2>
+    <dl>
+      <dt>Issue</dt>
+      <dd><a href="https://github.com/r-spade/ormah/issues/261">r-spade/ormah#261</a> — consolidated nodes stay in the <code>working</code> tier and re-cluster</dd>
+      <dt>Base</dt>
+      <dd><code>upstream/main</code> (clean island, Recipe A of <code>FORK-WORKFLOW.md</code>)</dd>
+      <dt>Branch</dt>
+      <dd><code>fix/261-consolidated-nodes-are-terminal</code>, worktree <code>../ormah-wt-261</code></dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="problem">The problem</h2>
+    <p class="statement">Consolidation is lossy when applied iteratively to its own output.</p>
+    <p><code>_apply_consolidation</code> creates the consolidated node with <code>tags=["consolidated"]</code> and leaves <code>tier</code> at the <code>CreateNodeRequest</code> default, <code>working</code>. This makes consolidation outputs eligible as consolidation inputs on the next run.</p>
+    <p>Consolidated nodes are short by construction (3–8 sentences), so they cluster more easily than their sources. When they re-cluster, the new summary is written <em>from two summaries</em> while the real sources sit in <code>archival</code>, no longer read. Each pass is lossy; applied to its own output the loss compounds and cannot be recovered.</p>
+    <div class="callout">
+      <strong>Verified by:</strong> reading <code>upstream/main:src/ormah/background/consolidator.py</code> (the two <code>SELECT</code> queries) and <code>upstream/main:src/ormah/models/node.py</code> (<code>tier: Tier = Tier.working</code> default).
+    </div>
+  </section>
+
+  <section>
+    <h2 id="decision">Decision</h2>
+    <p class="statement">A <code>consolidated</code> node is <em>terminal</em> for cluster discovery.</p>
+    <p>Consolidated nodes will never be a seed and never be a member of a consolidation cluster. A summary is the primary representation of its cluster and is not re-summarised.</p>
+
+    <h3 id="trade-offs">Trade-offs accepted</h3>
+    <p>When genuinely new related memories arrive, they form a <em>second</em> summary next to the first instead of updating it. Merging the two is the <code>duplicate_merger</code>'s job (human-curated proposals, ADR 0005).</p>
+    <p>Re-consolidating from the original sources — the semantically ideal behaviour — needs provenance that <a href="https://github.com/r-spade/ormah/issues/258">issue #258</a> is building and interacts with <a href="https://github.com/r-spade/ormah/issues/260">issue #260</a>'s cluster splitting. This is a follow-up, recorded on the issue, not part of this change.</p>
+
+    <h3 id="alternatives">Alternatives rejected</h3>
+    <ul>
+      <li><strong>Member yes, seed no, at most one per cluster</strong> — still rewrites a summary from a summary (S1 → S2 → S3), the same defect at a lower rate.</li>
+      <li><strong>Re-consolidate from sources</strong> — right semantics, wrong size for this issue (needs provenance work from #258 first).</li>
+      <li><strong>Document the current behaviour</strong> — the short-summary size constraint pushes toward re-clustering, so "summary of summary" would be a frequent accident, not a rare choice.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2 id="implementation">Implementation</h2>
+    <p>One file: <code>src/ormah/background/consolidator.py</code>, only the <code>_find_consolidation_clusters</code> function.</p>
+
+    <h3 id="exclusion-predicate">Exclusion predicate</h3>
+    <p>A module constant holds the predicate, written once and used in both queries:</p>
+    <pre><code class="language-python">_NOT_CONSOLIDATED = (
+    "NOT EXISTS (SELECT 1 FROM node_tags WHERE node_id = nodes.id AND tag = 'consolidated')"
+)</code></pre>
+
+    <h3 id="query-updates">Query updates</h3>
+    <ul>
+      <li><strong>Seed query:</strong> <code>SELECT id, title, content, space FROM nodes WHERE tier = 'working' AND {_NOT_CONSOLIDATED}</code></li>
+      <li><strong>Member query:</strong> <code>SELECT id, title, content, space, tier FROM nodes WHERE id = ? AND {_NOT_CONSOLIDATED}</code> (existing <code>tier != "working"</code> check on fetched row stays)</li>
+    </ul>
+
+    <h3 id="scope">Scope of change</h3>
+    <ul>
+      <li>Docstring states that <code>consolidated</code>-tagged nodes are terminal and excluded from discovery as seed and as member</li>
+      <li><code>node_tags(tag)</code> is already indexed (<code>idx_node_tags_tag</code>, <code>schema.sql</code>)</li>
+      <li><strong>No schema change, no migration, no settings</strong></li>
+      <li><code>_apply_consolidation</code>, the prompt, <code>run_consolidation</code>, and <code>_consolidate_cluster</code> are untouched — <a href="https://github.com/r-spade/ormah/pull/260">PR #260</a> (#192) edits those, not discovery, so the two changes do not conflict</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2 id="tests">Test specification</h2>
+    <p>Tests in <code>tests/test_background/test_consolidator.py</code>. Both must be red on <code>upstream/main</code>. Embeddings are real (fastembed via the <code>engine</code> fixture); identical content yields similarity 1.0, making clustering deterministic.</p>
+
+    <h3 id="test-unit">Unit: discovery never returns a consolidated id</h3>
+    <ol>
+      <li>Create two similar raw <code>working</code> nodes and two <code>working</code> nodes with the <em>same</em> content tagged <code>consolidated</code></li>
+      <li>Call <code>_find_consolidation_clusters(engine)</code></li>
+      <li>Assert no returned cluster contains a consolidated id</li>
+    </ol>
+    <p class="statement">Worked example without the fix:</p>
+    <p>The seed "consolidated A" pulls "consolidated B" (similarity 1.0) and the raw pair into one cluster of 4 — the assertion fails.</p>
+    <p class="statement">With the fix:</p>
+    <p>One cluster of the two raw nodes only.</p>
+
+    <h3 id="test-e2e">End to end: the issue's scenario</h3>
+    <ol>
+      <li>Set <code>consolidation_max_cluster_nodes = 2</code></li>
+      <li>Create four similar sources</li>
+      <li>Mock <code>llm_generate</code> to return one fixed summary</li>
+      <li>Run 1 produces N1 and N2 (both <code>working</code>, identical content)</li>
+      <li>Run 2 must create <strong>no</strong> new node; N1 and N2 remain <code>working</code>; no <code>derived_from</code> edge targets N1 or N2</li>
+    </ol>
+    <p class="statement">Without the fix:</p>
+    <p>Run 2 consolidates N1 + N2 into N3 — the summary-of-summaries.</p>
+
+    <h3 id="test-fixture">Fixture validation</h3>
+    <p class="callout warn">Before the red phase: <code>engine.remember(..., tags=["consolidated"])</code> must populate <code>node_tags</code>. If test 1 is green <em>before</em> the fix, this assumption failed and the predicate must read tags another way (the markdown), not the index.</p>
+  </section>
+
+  <section>
+    <h2 id="out-of-scope">Out of scope</h2>
+    <ul>
+      <li>Re-consolidation from sources when new related memories arrive (follow-up after <a href="https://github.com/r-spade/ormah/issues/258">#258</a>)</li>
+      <li>Idempotency under retry (<a href="https://github.com/r-spade/ormah/issues/258">#258</a>)</li>
+      <li>The Claude-in-the-loop maintenance route (<a href="https://github.com/r-spade/ormah/issues/259">#259</a>)</li>
+      <li>Anything in <code>_apply_consolidation</code>, the prompt, or the LLM route</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2 id="verification">Verification gates</h2>
+    <p>Island gates from <code>FORK-WORKFLOW.md</code>, in this order:</p>
+    <ol>
+      <li>Import gate (<code>ormah.__file__</code> inside <code>ormah-wt-261/</code>)</li>
+      <li>Red run of the two tests</li>
+      <li>Apply fix</li>
+      <li>Green run of the full suite with clean <code>HOME</code></li>
+      <li><code>git log --oneline upstream/main..HEAD</code> showing only this change's commits</li>
+    </ol>
+  </section>
+
+</article>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:6cf56cc395e37f1e64b7ccf040eafa9cca6f1485737b36a3628c516170737664 -->
