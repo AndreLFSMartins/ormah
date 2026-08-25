@@ -246,3 +246,24 @@ def test_two_summaries_are_not_summarised_again(monkeypatch, engine):
         ).fetchall()
     }
     assert tiers == {"working"}
+
+
+def test_consolidated_seed_never_recruits_raw_neighbours(engine):
+    """Seed-side exclusion, proven independently of the member check (#261).
+
+    Discovery scans working nodes in insertion order, so the summaries go in FIRST: without
+    the seed predicate the first summary seeds a cluster and recruits the raw pair, which the
+    member predicate alone cannot prevent.
+    """
+    from ormah.background.consolidator import _find_consolidation_clusters
+
+    summaries = [
+        _remember(engine, _SAME_TEXT, f"Summary {i}", tags=["consolidated"]) for i in range(2)
+    ]
+    raw = [_remember(engine, _SAME_TEXT, f"Raw {i}") for i in range(2)]
+
+    clusters = _find_consolidation_clusters(engine)
+    ids_in_clusters = {n["id"] for cluster in clusters for n in cluster}
+
+    assert ids_in_clusters.isdisjoint(summaries), "a consolidated node seeded a cluster"
+    assert set(raw) <= ids_in_clusters, "the raw pair should still cluster"
