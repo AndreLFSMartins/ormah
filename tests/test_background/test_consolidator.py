@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ormah.background import consolidator
 from ormah.config import Settings
 from ormah.models.node import CreateNodeRequest, NodeType, Tier
 
@@ -171,3 +172,45 @@ def test_inverted_cluster_bounds_returns_empty_and_warns(consolidation_engine, c
     assert "consolidation_max_cluster_nodes" in caplog.text
 
 
+def test_full_source_content_reaches_the_prompt(monkeypatch, consolidation_engine):
+    """The consolidator must never summarize from a partial view of a source (#192)."""
+    engine, ids = consolidation_engine
+    marker = "MARKER-BEYOND-THE-OLD-300-CHAR-CAP"
+    long_content = "padding. " * 600 + marker  # ~5400 chars, marker at the very end
+    cluster = [
+        {"id": ids[0], "title": "long source", "content": long_content, "space": None},
+        {"id": ids[1], "title": "short source", "content": "A short one.", "space": None},
+    ]
+    captured = {}
+
+    def spy(settings, prompt, json_mode=True, **kwargs):
+        captured["prompt"] = prompt
+        return json.dumps({"title": "t", "summary": "s", "type": "fact"})
+
+    monkeypatch.setattr("ormah.background.llm_client.llm_generate", spy)
+
+    consolidator._consolidate_cluster(engine, cluster)
+
+    assert marker in captured["prompt"], "content past char 300 never reached the model"
+    assert long_content in captured["prompt"]
+    assert "A short one." in captured["prompt"]
+
+
+def test_consolidation_logs_source_and_summary_sizes(monkeypatch, consolidation_engine, caplog):
+    """A lossy consolidation must be detectable after the fact (#192)."""
+    engine, ids = consolidation_engine
+    cluster = [
+        {"id": ids[0], "title": "a", "content": "x" * 400, "space": None},
+        {"id": ids[1], "title": "b", "content": "y" * 600, "space": None},
+    ]
+
+    def spy(settings, prompt, json_mode=True, **kwargs):
+        return json.dumps({"title": "t", "summary": "z" * 120, "type": "fact"})
+
+    monkeypatch.setattr("ormah.background.llm_client.llm_generate", spy)
+
+    with caplog.at_level("INFO"):
+        consolidator._consolidate_cluster(engine, cluster)
+
+    assert "source_chars=1000" in caplog.text
+    assert "summary_chars=120" in caplog.text

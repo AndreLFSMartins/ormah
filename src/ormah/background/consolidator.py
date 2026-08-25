@@ -208,12 +208,17 @@ def _consolidate_cluster(engine, cluster: list[dict]) -> None:
     """Consolidate a single cluster using LLM summarization."""
     from ormah.background.llm_client import extract_json, llm_generate
 
-    # Build prompt
+    # Build prompt from FULL content, never a slice (#192). The prompt below tells the model its
+    # output "becomes the PRIMARY representation of this knowledge" and that it must "preserve
+    # every concrete detail" -- instructions that are meaningless about text the model was never
+    # shown, and destructive here because _apply_consolidation demotes every source to archival
+    # immediately afterwards. A cluster too large for the prompt is split upstream in
+    # run_consolidation; it is never trimmed.
     items = []
     for node in cluster:
         title = node.get("title") or "Untitled"
         content = node.get("content", "")
-        items.append(f"- [{title}]: {content[:300]}")
+        items.append(f"- [{title}]: {content}")
     items_text = "\n".join(items)
 
     prompt = f"""\
@@ -260,4 +265,13 @@ Return a JSON object:
         return
 
     node_ids = [n["id"] for n in cluster]
-    _apply_consolidation(engine, node_ids, title, summary, node_type)
+    new_id = _apply_consolidation(engine, node_ids, title, summary, node_type)
+    # Audit trail (#192): the sources are demoted to archival by the call above, so this summary
+    # becomes what gets read instead of them. Recording both sizes makes a consolidation that
+    # shed too much visible in the logs without re-measuring the store by hand.
+    logger.info(
+        "consolidated %d sources into %s: source_chars=%d summary_chars=%d sources=%s",
+        len(node_ids), new_id,
+        sum(len(n.get("content") or "") for n in cluster), len(summary),
+        ",".join(node_ids),
+    )
