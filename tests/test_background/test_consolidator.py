@@ -197,6 +197,33 @@ def test_full_source_content_reaches_the_prompt(monkeypatch, consolidation_engin
     assert "A short one." in captured["prompt"]
 
 
+def test_consolidation_pins_the_llm_route(monkeypatch, consolidation_engine):
+    """The consolidation call must pin its own input window, not inherit the server default.
+
+    Without ``route="consolidation"`` the prompt falls back to whatever ``num_ctx`` the Ollama
+    server defaults to, and the full content this PR started sending is silently truncated by
+    the model instead of by us (#192).
+    """
+    engine, ids = consolidation_engine
+    cluster = [
+        {"id": ids[0], "title": "a", "content": "A body.", "space": None},
+        {"id": ids[1], "title": "b", "content": "B body.", "space": None},
+    ]
+    captured = {}
+
+    def spy(settings, prompt, json_mode=True, **kwargs):
+        captured.update(kwargs)
+        return json.dumps({"title": "t", "summary": "s", "type": "fact"})
+
+    monkeypatch.setattr("ormah.background.llm_client.llm_generate", spy)
+
+    consolidator._consolidate_cluster(engine, cluster)
+
+    assert captured.get("route") == "consolidation", (
+        f"the consolidation call did not pin its route: kwargs={captured}"
+    )
+
+
 def test_consolidation_logs_source_and_summary_sizes(monkeypatch, consolidation_engine, caplog):
     """A lossy consolidation must be detectable after the fact (#192)."""
     engine, ids = consolidation_engine
@@ -254,6 +281,23 @@ class TestSplitClusterToFit:
         assert flat == ["a", "b", "c", "d"]        # order preserved
         assert len(flat) == len(set(flat))          # no duplicates
 
+    def test_a_cluster_landing_exactly_on_the_budget_stays_whole(self):
+        """The boundary is inclusive: a cluster that fills the budget exactly is ONE call.
+
+        The budget comes from ``_item_chars`` rather than a magic number so it cannot rot when
+        the item rendering changes. Splitting here would cost a second LLM call and, worse, cut
+        apart sources that do fit together.
+        """
+        cluster = [self._node("a", 400), self._node("b", 400)]
+        exact = sum(consolidator._item_chars(n) for n in cluster)
+
+        parts = consolidator._split_cluster_to_fit(cluster, exact)
+        assert [[n["id"] for n in p] for p in parts] == [["a", "b"]]
+
+        # one char short is the other side of the same boundary
+        parts = consolidator._split_cluster_to_fit(cluster, exact - 1)
+        assert [[n["id"] for n in p] for p in parts] == [["a"], ["b"]]
+
     def test_node_larger_than_the_whole_budget_is_dropped_with_a_warning(self, caplog):
         cluster = [self._node("small", 100), self._node("huge", 5_000), self._node("s2", 100)]
         with caplog.at_level("WARNING"):
@@ -262,7 +306,13 @@ class TestSplitClusterToFit:
         assert [[n["id"] for n in p] for p in parts] == [["small", "s2"]]
         assert "huge" in caplog.text
 
-    def test_no_source_is_ever_truncated(self):
+    def test_split_does_not_mutate_source_content(self):
+        """The splitter hands back the input dicts untouched.
+
+        This guards the SPLITTER only -- it returns the dicts by reference, so it cannot catch
+        truncation in the renderer. That is what test_full_source_content_reaches_the_prompt is
+        for.
+        """
         cluster = [self._node("a", 400), self._node("b", 400)]
         parts = consolidator._split_cluster_to_fit(cluster, 500)
         for part in parts:
@@ -504,3 +554,43 @@ def test_oversized_source_is_left_working_end_to_end(monkeypatch, consolidation_
         assert engine.db.conn.execute(
             "SELECT tier FROM nodes WHERE id = ?", (other,)
         ).fetchone()["tier"] == "archival"
+
+
+def test_render_item_never_writes_the_literal_string_none():
+    """A NULL content column must render as empty, not as the four characters 'None'.
+
+    ``nodes.content`` is nullable, and ``dict.get(key, default)`` returns the stored ``None``
+    when the key is present -- the default only applies to a MISSING key. The audit log already
+    uses the ``or ""`` idiom; the renderer must match, or a node with NULL content teaches the
+    model that its body is the word "None".
+    """
+    assert consolidator._render_item({"id": "n", "title": "t", "content": None}) == "- [t]: "
+    assert "None" not in consolidator._render_item({"id": "n", "title": "t", "content": None})
+
+
+def test_a_failed_consolidation_is_logged_with_its_sources(monkeypatch, consolidation_engine,
+                                                           caplog):
+    """A consolidation the LLM never answered must not vanish silently (#192).
+
+    ``llm_generate`` returns None on timeout, connect error, or a disabled provider, and the
+    adapter's own warning names neither the job nor the cluster. run_consolidation's closing
+    report is guarded by ``if consolidated_count:``, so a run where EVERY consolidation failed
+    emits nothing at all: the daily job stays green while the working tier stops being curated.
+    """
+    engine, ids = consolidation_engine
+    cluster = [
+        {"id": ids[0], "title": "a", "content": "x" * 50, "space": None},
+        {"id": ids[1], "title": "b", "content": "y" * 50, "space": None},
+    ]
+    monkeypatch.setattr(
+        "ormah.background.llm_client.llm_generate",
+        lambda settings, prompt, json_mode=True, **kw: None,
+    )
+
+    with caplog.at_level("WARNING"):
+        consolidator._consolidate_cluster(engine, cluster)
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, "a consolidation that produced nothing left no trace"
+    text = " ".join(r.getMessage() for r in warnings)
+    assert ids[0] in text and ids[1] in text, f"the warning does not name the sources: {text}"

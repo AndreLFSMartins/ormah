@@ -65,7 +65,7 @@ class TestConsolidationRoute:
 class TestOllamaInputWindow:
     """num_ctx=None must OMIT the key, never substitute a default of our own."""
 
-    def test_num_ctx_is_absent_from_the_payload_when_unset(self):
+    def test_num_ctx_defaults_to_none(self):
         adapter = OllamaAdapter(model="m")
         assert adapter.num_ctx is None
 
