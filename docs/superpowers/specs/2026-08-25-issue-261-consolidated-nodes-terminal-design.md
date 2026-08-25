@@ -95,6 +95,13 @@ similarity 1.0, which is what makes clustering deterministic here.
    deletes that edge on the very next reindex anyway.) Without the fix run 2 consolidates
    N1 + N2 into N3 — the summary-of-summaries.
 
+3. **Unit — seed-side exclusion, independently of the member check** (added after the
+   council: Codex showed tests 1–2 stay green when the predicate is removed from the seed
+   `SELECT` only). Same setup as test 1 but the two `consolidated` nodes are inserted
+   **first**: discovery scans in insertion order, so without the seed predicate the first
+   summary seeds a cluster and recruits the raw pair. Verified red under a seed-only revert;
+   under a member-only revert tests 1 and 3 both go red; with the fix all green.
+
 Fixture check to do first in the red phase: `engine.remember(..., tags=["consolidated"])`
 must populate `node_tags`. If test 1 is green *before* the fix, this assumption failed and the
 predicate has to read tags another way (the markdown), not the index.
