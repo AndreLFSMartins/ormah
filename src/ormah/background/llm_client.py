@@ -79,10 +79,19 @@ _consolidation_adapter_initialised: bool = False
 # (and its process/connection never spun up) just to be thrown away.
 _adapter_lock = threading.Lock()
 
-# Chars per token assumed when converting a character budget into an input window. English prose
-# runs ~4 chars/token; 2.0 is a deliberate 2x safety margin, so a denser payload (hex digests,
-# base64, CJK) still fits the window we ask for. Erring large costs KV cache; erring small costs
-# a silently truncated prompt, which is the failure #192 exists to remove.
+# Chars per token assumed when converting a character budget into an input window. Latin-script
+# prose -- EN and PT-BR, which is what this store holds -- runs ~4 chars/token, so 2.0 asks for
+# roughly twice the tokens such a payload actually needs.
+#
+# That margin is NOT universal, and the direction matters: it only helps for content LESS dense
+# than 2 chars/token. A payload denser than that overruns the window we request. CJK is the known
+# case at ~1 char/token or worse -- a full 24000-char prompt is then ~24000 tokens against the
+# 16096 this asks for (24000/2 + llm_num_predict), and Ollama truncates the excess silently, which
+# is exactly the failure #192 exists to remove.
+#
+# A character budget cannot bound tokens; only the configured model's tokenizer can. This constant
+# buys headroom for the corpus ormah actually stores and is deliberately not a proof of fit.
+# Erring large costs KV cache; erring small costs a silently truncated prompt.
 _CHARS_PER_TOKEN = 2.0
 
 
