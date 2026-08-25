@@ -140,162 +140,167 @@ summary:hover{color:var(--accent)}
 <nav class="toc">
   <div class="eyebrow">[ SPEC ]</div>
   <div class="doc-title">Consolidated nodes are terminal for cluster discovery</div>
-  <a href="#problem">The problem</a>
-  <a href="#decision">The decision</a>
-  <a href="#consequence" class="lvl-3">Consequence accepted</a>
-  <a href="#alternatives" class="lvl-3">Alternatives rejected</a>
-  <a href="#implementation">The implementation</a>
-  <a href="#module-constant" class="lvl-3">Module constant</a>
-  <a href="#queries" class="lvl-3">Query changes</a>
-  <a href="#docstring" class="lvl-3">Docstring</a>
-  <a href="#schema" class="lvl-3">Schema &amp; migration</a>
-  <a href="#side-effect" class="lvl-3">Side effect: maintenance batches</a>
-  <a href="#compose" class="lvl-3">Composition with PR #260</a>
-  <a href="#tests">Test strategy</a>
-  <a href="#test-unit" class="lvl-3">1. Unit test — discovery never returns a consolidated id</a>
-  <a href="#test-e2e" class="lvl-3">2. End-to-end test — the issue's scenario</a>
-  <a href="#fixture-check" class="lvl-3">Fixture check first</a>
-  <a href="#out-of-scope">Out of scope</a>
-  <a href="#verification">Verification checklist</a>
+  <a href="#alternatives-rejected" class="lvl-3">Alternatives rejected</a>
+  <a href="#implementation-steps" class="lvl-3">Implementation</a>
+  <a href="#secondary-impact" class="lvl-3">Secondary impact</a>
+  <a href="#composition-with-other-prs" class="lvl-3">Composition with PR #260</a>
+  <a href="#test-1-discovery-never-returns-consolidated-id" class="lvl-3">1. Discovery never returns a consolidated ID</a>
+  <a href="#test-2-end-to-end-no-re-consolidation" class="lvl-3">2. End-to-end: no re-consolidation of summaries</a>
+  <a href="#test-3-seed-side-exclusion" class="lvl-3">3. Seed-side exclusion is independent of member check</a>
 </nav>
 <main>
-  <div class="eyebrow">[ SPECIFICATION ]</div>
-  <div class="doc-title"><em>Consolidated nodes are terminal</em> for cluster discovery</div>
+<section class="eyebrow">
+  Specification for Ormah issue #261
+</section>
 
-  <div class="metrics">
-    <div class="metric"><div class="big">1</div><div class="label">file</div></div>
-    <div class="metric"><div class="big">2</div><div class="label">tests</div></div>
-    <div class="metric"><div class="big">1</div><div class="label">query change</div></div>
+<h1>
+  <em>Consolidated</em> nodes are terminal for cluster discovery
+</h1>
+
+<div class="metrics">
+  <div class="metric">
+    <span class="big">1</span>
+    <span class="label">file changed</span>
   </div>
-
-  <p class="statement">A consolidated node is never a seed and never a member of a consolidation cluster. Summaries are terminal and are not re-summarised.</p>
-
-  <h2 id="problem">The <em>problem</em> <a class="backlink" href="#problem">↑</a></h2>
-
-  <p><code>_apply_consolidation</code> leaves consolidated nodes in the <code>working</code> tier and does not exclude them by tag. As a result, a consolidation output is eligible as a consolidation input on the next cycle. Two consolidated siblings are short by design (3–8 sentences), so they cluster more readily than their sources; when they re-cluster, the new summary is written from two summaries while the original sources sit in <code>archival</code>, out of reach.</p>
-
-  <p>Each pass is lossy; applied to its own output the loss compounds and cannot be recovered.</p>
-
-  <div class="callout">
-    <span class="label">Verified</span>
-    Confirmed by reading <code>upstream/main:src/ormah/background/consolidator.py</code> (both <code>SELECT</code> statements) and <code>upstream/main:src/ormah/models/node.py</code> (default <code>tier: Tier = Tier.working</code>).
+  <div class="metric">
+    <span class="big">3</span>
+    <span class="label">tests required</span>
   </div>
+  <div class="metric">
+    <span class="big">2</span>
+    <span class="label">SQL predicates</span>
+  </div>
+</div>
 
-  <h2 id="decision">The <em>decision</em> <a class="backlink" href="#decision">↑</a></h2>
+<section id="problem" class="eyebrow">Problem</section>
 
-  <p>A <code>consolidated</code> node is <strong>terminal</strong> for cluster discovery: it is never a seed and never a member of a consolidation cluster. A summary is the primary representation of its cluster and is not re-summarised.</p>
+<p>When <code>_apply_consolidation</code> creates a consolidated node, it defaults to the <code>working</code> tier. The consolidation discovery process then treats it like any other working node: it can serve as both a cluster seed and a cluster member. This creates a critical defect.</p>
 
-  <h3 id="consequence">Consequence accepted <a class="backlink" href="#consequence">↑</a></h3>
+<p class="statement">A consolidated node — a summary of summaries — should never be re-consolidated. Instead, each pass rewrites from the previous summary, compounding loss until the original sources become unrecoverable.</p>
 
-  <p>When genuinely new related memories arrive, they form a <em>second</em> summary next to the first instead of updating it. Merging the two is <code>duplicate_merger</code>'s job (human-curated proposals, <a href="https://github.com/r-spade/ormah/blob/upstream/main/ADR-0005.md">ADR 0005</a>). Re-consolidating from the original sources — the semantically ideal behaviour — needs provenance that <a href="https://github.com/r-spade/ormah/issues/258">issue #258</a> is building and interacts with <a href="https://github.com/r-spade/ormah/issues/260">issue #260</a>'s cluster splitting; it is a follow-up, recorded on the issue, not part of this change.</p>
+<p>The problem is verified by reading:</p>
+<ul>
+  <li><code>upstream/main:src/ormah/background/consolidator.py</code> — both discovery <code>SELECT</code>s exclude no consolidated nodes</li>
+  <li><code>upstream/main:src/ormah/models/node.py</code> — <code>tier: Tier = Tier.working</code> is the default</li>
+</ul>
 
-  <h3 id="alternatives">Alternatives rejected <a class="backlink" href="#alternatives">↑</a></h3>
+<section id="decision" class="eyebrow">Decision</section>
 
-  <ul>
-    <li><em>Member yes, seed no, at most one per cluster</em> — still rewrites a summary from a summary (S1 → S2 → S3), the same defect at a lower rate.</li>
-    <li><em>Re-consolidate from sources</em> — right semantics, wrong size for this issue (needs provenance work from #258; interacts with #260).</li>
-    <li><em>Document the current behaviour</em> — the short-summary size constraint pushes toward re-clustering, so "summary of summary" would be a frequent accident, not a rare choice.</li>
-  </ul>
+<p><strong>A consolidated node is terminal for cluster discovery.</strong> It is never selected as a seed and never accepted as a member of a consolidation cluster. A summary becomes the primary representation of its cluster and is not re-summarized.</p>
 
-  <h2 id="implementation">The <em>implementation</em> <a class="backlink" href="#implementation">↑</a></h2>
+<p class="statement">When genuinely new related memories arrive, they form a <em>second</em> summary next to the first. Merging the two is <code>duplicate_merger</code>'s job (human-curated proposals per ADR 0005). Re-consolidating from the original sources — the semantically ideal behaviour — requires provenance tracking (issue <a href="https://github.com/r-spade/ormah/issues/258">#258</a>) and interacts with cluster splitting (<a href="https://github.com/r-spade/ormah/issues/260">#260</a>). That is a follow-up.</p>
 
-  <p>One file: <code>src/ormah/background/consolidator.py</code>, function <code>_find_consolidation_clusters</code>.</p>
+<h3 id="alternatives-rejected">Alternatives rejected</h3>
 
-  <h3 id="module-constant">Module constant <a class="backlink" href="#module-constant">↑</a></h3>
+<ul>
+  <li><em>Member yes, seed no, at most one per cluster</em> — still rewrites a summary from a summary (S1 → S2 → S3), the same defect at lower rate.</li>
+  <li><em>Re-consolidate from sources</em> — correct semantics, but too large for this issue (depends on #258, overlaps #260).</li>
+  <li><em>Document the current behaviour</em> — the short-summary size constraint pushes toward re-clustering, so "summary of summary" would be a frequent accident, not a rare choice.</li>
+</ul>
 
-  <p>Define the exclusion predicate once at module level:</p>
+<section id="change" class="eyebrow">Change</section>
 
-  <pre><code>_NOT_CONSOLIDATED = (
-    "NOT EXISTS (SELECT 1 FROM node_tags WHERE node_id = nodes.id AND tag = 'consolidated')"
+<p>One file: <code>src/ormah/background/consolidator.py</code>. Only the <code>_find_consolidation_clusters</code> function is modified.</p>
+
+<h3 id="implementation-steps">Implementation</h3>
+
+<ol>
+  <li>Add a module-level constant holding the exclusion predicate:
+    <pre><code>_NOT_CONSOLIDATED = (
+    "NOT EXISTS (SELECT 1 FROM node_tags "
+    "WHERE node_id = nodes.id AND tag = 'consolidated')"
 )</code></pre>
+  </li>
+  <li>Update the seed query to exclude consolidated nodes:
+    <pre><code>SELECT id, title, content, space FROM nodes
+WHERE tier = 'working' AND {_NOT_CONSOLIDATED}</code></pre>
+  </li>
+  <li>Update the member query to exclude consolidated nodes:
+    <pre><code>SELECT id, title, content, space, tier FROM nodes
+WHERE id = ? AND {_NOT_CONSOLIDATED}</code></pre>
+    The existing <code>tier != "working"</code> check on the fetched row remains in place.
+  </li>
+  <li>Add a docstring stating that consolidated-tagged nodes are terminal for cluster discovery.</li>
+</ol>
 
-  <h3 id="queries">Query changes <a class="backlink" href="#queries">↑</a></h3>
+<div class="callout">
+  <strong>No schema changes, migrations, or settings adjustments are required.</strong> The correlated subquery uses <code>node_tags</code>'s primary key <code>(node_id, tag)</code>, which already exists.
+</div>
 
-  <p><strong>Seed query:</strong> append the exclusion to the <code>WHERE</code> clause:</p>
+<h3 id="secondary-impact">Secondary impact</h3>
 
-  <pre><code>SELECT id, title, content, space FROM nodes WHERE tier = 'working' AND {_NOT_CONSOLIDATED}</code></pre>
+<p><code>MemoryEngine.get_maintenance_batches</code> (at <code>memory_engine.py:1820</code> in the Claude-in-the-loop maintenance phase 1) also calls <code>_find_consolidation_clusters</code>. The consolidation batch offered to the agent will stop containing consolidated nodes — this is <strong>intended behaviour</strong>, applying the same terminal rule through one implementation.</p>
 
-  <p><strong>Member query:</strong> exclude consolidated nodes in the same way:</p>
+<h3 id="composition-with-other-prs">Composition with PR #260</h3>
 
-  <pre><code>SELECT id, title, content, space, tier FROM nodes WHERE id = ? AND {_NOT_CONSOLIDATED}</code></pre>
+<p>Verified with <code>gh pr diff 260</code>: PR <a href="https://github.com/r-spade/ormah/pull/260">#260</a> (from <a href="https://github.com/r-spade/ormah/pull/192">#192</a>) does not edit the two discovery <code>SELECT</code>s, so the changes compose safely. Both PRs insert module-level constants after imports (<code>_CONSOLIDATE_PROMPT</code> there, <code>_NOT_CONSOLIDATED</code> here), so whichever merges second may see a trivial textual conflict — resolve by keeping both constants.</p>
 
-  <p>The existing <code>tier != "working"</code> check on the fetched row stays.</p>
+<section id="tests" class="eyebrow">Tests</section>
 
-  <h3 id="docstring">Docstring <a class="backlink" href="#docstring">↑</a></h3>
+<p><code>tests/test_background/test_consolidator.py</code>. All three tests must be red on <code>upstream/main</code>. Embeddings are real (fastembed via the <code>engine</code> fixture); identical content yields similarity 1.0, making clustering deterministic.</p>
 
-  <p>Add a note that <code>consolidated</code>-tagged nodes are terminal and are excluded from discovery as seed and as member.</p>
+<h3 id="test-1-discovery-never-returns-consolidated-id">1. Discovery never returns a consolidated ID</h3>
 
-  <h3 id="schema">Schema &amp; migration <a class="backlink" href="#schema">↑</a></h3>
+<p><strong>Unit test.</strong> Create two similar raw <code>working</code> nodes and two <code>working</code> nodes with identical content tagged <code>consolidated</code>. Call <code>_find_consolidation_clusters(engine)</code> and assert no returned cluster contains a consolidated ID.</p>
 
-  <p>No schema change, no migration, no settings. The correlated probe by <code>node_id</code> is covered by <code>node_tags</code>'s primary key <code>(node_id, tag)</code> in <code>schema.sql</code>. <code>_apply_consolidation</code>, the prompt, <code>run_consolidation</code>, and <code>_consolidate_cluster</code> are untouched.</p>
+<ul>
+  <li><strong>Worked example (broken):</strong> The seed "consolidated A" pulls "consolidated B" (similarity 1.0) and the raw pair into one cluster of 4 — the assertion fails.</li>
+  <li><strong>With the fix:</strong> One cluster of the two raw nodes only.</li>
+</ul>
 
-  <h3 id="side-effect">Side effect: maintenance batches <a class="backlink" href="#side-effect">↑</a></h3>
+<h3 id="test-2-end-to-end-no-re-consolidation">2. End-to-end: no re-consolidation of summaries</h3>
 
-  <p><code>MemoryEngine.get_maintenance_batches</code> (at <code>memory_engine.py:1820</code>, the <code>run_maintenance</code> Claude-in-the-loop phase 1) also calls <code>_find_consolidation_clusters</code>. The consolidation batch offered to the agent stops containing consolidated nodes too. This is <em>intended</em> — the same "terminal" rule, one implementation.</p>
+<p><strong>Integration test.</strong> Set <code>consolidation_max_cluster_nodes = 2</code>. Create four similar source nodes. Mock <code>llm_generate</code> to return one fixed summary. Run the consolidation twice.</p>
 
-  <h3 id="compose">Composition with PR #260 <a class="backlink" href="#compose">↑</a></h3>
+<ul>
+  <li><strong>Run 1:</strong> Produces N1 and N2 (both <code>working</code>, identical content).</li>
+  <li><strong>Run 2 with the fix:</strong> Must create <strong>no</strong> new node (the set of consolidated-tagged ids is unchanged), must not call the LLM again, and N1 and N2 remain <code>working</code>.</li>
+  <li><strong>Without the fix:</strong> Run 2 consolidates N1 + N2 into N3, the summary-of-summaries.</li>
+</ul>
 
-  <p>Both PRs insert module-level constants immediately after imports (<code>_CONSOLIDATE_PROMPT</code> in #260, <code>_NOT_CONSOLIDATED</code> here). Whichever merges second may see a trivial textual conflict — resolve by keeping both. The changes compose: PR #260 does not edit these two <code>SELECT</code> statements.</p>
+<p class="statement">Note: A <code>derived_from</code> edge assertion would not work. On <code>upstream/main</code>, <a href="https://github.com/r-spade/ormah/issues/123">#123</a> deletes that edge on reindex anyway.</p>
 
-  <h2 id="tests">Test strategy <a class="backlink" href="#tests">↑</a></h2>
+<h3 id="test-3-seed-side-exclusion">3. Seed-side exclusion is independent of member check</h3>
 
-  <p>Both tests live in <code>tests/test_background/test_consolidator.py</code> and must be <strong>red on <code>upstream/main</code></strong> before the fix. Embeddings are real (fastembed via the <code>engine</code> fixture); identical content yields similarity 1.0, which makes clustering deterministic.</p>
+<p><strong>Unit test.</strong> Added after council review to show that the seed <code>SELECT</code> predicate and member <code>SELECT</code> predicate are both load-bearing. Same setup as test 1 but insert the two <code>consolidated</code> nodes <strong>first</strong>. Discovery scans in insertion order.</p>
 
-  <h3 id="test-unit">1. Unit test — discovery never returns a consolidated id <a class="backlink" href="#test-unit">↑</a></h3>
+<ul>
+  <li><strong>Without the seed predicate only:</strong> The first summary seeds a cluster and recruits the raw pair — test fails.</li>
+  <li><strong>Without the member predicate only:</strong> Tests 1 and 3 both fail.</li>
+  <li><strong>With the fix (both predicates):</strong> All three tests pass.</li>
+</ul>
 
-  <p><strong>Setup:</strong> Create two similar raw <code>working</code> nodes and two <code>working</code> nodes with <em>identical</em> content tagged <code>consolidated</code>.</p>
+<div class="callout warn">
+  <strong>Fixture verification.</strong> Before the red run, confirm that <code>engine.remember(..., tags=["consolidated"])</code> correctly populates <code>node_tags</code>. If test 1 is green <em>before</em> the fix, this assumption has failed and the predicate must read tags another way (e.g. from the markdown), not the index.
+</div>
 
-  <p><strong>Action:</strong> Call <code>_find_consolidation_clusters(engine)</code>.</p>
+<section id="out-of-scope" class="eyebrow">Out of scope</section>
 
-  <p><strong>Assert:</strong> No returned cluster contains a consolidated id.</p>
+<ul>
+  <li>Re-consolidation from sources when new related memories arrive (follow-up after <a href="https://github.com/r-spade/ormah/issues/258">#258</a>).</li>
+  <li>Idempotency under retry (<a href="https://github.com/r-spade/ormah/issues/258">#258</a>).</li>
+  <li>The Claude-in-the-loop maintenance route (<a href="https://github.com/r-spade/ormah/issues/259">#259</a>).</li>
+  <li>Anything in <code>_apply_consolidation</code>, the prompt, or the LLM route.</li>
+</ul>
 
-  <p><strong>Without the fix:</strong> The seed "consolidated A" pulls "consolidated B" (similarity 1.0) and the raw pair into one cluster of 4 — the assertion fails. <strong>With the fix:</strong> One cluster of the two raw nodes only.</p>
+<section id="verification" class="eyebrow">Verification</section>
 
-  <h3 id="test-e2e">2. End-to-end test — the issue's scenario <a class="backlink" href="#test-e2e">↑</a></h3>
+<p>Island gates from <code>FORK-WORKFLOW.md</code>, in this order:</p>
 
-  <p><strong>Setup:</strong> <code>consolidation_max_cluster_nodes = 2</code>, four similar sources, <code>llm_generate</code> mocked to return one fixed summary.</p>
+<ol>
+  <li>Import gate: <code>ormah.__file__</code> inside the worktree <code>../ormah-wt-261/</code>.</li>
+  <li>Red run: <code>pytest tests/test_background/test_consolidator.py::test_discovery_excludes_consolidated_nodes tests/test_background/test_consolidator.py::test_no_re_consolidation_of_summaries tests/test_background/test_consolidator.py::test_seed_side_exclusion -v</code></li>
+  <li>Apply the fix to <code>src/ormah/background/consolidator.py</code>.</li>
+  <li>Green run: Full suite with clean <code>HOME</code>: <code>pytest tests/ -v</code></li>
+  <li>Commit check: <code>git log --oneline upstream/main..HEAD</code> shows only this change's commits.</li>
+</ol>
 
-  <p><strong>Run 1:</strong> Produces N1 and N2 (both <code>working</code>, identical content).</p>
-
-  <p><strong>Run 2 assertions:</strong>
-  <ul>
-    <li>Must create <strong>no new node</strong> (the set of <code>consolidated</code>-tagged ids is unchanged)</li>
-    <li>Must <strong>not call the LLM</strong> again</li>
-    <li>N1 and N2 remain <code>working</code></li>
-  </ul>
-  </p>
-
-  <p><strong>Without the fix:</strong> Run 2 consolidates N1 + N2 into N3 — the summary-of-summaries scenario.</p>
-
-  <h3 id="fixture-check">Fixture check first <a class="backlink" href="#fixture-check">↑</a></h3>
-
-  <p>In the red phase: <code>engine.remember(..., tags=["consolidated"])</code> must populate <code>node_tags</code>. If test 1 passes <em>before</em> the fix, this assumption failed and the predicate has to read tags another way (e.g., from the node markdown content), not from the index.</p>
-
-  <h2 id="out-of-scope">Out of scope <a class="backlink" href="#out-of-scope">↑</a></h2>
-
-  <ul>
-    <li>Re-consolidation from sources when new related memories arrive (follow-up after <a href="https://github.com/r-spade/ormah/issues/258">issue #258</a>)</li>
-    <li>Idempotency under retry (part of <a href="https://github.com/r-spade/ormah/issues/258">issue #258</a>)</li>
-    <li>The Claude-in-the-loop maintenance route (<a href="https://github.com/r-spade/ormah/issues/259">issue #259</a>)</li>
-    <li>Anything in <code>_apply_consolidation</code>, the prompt, or the LLM route</li>
-  </ul>
-
-  <h2 id="verification">Verification checklist <a class="backlink" href="#verification">↑</a></h2>
-
-  <p>Island gates from <code>FORK-WORKFLOW.md</code>, in this order:</p>
-
-  <ol>
-    <li><strong>Import gate:</strong> <code>ormah.__file__</code> inside <code>ormah-wt-261/</code></li>
-    <li><strong>Red run:</strong> Both tests fail on <code>upstream/main</code></li>
-    <li><strong>Apply fix</strong> to <code>_find_consolidation_clusters</code></li>
-    <li><strong>Green run:</strong> Full suite passes with clean <code>HOME</code></li>
-    <li><strong>Commit log:</strong> <code>git log --oneline upstream/main..HEAD</code> shows only this change's commits</li>
-  </ol>
-
-  <div class="callout">
-    <span class="label">Branch reference</span>
-    Base: <code>upstream/main</code> (clean island, Recipe A). Branch: <code>fix/261-consolidated-nodes-are-terminal</code>. Worktree: <code>../ormah-wt-261</code>.
-  </div>
+<section id="metadata" class="meta">
+  <div><strong>Branch:</strong> <code>fix/261-consolidated-nodes-are-terminal</code></div>
+  <div><strong>Worktree:</strong> <code>../ormah-wt-261</code></div>
+  <div><strong>Base:</strong> <code>upstream/main</code> (clean island, Recipe A of FORK-WORKFLOW.md)</div>
+  <div><strong>Date:</strong> 2026-08-25</div>
+</section>
   <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
   <div class="signature">
     <div class="name">rich-doc</div>
@@ -304,4 +309,4 @@ summary:hover{color:var(--accent)}
 </main>
 </body>
 </html>
-<!-- rich-doc-src-sha256:40407ca80797cec3d8a0bb234d5d0028666d7e12db507c8b17cb349b11ab4983 -->
+<!-- rich-doc-src-sha256:a002bbf1979514bd2353f8da5ec53740713b1ae3ecfdff82189db30b87fa839a -->
