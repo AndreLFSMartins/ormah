@@ -37,6 +37,108 @@ def _cluster_signature(cluster: list[dict]) -> str:
         return "|".join(str(n.get(k) or "") for k in ("id", "title", "content", "space", "type"))
     parts = sorted(hashlib.sha256(_fields(n).encode()).hexdigest() for n in cluster)
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
+_CONSOLIDATE_PROMPT = """\
+You are consolidating a cluster of semantically similar memories into a single, richer memory. The consolidated memory will be stored as a new working-tier node, and the originals will be demoted to archival (still searchable but deprioritized). This means your output becomes the PRIMARY representation of this knowledge — it must be complete.
+
+Memories to consolidate:
+{items_text}
+
+## Your task
+
+Synthesize these into ONE memory that is better than any individual original. The result should read as a well-written knowledge base entry — not a list of bullet points stitched together, but a coherent narrative.
+
+## Rules
+
+1. **Preserve every concrete detail**: Names, versions, paths, numbers, dates, specific choices, file locations, command flags. If any original says "bge-base-en-v1.5" or "port 8787", the consolidated version must include it. Never generalize specifics — "chose SQLite" must stay "chose SQLite", not "chose a database".
+
+2. **Preserve all reasoning**: If any memory explains WHY something was decided, what alternative was rejected, or what constraint drove the design, that reasoning MUST appear. Reasoning is the most valuable part of memory — it prevents re-litigating decisions.
+
+3. **Eliminate only true redundancy**: If three memories all state "uses FastAPI", say it once. But if they say different things about FastAPI (routing patterns, middleware choices, deployment config), keep ALL of those distinct facts.
+
+4. **Choose the most valuable type**: Priority order: decision > procedure > observation > concept > fact. If the cluster contains a decision and supporting facts, the consolidated type should be "decision" because that's what makes the memory actionable.
+
+5. **Title for searchability**: Titles get 10x weight in full-text search. Make it specific and keyword-rich. BAD: "Project architecture". GOOD: "Ormah uses FastAPI + SQLite with hybrid FTS/vector search". The title should let someone find this memory by searching for any of its key topics.
+
+6. **Content length**: 3-8 sentences. Long enough to be self-contained, short enough to be scannable. This will be displayed to an AI assistant as context — it needs to absorb it quickly.
+
+Return a JSON object:
+{{
+  "title": "specific, keyword-rich title, 5-15 words",
+  "summary": "consolidated content as a coherent narrative, preserving all unique details",
+  "type": "fact|decision|preference|event|person|project|concept|procedure|goal|observation"
+}}"""
+
+
+def _prompt_overhead_chars() -> int:
+    """Chars the template costs around the items block.
+
+    Computed from the template itself so it cannot go stale when the prompt is edited -- this
+    number is subtracted from the operator's budget, so a hardcoded copy that drifted would
+    silently overrun the window the consolidation route asks for.
+    """
+    return len(_CONSOLIDATE_PROMPT.format(items_text=""))
+
+
+def _render_item(node: dict) -> str:
+    """One source as it appears in the items block. FULL content -- never a slice (#192)."""
+    title = node.get("title") or "Untitled"
+    content = node.get("content", "")
+    return f"- [{title}]: {content}"
+
+
+def _item_chars(node: dict) -> int:
+    """What one source costs in the prompt: its rendered line plus the newline that joins it."""
+    return len(_render_item(node)) + 1
+
+
+def _split_cluster_to_fit(cluster: list[dict], budget_chars: int) -> list[list[dict]]:
+    """Split *cluster* into sub-clusters whose rendered items fit within *budget_chars*.
+
+    Greedy, in the order given -- which is the order ``_find_consolidation_clusters`` produces
+    (seed first, then descending similarity), so the most similar sources stay together in the
+    first sub-cluster.
+
+    A source is NEVER truncated (#192): one that does not fit the remainder opens a new
+    sub-cluster, and one larger than the whole budget is dropped entirely and left where it is.
+    Losing a consolidation is recoverable -- the node stays working and keeps being whispered.
+    Summarizing from a partial view is not, because the sources are demoted to archival the
+    moment the summary is written.
+
+    Sub-clusters shorter than ``consolidation_min_cluster_size`` are NOT filtered here; that is
+    the caller's decision, which keeps this function pure and settings-free.
+    """
+    if budget_chars <= 0:
+        logger.warning(
+            "consolidation prompt budget is %d chars after the template's own overhead; "
+            "raise ORMAH_CONSOLIDATION_MAX_PROMPT_CHARS -- nothing can be consolidated",
+            budget_chars,
+        )
+        return []
+
+    parts: list[list[dict]] = []
+    current: list[dict] = []
+    used = 0
+
+    for node in cluster:
+        cost = _item_chars(node)
+        if cost > budget_chars:
+            logger.warning(
+                "consolidation source %s costs %d chars, more than the whole prompt budget "
+                "(%d); it stays put rather than being summarized from a partial view",
+                node.get("id"), cost, budget_chars,
+            )
+            continue
+        if current and used + cost > budget_chars:
+            parts.append(current)
+            current = []
+            used = 0
+        current.append(node)
+        used += cost
+
+    if current:
+        parts.append(current)
+    return parts
+
 
 def _find_consolidation_clusters(engine, limit: int = 4) -> list[list[dict]]:
     """Find clusters of similar working-tier nodes for consolidation.
@@ -260,43 +362,9 @@ def _consolidate_cluster(engine, cluster: list[dict]) -> None:
     # shown, and destructive here because _apply_consolidation demotes every source to archival
     # immediately afterwards. A cluster too large for the prompt is split upstream in
     # run_consolidation; it is never trimmed.
-    items = []
-    for node in cluster:
-        title = node.get("title") or "Untitled"
-        content = node.get("content", "")
-        items.append(f"- [{title}]: {content}")
-    items_text = "\n".join(items)
+    items_text = "\n".join(_render_item(node) for node in cluster)
 
-    prompt = f"""\
-You are consolidating a cluster of semantically similar memories into a single, richer memory. The consolidated memory will be stored as a new working-tier node, and the originals will be demoted to archival (still searchable but deprioritized). This means your output becomes the PRIMARY representation of this knowledge — it must be complete.
-
-Memories to consolidate:
-{items_text}
-
-## Your task
-
-Synthesize these into ONE memory that is better than any individual original. The result should read as a well-written knowledge base entry — not a list of bullet points stitched together, but a coherent narrative.
-
-## Rules
-
-1. **Preserve every concrete detail**: Names, versions, paths, numbers, dates, specific choices, file locations, command flags. If any original says "bge-base-en-v1.5" or "port 8787", the consolidated version must include it. Never generalize specifics — "chose SQLite" must stay "chose SQLite", not "chose a database".
-
-2. **Preserve all reasoning**: If any memory explains WHY something was decided, what alternative was rejected, or what constraint drove the design, that reasoning MUST appear. Reasoning is the most valuable part of memory — it prevents re-litigating decisions.
-
-3. **Eliminate only true redundancy**: If three memories all state "uses FastAPI", say it once. But if they say different things about FastAPI (routing patterns, middleware choices, deployment config), keep ALL of those distinct facts.
-
-4. **Choose the most valuable type**: Priority order: decision > procedure > observation > concept > fact. If the cluster contains a decision and supporting facts, the consolidated type should be "decision" because that's what makes the memory actionable.
-
-5. **Title for searchability**: Titles get 10x weight in full-text search. Make it specific and keyword-rich. BAD: "Project architecture". GOOD: "Ormah uses FastAPI + SQLite with hybrid FTS/vector search". The title should let someone find this memory by searching for any of its key topics.
-
-6. **Content length**: 3-8 sentences. Long enough to be self-contained, short enough to be scannable. This will be displayed to an AI assistant as context — it needs to absorb it quickly.
-
-Return a JSON object:
-{{
-  "title": "specific, keyword-rich title, 5-15 words",
-  "summary": "consolidated content as a coherent narrative, preserving all unique details",
-  "type": "fact|decision|preference|event|person|project|concept|procedure|goal|observation"
-}}"""
+    prompt = _CONSOLIDATE_PROMPT.format(items_text=items_text)
 
     raw = llm_generate(
         engine.settings, prompt, json_mode=True,
