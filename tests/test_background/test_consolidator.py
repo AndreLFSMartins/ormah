@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -231,3 +232,74 @@ def test_consolidation_max_prompt_chars_rejects_below_floor(tmp_path, monkeypatc
     monkeypatch.setenv("ORMAH_CONSOLIDATION_MAX_PROMPT_CHARS", "3999")
     with pytest.raises(ValueError, match="consolidation_max_prompt_chars must be >= 4000"):
         Settings(memory_dir=tmp_path)
+
+
+class TestSplitClusterToFit:
+    """#192: a cluster that does not fit is SPLIT, never truncated."""
+
+    @staticmethod
+    def _node(nid: str, chars: int) -> dict:
+        return {"id": nid, "title": "t", "content": "x" * chars, "space": None}
+
+    def test_cluster_that_fits_is_returned_whole(self):
+        cluster = [self._node("a", 100), self._node("b", 100)]
+        assert consolidator._split_cluster_to_fit(cluster, 10_000) == [cluster]
+
+    def test_oversized_cluster_is_split_preserving_order(self):
+        cluster = [self._node(x, 400) for x in ("a", "b", "c", "d")]
+        parts = consolidator._split_cluster_to_fit(cluster, 900)
+
+        assert [[n["id"] for n in p] for p in parts] == [["a", "b"], ["c", "d"]]
+        flat = [n["id"] for p in parts for n in p]
+        assert flat == ["a", "b", "c", "d"]        # order preserved
+        assert len(flat) == len(set(flat))          # no duplicates
+
+    def test_node_larger_than_the_whole_budget_is_dropped_with_a_warning(self, caplog):
+        cluster = [self._node("small", 100), self._node("huge", 5_000), self._node("s2", 100)]
+        with caplog.at_level("WARNING"):
+            parts = consolidator._split_cluster_to_fit(cluster, 1_000)
+
+        assert [[n["id"] for n in p] for p in parts] == [["small", "s2"]]
+        assert "huge" in caplog.text
+
+    def test_no_source_is_ever_truncated(self):
+        cluster = [self._node("a", 400), self._node("b", 400)]
+        parts = consolidator._split_cluster_to_fit(cluster, 500)
+        for part in parts:
+            for node in part:
+                assert len(node["content"]) == 400
+
+    def test_exhausted_budget_returns_nothing_and_warns(self, caplog):
+        with caplog.at_level("WARNING"):
+            assert consolidator._split_cluster_to_fit([self._node("a", 10)], 0) == []
+        assert "budget" in caplog.text.lower()
+
+
+def test_prompt_overhead_is_computed_from_the_template():
+    overhead = consolidator._prompt_overhead_chars()
+    assert overhead == len(consolidator._CONSOLIDATE_PROMPT.format(items_text=""))
+    assert 1_000 < overhead < 10_000  # sanity: the template is real prose, not a stub
+
+
+def test_prompt_items_are_rendered_by_the_same_function_the_split_budgets_with(monkeypatch):
+    """The split's cost model and the prompt's rendering must be one function, or the budget
+    silently stops matching what is actually sent (#192)."""
+    engine = SimpleNamespace(settings=SimpleNamespace())
+    cluster = [{"id": "n1", "title": "T", "content": "C", "space": None}]
+    captured = {}
+
+    def spy(settings, prompt, json_mode=True, **kwargs):
+        captured["prompt"] = prompt
+        return None  # short-circuit: _consolidate_cluster returns before touching the engine
+
+    monkeypatch.setattr("ormah.background.llm_client.llm_generate", spy)
+    monkeypatch.setattr(
+        consolidator, "_render_item", lambda node: "SENTINEL-RENDER-" + node["id"]
+    )
+
+    consolidator._consolidate_cluster(engine, cluster)
+
+    assert "SENTINEL-RENDER-n1" in captured["prompt"], (
+        "the prompt does not go through _render_item — the split budgets against a different "
+        "rendering than the one actually sent"
+    )
