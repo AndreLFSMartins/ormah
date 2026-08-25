@@ -294,16 +294,57 @@ def run_consolidation(engine) -> None:
     if not clusters:
         return
 
-    consolidated_count = 0
+    # A cluster whose sources do not fit the prompt is SPLIT, never truncated (#192).
+    budget = settings.consolidation_max_prompt_chars - _prompt_overhead_chars()
+    if budget <= 0:
+        # Checked ONCE per run, not once per cluster: _split_cluster_to_fit would emit the same
+        # line for every one of the (up to consolidation_max_clusters_per_run) clusters, turning
+        # a single operator misconfiguration into a wall of identical WARNINGs.
+        logger.warning(
+            "consolidation prompt budget is %d chars once the template's own overhead is "
+            "subtracted from ORMAH_CONSOLIDATION_MAX_PROMPT_CHARS (%d); nothing can be "
+            "consolidated this run -- raise the setting",
+            budget, settings.consolidation_max_prompt_chars,
+        )
+        return
+
+    min_size = settings.consolidation_min_cluster_size
+    queue: list[list[dict]] = []
+    dropped_nodes = 0
+
     for cluster in clusters:
+        parts = _split_cluster_to_fit(cluster, budget)
+        kept = [p for p in parts if len(p) >= min_size]
+        dropped_nodes += len(cluster) - sum(len(p) for p in kept)
+        queue.extend(kept)
+
+    # The cap bounds LLM CALLS, not discovery. Splitting can multiply one cluster into several,
+    # and a daily job silently costing 2.5x more is not what this setting promises. The excess is
+    # simply not processed, so it is rediscovered next run.
+    capped = queue[: settings.consolidation_max_clusters_per_run]
+    if len(queue) > len(capped):
+        logger.info(
+            "consolidation queue held %d sub-cluster(s) over the per-run cap; deferring to the "
+            "next run", len(queue) - len(capped),
+        )
+    if dropped_nodes:
+        logger.info(
+            "%d source(s) left working: too large for the prompt budget, or alone in a "
+            "sub-cluster after the split", dropped_nodes,
+        )
+
+    consolidated_count = 0
+    for sub in capped:
         try:
-            _consolidate_cluster(engine, cluster)
+            _consolidate_cluster(engine, sub)
             consolidated_count += 1
         except Exception as e:
             logger.warning("Failed to consolidate cluster: %s", e)
 
     if consolidated_count:
-        logger.info("Consolidated %d cluster(s)", consolidated_count)
+        logger.info(
+            "Consolidated %d sub-cluster(s) from %d cluster(s)", consolidated_count, len(clusters)
+        )
 
 
 def _consolidate_cluster(engine, cluster: list[dict]) -> None:

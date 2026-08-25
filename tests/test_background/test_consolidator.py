@@ -303,3 +303,204 @@ def test_prompt_items_are_rendered_by_the_same_function_the_split_budgets_with(m
         "the prompt does not go through _render_item — the split budgets against a different "
         "rendering than the one actually sent"
     )
+
+
+class TestRunConsolidationSplits:
+    """#192: run_consolidation splits oversized clusters and caps LLM calls, not discovery."""
+
+    @pytest.fixture(autouse=True)
+    def _fixed_overhead(self, monkeypatch):
+        """Pin the template overhead so these tests measure the SPLIT, not the prompt's prose.
+
+        With the real overhead the budgets below sit ~146 chars from their breaking point: an
+        unrelated edit to the prompt text would fail this class and point at the wrong code.
+        """
+        monkeypatch.setattr(consolidator, "_prompt_overhead_chars", lambda: 2_400)
+
+    @staticmethod
+    def _fat(nid: str, chars: int) -> dict:
+        return {"id": nid, "title": "t", "content": "x" * chars, "space": None}
+
+    def test_oversized_cluster_becomes_two_consolidations(self, monkeypatch, engine):
+        engine.settings.llm_provider = "ollama"
+        engine.settings.consolidation_max_prompt_chars = 6_000
+        cluster = [self._fat(x, 1_500) for x in ("a", "b", "c", "d")]
+        monkeypatch.setattr(
+            consolidator, "_find_consolidation_clusters", lambda eng, limit: [cluster]
+        )
+        seen = []
+        monkeypatch.setattr(
+            consolidator, "_consolidate_cluster", lambda eng, sub: seen.append(sub)
+        )
+
+        consolidator.run_consolidation(engine)
+
+        assert [[n["id"] for n in sub] for sub in seen] == [["a", "b"], ["c", "d"]]
+
+    def test_oversized_node_is_never_sent_to_the_llm(self, monkeypatch, engine):
+        engine.settings.llm_provider = "ollama"
+        engine.settings.consolidation_max_prompt_chars = 6_000
+        cluster = [self._fat("a", 800), self._fat("huge", 20_000), self._fat("b", 800)]
+        monkeypatch.setattr(
+            consolidator, "_find_consolidation_clusters", lambda eng, limit: [cluster]
+        )
+        seen = []
+        monkeypatch.setattr(
+            consolidator, "_consolidate_cluster", lambda eng, sub: seen.append(sub)
+        )
+
+        consolidator.run_consolidation(engine)
+
+        assert [[n["id"] for n in sub] for sub in seen] == [["a", "b"]]
+
+    def test_short_subcluster_is_dropped(self, monkeypatch, engine):
+        engine.settings.llm_provider = "ollama"
+        engine.settings.consolidation_max_prompt_chars = 6_000
+        # a+b fill the budget; c lands alone in its sub-cluster with nothing to merge with
+        cluster = [self._fat("a", 1_700), self._fat("b", 1_700), self._fat("c", 1_700)]
+        monkeypatch.setattr(
+            consolidator, "_find_consolidation_clusters", lambda eng, limit: [cluster]
+        )
+        seen = []
+        monkeypatch.setattr(
+            consolidator, "_consolidate_cluster", lambda eng, sub: seen.append(sub)
+        )
+
+        consolidator.run_consolidation(engine)
+
+        assert [[n["id"] for n in sub] for sub in seen] == [["a", "b"]]
+
+    def test_cap_counts_subclusters_not_raw_clusters(self, monkeypatch, engine):
+        engine.settings.llm_provider = "ollama"
+        engine.settings.consolidation_max_prompt_chars = 6_000
+        engine.settings.consolidation_max_clusters_per_run = 2
+        clusters = [
+            [self._fat(f"c{i}n{j}", 1_500) for j in range(4)] for i in range(3)
+        ]  # 3 raw clusters -> 6 sub-clusters of 2
+        monkeypatch.setattr(
+            consolidator, "_find_consolidation_clusters", lambda eng, limit: clusters
+        )
+        calls = {"n": 0}
+
+        def spy(eng, sub):
+            calls["n"] += 1
+
+        monkeypatch.setattr(consolidator, "_consolidate_cluster", spy)
+
+        consolidator.run_consolidation(engine)
+
+        assert calls["n"] == 2, "the cap must bound LLM calls, not discovery"
+
+    def test_exhausted_budget_warns_once_not_once_per_cluster(self, monkeypatch, engine, caplog):
+        engine.settings.llm_provider = "ollama"
+        engine.settings.consolidation_max_prompt_chars = 4_000
+        monkeypatch.setattr(consolidator, "_prompt_overhead_chars", lambda: 4_000)
+        monkeypatch.setattr(
+            consolidator,
+            "_find_consolidation_clusters",
+            lambda eng, limit: [[self._fat("a", 10), self._fat("b", 10)] for _ in range(3)],
+        )
+        called = []
+        monkeypatch.setattr(
+            consolidator, "_consolidate_cluster", lambda eng, sub: called.append(sub)
+        )
+
+        with caplog.at_level("WARNING"):
+            consolidator.run_consolidation(engine)
+
+        assert called == []
+        budget_warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "budget" in r.getMessage().lower()
+        ]
+        assert len(budget_warnings) == 1, (
+            f"one warning per run, got {len(budget_warnings)}: "
+            f"{[r.getMessage() for r in budget_warnings]}"
+        )
+
+
+def test_split_produces_two_real_consolidations_and_demotes_every_source(
+    monkeypatch, consolidation_engine
+):
+    """#192 end-to-end: an oversized cluster yields TWO consolidated nodes, and all four
+    sources end up archival — none is left half-processed.
+
+    The count goes through the ``consolidated`` tag rather than the ``derived_from`` edges:
+    ``_apply_consolidation`` does create those edges, but ``update_node(tier=archival)`` on the
+    very next line re-indexes the source and ``IndexBuilder._remove_node`` deletes every row with
+    ``source_id = ? OR target_id = ?``, so an inbound ``derived_from`` never survives the demotion
+    that follows it. That is a pre-existing defect in a path this PR does not touch; counting
+    edges here would measure it instead of the split.
+    """
+    engine, ids = consolidation_engine
+    engine.settings.llm_provider = "ollama"
+    engine.settings.consolidation_max_prompt_chars = 6_000
+    cluster = [
+        {"id": nid, "title": f"src {i}", "content": "x" * 1_500, "space": "testproject"}
+        for i, nid in enumerate(ids)
+    ]
+    monkeypatch.setattr(
+        consolidator, "_find_consolidation_clusters", lambda eng, limit: [cluster]
+    )
+    monkeypatch.setattr(
+        "ormah.background.llm_client.llm_generate",
+        lambda settings, prompt, json_mode=True, **kw: json.dumps(
+            {"title": "merged", "summary": "merged body", "type": "fact"}
+        ),
+    )
+
+    consolidator.run_consolidation(engine)
+
+    tiers = {
+        nid: engine.db.conn.execute(
+            "SELECT tier FROM nodes WHERE id = ?", (nid,)
+        ).fetchone()["tier"]
+        for nid in ids
+    }
+    assert set(tiers.values()) == {"archival"}, tiers
+    created = engine.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM node_tags WHERE tag = 'consolidated'"
+    ).fetchone()["n"]
+    assert created == 2, "each sub-cluster must produce its own consolidated node"
+
+
+def test_oversized_source_is_left_working_end_to_end(monkeypatch, consolidation_engine):
+    """The node the split refuses to pack must be left working while its neighbours merge.
+
+    The companion assertion is a consolidation count, not the absence of an inbound
+    ``derived_from`` edge: no such edge survives ``update_node``'s re-index (see the docstring
+    above), so asserting zero of them would pass even if the split had never run.
+    """
+    engine, ids = consolidation_engine
+    engine.settings.llm_provider = "ollama"
+    engine.settings.consolidation_max_prompt_chars = 6_000
+    huge, a, b = ids[0], ids[1], ids[2]
+    cluster = [
+        {"id": huge, "title": "huge", "content": "x" * 20_000, "space": "testproject"},
+        {"id": a, "title": "a", "content": "y" * 800, "space": "testproject"},
+        {"id": b, "title": "b", "content": "z" * 800, "space": "testproject"},
+    ]
+    monkeypatch.setattr(
+        consolidator, "_find_consolidation_clusters", lambda eng, limit: [cluster]
+    )
+    monkeypatch.setattr(
+        "ormah.background.llm_client.llm_generate",
+        lambda settings, prompt, json_mode=True, **kw: json.dumps(
+            {"title": "merged", "summary": "merged body", "type": "fact"}
+        ),
+    )
+
+    consolidator.run_consolidation(engine)
+
+    tier = engine.db.conn.execute(
+        "SELECT tier FROM nodes WHERE id = ?", (huge,)
+    ).fetchone()["tier"]
+    assert tier == "working"
+    consolidated = engine.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM node_tags WHERE tag = 'consolidated'"
+    ).fetchone()["n"]
+    assert consolidated == 1, "a and b must still have been consolidated without the huge source"
+    for other in (a, b):
+        assert engine.db.conn.execute(
+            "SELECT tier FROM nodes WHERE id = ?", (other,)
+        ).fetchone()["tier"] == "archival"
