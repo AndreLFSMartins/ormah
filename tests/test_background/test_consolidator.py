@@ -892,3 +892,78 @@ def test_a_failed_consolidation_is_logged_with_its_sources(monkeypatch, consolid
     assert warnings, "a consolidation that produced nothing left no trace"
     text = " ".join(r.getMessage() for r in warnings)
     assert ids[0] in text and ids[1] in text, f"the warning does not name the sources: {text}"
+def _remember(engine, content: str, title: str, tags: list[str] | None = None) -> str:
+    req = CreateNodeRequest(
+        content=content, type=NodeType.fact, title=title, space="testproject", tags=tags or []
+    )
+    nid, _ = engine.remember(req)
+    return nid
+
+
+_SAME_TEXT = "Python uses indentation to define code blocks"
+
+
+def test_consolidated_nodes_are_never_seed_nor_member(engine):
+    """A summary is terminal: discovery must not pick it as seed or member (#261)."""
+    from ormah.background.consolidator import _find_consolidation_clusters
+
+    raw = [_remember(engine, _SAME_TEXT, f"Raw {i}") for i in range(2)]
+    summaries = [
+        _remember(engine, _SAME_TEXT, f"Summary {i}", tags=["consolidated"]) for i in range(2)
+    ]
+    # Fixture check: the tag reached the index, otherwise the test proves nothing.
+    tagged = {
+        r[0]
+        for r in engine.db.conn.execute(
+            "SELECT node_id FROM node_tags WHERE tag = 'consolidated'"
+        ).fetchall()
+    }
+    assert set(summaries) <= tagged
+
+    clusters = _find_consolidation_clusters(engine)
+    ids_in_clusters = {n["id"] for cluster in clusters for n in cluster}
+
+    assert ids_in_clusters.isdisjoint(summaries), "a consolidated node entered a cluster"
+    assert set(raw) <= ids_in_clusters, "the raw pair should still cluster"
+
+
+def test_two_summaries_are_not_summarised_again(monkeypatch, engine):
+    """Issue #261's scenario: run 1 yields N1 and N2, run 2 must leave them alone."""
+    from ormah.background import consolidator
+
+    engine.settings.llm_provider = "ollama"  # default is "none", which skips the job
+    engine.settings.consolidation_max_cluster_nodes = 2  # four sources -> two clusters
+    for i in range(4):
+        _remember(engine, _SAME_TEXT, f"Source {i}")
+
+    prompts: list[str] = []
+
+    def fake_llm(settings, prompt, json_mode=True, **kwargs):
+        prompts.append(prompt)
+        return json.dumps(
+            {"title": "Python indentation rules", "summary": "Blocks by indentation.", "type": "fact"}
+        )
+
+    monkeypatch.setattr("ormah.background.llm_client.llm_generate", fake_llm)
+
+    def consolidated_ids() -> list[str]:
+        rows = engine.db.conn.execute(
+            "SELECT node_id FROM node_tags WHERE tag = 'consolidated'"
+        ).fetchall()
+        return sorted(r[0] for r in rows)
+
+    consolidator.run_consolidation(engine)
+    first = consolidated_ids()
+    assert len(first) == 2 and len(prompts) == 2
+
+    consolidator.run_consolidation(engine)
+
+    assert consolidated_ids() == first, "run 2 created a summary of summaries"
+    assert len(prompts) == 2, "run 2 asked the LLM again"
+    tiers = {
+        r[0]
+        for r in engine.db.conn.execute(
+            "SELECT tier FROM nodes WHERE id IN (?, ?)", first
+        ).fetchall()
+    }
+    assert tiers == {"working"}
