@@ -214,3 +214,20 @@ def test_consolidation_logs_source_and_summary_sizes(monkeypatch, consolidation_
 
     assert "source_chars=1000" in caplog.text
     assert "summary_chars=120" in caplog.text
+
+
+def test_consolidation_max_prompt_chars_default(tmp_path):
+    s = Settings(memory_dir=tmp_path)
+    assert s.consolidation_max_prompt_chars == 24000
+
+
+def test_consolidation_max_prompt_chars_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORMAH_CONSOLIDATION_MAX_PROMPT_CHARS", "16000")
+    s = Settings(memory_dir=tmp_path)
+    assert s.consolidation_max_prompt_chars == 16000
+
+
+def test_consolidation_max_prompt_chars_rejects_below_floor(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORMAH_CONSOLIDATION_MAX_PROMPT_CHARS", "3999")
+    with pytest.raises(ValueError, match="consolidation_max_prompt_chars must be >= 4000"):
+        Settings(memory_dir=tmp_path)
