@@ -361,7 +361,7 @@ def _consolidate_cluster(engine, cluster: list[dict]) -> None:
 
     prompt = _CONSOLIDATE_PROMPT.format(items_text=items_text)
 
-    raw = llm_generate(engine.settings, prompt, json_mode=True)
+    raw = llm_generate(engine.settings, prompt, json_mode=True, route="consolidation")
     if raw is None:
         return
 
