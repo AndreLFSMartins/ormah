@@ -63,6 +63,10 @@ _adapter_initialised: bool = False
 _cached_ingest_adapter: LLMAdapter | None = None
 _ingest_adapter_initialised: bool = False
 
+_cached_consolidation_adapter: LLMAdapter | None = None
+_consolidation_adapter_initialised: bool = False
+
+
 # HIGH-1 (council-pr, Codex): serialise lazy init + cache access. Without this, two drain
 # threads on distinct acceptance roots (the Beta has ~/.claude/projects + ~/.codex/sessions)
 # can both enter a factory on first use, both call get_adapter(...), and the second assignment
@@ -75,15 +79,24 @@ _ingest_adapter_initialised: bool = False
 # (and its process/connection never spun up) just to be thrown away.
 _adapter_lock = threading.Lock()
 
+# Chars per token assumed when converting a character budget into an input window. English prose
+# runs ~4 chars/token; 2.0 is a deliberate 2x safety margin, so a denser payload (hex digests,
+# base64, CJK) still fits the window we ask for. Erring large costs KV cache; erring small costs
+# a silently truncated prompt, which is the failure #192 exists to remove.
+_CHARS_PER_TOKEN = 2.0
+
 
 def reset_adapter() -> None:
     """Clear the cached adapters (useful for test isolation)."""
     global _cached_adapter, _adapter_initialised, _cached_ingest_adapter, _ingest_adapter_initialised
+    global _cached_consolidation_adapter, _consolidation_adapter_initialised
     with _adapter_lock:
         _cached_adapter = None
         _adapter_initialised = False
         _cached_ingest_adapter = None
         _ingest_adapter_initialised = False
+        _cached_consolidation_adapter = None
+        _consolidation_adapter_initialised = False
 
 
 def _get_or_create_adapter(settings) -> LLMAdapter | None:
@@ -118,6 +131,37 @@ def _get_or_create_ingest_adapter(settings) -> LLMAdapter | None:
             )
             _ingest_adapter_initialised = True
         return _cached_ingest_adapter
+
+
+def _consolidation_num_ctx(settings) -> int:
+    """The input window the consolidation route needs, derived from the budget it packs against.
+
+    Both sides of the call use the same number: the splitter fills at most
+    ``consolidation_max_prompt_chars``, and this converts that to tokens, leaving room for the
+    model's own output budget.
+    """
+    return int(settings.consolidation_max_prompt_chars / _CHARS_PER_TOKEN) + (
+        settings.llm_num_predict
+    )
+
+
+def _get_or_create_consolidation_adapter(settings) -> LLMAdapter | None:
+    global _cached_consolidation_adapter, _consolidation_adapter_initialised
+    # Same _adapter_lock as the maintenance and ingest factories: this cache is a third one, and
+    # leaving it unguarded would reintroduce for the consolidation route exactly the duplicate
+    # construction that HIGH-1 closed for the other two.
+    with _adapter_lock:
+        if not _consolidation_adapter_initialised:
+            # Consolidation is the ONE maintenance route whose prompt carries full source content
+            # (#192), and its output DISPLACES that content: every source is demoted to archival
+            # the moment the summary is written. Inheriting the operator's server default here
+            # would let Ollama truncate the prompt silently -- the #192 bug, one level down. The
+            # maintenance factory deliberately passes no num_ctx (small pairs, no KV-cache cost).
+            _cached_consolidation_adapter = get_adapter(
+                settings, num_ctx=_consolidation_num_ctx(settings)
+            )
+            _consolidation_adapter_initialised = True
+        return _cached_consolidation_adapter
 
 
 def _guarded_generate(adapter, prompt, **kwargs) -> str | None:
@@ -162,6 +206,34 @@ def ingest_provider_configured(settings) -> bool:
     return _get_or_create_ingest_adapter(settings) is not None
 
 
+def _consolidation_num_ctx(settings) -> int:
+    """The input window the consolidation route needs, derived from the budget it packs against.
+
+    Both sides of the call use the same number: the splitter fills at most
+    ``consolidation_max_prompt_chars``, and this converts that to tokens, leaving room for the
+    model's own output budget.
+    """
+    return int(settings.consolidation_max_prompt_chars / _CHARS_PER_TOKEN) + (
+        settings.llm_num_predict
+    )
+
+
+def _get_or_create_consolidation_adapter(settings) -> LLMAdapter | None:
+    global _cached_consolidation_adapter, _consolidation_adapter_initialised
+    if not _consolidation_adapter_initialised:
+        # Consolidation is the ONE maintenance route whose prompt carries full source content
+        # (#192), and its output DISPLACES that content: every source is demoted to archival the
+        # moment the summary is written. Inheriting the operator's server default here would let
+        # Ollama truncate the prompt silently -- exactly the bug #192 fixes, one level down. The
+        # SHARED adapter above deliberately passes no num_ctx: auto_linker, conflict_detector and
+        # duplicate_merger judge small pairs and must not pay this KV cache.
+        _cached_consolidation_adapter = get_adapter(
+            settings, num_ctx=_consolidation_num_ctx(settings)
+        )
+        _consolidation_adapter_initialised = True
+    return _cached_consolidation_adapter
+
+
 def llm_generate(
     settings,
     prompt: str,
@@ -171,9 +243,18 @@ def llm_generate(
     temperature: float | None = None,
     max_tokens: int | None = None,
     timeout_hint_seconds: float | None = None,
+    route: str = "maintenance",
 ) -> str | None:
-    """Maintenance path: swallow cancel/timeout to None (unchanged contract)."""
-    adapter = _get_or_create_adapter(settings)
+    """Maintenance path: swallow cancel/timeout to None (unchanged contract).
+
+    ``route="consolidation"`` selects the adapter that pins its own input window (#192); every
+    other route shares the maintenance adapter, which leaves the window to the operator.
+    """
+    adapter = (
+        _get_or_create_consolidation_adapter(settings)
+        if route == "consolidation"
+        else _get_or_create_adapter(settings)
+    )
     if adapter is None:
         return None
     try:

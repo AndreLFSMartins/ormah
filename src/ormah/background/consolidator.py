@@ -421,6 +421,7 @@ def _consolidate_cluster(engine, cluster: list[dict]) -> None:
     raw = llm_generate(
         engine.settings, prompt, json_mode=True,
         response_format={"type": "json_schema", "json_schema": {"schema": _CONSOLIDATE_RESPONSE_SCHEMA}},
+        route="consolidation",
     )
     if raw is None:
         return  # LLM unavailable — transient, do NOT record, must retry next run
