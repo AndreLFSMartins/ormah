@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from ormah.background import llm_client
+from ormah.background.llm.ollama_adapter import OllamaAdapter
 from ormah.background.llm_client import reset_adapter
 
 
@@ -222,7 +223,6 @@ def test_ingest_propagates_cancel_while_maintenance_swallows_it(monkeypatch):
 
     llm_client.reset_adapter()
     llm_cancel.begin_lifespan()
-from ormah.background.llm.ollama_adapter import OllamaAdapter
 
 
 class _StubAdapter:

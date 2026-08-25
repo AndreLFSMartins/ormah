@@ -11,7 +11,6 @@ import pytest
 
 from ormah.background import consolidator
 from ormah.config import Settings
-from ormah.background import consolidator
 from ormah.models.node import CreateNodeRequest, NodeType, Tier
 
 
@@ -623,13 +622,23 @@ def test_prompt_overhead_is_computed_from_the_template():
 def test_prompt_items_are_rendered_by_the_same_function_the_split_budgets_with(monkeypatch):
     """The split's cost model and the prompt's rendering must be one function, or the budget
     silently stops matching what is actually sent (#192)."""
-    engine = SimpleNamespace(settings=SimpleNamespace())
+    # db stub: on this tree _consolidate_cluster consults the consolidation_checked signature
+    # BEFORE building the prompt, so a settings-only namespace no longer reaches the prompt.
+    # fetchone() -> None means "cluster not seen", which is the path under test.
+    engine = SimpleNamespace(
+        settings=SimpleNamespace(),
+        db=SimpleNamespace(
+            conn=SimpleNamespace(
+                execute=lambda *a, **k: SimpleNamespace(fetchone=lambda: None)
+            )
+        ),
+    )
     cluster = [{"id": "n1", "title": "T", "content": "C", "space": None}]
     captured = {}
 
     def spy(settings, prompt, json_mode=True, **kwargs):
         captured["prompt"] = prompt
-        return None  # short-circuit: _consolidate_cluster returns before touching the engine
+        return None  # short-circuit: returns before _record_signature touches the engine again
 
     monkeypatch.setattr("ormah.background.llm_client.llm_generate", spy)
     monkeypatch.setattr(
