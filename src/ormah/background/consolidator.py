@@ -80,9 +80,14 @@ def _prompt_overhead_chars() -> int:
 
 
 def _render_item(node: dict) -> str:
-    """One source as it appears in the items block. FULL content -- never a slice (#192)."""
+    """One source as it appears in the items block. FULL content -- never a slice (#192).
+
+    ``or ""`` rather than ``get(key, "")``: ``nodes.content`` is nullable and the default only
+    applies to a MISSING key, so a present-but-NULL content would render as the literal string
+    "None" and teach the model that is the source's body. Same idiom as the audit log below.
+    """
     title = node.get("title") or "Untitled"
-    content = node.get("content", "")
+    content = node.get("content") or ""
     return f"- [{title}]: {content}"
 
 
@@ -424,6 +429,16 @@ def _consolidate_cluster(engine, cluster: list[dict]) -> None:
         route="consolidation",
     )
     if raw is None:
+        # Without this the failure is invisible: llm_generate returns None on timeout, connect
+        # error or a disabled provider, the adapter's own warning names neither the job nor the
+        # cluster, and run_consolidation's stats report does not name the cluster either. A run
+        # where every consolidation failed would say nothing about which sources were affected,
+        # so the daily job looks green while the working tier silently stops being curated.
+        logger.warning(
+            "consolidation produced no output for %d source(s) (prompt was %d chars); "
+            "sources left working: %s",
+            len(cluster), len(prompt), ",".join(str(n.get("id")) for n in cluster),
+        )
         return  # LLM unavailable — transient, do NOT record, must retry next run
 
     try:
