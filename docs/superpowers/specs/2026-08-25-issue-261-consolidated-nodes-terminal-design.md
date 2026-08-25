@@ -60,10 +60,19 @@ One file: `src/ormah/background/consolidator.py`, only `_find_consolidation_clus
 - Docstring states that `consolidated`-tagged nodes are terminal and are excluded from
   discovery as seed and as member.
 
-`node_tags(tag)` is already indexed (`idx_node_tags_tag`, `schema.sql`). No schema change, no
-migration, no settings. `_apply_consolidation`, the prompt, `run_consolidation` and
-`_consolidate_cluster` are untouched — PR #260 (#192) edits those and not discovery, so the
-two changes do not conflict.
+The correlated probe is by `node_id`, covered by `node_tags`'s primary key `(node_id, tag)`
+(`schema.sql`). No schema change, no migration, no settings. `_apply_consolidation`, the prompt,
+`run_consolidation` and `_consolidate_cluster` are untouched.
+
+Second caller: `MemoryEngine.get_maintenance_batches` (`memory_engine.py:1820`, the
+`run_maintenance` Claude-in-the-loop phase 1) also calls `_find_consolidation_clusters`, so the
+consolidation batch offered to the agent stops containing consolidated nodes too. Intended —
+same "terminal" rule, one implementation.
+
+Relation to PR #260 (#192), verified with `gh pr diff 260`: that PR does not edit the two
+discovery `SELECT`s, so the changes compose. Both PRs do insert module-level constants right
+after the imports (`_CONSOLIDATE_PROMPT` there, `_NOT_CONSOLIDATED` here), so whichever merges
+second may see a trivial textual conflict in the module header — resolve by keeping both.
 
 ## Tests
 
@@ -80,8 +89,10 @@ similarity 1.0, which is what makes clustering deterministic here.
 
 2. **End to end — the issue's scenario.** `consolidation_max_cluster_nodes = 2`, four
    similar sources, `llm_generate` mocked to return one fixed summary. Run 1 produces N1 and
-   N2 (both `working`, identical content). Run 2 must create **no** new node; N1 and N2 remain
-   `working`; no `derived_from` edge targets N1 or N2. Without the fix run 2 consolidates
+   N2 (both `working`, identical content). Run 2 must create **no** new node (the set of
+   `consolidated`-tagged ids is unchanged), must not call the LLM again, and N1 and N2 remain
+   `working`. (A `derived_from` assertion would not discriminate: on `upstream/main` #123
+   deletes that edge on the very next reindex anyway.) Without the fix run 2 consolidates
    N1 + N2 into N3 — the summary-of-summaries.
 
 Fixture check to do first in the red phase: `engine.remember(..., tags=["consolidated"])`
