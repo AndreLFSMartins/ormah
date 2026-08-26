@@ -393,3 +393,159 @@ class TestSelectClusterWithinBudget:
             result = _select_cluster_within_budget(cluster, budget=5000, min_size=2)
 
         assert result == [], "the budget is measuring raw content, not the serialized node"
+
+
+def _seed_long_nodes(engine, n: int = 2, chars: int = 600) -> dict[str, str]:
+    """Create n nodes whose content is exactly `chars` long. Returns {id: content}.
+
+    auto_link is disabled during remember() so the pairs stay unchecked and remain
+    available as link candidates later.
+    """
+    base = "Python uses indentation to define code block scope. "
+    seeded: dict[str, str] = {}
+    orig_threshold = engine.settings.auto_link_similarity_threshold
+    engine.settings.auto_link_similarity_threshold = 999.0
+    try:
+        for i in range(n):
+            content = (f"{i} " + base * 40)[:chars]
+            assert len(content) == chars
+            req = CreateNodeRequest(
+                content=content,
+                type=NodeType.fact,
+                title=f"Python indentation {i}",
+                space="testproject",
+            )
+            nid, _ = engine.remember(req)
+            seeded[nid] = content
+    finally:
+        engine.settings.auto_link_similarity_threshold = orig_threshold
+    return seeded
+
+
+class TestConsolidationBatchFidelity:
+
+    def test_consolidation_cluster_carries_full_content(self, engine):
+        seeded = _seed_long_nodes(engine, n=2, chars=600)
+        engine.settings.consolidation_cluster_threshold = 0.0
+        engine.settings.consolidation_min_cluster_size = 2
+
+        batches = engine.get_maintenance_batches()
+
+        clusters = batches["consolidation_clusters"]
+        assert clusters, "no consolidation cluster produced — the fixture is not exercising the batch"
+        checked = 0
+        for cluster in clusters:
+            for node in cluster:
+                if node["id"] in seeded:
+                    assert node["content"] == seeded[node["id"]]
+                    assert len(node["content"]) == 600
+                    checked += 1
+        assert checked >= 2, "seeded nodes never appeared in a cluster"
+
+    def test_norm_truncates_screening_batches(self, engine, monkeypatch):
+        """The over-fix guard: it must fail if _norm stops truncating screening.
+
+        It monkeypatches the finder because the real one already slices to 400 in
+        `_node_dict` (auto_linker.py:154), so asserting on its output would stay
+        green even with _norm's limit removed. Both council peers found that.
+        """
+        import ormah.background.auto_linker as auto_linker
+
+        long_node = {
+            "id": "n1",
+            "title": "long",
+            "type": "fact",
+            "space": "testproject",
+            "content": "y" * 600,
+        }
+        other = dict(long_node, id="n2")
+        monkeypatch.setattr(
+            auto_linker,
+            "_find_link_candidates",
+            lambda engine, limit: [{"node_a": long_node, "node_b": other, "similarity": 0.9}],
+        )
+
+        batches = engine.get_maintenance_batches()
+
+        assert batches["link_candidates"], "monkeypatched finder produced nothing"
+        for candidate in batches["link_candidates"]:
+            for node in (candidate["node_a"], candidate["node_b"]):
+                assert len(node["content"]) == 400, "screening batches must stay truncated"
+
+    def test_oversized_cluster_is_trimmed_in_the_batch(self, engine, monkeypatch):
+        """A cluster over budget reaches the batch as a prefix, contents intact."""
+        import json
+
+        import ormah.background.consolidator as consolidator
+
+        nodes = [
+            {
+                "id": f"n{i}",
+                "title": f"node {i}",
+                "type": "fact",
+                "space": "testproject",
+                "content": "z" * 6000,
+            }
+            for i in range(5)
+        ]
+        monkeypatch.setattr(
+            consolidator, "_find_consolidation_clusters", lambda engine, limit: [nodes]
+        )
+        engine.settings.claude_maintenance_cluster_max_chars = 24000
+
+        batches = engine.get_maintenance_batches()
+
+        clusters = batches["consolidation_clusters"]
+        assert len(clusters) == 1, "a prefix is one cluster, never several"
+        kept = clusters[0]
+        assert [n["id"] for n in kept] == ["n0", "n1", "n2"], (
+            "three 6000-char nodes serialize to 18_258; a fourth reaches 24_344, over 24_000"
+        )
+        for node in kept:
+            assert len(node["content"]) == 6000, "trim must never slice a node"
+        assert len(json.dumps(kept, ensure_ascii=False)) <= 24000
+
+    def test_worst_case_cardinality_stays_bounded(self, engine, monkeypatch):
+        """Four max-size clusters of large nodes stay within `4 x budget`.
+
+        With one prefix per cluster the bound is exactly `n_clusters * budget` —
+        unlike v2's bin-packing, where the sub-cluster count was unbounded. Node
+        size is 6000 chars so the trim actually fires (3 of 5 survive), and
+        `assert clusters` keeps the test from passing by emitting nothing.
+        """
+        import json
+
+        import ormah.background.consolidator as consolidator
+
+        budget = engine.settings.claude_maintenance_cluster_max_chars
+        max_nodes = engine.settings.consolidation_max_cluster_nodes
+        big_clusters = [
+            [
+                {
+                    "id": f"c{c}n{i}",
+                    "title": f"node {c}-{i}",
+                    "type": "fact",
+                    "space": "testproject",
+                    "content": "w" * 6000,
+                }
+                for i in range(max_nodes)
+            ]
+            for c in range(4)
+        ]
+        monkeypatch.setattr(
+            consolidator, "_find_consolidation_clusters", lambda engine, limit: big_clusters
+        )
+
+        batches = engine.get_maintenance_batches()
+
+        clusters = batches["consolidation_clusters"]
+        assert clusters, "the trim dropped everything — the fixture proves nothing"
+        assert len(clusters) == 4, "one prefix per cluster"
+        for sub in clusters:
+            assert len(json.dumps(sub, ensure_ascii=False)) <= budget
+
+        payload = json.dumps(clusters, ensure_ascii=False)
+        bound = 4 * budget + 4096
+        assert len(payload) <= bound, (
+            f"consolidation batch is unbounded: {len(payload)} chars, bound {bound}"
+        )

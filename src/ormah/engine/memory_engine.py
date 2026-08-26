@@ -1877,13 +1877,14 @@ class MemoryEngine:
         merge_candidates = _find_merge_candidates(self, limit_per_batch)
         consolidation_clusters = _find_consolidation_clusters(self, limit=4)
 
-        def _norm(node: dict) -> dict:
+        def _norm(node: dict, content_limit: int | None = 400) -> dict:
+            content = node.get("content") or ""
             return {
                 "id": node.get("id", ""),
                 "title": node.get("title", ""),
                 "type": node.get("type", ""),
                 "space": node.get("space", ""),
-                "content": (node.get("content") or "")[:400],
+                "content": content if content_limit is None else content[:content_limit],
             }
 
         def _norm_pair(c: dict) -> dict:
@@ -1892,6 +1893,16 @@ class MemoryEngine:
                 "node_b": _norm(c["node_b"]),
                 "similarity": c.get("similarity", 0.0),
             }
+
+        cluster_budget = self.settings.claude_maintenance_cluster_max_chars
+        min_size = self.settings.consolidation_min_cluster_size
+        consolidation_clusters = [
+            trimmed
+            for cluster in consolidation_clusters
+            if (trimmed := _select_cluster_within_budget(
+                [_norm(n, content_limit=None) for n in cluster], cluster_budget, min_size
+            ))
+        ]
 
         parts = []
         if link_candidates:
@@ -1908,10 +1919,7 @@ class MemoryEngine:
             "link_candidates": [_norm_pair(c) for c in link_candidates],
             "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
             "merge_candidates": [_norm_pair(c) for c in merge_candidates],
-            "consolidation_clusters": [
-                [_norm(n) for n in cluster]
-                for cluster in consolidation_clusters
-            ],
+            "consolidation_clusters": consolidation_clusters,
             "summary": summary,
         }
 
