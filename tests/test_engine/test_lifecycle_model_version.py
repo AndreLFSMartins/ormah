@@ -69,6 +69,14 @@ def test_a_legacy_store_is_backfilled_without_reseeding(engine):
 
 def test_an_unmigrated_store_still_gets_seeded(engine):
     node_id = _make_node(engine)
+    # The seed now computes from the loaded Markdown, not the SQLite row
+    # (council-pr, round 1, second pass: Codex medium@0.97) -- access_count has
+    # to be real on disk, or the fixture proves nothing but its own staleness.
+    node = engine.file_store.load(node_id)
+    node.access_count = 5
+    node.stability = 1.0
+    node.last_review = None
+    engine.file_store.save(node)
     engine.db.conn.execute("DELETE FROM meta WHERE key = 'lifecycle_model_version'")
     engine.db.conn.execute("DELETE FROM meta WHERE key = 'fsrs_migrated'")
     engine.db.conn.execute(
@@ -542,4 +550,32 @@ def test_a_stale_index_row_does_not_overwrite_newer_markdown(engine):
     assert _stability(engine, node_id) != 10.0, (
         "the seed wrote its own formula's value into the DB over a node it "
         "correctly left alone on disk"
+    )
+
+
+def test_stale_index_access_count_does_not_drive_the_formula(engine):
+    """council-pr, round 1, second pass (Codex medium@0.97): the earlier
+    re-check protects stability/last_review from being overwritten, but the
+    seed still computed its VALUE from the stale SQLite row's access_count.
+    An external tool that advances access_count on Markdown without touching
+    stability/last_review leaves the row eligible while the formula's input
+    is already wrong -- the write must come from the loaded node's own
+    access_count, not the row that only decided the node was worth loading."""
+    node_id = _make_node(engine)
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 1.0, last_review = NULL, access_count = 5 "
+        "WHERE id = ?", (node_id,)
+    )
+    engine.db.conn.commit()
+
+    node = engine.file_store.load(node_id)
+    node.access_count = 10
+    engine.file_store.save(node)
+
+    engine._migrate_fsrs()
+
+    on_disk = engine.file_store.load(node_id)
+    assert on_disk.stability == 20.0, (
+        f"seeded from the stale SQLite access_count (would give 10.0) instead "
+        f"of the disk's own (20.0): got {on_disk.stability}"
     )
