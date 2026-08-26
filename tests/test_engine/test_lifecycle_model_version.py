@@ -505,3 +505,41 @@ def test_a_store_at_the_current_version_never_parses_the_graph(engine, monkeypat
         "a full-store Markdown parse"
     )
     assert _version(engine) == "2"
+
+
+def test_a_stale_index_row_does_not_overwrite_newer_markdown(engine):
+    """council-pr, round 1 (Codex high@0.99, Cursor high@0.90, converged
+    independently): eligibility comes from SQLite; the seed used to write to
+    the loaded Markdown unconditionally. If the index goes stale relative to
+    disk -- the server was stopped while an external tool wrote a real
+    stability into a node the index still shows as pre-FSRS -- startup() with
+    a non-empty index never refreshes before _migrate_fsrs() runs, so the
+    stale row destroyed the newer, earned value."""
+    node_id = _make_node(engine)
+    engine.db.conn.execute(
+        "UPDATE nodes SET stability = 1.0, last_review = NULL, access_count = 5 "
+        "WHERE id = ?", (node_id,)
+    )
+    engine.db.conn.commit()
+
+    # An external edit lands on disk with a real earned value while the index
+    # still reflects the pre-FSRS shape above.
+    node = engine.file_store.load(node_id)
+    node.stability = 42.0
+    node.last_review = None
+    engine.file_store.save(node)
+
+    engine._migrate_fsrs()
+
+    on_disk = engine.file_store.load(node_id)
+    assert on_disk.stability == 42.0, (
+        "a stale index row destroyed a newer Markdown value"
+    )
+    # The DB row is left stale at 1.0 here -- reconciling it to the disk value
+    # is the index refresh's job (incremental_update / index_updater), not the
+    # seed's. What must not happen is the seed fabricating a *third* value on
+    # either side, e.g. min(30, access_count * 2) = 10.0.
+    assert _stability(engine, node_id) != 10.0, (
+        "the seed wrote its own formula's value into the DB over a node it "
+        "correctly left alone on disk"
+    )
