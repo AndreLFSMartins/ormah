@@ -381,10 +381,12 @@ class MemoryEngine:
         and on disk. Fail-closed, because the seed is destructive: skipping a
         node leaves a default in place, seeding one destroys a real value.
 
-        This is also what makes the migration resumable. Markdown writes below
-        are not rolled back with the DB transaction, so a failed save leaves
-        earlier files rewritten; on the next run those nodes no longer qualify
-        and the ones not yet reached still do.
+        The whole loop below runs inside one DB transaction, so a mid-loop
+        failure rolls back every row already written to the DB while the
+        Markdown files already saved stay rewritten — the two stores diverge.
+        The retry is correct anyway: the seed formula is deterministic and the
+        write idempotent, so reseeding a node the interrupted run had already
+        written reproduces the same value, and the DB and Markdown reconverge.
         """
         rows = self.db.conn.execute(
             "SELECT id, access_count, last_accessed FROM nodes "
