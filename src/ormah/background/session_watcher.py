@@ -550,7 +550,9 @@ def _record_whisper_usage_signals(
                 "row": row,
                 "signal_type": signal_type,
                 "polarity": polarity,
-                "strength": confidence,
+                "strength": signal_strength.judge_strength(
+                    confidence, min_confidence, polarity
+                ),
                 "evidence": {
                     "detector": _LLM_JUDGE_SOURCE,
                     "verdict": verdict,
