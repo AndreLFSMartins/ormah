@@ -432,28 +432,35 @@ class MemoryEngine:
         write idempotent, so reseeding a node the interrupted run had already
         written reproduces the same value, and the DB and Markdown reconverge.
         """
-        rows = self.db.conn.execute(
-            "SELECT id, access_count, last_accessed FROM nodes "
-            "WHERE last_review IS NULL AND stability = 1.0 AND access_count > 0"
-        ).fetchall()
+        candidate_ids = [
+            r["id"]
+            for r in self.db.conn.execute(
+                "SELECT id FROM nodes "
+                "WHERE last_review IS NULL AND stability = 1.0 AND access_count > 0"
+            ).fetchall()
+        ]
 
+        seeded = 0
         with self.db.transaction() as conn:
-            for r in rows:
-                node = self.file_store.load(r["id"])
+            for node_id in candidate_ids:
+                node = self.file_store.load(node_id)
                 if node is None:
                     continue
 
-                stability = min(30.0, r["access_count"] * 2.0)
-                last_review = r["last_accessed"]
-                last_review_dt: datetime | None = None
-                if last_review:
-                    try:
-                        last_review_dt = datetime.fromisoformat(last_review)
-                    except (ValueError, TypeError):
-                        last_review_dt = None
+                # Compute strictly from the loaded node's own durable fields,
+                # never the SQLite row that made it a candidate (council-pr,
+                # round 1: Codex medium@0.97). The row only decides WHICH
+                # nodes are worth loading; using its access_count/last_accessed
+                # to compute the seeded VALUE reproduces whatever the index
+                # last saw, which can be older than disk -- an external tool
+                # can advance access_count on Markdown without the index (or
+                # this predicate's own stability=1.0/last_review=NULL shape)
+                # ever changing, so the row stays a "candidate" while it is
+                # already stale on the one input the formula actually uses.
+                stability = min(30.0, node.access_count * 2.0)
+                last_review_dt = node.last_accessed
 
-                # Re-check the predicate against the loaded node, not just the
-                # SQLite row that qualified it (council-pr, round 1: Codex
+                # Re-check the predicate against the loaded node too (Codex
                 # high@0.99, Cursor high@0.90, converged independently).
                 # startup() with a non-empty index never refreshes it before
                 # _migrate_fsrs() runs, so the index can be stale relative to
@@ -463,11 +470,12 @@ class MemoryEngine:
                 #
                 # A node this same seed already wrote in an earlier,
                 # interrupted attempt is not such a case: the formula is
-                # deterministic, so its disk state already equals what this
-                # pass would produce again. Recognizing that keeps the
-                # resumability this method's docstring promises (Codex F3) --
-                # a node the failed attempt had already (re)written still
-                # converges instead of being skipped as "someone else's value".
+                # deterministic over the node's own fields, so its disk state
+                # already equals what this pass would produce again.
+                # Recognizing that keeps the resumability this method's
+                # docstring promises (Codex F3) -- a node the failed attempt
+                # had already (re)written still converges instead of being
+                # skipped as "someone else's value".
                 pre_fsrs = node.last_review is None and node.stability == 1.0
                 already_seeded = (
                     node.stability == stability and node.last_review == last_review_dt
@@ -477,15 +485,15 @@ class MemoryEngine:
 
                 conn.execute(
                     "UPDATE nodes SET stability = ?, last_review = ? WHERE id = ?",
-                    (stability, last_review, r["id"]),
+                    (stability, last_review_dt.isoformat() if last_review_dt else None, node_id),
                 )
 
                 node.stability = stability
-                if last_review_dt is not None:
-                    node.last_review = last_review_dt
+                node.last_review = last_review_dt
                 self.file_store.save(node)
+                seeded += 1
 
-        logger.info("FSRS data migration: seeded %d eligible nodes from access_count", len(rows))
+        logger.info("FSRS data migration: seeded %d eligible nodes from access_count", seeded)
 
     def _seed_initial_maintenance_grace_period(self) -> None:
         """Avoid firing agent-backed maintenance immediately on fresh installs."""
