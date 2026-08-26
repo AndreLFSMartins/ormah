@@ -64,3 +64,33 @@ def test_auto_cluster_aborts_when_a_restore_lands_mid_run(engine):
 
     assert saves["count"] == 1
     assert sum(_space_of(engine, o) == "proj" for o in orphans) == 0
+
+
+def test_a_space_assigned_after_the_scan_is_not_overwritten(engine):
+    """auto_cluster's candidate query says 'no space'; revalidate before writing one."""
+    orphan = _seeded_pair(engine, 0)
+    assigned_by_user = {"done": False}
+
+    real_load = engine.file_store.load
+
+    def assign_then_load(node_id):
+        """file_store.load is the first thing the apply step does; the user write lands
+        just before it, standing in for one that arrived after the candidate query."""
+        if not assigned_by_user["done"] and node_id == orphan:
+            assigned_by_user["done"] = True
+            node = real_load(node_id)
+            node.space = "chosen-by-user"
+            node.touch_updated()
+            real_save(node)
+            engine.db.conn.execute(
+                "UPDATE nodes SET space = 'chosen-by-user' WHERE id = ?", (orphan,))
+            engine.db.conn.commit()
+        return real_load(node_id)
+
+    real_save = engine.file_store.save
+    engine.file_store.load = assign_then_load
+
+    run_auto_cluster(engine)
+
+    assert assigned_by_user["done"], "the apply step never ran — the fixture stopped exercising the job"
+    assert _space_of(engine, orphan) == "chosen-by-user"

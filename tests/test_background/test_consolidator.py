@@ -187,6 +187,39 @@ class TestConsolidation:
         nodes_after = engine.db.conn.execute("SELECT COUNT(*) AS c FROM nodes").fetchone()["c"]
         assert nodes_after == nodes_before
 
+    @patch("ormah.background.llm_client.llm_generate")
+    def test_a_node_promoted_during_the_llm_call_is_not_demoted(self, mock_llm, consolidation_engine):
+        """The #257 canary, in the consolidator: revalidate tier inside the apply step."""
+        from ormah.models.node import Tier, UpdateNodeRequest
+
+        engine, ids = consolidation_engine
+        engine.settings.llm_provider = "ollama"
+        engine.settings.consolidation_min_cluster_size = 2
+
+        promoted_id = ids[0]
+        promoted = {"done": False}
+
+        def promote_then_answer(*args, **kwargs):
+            """The LLM call is the unlocked phase: a foreground promotion lands here."""
+            if not promoted["done"]:
+                promoted["done"] = True
+                engine.update_node(promoted_id, UpdateNodeRequest(tier=Tier.core))
+            return json.dumps({
+                "title": "Python uses indentation",
+                "summary": "Python blocks are delimited by indentation.",
+                "type": "fact",
+            })
+
+        mock_llm.side_effect = promote_then_answer
+
+        from ormah.background.consolidator import run_consolidation
+        run_consolidation(engine)
+
+        assert promoted["done"], "the fake LLM was never called — the fixture stopped exercising the job"
+        row = engine.db.conn.execute(
+            "SELECT tier FROM nodes WHERE id = ?", (promoted_id,)).fetchone()
+        assert row["tier"] == "core", "consolidation demoted a node promoted after the snapshot"
+
 
 def test_consolidation_settings_defaults(tmp_path):
     s = Settings(memory_dir=tmp_path)

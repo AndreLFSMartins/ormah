@@ -48,10 +48,19 @@ def run_auto_cluster(engine, epoch: int) -> None:
             # Update markdown file
             with engine.memory_operation_at(epoch):
                 node = engine.file_store.load(node_id)
-                if node:
-                    node.space = most_common
-                    node.touch_updated()
-                    engine.file_store.save(node)
+                if node is None:
+                    continue
+                # Revalidate: the candidate query said this node had no space, but that was
+                # read outside the lock. A space assigned since is the user's, not ours (#240).
+                if node.space:
+                    logger.debug(
+                        "Auto-cluster left %s alone: a space was assigned since the scan",
+                        node_id[:8])
+                    updates.pop()
+                    continue
+                node.space = most_common
+                node.touch_updated()
+                engine.file_store.save(node)
 
             assigned += 1
 

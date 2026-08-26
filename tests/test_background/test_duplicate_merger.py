@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch, MagicMock
 
-from ormah.models.node import CreateNodeRequest, NodeType
+from ormah.models.node import CreateNodeRequest, NodeType, UpdateNodeRequest
 
 _LLM_PATCH = "ormah.background.llm_client.llm_generate"
 
@@ -221,5 +221,42 @@ def test_duplicate_detection_aborts_when_a_restore_lands_mid_run(engine):
         "the fake LLM was never called — the fixture stopped exercising the job"
     assert engine.db.conn.execute(
         "SELECT COUNT(*) AS c FROM proposals").fetchone()["c"] == proposals_before
+    assert engine.db.conn.execute(
+        "SELECT COUNT(*) AS c FROM nodes").fetchone()["c"] == nodes_before
+
+
+def test_a_node_edited_during_the_llm_call_is_not_merged_over(engine):
+    """The merged text was written from pre-edit content; do not apply it to edited nodes."""
+    import json
+    from unittest.mock import patch
+
+    id_a, id_b = _create_pair(engine)
+    engine.settings.llm_provider = "ollama"
+    engine.settings.auto_merge_threshold = 0.0
+
+    edited = {"done": False}
+
+    def edit_then_answer(*args, **kwargs):
+        """The LLM call is the unlocked phase: a foreground edit lands here."""
+        if not edited["done"]:
+            edited["done"] = True
+            engine.update_node(id_a, UpdateNodeRequest(
+                content="the user rewrote this node while the merger was thinking"))
+        return json.dumps({
+            "is_duplicate": True, "reason": "same fact",
+            "merged_title": "merged", "merged_content": "merged content",
+        })
+
+    nodes_before = engine.db.conn.execute("SELECT COUNT(*) AS c FROM nodes").fetchone()["c"]
+
+    with patch("ormah.background.llm_client.llm_generate", side_effect=edit_then_answer):
+        from ormah.background.duplicate_merger import run_duplicate_detection
+        run_duplicate_detection(engine)
+
+    assert edited["done"], "the fake LLM was never called — the fixture stopped exercising the job"
+    row = engine.db.conn.execute(
+        "SELECT content FROM nodes WHERE id = ?", (id_a,)).fetchone()
+    assert row is not None, "the edited node was merged away"
+    assert "the user rewrote this node" in row["content"], "the stale merged text overwrote a fresh edit"
     assert engine.db.conn.execute(
         "SELECT COUNT(*) AS c FROM nodes").fetchone()["c"] == nodes_before

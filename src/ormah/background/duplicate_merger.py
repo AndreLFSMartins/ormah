@@ -339,6 +339,23 @@ def run_duplicate_detection(engine, epoch: int) -> None:
                 merged = False
                 if score >= engine.settings.auto_merge_threshold:
                     with engine.memory_operation_at(epoch):
+                        # Revalidate: merged_content was written by the LLM from the content
+                        # snapshotted before the call. Applying it over an edit made since would
+                        # silently discard that edit. Skip the pair; the next run re-checks it
+                        # against the new content (#240).
+                        fresh = engine.db.conn.execute(
+                            "SELECT id, content FROM nodes WHERE id IN (?, ?)",
+                            (node["id"], match["id"]),
+                        ).fetchall()
+                        current = {r["id"]: r["content"] for r in fresh}
+                        if (
+                            current.get(node["id"]) != node["content"]
+                            or current.get(match["id"]) != other["content"]
+                        ):
+                            logger.debug(
+                                "Auto-merge skipped %s / %s: content changed since the snapshot",
+                                node["id"][:8], match["id"][:8])
+                            continue
                         try:
                             result = engine.execute_merge(
                                 node["id"], match["id"],

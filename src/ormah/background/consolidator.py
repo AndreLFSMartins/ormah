@@ -183,6 +183,16 @@ def _apply_consolidation(
                 ))
             except Exception:
                 pass
+            # Revalidate before demoting: node_ids was snapshotted before the LLM call,
+            # so a foreground promotion may have landed since. Skip the item, do not abort
+            # the run — one node changing invalidates that node, not the whole cluster (#240).
+            current = conn.execute(
+                "SELECT tier FROM nodes WHERE id = ?", (node_id,)
+            ).fetchone()
+            if current is None or current["tier"] != "working":
+                logger.debug(
+                    "Consolidation left %s alone: tier changed since the snapshot", node_id[:8])
+                continue
             engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
 
         return new_id
