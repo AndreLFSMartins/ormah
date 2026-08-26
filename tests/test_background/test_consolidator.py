@@ -988,3 +988,19 @@ def test_consolidated_seed_never_recruits_raw_neighbours(engine):
 
     assert ids_in_clusters.isdisjoint(summaries), "a consolidated node seeded a cluster"
     assert set(raw) <= ids_in_clusters, "the raw pair should still cluster"
+
+
+def test_clusters_carry_node_type(consolidation_engine):
+    """The agent picks the consolidated node's type — it must see the sources' type."""
+    from ormah.background.consolidator import _find_consolidation_clusters
+
+    engine, _ids = consolidation_engine
+    engine.settings.consolidation_cluster_threshold = 0.0
+    engine.settings.consolidation_min_cluster_size = 2
+
+    clusters = _find_consolidation_clusters(engine, limit=4)
+
+    assert clusters, "no cluster formed — the assertion below would never run"
+    for cluster in clusters:
+        for node in cluster:
+            assert node.get("type") == "fact"
