@@ -103,13 +103,18 @@ def test_an_uncertain_verdict_carries_no_strength(engine, tmp_path):
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah-wt-218
 env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
-  tests/test_background/test_usage_signal_strength.py -q -k judge > /tmp/218-t4-red.txt 2>&1
+  tests/test_background/test_usage_signal_strength.py -q -k "judge_band or uncertain_verdict" \
+  > /tmp/218-t4-red.txt 2>&1
 echo "PYTEST_EXIT=$?" >> /tmp/218-t4-red.txt
 tail -20 /tmp/218-t4-red.txt
 ```
 
-Expected: 2 failed — the used verdict stores `0.88` instead of a band value, and the uncertain one
-stores `0.35` instead of `0.0`.
+Expected: `2 failed, 6 deselected` — the used verdict stores `0.88` instead of a band value, and
+the uncertain one stores `0.35` instead of `0.0`.
+
+The `-k` predicate names both tests explicitly. A bare `-k judge` silently selects only the first,
+because `test_an_uncertain_verdict_carries_no_strength` has no "judge" in its name — it reports
+`1 failed, 7 deselected` and looks like a passing second test.
 
 - [ ] **Step 3: Put the judge record on its band**
 
