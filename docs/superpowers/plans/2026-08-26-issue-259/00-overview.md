@@ -1,10 +1,10 @@
-# Issue #259 — Maintenance consolidation reads full content: Implementation Plan (v3)
+# Issue #259 — Maintenance consolidation reads full content: Implementation Plan (v3.1)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stop the Claude-in-the-loop maintenance path from writing consolidation summaries out of a truncated view of each source, at **both** cut points, while keeping the phase-1 payload bounded by splitting oversized clusters instead of slicing or skipping them.
 
-**Architecture:** There are two truncations between the store and the agent: `_norm` (400 chars, `memory_engine.py`) and `_format_maintenance_batches` (200 chars for clusters, `mcp_adapter.py`). Both must go for the consolidation batch and both must stay for screening. To keep the payload bounded once uncapped, `get_maintenance_batches` normalizes each cluster and then trims it to the longest prefix that fits `claude_maintenance_cluster_max_chars` measured on the serialized node — one decision point, and the formatter needs to know nothing about budgets.
+**Architecture:** There are two truncations between the store and the agent: `_norm` (400 chars, `memory_engine.py`) and `_format_maintenance_batches` (200 chars for clusters, `mcp_adapter.py`). Both must go for the consolidation batch and both must stay for screening. To keep the payload bounded once uncapped, `get_maintenance_batches` normalizes each cluster and then keeps the seed plus every following match that still fits `claude_maintenance_cluster_max_chars`, measured on the serialized node — one decision point, and the formatter needs to know nothing about budgets.
 
 **Tech Stack:** Python 3.11+, pydantic-settings, pytest (`asyncio_mode = auto`), ruff (line-length 100), fastembed + sqlite-vec for the cluster fixtures.
 
@@ -27,8 +27,8 @@ ever produces an unbounded phase-1 payload.
 
 | # | File | Deliverable |
 |---|------|-------------|
-| 1 | [01-split-helper.md](01-split-helper.md) | `claude_maintenance_cluster_max_chars` + `_select_cluster_within_budget`, tested in isolation. No behaviour change yet. |
-| 2 | [02-uncap-norm.md](02-uncap-norm.md) | `_norm` uncapped for consolidation, trim applied, both guards proven by mutation. |
+| 1 | [01-split-helper.md](01-split-helper.md) | `claude_maintenance_cluster_max_chars` + `_select_cluster_within_budget` (8 tests). No behaviour change yet. |
+| 2 | [02-uncap-norm.md](02-uncap-norm.md) | `_norm` uncapped for consolidation, trim applied, committed, then both guards proven by mutation. |
 | 3 | [03-formatter.md](03-formatter.md) | The MCP formatter stops cutting cluster content at 200 — the cut the agent actually reads. |
 | 4 | [04-node-type.md](04-node-type.md) | Cluster candidates carry `type`. |
 | 5 | [05-verification.md](05-verification.md) | Full suite, lint, island-clean gate, collision checks (#260 and #261), push to `fork`. |
@@ -45,9 +45,16 @@ Two `/council` runs rejected the two earlier drafts. Cursor and Codex returned
   tool result. Task 3 exists because of the first; Task 1 because of the second.
 - **v2** (run `5bf5592c-8c32273c-050cf979`, 4 findings, all HIGH): the greedy next-fit packing
   discarded nodes that would have paired, and dropped the seed silently. Confirmed by executing
-  the specified helper: `[500,500,400,400]` at budget 900 lost 2 of 4 nodes. Task 1 now selects a
-  prefix instead. The v2 bound also measured raw content, ignoring metadata and JSON escaping —
-  3000 NUL characters serialize to 18_070 — so the budget now measures `json.dumps(node)`.
+  the specified helper: `[500,500,400,400]` at budget 900 lost 2 of 4 nodes. The v2 bound also
+  measured raw content, ignoring metadata and JSON escaping — 3000 NUL characters serialize to
+  18_070 — so the budget now measures `json.dumps(node)`.
+- **v3** (run `8c32273c-fb8ee423-e379cc46`, 4 findings, all HIGH): no architectural decision was
+  attacked. Two implementation errors: the strict prefix stopped at the first node over budget,
+  hiding every smaller node behind it — `[seed(177), m1(24073), m2(173)]` at budget 24000 returned
+  `[]`, losing the valid `seed + m2` — and permanently, since the finder rebuilds the same ordered
+  cluster every cycle. And Task 2's mutation step ran `git checkout` on an uncommitted
+  implementation, which would have made Mutation B pass vacuously. v3.1 skips instead of stopping,
+  and commits before mutating.
 
 **Review-setup caveat:** the peers review the working tree of `Tools/ormah`, which is on
 `local-main` (~693 commits ahead), while this plan targets `upstream/main`. In the v2 run a peer
