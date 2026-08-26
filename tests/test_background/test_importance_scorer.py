@@ -427,6 +427,43 @@ def test_importance_job_uses_configured_recency_half_life(engine):
     assert importance == pytest.approx(0.5, abs=0.001)
 
 
+def test_recency_ignores_a_lagging_last_review(engine):
+    """A node used today must not read as stale because reinforcement is on cooldown."""
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Used today, reinforced a month ago",
+        type=NodeType.fact,
+        tier=Tier.working,
+        title="Lagging review",
+    ))
+    now = datetime.now(timezone.utc)
+    engine.db.conn.execute(
+        "UPDATE nodes SET last_accessed = ?, last_review = ?, access_count = 0 "
+        "WHERE id = ?",
+        (now.isoformat(), (now - timedelta(days=30)).isoformat(), node_id),
+    )
+    # Keep the assertion about recency only; auto-linking can otherwise add an
+    # unrelated edge contribution and make the old timestamp order look healthy.
+    engine.db.conn.execute(
+        "DELETE FROM edges WHERE source_id = ? OR target_id = ?", (node_id, node_id)
+    )
+    engine.db.conn.commit()
+
+    run_importance_scoring(engine)
+
+    importance = engine.db.conn.execute(
+        "SELECT importance FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()["importance"]
+    settings = engine.settings
+    total = (
+        settings.importance_access_weight
+        + settings.importance_edge_weight
+        + settings.importance_recency_weight
+    )
+    assert importance == pytest.approx(
+        settings.importance_recency_weight / total, abs=0.02
+    )
+
+
 def test_recency_signal_survives_an_invalid_half_life():
     """Defence in depth (council I1): the validator should make these unreachable,
     but the guard must hold anyway. A zero or negative half-life must never raise
