@@ -65,10 +65,13 @@ class IndexBuilder:
             # the rebuilt store is reprocessed even if the counter was also reset (wiped meta).
             # Also clear the conflict scope-stamp so post-rebuild state is fully coherent
             # (the stamp would otherwise linger and describe a scope for a watermark of 0).
+            # The lifecycle markers are derived state too (#236): index.db is excluded from
+            # backups, so a restore onto an existing index must re-evaluate the FSRS migration
+            # instead of trusting a marker written for the previous graph.
             conn.execute(
                 "DELETE FROM meta WHERE key IN "
                 "('auto_link_watermark', 'duplicate_check_watermark', 'conflict_check_watermark', "
-                "'conflict_check_watermark_scope')"
+                "'conflict_check_watermark_scope', 'fsrs_migrated', 'lifecycle_model_version')"
             )
 
             # Two-pass: nodes first, then edges (to satisfy FK constraints)
