@@ -99,13 +99,11 @@ def test_a_rebuilt_index_does_not_reseed_earned_stability(engine):
     The Markdown still carries stability and last_review, so the store is not a
     pre-FSRS one and must not be reseeded.
 
-    SCOPE, stated so nobody reads more into a green than it carries: this covers
-    the EMPTY-meta restore only. It deletes the keys by hand and calls
-    _migrate_fsrs directly — it goes through neither full_rebuild nor
-    reload_restored_graph. The same-device restore, where meta survives the
-    rebuild and _migrate_fsrs is never called, is a pre-existing defect tracked
-    outside this issue (see the scope boundary above). This test passing does
-    NOT mean restore is safe in general.
+    SCOPE: this covers the EMPTY-meta case at the _migrate_fsrs level only —
+    it deletes the keys by hand and never goes through full_rebuild or
+    reload_restored_graph. The same-device restore, where meta used to survive
+    the rebuild, is covered by test_a_restore_onto_an_existing_index_* below
+    (#236).
     """
     node_id = _make_node(engine)
     now = datetime.now(timezone.utc)
@@ -262,5 +260,57 @@ def test_no_version_is_recorded_while_a_file_is_missing_from_the_index(engine):
 
     (engine.file_store.nodes_dir / "broken.md").unlink()
     engine._migrate_fsrs()
+
+    assert _version(engine) == "2"
+
+
+def _rewrite_as_pre_fsrs(engine, node_id: str, access_count: int) -> None:
+    """Rewrite one node's Markdown the way a pre-FSRS store would have it:
+    no last_review, default stability, but a real usage history."""
+    node = engine.file_store.load(node_id)
+    node.last_review = None
+    node.stability = 1.0
+    node.access_count = access_count
+    engine.file_store.save(node)
+
+
+def test_a_restore_onto_an_existing_index_seeds_pre_fsrs_nodes(engine):
+    """#236: the store was already migrated (version 2 in meta), then the
+    Markdown is replaced by pre-FSRS nodes and the graph is reloaded. The
+    surviving marker must not short-circuit the seed."""
+    node_id = _make_node(engine)
+    assert _version(engine) == "2"
+    _rewrite_as_pre_fsrs(engine, node_id, access_count=5)
+
+    engine.reload_restored_graph()
+
+    assert _stability(engine, node_id) == 10.0, "min(30, access_count * 2) was not applied"
+    assert _version(engine) == "2"
+    assert engine.file_store.load(node_id).stability == 10.0, "Markdown was not reseeded"
+
+
+def test_a_restore_onto_an_existing_index_keeps_earned_stability(engine):
+    """The inverse of the case above: a store that carries last_review is not
+    pre-FSRS, so reloading must leave earned stability alone and simply
+    re-record the version."""
+    node_id = _make_node(engine)
+    node = engine.file_store.load(node_id)
+    node.stability = 42.0
+    node.access_count = 5
+    node.last_review = datetime.now(timezone.utc)
+    engine.file_store.save(node)
+
+    engine.reload_restored_graph()
+
+    assert _stability(engine, node_id) == 42.0, "the seed re-ran on a migrated store"
+    assert _version(engine) == "2"
+
+
+def test_an_admin_rebuild_re_records_the_version(engine):
+    """rebuild_index is also reachable from the admin route; it must leave the
+    store at the current version, not with the keys wiped by full_rebuild."""
+    _make_node(engine)
+
+    engine.rebuild_index()
 
     assert _version(engine) == "2"
