@@ -1,4 +1,4 @@
-### Task 1: Budget setting and the prefix-selection helper
+### Task 1: Budget setting and the seed-first selection helper
 
 **Files:**
 - Modify: `src/ormah/config.py` (after `claude_maintenance_batch_size`, and the validators block)
@@ -14,12 +14,21 @@
 This task adds capability only. Nothing calls the helper yet, so `get_maintenance_batches`
 behaves exactly as before and the existing suite must stay green.
 
-**Why a prefix and not bin-packing.** v2 specified greedy next-fit packing. Both `/council` peers
-converged on its defect and it was confirmed by execution: `[500,500,400,400]` at budget 900
-yields `[500],[500,400],[400]`, and the `len >= 2` filter then deletes two nodes that would have
-paired; a large seed followed by smaller matches gets the **seed** dropped, silently. A prefix has
-no bins, so no orphan singletons, and it keeps the most central nodes because
-`_find_consolidation_clusters` already returns seed-first, matches by descending similarity.
+**Why seed-first greedy selection, and not bin-packing or a strict prefix.**
+
+- **Not bin-packing (v2).** Greedy next-fit at budget 900 turns `[500,500,400,400]` into
+  `[500],[500,400],[400]`, and the `len >= 2` filter then deletes two nodes that would have
+  paired; a large seed followed by smaller matches gets the **seed** dropped, silently. Confirmed
+  by executing the v2 helper.
+- **Not a strict prefix (v3).** Stopping at the first node that does not fit hides every smaller
+  node behind an oversized one. Confirmed by execution: `[seed(177), m1(24073), m2(173)]` at
+  budget 24000 returns `[]`, losing the perfectly valid `seed + m2`. Worse, it is permanent —
+  `_find_consolidation_clusters` rebuilds the same cluster in the same order every cycle, so
+  those nodes never progress and keep consuming one of the finder's four slots. Both peers found
+  this; the starvation consequence is the Codex peer's.
+- **Seed-first greedy skip** keeps the invariant that matters (a consolidation always contains its
+  seed), never opens a second bin (which is what dropped the seed in v2), and lets a smaller match
+  through when a bigger one does not fit.
 
 **Why the budget measures `json.dumps(node)`.** The normalized node also carries `id`, `title`,
 `type` and `space`, and JSON escaping can multiply size — 3000 NUL characters of content serialize
@@ -56,7 +65,7 @@ class TestSelectClusterWithinBudget:
         cluster = [self._node(f"n{i}", 400) for i in range(5)]
         assert _select_cluster_within_budget(cluster, budget=24000, min_size=2) == cluster
 
-    def test_oversized_cluster_is_trimmed_to_a_prefix(self, caplog):
+    def test_oversized_cluster_is_trimmed(self, caplog):
         from ormah.engine.memory_engine import _select_cluster_within_budget
 
         cluster = [self._node(f"n{i}", 500) for i in range(4)]
@@ -69,6 +78,37 @@ class TestSelectClusterWithinBudget:
         for node in result:
             assert len(node["content"]) == 500, "trim must never slice a node"
         assert "trimmed" in caplog.text
+
+    def test_an_oversized_match_does_not_hide_the_smaller_ones(self, caplog):
+        """The v3 defect: a strict prefix stopped here and lost seed + m2.
+
+        Sizes: seed 177, m1 24_073, m2 173 serialized. `seed + m1` is 24_250,
+        over budget; `seed + m2` is 350, well under. Stopping at m1 returns [].
+        """
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("seed", 100), self._node("m1", 24000), self._node("m2", 100)]
+
+        with caplog.at_level("INFO"):
+            result = _select_cluster_within_budget(cluster, budget=24000, min_size=2)
+
+        assert [n["id"] for n in result] == ["seed", "m2"]
+        assert "m1" in caplog.text, "the skipped node must be named in the log"
+
+    def test_repeated_cycles_make_progress(self):
+        """No starvation: the finder rebuilds the same ordered cluster every cycle,
+        so a cluster that yields nothing once would yield nothing forever."""
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("seed", 100), self._node("m1", 24000), self._node("m2", 100)]
+
+        results = [
+            _select_cluster_within_budget(cluster, budget=24000, min_size=2)
+            for _ in range(3)
+        ]
+
+        assert all(r for r in results), "a cycle produced nothing — this cluster is starved"
+        assert all([n["id"] for n in r] == ["seed", "m2"] for r in results)
 
     def test_a_kept_cluster_always_contains_the_seed(self):
         """The invariant next-fit violated: never consolidate without the seed."""
@@ -94,6 +134,8 @@ class TestSelectClusterWithinBudget:
         assert caplog.records, "a dropped cluster must never be silent"
 
     def test_seed_larger_than_the_budget_drops_the_cluster(self, caplog):
+        """An oversized seed must not claim the cluster and starve its matches —
+        it drops the whole cluster, explicitly, with the seed named."""
         from ormah.engine.memory_engine import _select_cluster_within_budget
 
         cluster = [self._node("huge", 30000), self._node("a", 100), self._node("b", 100)]
@@ -102,7 +144,7 @@ class TestSelectClusterWithinBudget:
             result = _select_cluster_within_budget(cluster, budget=24000, min_size=2)
 
         assert result == []
-        assert caplog.records
+        assert "huge" in caplog.text
 
     def test_budget_counts_serialized_size_not_raw_content(self, caplog):
         """3000 NUL chars are 3000 raw but 18_070 serialized — a len(content)
@@ -128,7 +170,7 @@ echo "PYTEST_EXIT=$?" >> /tmp/t1.txt
 cat /tmp/t1.txt
 ```
 
-Expected: all six FAIL with `ImportError: cannot import name '_select_cluster_within_budget'`.
+Expected: all eight FAIL with `ImportError: cannot import name '_select_cluster_within_budget'`.
 
 - [ ] **Step 3: Add the setting**
 
@@ -159,35 +201,56 @@ add the import if it is not, and `logger` is defined at line 47):
 def _select_cluster_within_budget(
     cluster: list[dict], budget: int, min_size: int
 ) -> list[dict]:
-    """Longest prefix of `cluster` whose serialized size fits `budget`.
+    """Greedy seed-first selection of nodes whose serialized sizes fit `budget`.
 
-    The cluster arrives seed-first, then matches by descending similarity, so the
-    prefix keeps the most central nodes. A node is never sliced; nodes left out
-    stay in the working tier and return on the next cycle. Returns [] when the
-    prefix cannot reach `min_size`.
+    The seed is always kept: it is the node the cluster was built around, and a
+    consolidation written without it is not a consolidation of that cluster. The
+    matches follow in descending similarity; a match that does not fit is
+    *skipped*, not a stop signal — stopping at the first oversized match would
+    hide every smaller match behind it, and because the finder rebuilds the same
+    ordered cluster every cycle, it would hide them permanently.
+
+    Nodes are never sliced. Returns [] when the seed alone exceeds the budget or
+    when fewer than `min_size` nodes fit.
     """
-    selected: list[dict] = []
-    used = 0
+    if not cluster:
+        return []
 
-    for node in cluster:
+    seed, matches = cluster[0], cluster[1:]
+    seed_size = len(json.dumps(seed, ensure_ascii=False))
+    if seed_size > budget:
+        logger.warning(
+            "consolidation: seed %s serializes to %d chars, over the %d-char budget; "
+            "cluster dropped, its nodes stay in the working tier",
+            seed.get("id", "?"), seed_size, budget,
+        )
+        return []
+
+    selected = [seed]
+    used = seed_size
+    skipped: list[str] = []
+
+    for node in matches:
         size = len(json.dumps(node, ensure_ascii=False))
         if used + size > budget:
-            break
+            skipped.append(node.get("id", "?"))
+            continue
         selected.append(node)
         used += size
 
     if len(selected) < min_size:
         logger.warning(
-            "consolidation: cluster dropped — only %d of %d nodes fit the %d-char budget "
-            "(minimum %d); leaving them in the working tier",
+            "consolidation: only %d of %d nodes fit the %d-char budget (minimum %d); "
+            "cluster dropped, its nodes stay in the working tier",
             len(selected), len(cluster), budget, min_size,
         )
         return []
 
-    if len(selected) < len(cluster):
+    if skipped:
         logger.info(
-            "consolidation: cluster trimmed from %d to %d nodes to fit the %d-char budget",
-            len(cluster), len(selected), budget,
+            "consolidation: cluster trimmed from %d to %d nodes to fit the %d-char budget "
+            "(skipped: %s)",
+            len(cluster), len(selected), budget, ", ".join(skipped),
         )
 
     return selected

@@ -1,6 +1,6 @@
 # Issue #259 — Claude-in-the-loop consolidation must summarize from full content
 
-- **Date:** 2026-08-26 (v3 — rewritten after `/council` rejected v1 and v2)
+- **Date:** 2026-08-26 (v3.1 — three `/council` rounds; v3.1 fixes what the third found)
 - **Issue:** [r-spade/ormah#259](https://github.com/r-spade/ormah/issues/259)
 - **Branch:** `fix/259-maintenance-full-content` (island cut from `upstream/main` @ `90c431e`)
 - **Worktree:** `Tools/ormah-wt-259`
@@ -48,14 +48,24 @@ KEYS: ['content', 'id', 'space', 'title']
 
 ## Decisions
 
-### Trim to the longest prefix that fits — never slice a node
+### Seed-first greedy selection — never slice a node, never stop at the first misfit
 
-A cluster whose serialized size exceeds `claude_maintenance_cluster_max_chars` is trimmed to the
-**longest prefix that fits**. The cluster already arrives ordered by `_find_consolidation_clusters`
-— seed first, then matches by descending similarity — so the prefix keeps the most central and
-the most similar nodes. Content is never sliced. Nodes left out stay in `working` and return on
-the next cycle. If the prefix cannot reach `consolidation_min_cluster_size`, the cluster is
-dropped entirely with a WARNING naming it.
+A cluster whose serialized size exceeds `claude_maintenance_cluster_max_chars` is reduced by
+keeping the **seed plus every following match that still fits**, in the order
+`_find_consolidation_clusters` produces (seed first, matches by descending similarity). A match
+that does not fit is **skipped**, and scanning continues. Content is never sliced. If the seed
+alone exceeds the budget, or fewer than `consolidation_min_cluster_size` nodes fit, the cluster is
+dropped with a WARNING naming it.
+
+The seed is always kept: it is the node the cluster was built around, and a consolidation written
+without it is not a consolidation of that cluster.
+
+**Skipping, not stopping.** v3 specified a strict prefix that stopped at the first node over
+budget. That hides every smaller node behind an oversized one — verified by execution:
+`[seed(177), m1(24073), m2(173)]` at budget 24000 returns `[]`, losing the valid `seed + m2`.
+And it is not a deferral: `_find_consolidation_clusters` rebuilds the same cluster in the same
+order every cycle, so those nodes would never progress while still consuming one of the finder's
+four slots. Both `/council` peers found the stop; the starvation consequence is the Codex peer's.
 
 **v2 proposed greedy bin-packing, and it was wrong.** Both `/council` peers converged on it and I
 confirmed each case by executing the specified helper:
@@ -78,10 +88,16 @@ characters. If any layer truncates the tool result silently — the Claude Code 
 `truncateHead` in the Pi plugin — the #192 defect returns in full: partial view, sources archived
 all the same.
 
-Accepted trade-off: a cluster that does not fit whole consolidates only its prefix; the tail
-waits a cycle. By #192's measurement (5.923 nodes, 301 reconstructed consolidation events), no
-historical event would have been trimmed at any budget >= 16000, so this is a tail safety net,
-not the common path.
+Accepted trade-off: a cluster that does not fit whole consolidates only the nodes that fit. The
+skipped ones stay in `working`, and — unlike the v3 prefix — they are not permanently blocked:
+they are skipped only while a larger node occupies the budget in the same cluster, and any change
+to the store that reshapes the cluster gives them another chance. What is **not** claimed is that
+they are guaranteed to be consolidated later; a node that is always the largest in a stable
+cluster may never enter one. That is a bounded, logged omission, not silent data loss — the nodes
+remain in `working` and in the whisper pool.
+
+By #192's measurement (5.923 nodes, 301 reconstructed consolidation events), no historical event
+would have been trimmed at any budget >= 16000, so this is a tail safety net, not the common path.
 
 ### The budget measures the serialized node, not raw content
 
@@ -209,21 +225,25 @@ proved sufficient with two similar nodes.
 **Trim policy:**
 
 5. `test_cluster_within_budget_is_returned_whole` — nothing is trimmed when it fits.
-6. `test_oversized_cluster_is_trimmed_to_a_prefix` — the prefix keeps the leading nodes, every
-   kept node's content is intact, and the dropped ones are absent.
-7. `test_seed_is_never_dropped` — the case that killed v2: a large seed followed by smaller
-   matches. The seed must be in the result. Red against a next-fit implementation.
-8. `test_cluster_below_min_size_after_trim_is_dropped_with_warning` — `caplog` names the cluster.
-9. `test_budget_counts_serialized_size_not_raw_content` — a node whose content is short but whose
-   JSON escaping is large is budgeted by its serialized size. Red against a `len(content)` budget.
-10. `test_worst_case_cardinality_stays_bounded` — 4 clusters of `max_cluster_nodes` pairable
-    nodes; every emitted cluster serializes within budget, the batch within `4 x budget`, and the
-    result is non-empty (so it cannot pass by emitting nothing).
+6. `test_oversized_cluster_is_trimmed` — kept nodes are intact, dropped ones absent, INFO logged.
+7. `test_a_kept_cluster_always_contains_the_seed` — the invariant v2's next-fit violated.
+8. `test_an_oversized_match_does_not_hide_the_smaller_ones` — the v3 defect: `[seed, m1(24000),
+   m2]` must yield `[seed, m2]`, and the skipped node must be named in the log.
+9. `test_repeated_cycles_make_progress` — the same cluster three times must never yield nothing;
+   this is the starvation guard.
+10. `test_cluster_below_min_size_after_trim_is_dropped_with_warning` — `caplog` names the cluster.
+11. `test_seed_larger_than_the_budget_drops_the_cluster` — an oversized seed drops the cluster
+    explicitly instead of claiming it and starving the matches.
+12. `test_budget_counts_serialized_size_not_raw_content` — a node whose content is short but whose
+    JSON escaping is large is budgeted by its serialized size. Red against a `len(content)` budget.
+13. `test_worst_case_cardinality_stays_bounded` — 4 clusters of `max_cluster_nodes` nodes; every
+    emitted cluster serializes within budget, the batch within `4 x budget`, and the result is
+    non-empty (so it cannot pass by emitting nothing).
 
 **Type:**
 
-11. `test_clusters_carry_node_type` — `_find_consolidation_clusters` emits `type`.
-12. `test_consolidation_cluster_carries_type` — it survives into the batch.
+14. `test_clusters_carry_node_type` — `_find_consolidation_clusters` emits `type`.
+15. `test_consolidation_cluster_carries_type` — it survives into the batch.
 
 ## Verification gates (FORK-WORKFLOW.md)
 
@@ -248,6 +268,11 @@ returning `needs-attention` and neither approving.
 - **v2**, run `5bf5592c-8c32273c-050cf979`: 4 findings, all HIGH, none rejected. Both peers
   converged on the next-fit packing discarding pairable nodes and on the 192k bound measuring
   only raw content.
+- **v3**, run `8c32273c-fb8ee423-e379cc46`: 4 findings (2 problems x 2 peers), all HIGH, none
+  rejected. No architectural decision was attacked — the peers hit two implementation errors:
+  the strict prefix stopping at the first misfit (and starving those nodes permanently), and the
+  mutation procedure restoring the file from git while Task 2 was still uncommitted, which would
+  have made Mutation B pass vacuously. v3.1 fixes both.
 
 **Note on the review setup:** the peers review the working tree of `Tools/ormah`, which is on
 `local-main` (~693 commits ahead), while this plan targets `upstream/main`. In the v2 run the

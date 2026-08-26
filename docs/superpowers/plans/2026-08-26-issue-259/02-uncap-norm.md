@@ -244,43 +244,70 @@ cat /tmp/t2b.txt
 Expected: `PYTEST_EXIT=0`, whole file green — including the pre-existing
 `test_content_truncated_to_400`, which asserts on `link_candidates` and must not regress.
 
-- [ ] **Step 5: Prove both guards actually guard (mutation check)**
+- [ ] **Step 5: Commit the implementation FIRST**
 
-Neither guard is red in Step 2, so each must be shown to go red under the mutation it exists to
-catch. Run both, reverting after each. **This step is not optional:** v1 shipped a guard that
-passed its own mutation.
+The mutation checks below rewrite `memory_engine.py` and restore it from git. If the Task 2
+implementation is still uncommitted at that point, the restore wipes it: the file reverts to
+Task 1's HEAD, `content_limit` and the trim call site vanish, Mutation B's `sed` finds no pattern,
+and its test runs against the old 400-char truncation — where the plan already says it passes. A
+green Mutation B would then mean nothing, and Step 6 would commit new tests against a reverted
+engine. Both council peers flagged this; the Codex peer at confidence 1.0.
 
-Mutation A — remove `_norm`'s screening limit:
-
-```bash
-sed -i '' 's/def _norm(node: dict, content_limit: int | None = 400)/def _norm(node: dict, content_limit: int | None = None)/' src/ormah/engine/memory_engine.py
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
-  "tests/test_background/test_run_maintenance.py::TestConsolidationBatchFidelity::test_norm_truncates_screening_batches" -q > /tmp/t2mA.txt 2>&1
-echo "PYTEST_EXIT=$?" >> /tmp/t2mA.txt
-cat /tmp/t2mA.txt
-git checkout -- src/ormah/engine/memory_engine.py
-```
-
-Expected: **FAILS** — content arrives at 600 chars instead of 400.
-
-Mutation B — remove the trim:
-
-```bash
-sed -i '' 's/if (trimmed := _select_cluster_within_budget(/if (trimmed := (lambda c, b, m: c)(/' src/ormah/engine/memory_engine.py
-env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
-  "tests/test_background/test_run_maintenance.py::TestConsolidationBatchFidelity::test_worst_case_cardinality_stays_bounded" -q > /tmp/t2mB.txt 2>&1
-echo "PYTEST_EXIT=$?" >> /tmp/t2mB.txt
-cat /tmp/t2mB.txt
-git checkout -- src/ormah/engine/memory_engine.py
-```
-
-Expected: **FAILS** on the per-cluster serialized assertion — five 6000-char nodes serialize to
-30_450 chars, over the 24_000 budget. If either mutation passes, the guard is vacuous: fix
-the test before committing.
-
-- [ ] **Step 6: Commit**
+So commit before mutating:
 
 ```bash
 git add src/ormah/engine/memory_engine.py tests/test_background/test_run_maintenance.py
 git commit -m "fix(engine): consolidation batch carries full content, trimmed to budget (#259)"
 ```
+
+- [ ] **Step 6: Prove both guards actually guard (mutation check)**
+
+Neither guard is red in Step 2, so each must be shown to go red under the mutation it exists to
+catch. **This step is not optional:** v1 shipped a guard that passed its own mutation.
+
+Mutation A — remove `_norm`'s screening limit:
+
+```bash
+cp src/ormah/engine/memory_engine.py /tmp/me_backup.py
+sed -i '' 's/def _norm(node: dict, content_limit: int | None = 400)/def _norm(node: dict, content_limit: int | None = None)/' src/ormah/engine/memory_engine.py
+git diff --stat src/ormah/engine/memory_engine.py   # must show exactly 1 changed line
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest   "tests/test_background/test_run_maintenance.py::TestConsolidationBatchFidelity::test_norm_truncates_screening_batches" -q > /tmp/t2mA.txt 2>&1
+echo "PYTEST_EXIT=$?" >> /tmp/t2mA.txt
+cat /tmp/t2mA.txt
+cp /tmp/me_backup.py src/ormah/engine/memory_engine.py
+```
+
+Expected: **FAILS** — content arrives at 600 chars instead of 400. If `git diff --stat` shows 0
+changed lines, the `sed` pattern did not match: fix the pattern, because an unapplied mutation
+looks exactly like a passing guard.
+
+Mutation B — remove the trim:
+
+```bash
+cp src/ormah/engine/memory_engine.py /tmp/me_backup.py
+sed -i '' 's/if (trimmed := _select_cluster_within_budget(/if (trimmed := (lambda c, b, m: c)(/' src/ormah/engine/memory_engine.py
+git diff --stat src/ormah/engine/memory_engine.py   # must show exactly 1 changed line
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest   "tests/test_background/test_run_maintenance.py::TestConsolidationBatchFidelity::test_worst_case_cardinality_stays_bounded" -q > /tmp/t2mB.txt 2>&1
+echo "PYTEST_EXIT=$?" >> /tmp/t2mB.txt
+cat /tmp/t2mB.txt
+cp /tmp/me_backup.py src/ormah/engine/memory_engine.py
+```
+
+Expected: **FAILS** on the per-cluster serialized assertion — five 6000-char nodes serialize to
+30_450 chars, over the 24_000 budget.
+
+If either mutation passes, the guard is vacuous: fix the test, amend the commit from Step 5, and
+re-run both mutations.
+
+- [ ] **Step 7: Confirm the tree is back to the committed state**
+
+```bash
+git status --porcelain src/ormah/engine/memory_engine.py   # must be empty
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest   tests/test_background/test_run_maintenance.py -q > /tmp/t2c.txt 2>&1
+echo "PYTEST_EXIT=$?" >> /tmp/t2c.txt
+tail -5 /tmp/t2c.txt
+```
+
+Expected: no diff against the commit, and `PYTEST_EXIT=0`. This is what proves the mutations were
+fully reverted before moving on.
+
