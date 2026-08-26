@@ -201,8 +201,11 @@ class MemoryEngine:
         overlap ratio.
 
         The cutoff advances only to the highest id actually processed, never to
-        MAX(id): a row inserted between the SELECT and the stamp keeps an id above the
-        cutoff and is picked up on the next start rather than skipped.
+        MAX(id). db.transaction() opens BEGIN IMMEDIATE, so no writer -- in this
+        process or any other -- can commit between the SELECT and the stamp, which
+        means that interleaving cannot occur as the code stands. Advancing by
+        processed id is therefore defence in depth against a future change to that
+        isolation, not a fix for a reachable race.
 
         Recompute is exact, not estimated: the judge stamps the min_confidence in
         force when its row was written, so a row normalises to what it would have

@@ -73,10 +73,38 @@ _FEEDBACK_LADDER = {
 
 
 def _as_float(value: object, default: float = 0.0) -> float:
+    """Coerce a stored evidence value to a FINITE float, else *default*.
+
+    Both guards exist because the #218 migration runs on every startup and writes
+    into ``signals.strength``, which is ``REAL NOT NULL``:
+
+    - ``OverflowError`` is in the except tuple because ``json.loads`` returns an
+      unbounded Python ``int`` for a large integer literal, and ``float()`` of one
+      beyond the double range raises it -- not ``ValueError``.
+    - Non-finite results are rejected because ``json.loads`` accepts bare ``NaN``
+      and ``Infinity``, and SQLite stores a NaN REAL as NULL. Binding one would
+      raise ``IntegrityError`` inside the migration, and since the migration runs
+      at every boot, a single poisoned historical row would stop the server from
+      ever starting again.
+
+    Reported by the Codex peer, /council-pr of 2026-08-26.
+    """
     try:
-        return float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+        result = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
         return default
+    return result if math.isfinite(result) else default
+
+
+def _finite(value: float) -> float:
+    """Last guard before a strength reaches the NOT NULL column.
+
+    ``_as_float`` already keeps non-finite values out of the inputs, so this cannot
+    fire today. It guards the OUTPUT side instead: a future change to one of the
+    band formulas could produce a non-finite result from finite inputs, and the
+    cost of that reaching the every-boot migration is a server that never starts.
+    """
+    return value if math.isfinite(value) else UNKNOWN
 
 
 def token_overlap_strength(ratio: float) -> float:
@@ -148,12 +176,14 @@ def strength_from_evidence(source: str, polarity: int, evidence_json: str | None
         if match == "sentence":
             return VERBATIM_SENTENCE
         if match == "token_overlap":
-            return token_overlap_strength(_as_float(evidence.get("overlap_ratio")))
+            return _finite(token_overlap_strength(_as_float(evidence.get("overlap_ratio"))))
         return UNKNOWN
     if source == LLM_JUDGE_SOURCE:
-        return judge_strength(
-            _as_float(evidence.get("confidence")),
-            _as_float(evidence.get("min_confidence"), default=0.75),
-            polarity,
+        return _finite(
+            judge_strength(
+                _as_float(evidence.get("confidence")),
+                _as_float(evidence.get("min_confidence"), default=0.75),
+                polarity,
+            )
         )
     return feedback_strength(source, polarity)

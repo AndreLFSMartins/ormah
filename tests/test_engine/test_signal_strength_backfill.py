@@ -202,3 +202,36 @@ def test_the_cutoff_advances_after_a_repair(engine):
     engine._migrate_signal_strength()
 
     assert _row(engine, legacy)["strength"] == 0.123, "the cutoff did not advance"
+
+
+def test_a_poisoned_evidence_row_cannot_block_startup(engine):
+    """One malformed historical value must not stop the server from ever booting.
+
+    The migration runs at every startup and writes into signals.strength, which is
+    REAL NOT NULL. SQLite stores a NaN REAL as NULL, so binding one raises
+    IntegrityError — and with an every-boot migration that failure is permanent,
+    not a one-time hiccup. Codex peer finding, /council-pr of 2026-08-26.
+    """
+    poisoned = _seed(
+        engine,
+        source=ss.HEURISTIC_SOURCE,
+        polarity=1,
+        evidence={"match": "token_overlap", "overlap_ratio": float("nan")},
+    )
+    huge = _seed(
+        engine,
+        source=ss.LLM_JUDGE_SOURCE,
+        polarity=1,
+        evidence={"confidence": int("9" * 400), "min_confidence": 0.75},
+    )
+
+    _rerun(engine)          # must not raise
+    engine._migrate_signal_strength()   # and the next boot must not raise either
+
+    for signal_id, lo, hi in (
+        (poisoned, ss.OVERLAP_FLOOR, ss.OVERLAP_FLOOR + ss.OVERLAP_SPAN),
+        (huge, ss.JUDGE_LO, ss.JUDGE_HI),
+    ):
+        strength = _row(engine, signal_id)["strength"]
+        assert strength is not None
+        assert lo <= strength <= hi

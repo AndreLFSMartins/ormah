@@ -1,6 +1,7 @@
 """Unit tests for the #218 ordinal evidence ladder."""
 
 import json
+import math
 
 import pytest
 
@@ -127,3 +128,41 @@ def test_recompute_survives_malformed_evidence():
     assert ss.strength_from_evidence(ss.HEURISTIC_SOURCE, 1, "not json") == ss.UNKNOWN
     assert ss.strength_from_evidence(ss.HEURISTIC_SOURCE, 1, None) == ss.UNKNOWN
     assert ss.strength_from_evidence("implicit", 0, None) == 0.0
+
+
+# --- Non-finite and out-of-range evidence (#218, Codex peer 2026-08-26) ---------
+#
+# The migration runs on every startup. json.loads accepts NaN and Infinity by
+# default and returns an unbounded int for a large integer literal; SQLite stores a
+# NaN REAL as NULL and signals.strength is NOT NULL. So one poisoned historical row
+# would raise IntegrityError inside the migration and the server would never boot
+# again. These pin the coercion that prevents it.
+
+def test_as_float_survives_an_integer_beyond_the_double_range():
+    """float() of a huge int raises OverflowError, which is not a ValueError."""
+    assert ss._as_float(int("9" * 400)) == 0.0
+    assert ss._as_float(int("9" * 400), default=0.75) == 0.75
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_as_float_rejects_non_finite_values(value):
+    assert ss._as_float(value) == 0.0
+    assert ss._as_float(value, default=0.75) == 0.75
+
+
+@pytest.mark.parametrize(
+    "ratio", [float("nan"), float("inf"), float("-inf"), int("9" * 400)]
+)
+def test_recompute_stays_finite_and_in_band_for_poisoned_overlap_ratio(ratio):
+    evidence = json.dumps({"match": "token_overlap", "overlap_ratio": ratio})
+    result = ss.strength_from_evidence(ss.HEURISTIC_SOURCE, 1, evidence)
+    assert math.isfinite(result)
+    assert ss.OVERLAP_FLOOR <= result <= ss.OVERLAP_FLOOR + ss.OVERLAP_SPAN
+
+
+@pytest.mark.parametrize("confidence", [float("nan"), float("inf"), int("9" * 400)])
+def test_recompute_stays_finite_and_in_band_for_poisoned_confidence(confidence):
+    evidence = json.dumps({"confidence": confidence, "min_confidence": 0.75})
+    result = ss.strength_from_evidence(ss.LLM_JUDGE_SOURCE, 1, evidence)
+    assert math.isfinite(result)
+    assert ss.JUDGE_LO <= result <= ss.JUDGE_HI
