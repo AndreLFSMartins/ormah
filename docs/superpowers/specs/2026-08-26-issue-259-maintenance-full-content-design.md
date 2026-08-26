@@ -73,8 +73,13 @@ New setting `claude_maintenance_cluster_max_chars`, default **24000**, applied p
 The default reuses #192's measurement because it was taken on this same store: 5.923 nodes and
 301 reconstructed consolidation events, worst real event 12.961 chars, theoretical worst case
 24.038. At any budget >= 16000 none of the 301 historical events would have been split, so the
-split is a safety net for the tail, not the common path. Four clusters at this budget cap the
-batch at ~96k characters.
+split is a safety net for the tail, not the common path.
+
+**Batch bound.** The budget caps a *sub*-cluster, not the batch, and one original cluster of
+`consolidation_max_cluster_nodes` yields up to `floor(max_cluster_nodes / 2)` sub-clusters — a
+sub-cluster needs two nodes to survive. So the phase-1 consolidation payload is bounded by
+`4 clusters x floor(5 / 2) x 24000 = 192_000` characters, roughly 48k tokens, not the 96k
+characters a per-cluster reading would suggest. That is the number the worst-case test asserts.
 
 It is **not** `consolidation_max_prompt_chars`: that setting exists only on PR #260, still open,
 so reusing it would chain this PR behind that one. The consumers also differ — the Claude agent's

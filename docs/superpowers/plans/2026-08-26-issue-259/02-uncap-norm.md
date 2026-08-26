@@ -116,12 +116,23 @@ class TestConsolidationBatchFidelity:
                 assert len(node["content"]) == 400, "split must never slice content"
 
     def test_worst_case_cardinality_stays_bounded(self, engine, monkeypatch):
-        """Four max-size clusters of oversized nodes must not produce an unbounded batch."""
+        """Four max-size clusters of large nodes must not produce an unbounded batch.
+
+        The bound is NOT `n_clusters * budget`. The budget caps each *sub*-cluster,
+        and one original cluster of `max_cluster_nodes` yields up to
+        `floor(max_cluster_nodes / 2)` of them (a sub-cluster needs 2 nodes to
+        survive). With the defaults: 4 x floor(5/2) x 24000 = 192_000 chars.
+
+        Node size is chosen at just over half the budget so the split actually
+        fires: 12_001-char nodes pack two per sub-cluster and leave a remainder.
+        """
         import json
 
         import ormah.background.consolidator as consolidator
 
         budget = engine.settings.claude_maintenance_cluster_max_chars
+        max_nodes = engine.settings.consolidation_max_cluster_nodes
+        node_chars = budget // 2 + 1
         big_clusters = [
             [
                 {
@@ -129,9 +140,9 @@ class TestConsolidationBatchFidelity:
                     "title": f"node {c}-{i}",
                     "type": "fact",
                     "space": "testproject",
-                    "content": "w" * 100_000,
+                    "content": "w" * node_chars,
                 }
-                for i in range(5)
+                for i in range(max_nodes)
             ]
             for c in range(4)
         ]
@@ -141,9 +152,16 @@ class TestConsolidationBatchFidelity:
 
         batches = engine.get_maintenance_batches()
 
-        payload = json.dumps(batches["consolidation_clusters"])
-        assert len(payload) <= 4 * budget + 4096, (
-            f"consolidation batch is unbounded: {len(payload)} chars"
+        clusters = batches["consolidation_clusters"]
+        assert clusters, "the split dropped everything — the fixture proves nothing"
+        for sub in clusters:
+            total = sum(len(n["content"]) for n in sub)
+            assert total <= budget, f"sub-cluster of {total} chars exceeds the budget"
+
+        payload = json.dumps(clusters)
+        bound = 4 * (max_nodes // 2) * budget + 4096
+        assert len(payload) <= bound, (
+            f"consolidation batch is unbounded: {len(payload)} chars, bound {bound}"
         )
 ```
 
@@ -164,9 +182,11 @@ Expected, and each for its own reason — read the failures, do not just count t
   not vacuous now — with `_norm`'s default changed to `None` it goes red, which is the whole
   point of the monkeypatch.
 - `test_oversized_cluster_is_split_in_the_batch` FAILS: one cluster comes back, not two.
-- `test_worst_case_cardinality_stays_bounded` FAILS on the payload size (4 x 5 x 400 chars of
-  `_norm` truncation is well under budget today, so if this one passes before the fix, check
-  that the monkeypatch actually took effect before moving on).
+- `test_worst_case_cardinality_stays_bounded` FAILS on the per-sub-cluster assertion: with no
+  split, one cluster of 5 x 12001 chars comes back as a single 60005-char entry, over the
+  24000 budget. (It cannot fail on the payload bound instead — today `_norm` cuts everything
+  to 400 chars, so the serialized size is tiny. The per-sub-cluster check is what makes this
+  test red before the fix; read the failure message to confirm which assertion fired.)
 
 - [ ] **Step 3: Write the implementation**
 
