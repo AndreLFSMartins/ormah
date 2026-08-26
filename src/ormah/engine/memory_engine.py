@@ -2430,7 +2430,6 @@ class MemoryEngine:
 
     # --- Conversation ingestion ---
 
-    @_serialized_memory_operation
     def ingest_conversation(
         self,
         content: str,
@@ -2467,12 +2466,6 @@ class MemoryEngine:
             if not mem_content:
                 continue
 
-            # Dedup: check if a very similar memory already exists (skip in dry_run)
-            if not dry_run and self._is_duplicate_memory(mem_content):
-                logger.debug("Skipping duplicate: %s", mem.get("title", mem_content[:40]))
-                skipped += 1
-                continue
-
             try:
                 node_type = NodeType(mem.get("type", "fact"))
             except ValueError:
@@ -2486,6 +2479,11 @@ class MemoryEngine:
             tags = mem.get("tags", []) + ["auto-ingested"] + (extra_tags or [])
 
             if dry_run:
+                # Dry run never writes, so a loose pre-check is fine here — there is
+                # no race to revalidate against.
+                if self._is_duplicate_memory(mem_content):
+                    skipped += 1
+                    continue
                 created.append({
                     "title": mem_title,
                     "content": mem_content,
@@ -2496,16 +2494,26 @@ class MemoryEngine:
                 })
                 continue
 
-            req = CreateNodeRequest(
-                content=mem_content,
-                type=node_type,
-                title=mem_title,
-                tags=tags,
-                space=space,
-                about_self=mem.get("about_self", False),
-                confidence=confidence,
-            )
-            node_id, _ = self.remember(req, agent_id=agent_id or "ingester")
+            # Dedup check and store must be one exclusive step: extraction ran
+            # unlocked, so another concurrent ingest could have written the same
+            # content since. Re-checking outside this lock would race the same
+            # way the old whole-call lock accidentally prevented (#240).
+            with self.memory_operation():
+                if self._is_duplicate_memory(mem_content):
+                    logger.debug("Skipping duplicate: %s", mem.get("title", mem_content[:40]))
+                    skipped += 1
+                    continue
+
+                req = CreateNodeRequest(
+                    content=mem_content,
+                    type=node_type,
+                    title=mem_title,
+                    tags=tags,
+                    space=space,
+                    about_self=mem.get("about_self", False),
+                    confidence=confidence,
+                )
+                node_id, _ = self.remember(req, agent_id=agent_id or "ingester")
             created.append({
                 "node_id": node_id,
                 "title": mem_title,
