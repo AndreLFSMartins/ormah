@@ -160,6 +160,7 @@ def test_no_background_job_takes_l_mem_inside_a_write_transaction(engine):
     above — that test covers the builder's own entry points, not the seven jobs.
     """
     import json
+    from datetime import datetime, timedelta, timezone
     from unittest.mock import patch
 
     from ormah.background.auto_cluster import run_auto_cluster
@@ -169,7 +170,13 @@ def test_no_background_job_takes_l_mem_inside_a_write_transaction(engine):
     from ormah.background.decay_manager import run_decay
     from ormah.background.duplicate_merger import run_duplicate_detection
     from ormah.background.importance_scorer import run_importance_scoring
-    from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, NodeType
+    from ormah.models.node import (
+        ConnectRequest,
+        CreateNodeRequest,
+        EdgeType,
+        NodeType,
+        UpdateNodeRequest,
+    )
 
     real_lock = engine._memory_operation_lock
     violations: list[int] = []
@@ -219,11 +226,26 @@ def test_no_background_job_takes_l_mem_inside_a_write_transaction(engine):
     # linked, above-threshold pairs to classify.
     engine.connect(ConnectRequest(
         source_id=ids[0], target_id=ids[4], edge=EdgeType.related_to, weight=1.0))
-    engine.db.conn.execute("UPDATE nodes SET space = 'architecture' WHERE id = ?", (ids[0],))
-    engine.db.conn.execute("UPDATE nodes SET space = NULL WHERE id = ?", (ids[4],))
+    # ids[4] is already space=None from creation -- nothing to set there.
+    # ids[0]'s space must go through update_node, not a raw SQL UPDATE: the
+    # markdown file (loaded by file_store) is the source of truth, and any later
+    # engine.update_node call (decay's own demotion, right below) reloads from
+    # the file and re-persists it -- silently reverting a DB-only `space` back
+    # to None and starving auto_cluster of a spaced neighbor to vote from.
+    engine.update_node(ids[0], UpdateNodeRequest(space="architecture"))
+    # A bare SQL `datetime('now', '-30 days')` literal produces a naive,
+    # space-separated string; decay_manager's anchor parse then mixes it with a
+    # tz-aware `now`, raises TypeError, and silently skips the node -- vacuous.
+    # Use the same tz-aware ISO string test_decay_manager.py's _make_stale uses.
+    # last_accessed is read straight from the SQLite index by decay's own
+    # candidate scan and revalidation, so a raw SQL UPDATE (unlike space above)
+    # is exactly what's needed here -- and update_node's later reload/resave for
+    # the tier demotion doesn't touch it since UpdateNodeRequest carries no
+    # last_accessed field.
+    stale_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     engine.db.conn.execute(
-        "UPDATE nodes SET last_accessed = datetime('now', '-30 days'), tier = 'working' "
-        "WHERE id = ?", (ids[0],))
+        "UPDATE nodes SET last_accessed = ?, tier = 'working' WHERE id = ?",
+        (stale_date, ids[0]))
     engine.db.conn.commit()
 
     engine.settings.llm_provider = "ollama"
@@ -273,8 +295,22 @@ def test_no_background_job_takes_l_mem_inside_a_write_transaction(engine):
 
     try:
         with patch("ormah.background.llm_client.llm_generate", side_effect=fake_llm):
+            # decay gets its own check instead of the shared acquisitions-count guard:
+            # run_decay unconditionally opens L_mem once at the top of every call to
+            # clear stale proposals (decay_manager.py's one-time cleanup), before it
+            # ever scans for demotion candidates. That means acquisitions["n"] > before
+            # would hold even if decay found nothing to demote -- it doesn't prove the
+            # apply step (the actual tier demotion) ran. Assert the observable effect
+            # instead: the seeded stale node (ids[0]) really moved to archival.
+            run_decay(engine)
+            tier_row = engine.db.conn.execute(
+                "SELECT tier FROM nodes WHERE id = ?", (ids[0],)).fetchone()
+            assert tier_row is not None and tier_row["tier"] == "archival", (
+                "decay never demoted the seeded stale node -- its apply step was "
+                "never reached, so this net covers nothing for it"
+            )
+
             for name, run_job in [
-                ("decay", run_decay),
                 ("importance_scoring", run_importance_scoring),
                 ("auto_cluster", run_auto_cluster),
                 ("auto_linker", run_auto_linker),
