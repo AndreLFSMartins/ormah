@@ -156,3 +156,70 @@ def test_merged_content_stored_in_proposal(engine):
     assert "Python Programming Language" in proposal["proposed_action"]
     assert "Python is a popular programming language used widely." in proposal["proposed_action"]
     assert "Both describe Python" in proposal["reason"]
+
+
+def test_duplicate_detection_does_not_hold_the_lock_across_the_llm_call(engine):
+    from tests.test_background.lock_probe import install_probe
+
+    id_a, id_b = _create_pair(engine)
+    # Force the auto-merge branch (the one wrapping engine.execute_merge, itself
+    # lock-decorated) so the probe also exercises the nested-lock path.
+    engine.settings.auto_merge_threshold = 0.0
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    probe = install_probe(engine)
+    lock_held_at_call: list[bool] = []
+
+    def fake_llm(*args, **kwargs):
+        lock_held_at_call.append(probe.held)
+        return json.dumps({
+            "is_duplicate": True, "reason": "same fact",
+            "merged_title": "merged", "merged_content": "merged content",
+        })
+
+    with patch(_LLM_PATCH, side_effect=fake_llm):
+        from ormah.background.duplicate_merger import run_duplicate_detection
+        run_duplicate_detection(engine)
+
+    assert lock_held_at_call, "the fake LLM was never called — the fixture stopped exercising the job"
+    assert not any(lock_held_at_call)
+
+
+def test_duplicate_detection_aborts_when_a_restore_lands_mid_run(engine):
+    id_a, id_b = _create_pair(engine)
+    # Force the auto-merge branch so the node-count assertion below actually
+    # proves that path aborted too, not only the (mutually exclusive) proposal path.
+    engine.settings.auto_merge_threshold = 0.0
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    proposals_before = engine.db.conn.execute(
+        "SELECT COUNT(*) AS c FROM proposals").fetchone()["c"]
+    nodes_before = engine.db.conn.execute("SELECT COUNT(*) AS c FROM nodes").fetchone()["c"]
+    epoch_before = engine.restore_epoch
+
+    # The bump must land AFTER the job read its entry epoch: restore_aware_job reads
+    # engine.restore_epoch at call time, so bumping before the call would hand the job the
+    # new value and leave no mismatch to detect. Inside the fake LLM is where a real restore
+    # lands — between the unlocked LLM call and the apply step that follows it.
+    def fake_llm(*args, **kwargs):
+        engine._restore_epoch += 1
+        return json.dumps({
+            "is_duplicate": True, "reason": "same fact",
+            "merged_title": "merged", "merged_content": "merged content",
+        })
+
+    with patch(_LLM_PATCH, side_effect=fake_llm):
+        from ormah.background.duplicate_merger import run_duplicate_detection
+        run_duplicate_detection(engine)  # returns cleanly
+
+    # Guard against silent vacuousness: the abort assertions below hold trivially if the
+    # job never reached an apply step at all. Since the bump lives inside the fake LLM, a
+    # moved epoch is proof the job actually got there.
+    assert engine.restore_epoch > epoch_before, \
+        "the fake LLM was never called — the fixture stopped exercising the job"
+    assert engine.db.conn.execute(
+        "SELECT COUNT(*) AS c FROM proposals").fetchone()["c"] == proposals_before
+    assert engine.db.conn.execute(
+        "SELECT COUNT(*) AS c FROM nodes").fetchone()["c"] == nodes_before
