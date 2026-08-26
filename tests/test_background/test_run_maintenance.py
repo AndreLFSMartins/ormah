@@ -549,3 +549,20 @@ class TestConsolidationBatchFidelity:
         assert len(payload) <= bound, (
             f"consolidation batch is unbounded: {len(payload)} chars, bound {bound}"
         )
+
+    def test_consolidation_cluster_carries_type(self, engine):
+        seeded = _seed_long_nodes(engine, n=2, chars=600)
+        engine.settings.consolidation_cluster_threshold = 0.0
+        engine.settings.consolidation_min_cluster_size = 2
+
+        batches = engine.get_maintenance_batches()
+
+        clusters = batches["consolidation_clusters"]
+        assert clusters, "no consolidation cluster produced — the assertion below would never run"
+        checked = 0
+        for cluster in clusters:
+            for node in cluster:
+                if node["id"] in seeded:
+                    assert node["type"] == "fact"
+                    checked += 1
+        assert checked >= 2, "seeded nodes never appeared in a cluster"
