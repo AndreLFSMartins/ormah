@@ -148,10 +148,16 @@ def _node_usage_evidence(row, response_text: str) -> tuple[bool, float, dict]:
     denominator = min(len(candidate_tokens), 12)
     overlap_ratio = (len(overlap) / denominator) if denominator else 0.0
     if len(overlap) >= 4 and overlap_ratio >= signal_strength.OVERLAP_GATE:
-        return True, signal_strength.token_overlap_strength(overlap_ratio), {
+        # Round ONCE, then use that same value for both the strength and the evidence.
+        # The #218 backfill recomputes strength from evidence, so a strength derived
+        # from a more precise ratio than the one recorded makes the recompute perturb
+        # a correct row instead of confirming it. The gate above still reads the raw
+        # ratio, so which responses count as referenced is unchanged.
+        recorded_ratio = round(overlap_ratio, 3)
+        return True, signal_strength.token_overlap_strength(recorded_ratio), {
             "match": "token_overlap",
             "overlap": overlap[:12],
-            "overlap_ratio": round(overlap_ratio, 3),
+            "overlap_ratio": recorded_ratio,
         }
 
     return False, 0.0, {

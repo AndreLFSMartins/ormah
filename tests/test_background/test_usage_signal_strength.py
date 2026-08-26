@@ -142,3 +142,24 @@ def test_an_uncertain_verdict_carries_no_strength(engine, tmp_path):
     assert signal["polarity"] == 0
     assert signal["strength"] == 0.0
     assert json.loads(signal["evidence"])["confidence"] == 0.35
+
+
+def test_recorded_evidence_reproduces_the_stored_strength():
+    """evidence must be a lossless record of what determined strength.
+
+    The #218 backfill recomputes strength from evidence. Deriving the stored strength
+    from a more precise ratio than the one recorded makes that recompute perturb a
+    correct row instead of confirming it — and makes any future rescan of new rows a
+    drift rather than a no-op.
+
+    4 overlaps over 6 candidates is 0.6666..., recorded as 0.667. That gap used to be
+    ~1e-04 of strength.
+    """
+    referenced, strength, evidence = _node_usage_evidence(
+        _row(title="Q", content="quantum entanglement decoherence topology manifold curvature"),
+        "Consider decoherence, topology, the manifold and curvature when planning.",
+    )
+    assert referenced
+    assert evidence["match"] == "token_overlap"
+    assert evidence["overlap_ratio"] == pytest.approx(0.667)
+    assert strength == ss.strength_from_evidence(ss.HEURISTIC_SOURCE, 1, json.dumps(evidence))
