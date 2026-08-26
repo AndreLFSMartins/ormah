@@ -25,9 +25,10 @@ def _seed(engine, *, source, polarity, evidence, strength=0.85):
 
 
 def _rerun(engine):
-    """Clear the version stamp so the guarded migration runs again."""
+    """Clear both markers so the migration makes a full pass over the table."""
     engine.db.conn.execute(
-        "DELETE FROM meta WHERE key = 'signal_strength_ladder_version'"
+        "DELETE FROM meta WHERE key IN "
+        "('signal_strength_ladder_version', 'signal_strength_ladder_cutoff')"
     )
     engine.db.conn.commit()
     engine._migrate_signal_strength()
@@ -130,8 +131,8 @@ def test_backfill_is_idempotent(engine):
     assert once == twice
 
 
-def test_backfill_does_not_rerun_once_stamped(engine):
-    """The version guard, not the recompute, is what makes the second boot free."""
+def test_rows_at_or_below_the_cutoff_are_not_rescanned(engine):
+    """The cutoff, not the recompute, is what keeps a later start cheap."""
     signal_id = _seed(
         engine, source=ss.HEURISTIC_SOURCE, polarity=1, evidence={"match": "node_id"}
     )
@@ -142,3 +143,62 @@ def test_backfill_does_not_rerun_once_stamped(engine):
     engine._migrate_signal_strength()
 
     assert _row(engine, signal_id)["strength"] == 0.123
+
+
+def test_rescan_repairs_a_legacy_row_written_after_the_stamp(engine):
+    """A one-time stamp cannot repair what an old binary writes after it.
+
+    A rollback then re-upgrade, or the second unmanaged server process this project
+    already knows about (#238), inserts pre-ladder values into a table the stamp
+    declares migrated. Council peer finding, /council-pr of 2026-08-26.
+    """
+    _rerun(engine)
+
+    legacy = _seed(
+        engine,
+        source=ss.HEURISTIC_SOURCE,
+        polarity=1,
+        evidence={"match": "node_id"},
+        strength=1.0,
+    )
+    engine._migrate_signal_strength()
+
+    assert _row(engine, legacy)["strength"] == ss.VERBATIM_NODE_ID
+
+
+def test_rescan_leaves_an_already_correct_row_untouched(engine):
+    """The repair is a repair only because a current-code row recomputes to itself.
+
+    strength_from_evidence is a pure function of (source, polarity, evidence), and
+    every write site stores exactly what it returns for what it recorded. Without
+    that, rescanning would drift correct rows instead of confirming them.
+    """
+    _rerun(engine)
+
+    correct = _seed(
+        engine,
+        source=ss.HEURISTIC_SOURCE,
+        polarity=1,
+        evidence={"match": "token_overlap", "overlap_ratio": 0.667},
+        strength=ss.token_overlap_strength(0.667),
+    )
+    before = _row(engine, correct)["strength"]
+    engine._migrate_signal_strength()
+
+    assert _row(engine, correct)["strength"] == before
+
+
+def test_the_cutoff_advances_after_a_repair(engine):
+    """Each start covers only what arrived since the last one."""
+    _rerun(engine)
+    legacy = _seed(
+        engine, source="implicit", polarity=1, evidence={"source": "implicit"}, strength=1.0
+    )
+    engine._migrate_signal_strength()
+    assert _row(engine, legacy)["strength"] == ss.IMPLICIT
+
+    engine.db.conn.execute("UPDATE signals SET strength = 0.123 WHERE id = ?", (legacy,))
+    engine.db.conn.commit()
+    engine._migrate_signal_strength()
+
+    assert _row(engine, legacy)["strength"] == 0.123, "the cutoff did not advance"
