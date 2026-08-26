@@ -2479,11 +2479,6 @@ class MemoryEngine:
             tags = mem.get("tags", []) + ["auto-ingested"] + (extra_tags or [])
 
             if dry_run:
-                # Dry run never writes, so a loose pre-check is fine here — there is
-                # no race to revalidate against.
-                if self._is_duplicate_memory(mem_content):
-                    skipped += 1
-                    continue
                 created.append({
                     "title": mem_title,
                     "content": mem_content,
