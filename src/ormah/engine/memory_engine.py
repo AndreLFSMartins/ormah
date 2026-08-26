@@ -61,6 +61,10 @@ _CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge"})
 # so a future curve migration can tell which model produced the stored values.
 LIFECYCLE_MODEL_VERSION = 2
 
+# Evidence-ladder version for signals.strength (#218). Bump when the ladder's
+# values or mappings change, so a stamped store recomputes from its evidence.
+SIGNAL_STRENGTH_LADDER_VERSION = 1
+
 
 def _generate_title(content: str, max_chars: int = 60) -> str:
     """Generate a short title from the first line/sentence of content."""
@@ -160,12 +164,60 @@ class MemoryEngine:
 
         # One-time FSRS data migration: seed stability from access patterns
         self._migrate_fsrs()
+        self._migrate_signal_strength()
 
         self._ensure_self_node()
         self._migrate_identity_tiers()
         self._seed_initial_maintenance_grace_period()
         self._warmup_embedder()
         self._warmup_reranker()
+
+    def _migrate_signal_strength(self) -> None:
+        """Recompute signals.strength onto the #218 ordinal evidence ladder.
+
+        Exact rather than estimated: every row carries the evidence its own channel
+        needs, and the judge stamps the min_confidence in force when the row was
+        written -- so a row recomputes to what it would have stored had the ladder
+        existed then, not to what today's settings would produce.
+
+        Re-runnable by construction: evidence is never written, so a later revision
+        of the ladder recomputes from the same untouched source. Only strength moves.
+
+        No file_store call, so this does not take db-lock before memory-lock and
+        stays outside the ordering hazard documented on _record_confirmed_use.
+        """
+        stamp = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'signal_strength_ladder_version'"
+        ).fetchone()
+        try:
+            version = int(stamp["value"]) if stamp else 0
+        except (TypeError, ValueError):
+            version = 0
+        if version >= SIGNAL_STRENGTH_LADDER_VERSION:
+            return
+
+        with self.db.transaction() as conn:
+            rows = conn.execute("SELECT id, source, polarity, evidence FROM signals").fetchall()
+            for row in rows:
+                conn.execute(
+                    "UPDATE signals SET strength = ? WHERE id = ?",
+                    (
+                        signal_strength.strength_from_evidence(
+                            row["source"], row["polarity"], row["evidence"]
+                        ),
+                        row["id"],
+                    ),
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                "('signal_strength_ladder_version', ?)",
+                (str(SIGNAL_STRENGTH_LADDER_VERSION),),
+            )
+        logger.info(
+            "Recomputed strength on %d signal rows (#218 ladder v%d)",
+            len(rows),
+            SIGNAL_STRENGTH_LADDER_VERSION,
+        )
 
     def _migrate_fsrs(self) -> None:
         """Seed FSRS stability once, and record the store's lifecycle-model version."""
