@@ -210,9 +210,10 @@ def test_a_node_with_no_usage_history_is_left_alone(engine):
 
 
 def test_an_interrupted_seed_resumes_on_the_next_run(engine):
-    """Codex F3: Markdown writes are not rolled back with the DB transaction.
-    The per-node predicate is what makes the retry correct — a node already
-    seeded no longer qualifies, one not yet reached still does."""
+    """Codex F3: an interrupted seed leaves no version marker behind, and a
+    subsequent run converges every eligible node on the correct stability.
+    The seed formula is deterministic and the write idempotent, so this holds
+    whether or not a node was already (re)written by the failed attempt."""
     first = _make_node(engine)
     second = _make_node(engine)
     for node_id in (first, second):
