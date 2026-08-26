@@ -287,9 +287,12 @@ echo "PYTEST_EXIT=$?" >> /tmp/218-final.txt
 tail -10 /tmp/218-final.txt
 ```
 
-Expected: the import path contains `ormah-wt-218/`, `PYTEST_EXIT=0`, and a passing count equal to
-Task 1's baseline **plus 39** (19 + 6 + 2 + 5 + 7 new tests). A count below baseline is a
-regression, not a flake — find it before reporting done.
+Expected: the import path contains `ormah-wt-218/`, a passing count of **1987** (Task 1's 1948
+baseline **plus 39** new tests: 19 + 6 + 2 + 5 + 7), and **the same 4 pre-existing failures Task 1
+characterised** — so `PYTEST_EXIT=1`, exactly as at baseline.
+
+A fifth failure, or fewer than 1987 passing, is a regression, not a flake — find it before
+reporting done.
 
 - [ ] **Step 8: Lint and commit**
 

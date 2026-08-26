@@ -57,7 +57,21 @@ echo "PYTEST_EXIT=$?" >> /tmp/218-baseline.txt
 tail -5 /tmp/218-baseline.txt
 ```
 
-Expected: `PYTEST_EXIT=0`.
+Expected: **`1948 passed, 4 failed`**, `PYTEST_EXIT=1`. The baseline is not green, and both
+causes were characterised on an untouched checkout before this plan ran — neither touches
+`signals` or `strength`:
+
+- **3 x `tests/test_setup.py::TestConfigureCodexMcp`** — a genuine pre-existing upstream test bug.
+  The test patches `ormah.setup.shutil.which`, but `_find_binary` falls past it to a list of
+  hardcoded absolute paths including `/opt/homebrew/bin/codex`. On a machine where `codex` is
+  installed there, the binary is found anyway and `mock_run.assert_not_called()` fails. Fails with
+  a real `HOME` too, so it is not an isolation artifact. Worth its own upstream issue; not this one.
+- **1 x `test_detect_returns_none_for_home`** — an artifact of the mandatory `HOME=$(mktemp -d)`.
+  It passes under a real `HOME`. Most likely the macOS `/var` -> `/private/var` symlink making the
+  patched `os.getcwd()` and the resolved home compare unequal.
+
+**Your baseline is `1948 passed` with exactly those 4 failures.** A fifth failure, or a passing
+count below 1948, is yours.
 
 `HOME` matters and `env -u` cannot strip it: `Settings.model_config` reads `~/.config/ormah/.env`
 before the island's own, and the Beta's copy sets `ORMAH_LLM_PROVIDER=claude_cli`, which
