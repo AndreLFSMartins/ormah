@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Reversible Promotion and the Seven-Day Initial Lease</title>
+<title>Design: Issue 223 — reversible promotion and the seven-day initial lease</title>
 <style>
 /* rich-doc design system — Anthropic brand, document-oriented.
    Light paper/ink, Lora italic display, Poppins body, system mono.
@@ -139,647 +139,348 @@ summary:hover{color:var(--accent)}
 <body>
 <nav class="toc">
   <div class="eyebrow">[ SPEC ]</div>
-  <div class="doc-title">Reversible Promotion and the Seven-Day Initial Lease</div>
-  <a href="#the-problem">The Problem</a>
-  <a href="#the-decision">The Decision</a>
-  <a href="#execution-order" class="lvl-3">Execution Order Matters</a>
-  <a href="#the-seven-changes">Changes Across Seven Modules</a>
-  <a href="#1-config" class="lvl-3">1. src/ormah/config.py</a>
-  <a href="#2-lifecycle" class="lvl-3">2. src/ormah/lifecycle.py</a>
-  <a href="#3-node-model" class="lvl-3">3. src/ormah/models/node.py</a>
-  <a href="#4-markdown-store" class="lvl-3">4. src/ormah/store/markdown.py</a>
-  <a href="#5-schema-and-db" class="lvl-3">5. src/ormah/index/schema.sql and src/ormah/index/db.py</a>
-  <a href="#6-memory-engine" class="lvl-3">6. src/ormah/engine/memory_engine.py — The Core Logic</a>
-  <a href="#7-consolidator" class="lvl-3">7. src/ormah/background/consolidator.py</a>
-  <a href="#what-stays-unchanged">What Deliberately Stays Unchanged</a>
-  <a href="#concurrency-and-failure">Concurrency and Failure</a>
-  <a href="#further-limitations" class="lvl-3">Further Limitations (Pre-Existing)</a>
-  <a href="#acceptance-criteria-and-tests">Acceptance Criteria → Tests</a>
-  <a href="#branch-strategy">Branch Strategy</a>
-  <a href="#dependency-merge-conflicts" class="lvl-3">What the Dependency Merge Required</a>
-  <a href="#code-references">Code References Use Symbols</a>
-  <a href="#consequences">Two Consequences This Creates</a>
-  <a href="#landmine-local-main">Landmine When This Reaches local-main</a>
-  <a href="#out-of-scope">Out of Scope</a>
+  <div class="doc-title">Design: Issue 223 — reversible promotion and the seven-day initial lease</div>
+  <a href="#problem">Problem</a>
+  <a href="#problem-initial-stability" class="lvl-3">New nodes ignore the configured initial stability</a>
+  <a href="#problem-derived-from" class="lvl-3">Blanket exclusion of derived_from targets is too broad</a>
+  <a href="#decision">Decision (from #191)</a>
+  <a href="#branch-strategy">Branch strategy</a>
+  <a href="#branch-original-merge" class="lvl-3">What the dependency merge required (historical)</a>
+  <a href="#branch-reference-style" class="lvl-3">Reference style</a>
+  <a href="#changes">Changes</a>
+  <a href="#changes-config" class="lvl-3">1. src/ormah/config.py</a>
+  <a href="#changes-lifecycle" class="lvl-3">2. src/ormah/lifecycle.py</a>
+  <a href="#changes-node" class="lvl-3">3. src/ormah/models/node.py</a>
+  <a href="#changes-markdown" class="lvl-3">4. src/ormah/store/markdown.py</a>
+  <a href="#changes-schema" class="lvl-3">5. src/ormah/index/schema.sql and src/ormah/index/db.py</a>
+  <a href="#changes-builder" class="lvl-3">5b. src/ormah/index/builder.py (amendment, 2026-08-18)</a>
+  <a href="#changes-memory-engine" class="lvl-3">6. src/ormah/engine/memory_engine.py</a>
+  <a href="#changes-consolidator" class="lvl-3">7. src/ormah/background/consolidator.py</a>
+  <a href="#no-change">What deliberately does not change</a>
+  <a href="#concurrency">Concurrency and failure</a>
+  <a href="#concurrency-break" class="lvl-3">What breaks if the lock stops excluding</a>
+  <a href="#concurrency-fix" class="lvl-3">What #223 would then need</a>
+  <a href="#concurrency-acceptance" class="lvl-3">Acceptance criterion met by the lock</a>
+  <a href="#concurrency-limitations" class="lvl-3">Stated limitations</a>
+  <a href="#acceptance-tests">Acceptance criteria → tests</a>
   <a href="#documentation">Documentation</a>
+  <a href="#documentation-local-main" class="lvl-3">Product docs on local-main (cherry-pick, not merge)</a>
+  <a href="#documentation-landmine" class="lvl-3">Landmine when this reaches local-main</a>
+  <a href="#out-of-scope">Out of scope</a>
+  <a href="#out-of-scope-consequences" class="lvl-3">Two consequences #223 creates</a>
   <a href="#verification">Verification</a>
 </nav>
 <main>
 <article>
-  <div class="eyebrow">Issue #223</div>
-  <h1>Reversible Promotion and the Seven-Day Initial Lease</h1>
+<header>
+  <p class="eyebrow">Ormah — Issue #223</p>
+  <h1><em>Design:</em> reversible promotion and the seven-day initial lease</h1>
+  <dl class="meta">
+    <dt>Issue</dt>
+    <dd><a href="https://github.com/r-spade/ormah/issues/223">r-spade/ormah#223</a></dd>
+    <dt>Landing order</dt>
+    <dd>#220 (PR #234) → #222 (PR #235) → #221 (PR #239) → <strong>#223</strong></dd>
+    <dt>Decision source</dt>
+    <dd>#191 (closed design decision), transcribed in <code>docs/lifecycle/2026-08-14-issue-dossier.md</code> §4</dd>
+    <dt>Status note</dt>
+    <dd>Amendment 2026-08-23: all dependencies have landed upstream at <code>90c431e</code></dd>
+  </dl>
+</header>
 
+<section>
+  <h2 id="problem">Problem</h2>
+  <p>Archival is one-way. <code>TierManager.promote()</code> exists in <code>src/ormah/engine/tier_manager.py</code> but has no production caller — <code>enforce_core_cap</code> is the engine's only <code>TierManager</code> call site. A node deliberately recalled from archival cannot return to the whisper-eligible working tier.</p>
+
+  <h3 id="problem-initial-stability">New nodes ignore the configured initial stability</h3>
+  <p><code>fsrs_initial_stability</code> is validated but never passed to <code>remember()</code>, so new nodes take the default <code>1.0</code>. At the default <code>fsrs_decay_threshold = 0.3</code>, a node reaches decay-candidate status after <strong>28.9 hours</strong> — a new memory becomes eligible for demotion on its second day.</p>
+
+  <h3 id="problem-derived-from">Blanket exclusion of derived_from targets is too broad</h3>
+  <p><code>derived_from</code> is a general relationship; only consolidation sources that were actually superseded should be blocked from automatic promotion.</p>
+</section>
+
+<section>
+  <h2 id="decision">Decision (from #191)</h2>
   <div class="statement">
-    Archived memories cannot be manually recalled to working tier, and new memories decay too quickly.
-    This design restores <em>promotion</em> from archival and establishes a seven-day grace period for
-    new nodes by wiring the configured initial stability to both creation and promotion.
+    <p>Reversible promotion with a mathematical seven-day initial lease.</p>
   </div>
 
-  <div class="metrics">
-    <div class="metric">
-      <div class="big">7</div>
-      <div class="label">Changes across core modules</div>
-    </div>
-    <div class="metric">
-      <div class="big">5.814</div>
-      <div class="label">Seconds per day × ln(decay threshold)</div>
-    </div>
-    <div class="metric">
-      <div class="big">28.9</div>
-      <div class="label">Hours to decay at default S=1</div>
-    </div>
-  </div>
+  <ul>
+    <li>Default initial stability <code>−7 / ln(0.3) = 5.814085</code> → rounded default <strong>5.814</strong></li>
+    <li>Use <code>fsrs_initial_stability</code> at node creation <strong>and</strong> as the promotion floor</li>
+    <li>Promote <code>archival → working</code> on confirmed use from <code>recall_node</code> or source-qualified positive feedback</li>
+    <li>Compute bounded reinforcement from old stability, then apply the floor: <code>1 → 2</code> (bounded), then <code>2 → 5.814</code> (floor)</li>
+    <li>Confirmed use + reinforcement/floor + promotion = <strong>one atomic lifecycle operation</strong></li>
+    <li>Do <strong>not</strong> rescale existing stability values just because the default is now wired</li>
+    <li>Record explicit consolidation/supersession provenance; block automatic promotion only for those sources</li>
+  </ul>
+</section>
 
-  <section>
-    <h2 id="the-problem">The <em>Problem</em></h2>
+<section>
+  <h2 id="branch-strategy">Branch strategy</h2>
+  <p class="callout warn"><strong>Superseded 2026-08-23.</strong> Both dependencies landed upstream before any #223 commit existed. The island <code>feat/223-reversible-promotion</code> (worktree <code>../ormah-wt-223</code>) was reset to <code>90c431e</code> with no dependency merges. <code>git log --oneline upstream/main..HEAD</code> is empty at the start of implementation.</p>
 
-    <p>
-      Three independent gaps block recall and reintroduction of archived nodes:
-    </p>
+  <p>This subsection is kept as history of the conflict resolution; its instructions no longer apply.</p>
 
-    <ol>
-      <li>
-        <strong>Archival is one-way.</strong> <code>TierManager.promote()</code> exists but has no
-        production caller; <code>enforce_core_cap</code> is the only call site. A deliberately recalled
-        node cannot return to whisper-eligible working tier.
-      </li>
-      <li>
-        <strong>New nodes ignore configured stability.</strong> <code>fsrs_initial_stability</code> is
-        validated but never passed to <code>remember()</code>, so new nodes take the model default
-        <code>S = 1.0</code>. At the default <code>fsrs_decay_threshold = 0.3</code>, this reaches
-        decay threshold after <strong>~28.9 hours</strong> — a new memory becomes a decay candidate on
-        its second day.
-      </li>
-      <li>
-        <strong>The consolidation exclusion is too broad.</strong> Blanket exclusion of every
-        <code>derived_from</code> target blocks promotion of unrelated linked nodes. Only consolidation
-        sources that were actually superseded should be excluded.
-      </li>
-    </ol>
-  </section>
+  <h3 id="branch-original-merge">What the dependency merge required (historical)</h3>
+  <p><code>fix/220-confirmed-use</code> merged clean. <code>fix/221-bounded-reinforcement</code> conflicted in <code>memory_engine.py</code> semantically rather than textually:</p>
 
-  <section>
-    <h2 id="the-decision">The <em>Decision</em></h2>
+  <ul>
+    <li><strong>Module constants:</strong> <code>_CONFIRMED_USE_SOURCES</code> (#220) and <code>LIFECYCLE_MODEL_VERSION</code> (#221) — independent, both kept</li>
+    <li><strong>Definition:</strong> Takes #220's name with a docstring covering both concerns. Callers are cited by name, not by line. #221's lock-order list was corrected to exclude <code>_ensure_self_node</code> (verified: only <code>_seed_stability_from_access_count</code> and <code>_migrate_identity_tiers</code> call <code>file_store</code> inside a transaction)</li>
+    <li><strong>Body:</strong> Takes #221's bounded update with zero-stability rationale folded into the comment</li>
+  </ul>
 
-    <p>
-      From issue #191 (closed design decision):
-    </p>
+  <p>Two follow-on fixes: <code>tests/test_engine/test_reinforcement_cooldown.py</code> called <code>engine._touch_access</code> in ten places. Verified before rewriting that none of <code>recall_node</code>, <code>submit_feedback</code>, or the session watcher's <code>_record_whisper_usage_signals</code> carries <code>@_serialized_memory_operation</code> — so the concurrency claim still holds.</p>
 
-    <div class="callout">
-      <p>
-        <strong>Initial stability floor:</strong> <code>−7 / ln(0.3) = 5.814</code> — a mathematically
-        derived value that gives a seven-day unused working window. This becomes both the default for
-        <code>fsrs_initial_stability</code> and the floor for promotion.
-      </p>
-      <p style="margin-top: 1em;">
-        <strong>Promotion path:</strong> Archival → working on confirmed use from <code>recall_node</code>
-        or source-qualified positive feedback, with bounded reinforcement applied first, then the floor.
-      </p>
-      <p style="margin-top: 1em;">
-        <strong>Provenance:</strong> Record explicit consolidation/supersession; block automatic promotion
-        only for those sources. Generic <code>derived_from</code> relationships do not block promotion.
-      </p>
-    </div>
+  <h3 id="branch-reference-style">Reference style</h3>
+  <p>Code references in this document name <strong>symbols</strong>, not line numbers. Since <code>local-main</code> and the island diverge by hundreds of commits, line numbers would be wrong — and edits made while implementing invalidate them again. Symbol names survive both.</p>
+</section>
 
-    <h3 id="execution-order">Execution Order Matters</h3>
-    <p>
-      When a node is confirmed used from archival:
-    </p>
-    <ol>
-      <li>Apply bounded reinforcement using <strong>old</strong> stability: <code>1 → 2.0</code></li>
-      <li>Apply promotion floor: <code>2.0 → 5.814</code></li>
-      <li>Flip tier: archival → working</li>
-    </ol>
-    <p>
-      This is one atomic lifecycle operation. Inverting the order or applying the floor to the
-      bounded result would grant longer than one initial lease — the <code>max</code> is what keeps it
-      structural rather than incidental.
-    </p>
-  </section>
+<section>
+  <h2 id="changes">Changes</h2>
 
-  <section>
-    <h2 id="the-seven-changes">Changes Across <em>Seven</em> Modules</h2>
+  <h3 id="changes-config">1. <code>src/ormah/config.py</code></h3>
+  <p>Change <code>fsrs_initial_stability: 1.0 → 5.814</code>, with <code>−7 / ln(0.3)</code> recorded in the line comment. It stays a directly configured knob rather than derived from <code>fsrs_decay_threshold</code>: the acceptance criterion asserts the seven-day lease at the <em>default</em> threshold. Existing validators (<code>_fsrs_finite</code>, <code>_fsrs_positive</code>) already cover it.</p>
 
-    <h3 id="1-config">1. <code>src/ormah/config.py</code></h3>
-    <p>
-      Change default: <code>fsrs_initial_stability: 1.0 → 5.814</code>. Record the derivation
-      <code>−7 / ln(0.3)</code> in the line comment. Existing validators already cover it; no new logic needed.
-    </p>
-
-    <h3 id="2-lifecycle">2. <code>src/ormah/lifecycle.py</code></h3>
-    <p>
-      One new pure function (no I/O, no settings, no database):
-    </p>
-    <pre><code class="language-python">def promotion_floor(stability: float, initial_stability: float) -&gt; float:
+  <h3 id="changes-lifecycle">2. <code>src/ormah/lifecycle.py</code></h3>
+  <p>One new pure function, matching the module's contract (no I/O, no settings, no database):</p>
+  <pre><code>def promotion_floor(stability: float, initial_stability: float) -> float:
     """``max(S, initial)`` — the lease a promoted node restarts from."""</code></pre>
-    <p>
-      Uses <code>max</code>, never a sum. This keeps the idempotence structural: repeated promotions
-      cannot amplify the same event into a longer-than-initial lease.
-    </p>
+  <p>Use <code>max</code>, never a sum. This makes "the post-update floor does not amplify the same event into a longer-than-initial lease" structural rather than incidental, and makes repeated promotions idempotent.</p>
 
-    <h3 id="3-node-model">3. <code>src/ormah/models/node.py</code></h3>
-    <p>
-      Add field: <code>superseded_by: str | None = None</code> — the id of the consolidation node
-      that replaced this one. Deliberately <strong>not</strong> exposed in <code>UpdateNodeRequest</code>;
-      this is policy state written only by consolidation.
-    </p>
+  <h3 id="changes-node">3. <code>src/ormah/models/node.py</code></h3>
+  <p>Add <code>superseded_by: str | None = None</code> — the id of the consolidation node that replaced this one. Deliberately <strong>not</strong> exposed in <code>UpdateNodeRequest</code>: this is policy state, and no agent writes it.</p>
 
-    <h3 id="4-markdown-store">4. <code>src/ormah/store/markdown.py</code></h3>
-    <p>
-      Serialize only when not <code>None</code> (following the existing optional-field pattern).
-      Parse via <code>meta.get("superseded_by")</code>.
-    </p>
+  <h3 id="changes-markdown">4. <code>src/ormah/store/markdown.py</code></h3>
+  <p>Serialize only when not <code>None</code>, following the existing optional-field pattern; parse via <code>meta.get("superseded_by")</code>.</p>
 
-    <h3 id="5-schema-and-db">5. <code>src/ormah/index/schema.sql</code> and <code>src/ormah/index/db.py</code></h3>
-    <p>
-      Add column: <code>superseded_by TEXT</code> on <code>nodes</code> table. Add one entry to the
-      <code>_migrate</code> pair list in <code>db.py</code>. <code>PRAGMA table_info</code>-guarded,
-      so it is idempotent and existing rows stay <code>NULL</code>.
-    </p>
+  <h3 id="changes-schema">5. <code>src/ormah/index/schema.sql</code> and <code>src/ormah/index/db.py</code></h3>
+  <p>Add <code>superseded_by TEXT</code> on <code>nodes</code>, plus one entry in the <code>_migrate</code> pair list in <code>db.py</code> — <code>PRAGMA table_info</code>-guarded, so it is idempotent and existing rows stay <code>NULL</code>.</p>
 
-    <h3 id="6-memory-engine">6. <code>src/ormah/engine/memory_engine.py</code> — The Core Logic</h3>
-    <p>
-      The promotion lives inside <code>_record_confirmed_use</code>, after the bounded reinforcement
-      cooldown block:
-    </p>
-    <pre><code class="language-python">if node.tier is Tier.archival and node.superseded_by is None:
+  <h3 id="changes-builder">5b. <code>src/ormah/index/builder.py</code> (amendment, 2026-08-18)</h3>
+  <p><strong>Added after approval.</strong> The original list of seven files missed this one. Without it the column added in §5 is written and immediately erased.</p>
+
+  <p><code>IndexBuilder._index_file_nodes_only</code> runs <code>INSERT OR REPLACE INTO nodes</code> with an explicit column list. In SQLite <code>REPLACE</code> is DELETE + INSERT, so a column absent from that list is recreated at its <code>DEFAULT</code> — <code>NULL</code>. The consolidator marks a source and then calls <code>update_node(tier=archival)</code> on the next line: the marker is wiped from the index inside the same loop iteration that wrote it.</p>
+
+  <p><code>superseded_by</code> must therefore join the column list, the <code>?</code> placeholders, and the value tuple.</p>
+
+  <p class="callout">Severity: this does <strong>not</strong> break the promotion gate (the gate reads via <code>file_store.load</code>, and the file keeps the marker). What breaks is the index column: permanently <code>NULL</code>, which is a lie told to the SQL consumer named in <a href="#changes-schema">§5</a> (#209).</p>
+
+  <h3 id="changes-memory-engine">6. <code>src/ormah/engine/memory_engine.py</code></h3>
+  <p>The promotion lives inside <code>_record_confirmed_use</code>, after the #221 cooldown block and before the <code># Standard access tracking</code> lines:</p>
+
+  <pre><code>if node.tier is Tier.archival and node.superseded_by is None:
     node.stability = lifecycle.promotion_floor(
         node.stability, self.settings.fsrs_initial_stability
     )
     self.tier_manager.promote(node, Tier.working)</code></pre>
 
-    <p style="margin-top: 1.5em;">
-      <strong>Three sub-decisions embedded here:</strong>
-    </p>
-    <details>
-      <summary>Why the floor runs even under cooldown</summary>
-      <p>
-        Otherwise a second confirmed use on the same day promotes with old <code>S = 1</code>, buying
-        a ~29-hour lease, and the next decay run demotes straight back. The floor is <code>max</code>
-        against a constant, so running on every promotion cannot push past one initial lease.
-      </p>
-    </details>
-    <details>
-      <summary>Why <code>TierManager.promote()</code>, not direct assignment</summary>
-      <p>
-        This gives the root cause its first production caller and brings the tier-ordering guard along.
-        <code>promote()</code> calls <code>touch_updated()</code>, so <code>updated</code> advances —
-        this is correct, as the tier genuinely changed, and <code>updated</code> feeds LWW sync. Not
-        advancing it would let stale remote copies win.
-      </p>
-    </details>
-    <details>
-      <summary>No <code>archived_at</code> handling</summary>
-      <p>
-        <strong>Verified on the island:</strong> <code>archived_at</code> appears nowhere in
-        <code>src/</code> or <code>tests/</code>, is absent from <code>schema.sql</code>, and
-        <code>background/forgetting_manager.py</code> does not exist. All of that is issue #28,
-        which is local-only work on <code>local-main</code>, not in <code>upstream/main</code>.
-        There is nothing to extract into a shared helper.
-      </p>
-    </details>
+  <h4 id="changes-memory-engine-floor">The floor runs even when the cooldown blocked the numeric update</h4>
+  <p>Otherwise a second confirmed use on the same day promotes with <code>S = 1</code>, buying a ~29-hour lease, and the next decay run demotes the node straight back. The floor is <code>max</code> against a constant, so running it on every promotion cannot push stability past one initial lease.</p>
 
-    <p style="margin-top: 1.5em;">
-      <strong>The UPDATE statement gains two columns (no branching logic):</strong>
-    </p>
-    <pre><code class="language-sql">UPDATE nodes SET access_count=?, last_accessed=?, stability=?,
-                 last_review=?, tier=?, updated=? WHERE id=?</code></pre>
+  <h4 id="changes-memory-engine-promote">The tier flip goes through TierManager.promote()</h4>
+  <p>Rather than assigning <code>node.tier</code> directly. This gives #223's root cause its first production caller and brings the tier-ordering guard along. Visible, deliberate consequence: <code>promote()</code> calls <code>touch_updated()</code>, so <code>updated</code> advances. That is correct — the tier genuinely changed, and <code>updated</code> feeds LWW sync. Not advancing it would let a stale remote copy win and silently re-archive the node. <code>updated</code> therefore joins the UPDATE.</p>
 
-    <p>
-      On non-promoting paths, both values are already on disk. When a promotion happens, one
-      <code>_write_audit_log(operation="promote", ...)</code> runs after the transaction closes.
-    </p>
+  <h4 id="changes-memory-engine-archived-at">No archived_at handling</h4>
+  <p>The field does not exist upstream. Verified: <code>archived_at</code> appears nowhere in <code>src/</code> or <code>tests/</code>, is absent from <code>schema.sql</code> and from the <code>_migrate</code> pair list, and <code>background/forgetting_manager.py</code> does not exist. All of that is #28 — local-only work. There is nothing to extract into a shared helper, no column to write, and no purge queue.</p>
 
-    <p style="margin-top: 1.5em;">
-      Also in this module: <code>_mark_superseded(source_id, consolidation_id)</code>, a serialized
-      operation that sets the field on the loaded node, saves markdown, and writes the column in one
-      transaction. This is needed because the field deliberately does not travel through
-      <code>update_node</code>.
-    </p>
+  <p>The existing targeted UPDATE gains two columns, with no branching — on the non-promoting path both values are the ones already on disk:</p>
 
-    <h3 id="7-consolidator">7. <code>src/ormah/background/consolidator.py</code></h3>
-    <p>
-      Mark <code>superseded_by</code> <strong>before</strong> demoting in the
-      <code>derived_from</code> + demote loop. The order is the fail-safe: crashing between the two
-      leaves the node <code>working</code> + marked (harmless, since the marker only blocks automatic
-      promotion). The reverse order would leave it <code>archival</code> + unmarked — exactly the
-      promotable node we do not want. <code>derived_from</code> is untouched, giving "a generic
-      <code>derived_from</code> target can promote" for free.
-    </p>
-  </section>
+  <pre><code>UPDATE nodes SET access_count=?, last_accessed=?, stability=?, last_review=?,
+                 tier=?, updated=? WHERE id=?</code></pre>
 
-  <section>
-    <h2 id="what-stays-unchanged">What <em>Deliberately</em> Stays Unchanged</h2>
+  <p>No <code>builder.index_single</code>, no <code>_index_embedding</code>: content did not change and the UPDATE already carries every column that moved. When — and only when — a promotion happened, one <code>_write_audit_log(operation="promote", ...)</code> runs after the transaction closes.</p>
 
-    <p>
-      Three independent <code>1.0</code> defaults remain in place:
-    </p>
-    <ul>
-      <li><code>MemoryNode.stability</code>'s <code>Field(default=1.0)</code></li>
-      <li><code>parse_node</code>'s <code>meta.get("stability", 1.0)</code> fallback</li>
-      <li><code>stability REAL DEFAULT 1.0</code> in <code>schema.sql</code></li>
-    </ul>
-    <p>
-      Changing any would retroactively rescale nodes that never carried the field, which issue #191
-      forbids. Only <code>remember()</code> gains <code>stability=self.settings.fsrs_initial_stability</code>.
-    </p>
-    <p>
-      <code>lifecycle_model_version</code> stays at <code>2</code>. Nothing reads it on the promotion
-      path and no existing data is rewritten. The version records <em>which reinforcement model wrote
-      this store</em>, and #223 does not change the reinforcement model — it changes a creation default
-      and adds a column. Recorded as a deliberate decision, not an omission, with a test pinning the
-      value.
-    </p>
-  </section>
+  <p>Also here: <code>_mark_superseded(source_id, consolidation_id)</code>, a serialized operation that sets the field on the loaded node, saves the markdown, and writes the <code>superseded_by</code> column in one transaction. And a comment in <code>_lifecycle_model_version</code> recording why #223 does not bump the version.</p>
 
-  <section>
-    <h2 id="concurrency-and-failure">Concurrency and <em>Failure</em></h2>
+  <h3 id="changes-consolidator">7. <code>src/ormah/background/consolidator.py</code></h3>
+  <p>Mark <code>superseded_by</code> <strong>before</strong> demoting, in the <code>derived_from</code> + demote loop that closes <code>_apply_consolidation</code>. The order is the fail-safe: crashing between the two leaves the node <code>working</code> + marked, which is harmless because the marker only blocks <em>automatic</em> promotion. The reverse order would leave it <code>archival</code> + unmarked — exactly the promotable node we do not want. <code>derived_from</code> is untouched, which gives "a generic <code>derived_from</code> target can promote" for free.</p>
+</section>
 
-    <p>
-      <code>run_decay</code> holds <code>_memory_operation_lock</code> for its whole run, and
-      <code>_record_confirmed_use</code> takes the same <code>RLock</code>. <strong>Verified:</strong>
-      decay and promotion cannot interleave in-process. Decay takes its <code>tier='working'</code>
-      snapshot under the lock, so it cannot see a node promoted after it; and a node promoted before
-      the snapshot appears with <code>last_accessed = now</code>, so <code>R ≈ 1</code> and decay
-      skips it.
-    </p>
+<section>
+  <h2 id="no-change">What deliberately does not change</h2>
+  <p>Three independent <code>1.0</code> defaults stay: <code>MemoryNode.stability</code>'s <code>Field(default=1.0)</code>, <code>parse_node</code>'s <code>meta.get("stability", 1.0)</code> fallback, and <code>stability REAL DEFAULT 1.0</code> in <code>schema.sql</code>. Changing any would retroactively rescale nodes that never carried the field, which #191 forbids. Only <code>remember()</code> gains <code>stability=self.settings.fsrs_initial_stability</code>.</p>
 
-    <div class="callout warn">
-      <p>
-        <strong>That guarantee is inherited, not built here — and it is under review.</strong>
-        Issue #240 documents the lock as a starvation defect, and its proposed fix is precisely to
-        stop background jobs from excluding the foreground. This coupling is visible to whoever lands
-        either change.
-      </p>
-    </div>
+  <p>The <code>Self</code> node built by <code>_ensure_self_node</code> keeps <code>1.0</code> and is unaffected: it is <code>core</code>, and <code>run_decay</code> queries <code>tier = 'working'</code> and additionally skips <code>user_node_id</code>.</p>
 
-    <p style="margin-top: 1.5em;">
-      <strong>What breaks if the lock stops excluding:</strong> <code>run_decay</code> reads its
-      snapshot outside any transaction and demotes row by row afterwards. A node whose confirmed use
-      lands between the snapshot and its own demotion would be archived on stale data — losing the
-      seven-day lease. Today the lock makes that interleaving impossible. If #240 lands a fix that
-      removes whole-run exclusion, the promotion will need a revalidation inside the demoting write
-      (demote only if <code>last_accessed</code> still matches the snapshot).
-    </p>
+  <p><code>lifecycle_model_version</code> stays at <code>2</code>. Nothing reads it on the promotion path and no existing data is rewritten — the <code>PRAGMA</code>-guarded <code>ALTER</code> is self-describing and idempotent. The version records <em>which reinforcement model wrote this store</em>, and #223 does not change the reinforcement model; it changes a creation default and adds a column. Recorded as a decision, not an omission, with a test pinning the value.</p>
+</section>
 
-    <h3 id="further-limitations">Further Limitations (Pre-Existing)</h3>
-    <ul>
-      <li>
-        <strong>No cross-process exclusion.</strong> A CLI running alongside the server does not share
-        the <code>RLock</code>. The guarantee holds inside the server process where both paths live
-        (scheduler thread + request thread).
-      </li>
-      <li>
-        <strong>A window between file and index.</strong> If <code>file_store.save</code> succeeds and
-        the UPDATE fails, markdown says <code>working</code> while the index says <code>archival</code>.
-        Markdown is the source of truth and the <code>index_updater</code> job reconciles by
-        <code>file_hash</code> every <strong>1 minute</strong>; in that window the node is merely not
-        whisper-eligible. This is existing behaviour of every field the method already writes.
-      </li>
-    </ul>
-  </section>
+<section>
+  <h2 id="concurrency">Concurrency and failure</h2>
+  <p><code>run_decay</code> holds <code>_memory_operation_lock</code> for its whole run, and <code>_record_confirmed_use</code> takes the same <code>RLock</code>. <strong>Verified:</strong> decay and promotion cannot interleave in-process, in either direction — decay takes its <code>tier='working'</code> snapshot under the lock, so it cannot see a node promoted after it; and a node promoted before the snapshot appears in it with <code>last_accessed = now</code>, so <code>R ≈ 1</code> and decay skips it.</p>
 
-  <section>
-    <h2 id="acceptance-criteria-and-tests">Acceptance Criteria <em>→</em> Tests</h2>
+  <div class="statement">
+    <p>That guarantee is inherited, not built here — and it is under review.</p>
+  </div>
 
-    <p>
-      No new qualification logic. <code>_claim_confirmed_use</code> already fail-closes on
-      <code>signal == 1</code>, <code>source ∈ _CONFIRMED_USE_SOURCES</code>,
-      <code>was_injected == 1</code>, and at-most-once — and all three callers pass through it.
-      Promotion placed inside <code>_record_confirmed_use</code> inherits "unqualified sources do not
-      promote" for free.
-    </p>
+  <p>#223 adds no exclusion of its own. It relies entirely on a lock that <a href="https://github.com/r-spade/ormah/issues/240">#240</a> documents as a starvation defect, and whose proposed fix is precisely to stop background jobs from excluding the foreground. Recorded as a dependency rather than as a settled property, so the coupling is visible to whoever lands either change:</p>
 
-    <p>
-      Each test entry names the concrete worked example. ⚠️ marks assertions that would
-      <strong>not</strong> catch the target bug.
-    </p>
+  <h3 id="concurrency-break">What breaks if the lock stops excluding</h3>
+  <p><code>run_decay</code> reads its snapshot outside any transaction and demotes row by row afterwards. A node whose confirmed use lands between the snapshot and its own demotion would be archived on stale data — losing the seven-day lease #223 exists to grant, one instant after the use that earned it. Today the lock makes that interleaving impossible.</p>
 
-    <figure>
-      <table>
-        <thead>
-          <tr>
-            <th>Criterion</th>
-            <th>Test File</th>
-            <th>Worked Example</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><strong>Seven-day lease</strong></td>
-            <td><code>tests/test_lifecycle.py</code></td>
-            <td><code>retrievability(6.5, 5.814) &gt; 0.3</code>, <code>retrievability(7.5, 5.814) &lt; 0.3</code>.
-                Real crossing at <strong>6.99990 days</strong>. ⚠️ Asserting <code>&gt; 0.3</code> at <code>t=7.0</code>
-                fails; asserting default stability alone proves nothing about the lease.</td>
-          </tr>
-          <tr>
-            <td><strong>Promotion never reduces</strong></td>
-            <td><code>tests/test_lifecycle.py</code></td>
-            <td><code>promotion_floor(50.0, 5.814) == 50.0</code>.
-                ⚠️ Equality at <code>50.0</code>, not <code>&gt;= 5.814</code> — a <code>min</code>/<code>max</code>
-                swap passes with <code>&gt;=</code>.</td>
-          </tr>
-          <tr>
-            <td><strong>Creation uses the knob</strong></td>
-            <td><code>tests/test_engine/test_memory_engine.py</code></td>
-            <td>Set <code>fsrs_initial_stability = 9.0</code> (non-default) → <code>remember()</code> →
-                <code>node.stability == 9.0</code>. ⚠️ Testing with <code>5.814</code> passes by accident
-                if someone also changed the model default.</td>
-          </tr>
-          <tr>
-            <td><strong>Before scheduler cadence</strong></td>
-            <td><code>tests/test_background/test_decay_manager.py</code></td>
-            <td><code>S = 5.814</code>, <code>last_accessed = now − 6.5d</code> → stays <code>working</code>;
-                at <code>− 7.5d</code> it demotes. Drives the real job, not the formula.</td>
-          </tr>
-          <tr>
-            <td><strong>Bounded update precedes floor</strong></td>
-            <td><code>tests/test_engine/test_reinforcement_cooldown.py</code></td>
-            <td>Archival, <code>S = 1</code>, <code>last_review = now − 30d</code> →
-                <code>stability == 5.814</code>. Bounded gives <code>1 → 2.0</code>; floor lifts to
-                <code>5.814</code>. Inverted would give ≈ <strong>8.23</strong>; equality catches inversion.</td>
-          </tr>
-          <tr>
-            <td><strong>Floor under cooldown</strong></td>
-            <td><code>tests/test_engine/test_reinforcement_cooldown.py</code></td>
-            <td>Archival, <code>S = 1</code>, <code>last_review = now</code> →
-                <code>tier == working</code> <strong>and</strong> <code>stability == 5.814</code>.
-                ⚠️ Asserting only tier passes with the bug; the node re-archives in ~29h.</td>
-          </tr>
-          <tr>
-            <td><strong>Floor does not stack</strong></td>
-            <td><code>tests/test_engine/test_reinforcement_cooldown.py</code></td>
-            <td>Two confirmed uses in one day on archival <code>S = 1</code> → <code>5.814</code>,
-                not <code>11.628</code> or <code>6.814</code>.</td>
-          </tr>
-          <tr>
-            <td><strong><code>recall_node</code> promotes exactly one</strong></td>
-            <td><code>tests/test_engine/test_reversible_promotion.py</code></td>
-            <td>Archival A with archival neighbour B. <code>recall_node(A)</code> → A becomes
-                <code>working</code>, <strong>B stays <code>archival</code></strong>.
-                ⚠️ Without the neighbour, promoting every id in whisper_log_ids passes.</td>
-          </tr>
-          <tr>
-            <td><strong>Qualified positives only</strong></td>
-            <td><code>tests/test_engine/test_confirmed_use_contract.py</code></td>
-            <td>Parametrised: <code>(1,"explicit",injected=1)</code> promotes ·
-                <code>(1,"auto_heuristic",1)</code> does not · <code>(-1,"explicit",1)</code> does not ·
-                <code>(1,"explicit",injected=0)</code> does not.</td>
-          </tr>
-          <tr>
-            <td><strong>Generic vs superseded</strong></td>
-            <td><code>tests/test_engine/test_reversible_promotion.py</code></td>
-            <td>Two archival, both <code>derived_from</code> targets, only one with <code>superseded_by</code> →
-                plain one promotes, marked one does not.
-                ⚠️ Testing only the marked node misses the block-everything bug.</td>
-          </tr>
-          <tr>
-            <td><strong>Consolidation provenance</strong></td>
-            <td><code>tests/test_background/test_consolidator.py</code></td>
-            <td>Source ends <code>archival</code> + <code>superseded_by == new_id</code>;
-                plus ordering test injecting demotion failure, asserting node ended
-                <code>working + marked</code>, not <code>archival + unmarked</code>.</td>
-          </tr>
-          <tr>
-            <td><strong>Serialization</strong></td>
-            <td><code>tests/test_store/test_markdown.py</code></td>
-            <td><code>superseded_by</code> survives roundtrip and is <strong>absent</strong> when <code>None</code>.
-                ⚠️ Without the absence check, writing <code>superseded_by: null</code> pollutes every node file.</td>
-          </tr>
-          <tr>
-            <td><strong>Migration</strong></td>
-            <td><code>tests/test_index/</code></td>
-            <td>DB without column → <code>_migrate()</code> adds it, existing rows are <code>NULL</code>,
-                running twice is idempotent.</td>
-          </tr>
-          <tr>
-            <td><strong>No retroactive rescale</strong></td>
-            <td><code>tests/test_store/test_markdown.py</code></td>
-            <td>File with <code>stability: 1.0</code> stays <code>1.0</code>; file with <strong>no</strong>
-                <code>stability</code> key parses to <code>1.0</code>, not <code>5.814</code>.</td>
-          </tr>
-          <tr>
-            <td><strong>Concurrency</strong></td>
-            <td><code>tests/test_engine/test_recall_concurrency.py</code></td>
-            <td>Thread A runs <code>run_decay</code> while B promotes; afterwards
-                <code>tier</code> in file equals <code>tier</code> in index.
-                ⚠️ "Did not raise" does not catch divergence; assertion compares disk vs index.</td>
-          </tr>
-          <tr>
-            <td><strong><code>promote()</code> guard</strong></td>
-            <td><code>tests/test_engine/test_tier_manager.py</code></td>
-            <td><code>promote(archival → working)</code> returns <code>True</code>;
-                <code>promote(working → working)</code> returns <code>False</code>.</td>
-          </tr>
-          <tr>
-            <td><strong>Audit trail</strong></td>
-            <td><code>tests/test_engine/test_audit_log.py</code></td>
-            <td>Promotion writes one <code>operation="promote"</code> entry.</td>
-          </tr>
-          <tr>
-            <td><strong>Version unchanged</strong></td>
-            <td><code>tests/test_engine/test_lifecycle_model_version.py</code></td>
-            <td>Store written under #223 reports <code>lifecycle_model_version == 2</code>.</td>
-          </tr>
-        </tbody>
-      </table>
-    </figure>
-  </section>
+  <h3 id="concurrency-fix">What #223 would then need</h3>
+  <p>The fix shape is a revalidation inside the demoting write: demote only if the node's <code>last_accessed</code> still matches the snapshot. But <code>update_node</code> takes no guard parameter, and the guarded-mutator precedent (<code>delete_node_guarded</code>) is local-only (#28) and absent from this island. So this is not a small edit; it is its own design question, left open deliberately rather than answered with an unreviewed sketch. It becomes required work only if #240 lands a fix that removes whole-run exclusion.</p>
 
-  <section>
-    <h2 id="branch-strategy">Branch <em>Strategy</em></h2>
+  <h3 id="concurrency-acceptance">Acceptance criterion met by the lock</h3>
+  <p>The issue's acceptance criterion — <em>"concurrent promotion/decay cannot leave markdown and index lifecycle state inconsistent"</em> — is met today by the lock. This section exists so that it is not met <em>accidentally</em>.</p>
 
-    <p>
-      Issue #223 depends on #220 and #221, neither of which has landed upstream. The work island is
-      cut from <code>upstream/main</code> and takes both dependencies as explicit merges:
-    </p>
+  <h3 id="concurrency-limitations">Stated limitations</h3>
+  <p><strong>No cross-process exclusion.</strong> A CLI running alongside the server does not share the <code>RLock</code>. This is pre-existing, not something #223 introduces. The guarantee holds inside the server process only.</p>
 
-    <pre><code class="language-bash">git fetch upstream
-git worktree add -b feat/223-reversible-promotion ../ormah-wt-223 upstream/main
-cd ../ormah-wt-223
-git merge --no-ff fix/220-confirmed-use          # dep 1
-git merge --no-ff fix/221-bounded-reinforcement  # dep 2 → record this SHA
-# #223 commits stay linear above it
-# once PRs #234 and #239 land:  git rebase --onto upstream/main &lt;dep-SHA&gt;</code></pre>
+  <p><strong>A window between file and index.</strong> If <code>file_store.save</code> succeeds and the UPDATE fails, markdown says <code>working</code> while the index says <code>archival</code>. Markdown is the source of truth and the <code>index_updater</code> job reconciles by <code>file_hash</code> every 1 minute. In that window the node is merely not whisper-eligible. This is the existing behaviour of every field the method already writes. All three callers already wrap <code>_record_confirmed_use</code> in <code>try/except</code> and never propagate (at-most-once, logged miss). A lost promotion stays a logged miss: the claim remains taken and will not retry.</p>
+</section>
 
-    <p style="margin-top: 1.5em;">
-      <strong>Verified:</strong> <code>upstream/main</code> is an ancestor of both dependency branches
-      (merge-base <code>a28837b</code>), every commit is authored by <code>andrema2</code>, and neither
-      carries protected directories. The island inherits nothing local-only.
-    </p>
+<section>
+  <h2 id="acceptance-tests">Acceptance criteria → tests</h2>
+  <p>Qualification needs no new logic. <code>_claim_confirmed_use</code> already fail-closes on <code>signal == 1</code>, <code>source ∈ _CONFIRMED_USE_SOURCES</code>, <code>was_injected == 1</code>, and at-most-once — and all three callers pass through it. Promotion placed inside <code>_record_confirmed_use</code> inherits "unqualified sources do not promote" for free. The tests below exist to stop a future fourth caller from reopening the hole.</p>
 
-    <div class="callout warn">
-      <p>
-        <strong>Known hazard:</strong> <code>docs/lifecycle/</code> is tracked on <code>local-main</code>,
-        absent from <code>upstream/main</code>, and <strong>not</strong> matched by the <code>PROTECTED</code>
-        allowlist in <code>.git/hooks/pre-push</code> (tested against the regex). Do not edit the
-        dossier inside the #223 worktree.
-      </p>
-    </div>
+  <p>Each entry names the concrete worked example, and ⚠️ marks assertions that would <em>not</em> catch the target bug.</p>
 
-    <h3 id="dependency-merge-conflicts">What the Dependency Merge Required</h3>
-    <p>
-      <code>fix/220-confirmed-use</code> merged clean. <code>fix/221-bounded-reinforcement</code>
-      conflicted in <code>memory_engine.py</code>, semantically rather than textually:
-    </p>
-    <ul>
-      <li>
-        Two module constants (<code>_CONFIRMED_USE_SOURCES</code> and <code>LIFECYCLE_MODEL_VERSION</code>)
-        — independent, both kept.
-      </li>
-      <li>
-        Method definition takes #220's name with a docstring covering both concerns. Callers cited
-        by name, not line. #221's lock-order list was corrected to exclude
-        <code>_ensure_self_node</code>, which calls <code>file_store.save</code> before its transaction.
-      </li>
-      <li>
-        Body takes #221's bounded update, with zero-stability rationale folded into its comment
-        because <code>lifecycle.reinforced_stability</code> now owns that case.
-      </li>
-    </ul>
+  <p>The #223-specific behaviour tests live in a new <code>tests/test_engine/test_reversible_promotion.py</code>. Everything else extends the file that already owns the concern.</p>
 
-    <p style="margin-top: 1.5em;">
-      <strong>Two follow-on fixes the conflict did not surface:</strong>
-    </p>
-    <ul>
-      <li>
-        <code>tests/test_engine/test_reinforcement_cooldown.py</code> called <code>engine._touch_access</code>
-        in ten places. Verified before rewriting that none of <code>recall_node</code>,
-        <code>submit_feedback</code>, or the session watcher carries
-        <code>@_serialized_memory_operation</code> — so the claim still holds.
-      </li>
-    </ul>
-  </section>
+  <table>
+    <thead>
+      <tr>
+        <th>Criterion</th>
+        <th>Test</th>
+        <th>Worked example</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Seven-day lease</td>
+        <td><code>tests/test_lifecycle.py</code></td>
+        <td><code>retrievability(6.5, 5.814) > 0.3</code>, <code>retrievability(7.5, 5.814) < 0.3</code>. With the rounded default the real crossing is at <strong>6.99990 days</strong>, ~8.8 s before the 7-day mark, so <code>retrievability(7.0, 5.814) = 0.29999</code> is <strong>below</strong> threshold. ⚠️ An assertion of <code>&gt; 0.3</code> at <code>t = 7.0</code> would fail.</td>
+      </tr>
+      <tr>
+        <td>Promotion never reduces stability</td>
+        <td><code>tests/test_lifecycle.py</code></td>
+        <td><code>promotion_floor(50.0, 5.814) == 50.0</code>. ⚠️ Equality at <code>50.0</code>, not <code>&gt;= 5.814</code> — with <code>&gt;=</code>, a <code>min</code>/<code>max</code> swap passes.</td>
+      </tr>
+      <tr>
+        <td>Creation uses the knob</td>
+        <td><code>tests/test_engine/test_memory_engine.py</code></td>
+        <td>Set <code>fsrs_initial_stability = 9.0</code> (a <strong>non-default</strong> value) → <code>remember()</code> → <code>node.stability == 9.0</code>. ⚠️ Testing with <code>5.814</code> would pass by accident if someone also changed the model default.</td>
+      </tr>
+      <tr>
+        <td>Before scheduler cadence</td>
+        <td><code>tests/test_background/test_decay_manager.py</code></td>
+        <td><code>S = 5.814</code>, <code>last_accessed = now − 6.5d</code> → <code>run_decay</code> leaves it <code>working</code>; at <code>− 7.5d</code> it demotes. Drives the real job, not the formula.</td>
+      </tr>
+      <tr>
+        <td>Bounded update precedes the floor</td>
+        <td><code>tests/test_engine/test_reinforcement_cooldown.py</code></td>
+        <td>Archival, <code>S = 1</code>, <code>last_accessed = last_review = now − 30d</code> → <code>stability == 5.814</code>. Bounded update gives <code>1 → 2.0</code>; floor lifts <code>2 → 5.814</code>. Inverted order would give ≈ 8.23, so equality catches the inversion.</td>
+      </tr>
+      <tr>
+        <td>Floor applies under cooldown</td>
+        <td><code>tests/test_engine/test_reinforcement_cooldown.py</code></td>
+        <td>Archival, <code>S = 1</code>, <code>last_review = now</code> (cooldown closed) → <code>tier == working</code> <strong>and</strong> <code>stability == 5.814</code>. ⚠️ Asserting only <code>tier == working</code> passes with the bug.</td>
+      </tr>
+      <tr>
+        <td>Floor does not stack</td>
+        <td><code>tests/test_engine/test_reinforcement_cooldown.py</code></td>
+        <td>Two confirmed uses in one day on archival <code>S = 1</code> → <code>5.814</code>, not <code>11.628</code> and not <code>6.814</code>.</td>
+      </tr>
+      <tr>
+        <td><code>recall_node</code> promotes exactly the requested node</td>
+        <td><code>tests/test_engine/test_reversible_promotion.py</code></td>
+        <td>Archival A with archival neighbour B. <code>recall_node(A)</code> → A becomes <code>working</code>, <strong>B stays <code>archival</code></strong>. ⚠️ Without the neighbour, promoting every id in <code>whisper_log_ids</code> passes.</td>
+      </tr>
+      <tr>
+        <td>Qualified positives only</td>
+        <td><code>tests/test_engine/test_confirmed_use_contract.py</code></td>
+        <td>Parametrised: <code>(1,"explicit",injected=1)</code> promotes · <code>(1,"auto_heuristic",1)</code> does not · <code>(-1,"explicit",1)</code> does not · <code>(1,"explicit",injected=0)</code> does not.</td>
+      </tr>
+      <tr>
+        <td>Generic <code>derived_from</code> vs superseded</td>
+        <td><code>tests/test_engine/test_reversible_promotion.py</code></td>
+        <td>Two archival nodes, both <code>derived_from</code> targets, only one with <code>superseded_by</code> → plain one promotes, marked one does not. ⚠️ Testing only the marked node misses the block-everything bug the issue explicitly names.</td>
+      </tr>
+      <tr>
+        <td>Consolidation provenance</td>
+        <td><code>tests/test_background/test_consolidator.py</code></td>
+        <td>Source ends <code>archival</code> + <code>superseded_by == new_id</code>; plus ordering test that injects demotion failure and asserts node ended <code>working</code> + marked, not <code>archival</code> + unmarked.</td>
+      </tr>
+      <tr>
+        <td>Serialization</td>
+        <td><code>tests/test_store/test_markdown.py</code></td>
+        <td><code>superseded_by</code> survives the roundtrip, and is <strong>absent</strong> from frontmatter when <code>None</code>. ⚠️ Without the second assertion, writing <code>superseded_by: null</code> would pollute every node file.</td>
+      </tr>
+      <tr>
+        <td>Migration</td>
+        <td><code>tests/test_index/</code></td>
+        <td>DB without the column → <code>_migrate()</code> adds it, existing rows are <code>NULL</code>, running twice is idempotent.</td>
+      </tr>
+      <tr>
+        <td>No retroactive rescale</td>
+        <td><code>tests/test_store/test_markdown.py</code></td>
+        <td>File with <code>stability: 1.0</code> stays <code>1.0</code>; file with <strong>no</strong> <code>stability</code> key parses to <code>1.0</code>, not <code>5.814</code>.</td>
+      </tr>
+      <tr>
+        <td>Concurrency</td>
+        <td><code>tests/test_engine/test_recall_concurrency.py</code></td>
+        <td>Thread A runs <code>run_decay</code> while thread B promotes; afterwards <code>tier</code> in file equals <code>tier</code> in index. ⚠️ "Did not raise" does not catch divergence — assertion compares disk against index.</td>
+      </tr>
+      <tr>
+        <td><code>promote()</code> guard</td>
+        <td><code>tests/test_engine/test_tier_manager.py</code></td>
+        <td><code>promote(archival → working)</code> returns <code>True</code>; <code>promote(working → working)</code> returns <code>False</code> (the guard this design relies on).</td>
+      </tr>
+      <tr>
+        <td>Audit trail</td>
+        <td><code>tests/test_engine/test_audit_log.py</code></td>
+        <td>Promotion writes one <code>operation="promote"</code> entry.</td>
+      </tr>
+      <tr>
+        <td>Version unchanged</td>
+        <td><code>tests/test_engine/test_lifecycle_model_version.py</code></td>
+        <td>Store written under #223 still reports <code>2</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
 
-  <section>
-    <h2 id="code-references">Code References Use <em>Symbols</em></h2>
+<section>
+  <h2 id="documentation">Documentation</h2>
+  <p>The PR carries documentation that lives <strong>in the code</strong>: the <code>superseded_by</code> field description, the <code>promotion_floor</code> docstring, the promotion paragraph in <code>_record_confirmed_use</code>, the derivation comment on <code>fsrs_initial_stability</code>, and the <code>_lifecycle_model_version</code> note — plus the PR body.</p>
 
-    <p>
-      This document names symbols, not line numbers. <code>local-main</code> and the island diverge
-      by hundreds of commits, so a line number is wrong in either branch. Symbol names survive both
-      the divergence and the implementation edits.
-    </p>
-  </section>
+  <p>Product docs (<code>docs/01 - Data Model.md</code>, <code>docs/05 - Background Jobs.md</code>, <code>docs/12 - Configuration Reference.md</code>) and <code>.env.example</code> are <strong>not</strong> part of this PR. Standing rule for this repo: docs that are not part of the code do not go upstream. Precedent is commit <code>f8cb685</code> on the #220 island ("chore(docs): keep product docs out of the upstream PR"), which reverted product docs to upstream text. Verified: <code>.env.example</code> is referenced by nothing and lists no <code>fsrs_*</code> knob today — it is a human-readable template, not a consumed artifact.</p>
 
-  <section>
-    <h2 id="consequences">Two Consequences This <em>Creates</em></h2>
+  <p class="callout">Consequence: the issue's acceptance criterion asks that "docs cover the new provenance/state". In the PR that is satisfied by in-code documentation and the PR body. If the maintainer asks for product docs during review, it is a three-file edit added then.</p>
 
-    <p>
-      These did not exist before and are recorded here rather than fixed:
-    </p>
+  <h3 id="documentation-local-main">Product docs on local-main (cherry-pick, not merge)</h3>
+  <p>Product docs are updated separately on <code>local-main</code>, after the PR — and <strong>by cherry-pick, not merge</strong>: an ormah memory records that merging a contribution branch into <code>local-main</code> can wipe <code>docs/superpowers</code>. That memory's full content could not be loaded (two <code>recall_node</code> timeouts), so it is <strong>an unverified whisper title</strong> — re-confirm before executing.</p>
 
-    <ol>
-      <li>
-        <strong>#218's interim rule becomes costlier.</strong> Excluding <code>auto_heuristic</code>
-        wholesale used to cost only lost reinforcement. Under #223 a verbatim
-        <code>node_id</code>/<code>title</code>/<code>sentence</code> match on an archival node also
-        becomes a lost promotion. The dossier records 45 such matches, but that is a dossier record
-        (not a measurement in this session) and must be re-measured before use as evidence.
-      </li>
-      <li>
-        <strong>#192 plus supersession is permanent burial.</strong> Archival nodes now return on
-        confirmed use — except those marked <code>superseded_by</code>, which are exactly the sources
-        #192 says were harmed. #223 does not regress #192, but it withholds from those nodes the
-        escape it grants everything else. The only way out is manual <code>update_node(tier=working)</code>.
-        This is accepted under the #191 ruling (supersession blocks automatic promotion).
-      </li>
-    </ol>
+  <h3 id="documentation-landmine">Landmine when this reaches local-main</h3>
+  <p><code>local-main</code> <strong>does</strong> have <code>archived_at</code> and <code>forgetting_manager</code> (#28); the island does not. So the promotion written for upstream is incomplete there: a node promoted out of archival on <code>local-main</code> keeps its <code>archived_at</code> timestamp, which leaves a stale graveyard clock on an active node and may leave it purgeable while it sits in <code>working</code>. When cherry-picking #223 onto <code>local-main</code>, the promotion must additionally clear <code>archived_at</code> on the node and in the index UPDATE. This is deliberately <strong>not</strong> in the PR — the column does not exist upstream — and it must not be forgotten locally.</p>
+</section>
 
-    <p style="margin-top: 1.5em;">
-      Both should be posted as comments on #218 and #192 — GitHub is the durable destination.
-    </p>
-  </section>
+<section>
+  <h2 id="out-of-scope">Out of scope</h2>
+  <p><strong>#209</strong> (unbounded merge-proposal queue) is <em>unblocked</em> by #223 and needs nothing extra from it: the dossier restricts duplicate candidates to active memories "provided promoted memories become eligible again", and the tier flip in the index is what #209 will query.</p>
 
-  <section>
-    <h2 id="landmine-local-main">Landmine When This Reaches <code>local-main</code></h2>
+  <p><strong><code>start_watcher</code></strong> (<code>src/ormah/store/watcher.py</code>) has no production caller, and that is already documented as deliberate in <code>docs/02 - Storage Layer.md:118-133</code>. Not touched.</p>
 
-    <p>
-      <code>local-main</code> <strong>does</strong> have <code>archived_at</code> and
-      <code>forgetting_manager</code> (issue #28); the island does not. The promotion written for
-      upstream is incomplete there: a node promoted out of archival on <code>local-main</code> keeps
-      its <code>archived_at</code> timestamp, leaving a stale graveyard clock on an active node.
-    </p>
+  <p><strong>#218</strong> (strength calibration) is unchanged by #223, which consumes the interim source-qualified rule.</p>
 
-    <div class="callout warn">
-      <p>
-        When cherry-picking #223 onto <code>local-main</code>, the promotion must additionally clear
-        <code>archived_at</code> on the node and in the index UPDATE. This is deliberately
-        <strong>not</strong> in the PR — the column does not exist upstream — and it must not be
-        forgotten locally.
-      </p>
-    </div>
-  </section>
+  <h3 id="out-of-scope-consequences">Two consequences #223 creates</h3>
+  <p>These did not exist before this change and are recorded here rather than fixed:</p>
 
-  <section>
-    <h2 id="out-of-scope">Out of <em>Scope</em></h2>
+  <h4 id="consequence-218">1. #218's interim rule becomes costlier</h4>
+  <p>Excluding <code>auto_heuristic</code> wholesale used to cost only <em>lost reinforcement</em>. Under #223 a verbatim <code>node_id</code>/<code>title</code>/<code>sentence</code> match on an archival node also becomes a <em>lost promotion</em> — the node does not come back. The dossier records 45 such matches; that number is <strong>a dossier record, not a measurement taken in this session</strong>, and must be re-measured before it is used as evidence.</p>
 
-    <p>
-      Three related issues are either unblocked or deliberately deferred:
-    </p>
+  <h4 id="consequence-192">2. #192 plus supersession is a permanent burial</h4>
+  <p>Today a badly-truncated consolidation demotes its sources and they never return, because <code>promote()</code> has no caller. After #223 archival nodes return on confirmed use — except those marked <code>superseded_by</code>, which are exactly the sources #192 says were harmed. #223 does not regress #192, but it withholds from those nodes the escape it grants everything else. The only way out is a manual <code>update_node(tier=working)</code>. This is accepted under the #191 ruling (supersession blocks <em>automatic</em> promotion), not a bug to fix here.</p>
 
-    <ul>
-      <li>
-        <strong>Issue #209</strong> (unbounded merge-proposal queue) is unblocked by #223 and needs
-        nothing extra from it. The dossier restricts duplicate candidates to active memories "provided
-        promoted memories become eligible again" — the tier flip in the index is what #209 will query.
-      </li>
-      <li>
-        <strong><code>start_watcher</code></strong> has no production caller and is already documented
-        as deliberate in the storage layer docs. Not touched.
-      </li>
-      <li>
-        <strong>Issue #218</strong> (strength calibration) is unchanged by #223, which consumes the
-        interim source-qualified rule.
-      </li>
-    </ul>
-  </section>
+  <p>Both should be posted as comments on #218 and #192 — GitHub is the durable destination.</p>
+</section>
 
-  <section>
-    <h2 id="documentation">Documentation</h2>
-
-    <p>
-      The PR carries documentation that lives <strong>in the code</strong>: the
-      <code>superseded_by</code> field description, the <code>promotion_floor</code> docstring, the
-      promotion paragraph in <code>_record_confirmed_use</code>, the derivation comment on
-      <code>fsrs_initial_stability</code>, and the <code>_lifecycle_model_version</code> note — plus
-      the PR body.
-    </p>
-
-    <p style="margin-top: 1.5em;">
-      Product docs and <code>.env.example</code> are <strong>not</strong> part of this PR. Standing
-      rule: docs that are not part of the code do not go upstream. Consequence: the acceptance
-      criterion "docs cover the new provenance/state" is satisfied by in-code documentation and the
-      PR body. If the maintainer asks for product docs during review, it is a three-file edit added then.
-    </p>
-
-    <p style="margin-top: 1.5em;">
-      Product docs are updated separately on <code>local-main</code>, after the PR — and
-      <strong>by cherry-pick, not merge</strong>: an ormah memory records that merging a contribution
-      branch into <code>local-main</code> can wipe <code>docs/superpowers</code>. That memory's full
-      content could not be loaded (two <code>recall_node</code> timeouts), so it is
-      <strong>an unverified whisper title</strong> — re-confirm before executing.
-    </p>
-  </section>
-
-  <section>
-    <h2 id="verification">Verification</h2>
-
-    <p>
-      <code>make test</code> green, <code>make lint</code> clean, and the concurrency test run
-      repeatedly (failure mode is timing-dependent).
-    </p>
-
-    <div class="meta">
-      <strong>Landing order:</strong> #220 (PR #234) → #222 (PR #235) → #221 (PR #239) → #223
-    </div>
-    <div class="meta">
-      <strong>Decision source:</strong> Issue #191 (closed design decision), transcribed in
-      <code>docs/lifecycle/2026-08-14-issue-dossier.md</code>
-    </div>
-    <div class="meta">
-      <strong>GitHub:</strong> <a href="https://github.com/r-spade/ormah/issues/223">r-spade/ormah#223</a>
-    </div>
-  </section>
+<section>
+  <h2 id="verification">Verification</h2>
+  <p><code>make test</code> green, <code>make lint</code> clean, and the concurrency test run repeatedly (it is the one test whose failure mode is timing-dependent).</p>
+</section>
 </article>
   <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
   <div class="signature">
@@ -789,4 +490,4 @@ git merge --no-ff fix/221-bounded-reinforcement  # dep 2 → record this SHA
 </main>
 </body>
 </html>
-<!-- rich-doc-src-sha256:7a654a8655a4768b98fda41f1c8c57952a6856b2ac71011a33809455a8546a6a -->
+<!-- rich-doc-src-sha256:3dd95bd16aa09ef7ad5bc0bc568f68751314f223400bead6fb220039614e5652 -->

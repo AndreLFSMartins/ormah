@@ -1,6 +1,6 @@
 # Issue #259 — Claude-in-the-loop consolidation must summarize from full content
 
-- **Date:** 2026-08-26 (v2 — rewritten after `/council` rejected v1)
+- **Date:** 2026-08-26 (v3 — rewritten after `/council` rejected v1 and v2)
 - **Issue:** [r-spade/ormah#259](https://github.com/r-spade/ormah/issues/259)
 - **Branch:** `fix/259-maintenance-full-content` (island cut from `upstream/main` @ `90c431e`)
 - **Worktree:** `Tools/ormah-wt-259`
@@ -48,49 +48,68 @@ KEYS: ['content', 'id', 'space', 'title']
 
 ## Decisions
 
-### Split on overflow — never skip, never slice
+### Trim to the longest prefix that fits — never slice a node
 
-A cluster whose total content exceeds `claude_maintenance_cluster_max_chars` is **split** into
-sub-clusters by greedy bin-packing in the order `_find_consolidation_clusters` already returns
-(seed first, then matches by descending similarity). A sub-cluster left with a single node is
-dropped; a single node larger than the whole budget stays in `working` with a WARNING.
+A cluster whose serialized size exceeds `claude_maintenance_cluster_max_chars` is trimmed to the
+**longest prefix that fits**. The cluster already arrives ordered by `_find_consolidation_clusters`
+— seed first, then matches by descending similarity — so the prefix keeps the most central and
+the most similar nodes. Content is never sliced. Nodes left out stay in `working` and return on
+the next cycle. If the prefix cannot reach `consolidation_min_cluster_size`, the cluster is
+dropped entirely with a WARNING naming it.
 
-This mirrors the #192 decision of 2026-08-24, where skipping was rejected explicitly — a skipped
-cluster is a consolidation that never happens. Slicing is the defect itself.
+**v2 proposed greedy bin-packing, and it was wrong.** Both `/council` peers converged on it and I
+confirmed each case by executing the specified helper:
 
-v1 of this spec proposed **no cap at all**, on the argument that the agent's window is orders of
-magnitude larger than any cluster and that the cost of being wrong was "latency, not data loss".
-Both `/council` peers falsified that independently: `MemoryNode.content` has no `max_length` and
-`ingest_max_content_chars` is 100000 (`config.py:279`), so the uncapped worst case is 4 clusters
-x 5 nodes x 100k = **~2M characters**. If any layer truncates the tool result silently — the
-Claude Code host, or `truncateHead` in the Pi plugin — the #192 defect returns in full: partial
-view, sources archived all the same. The claim that no data could be lost was wrong.
+```
+[500,500,400,400], budget 900   -> [[500,400]]        2 of 4 nodes lost
+                                                       (optimal: [[500,400],[500,400]])
+seed 600 + m1 400 + m2 400      -> [['m1','m2']]      the SEED is dropped silently
+5 nodes of 12001, budget 24000  -> []                 empty caplog
+```
+
+Next-fit closes a bin whenever the next node does not fit, and the `len(sub) >= 2` filter then
+deletes every singleton it created — so it discards nodes that would have paired, and it tends to
+discard the seed, the most central node of the cluster. A prefix has no bins, so it has no orphan
+singletons, and the seed is by definition the first element it keeps.
+
+**v1 proposed no cap at all, and that was wrong too.** `MemoryNode.content` has no `max_length` and
+`ingest_max_content_chars` is 100000 (`config.py:279`), so the uncapped worst case is ~2M
+characters. If any layer truncates the tool result silently — the Claude Code host, or
+`truncateHead` in the Pi plugin — the #192 defect returns in full: partial view, sources archived
+all the same.
+
+Accepted trade-off: a cluster that does not fit whole consolidates only its prefix; the tail
+waits a cycle. By #192's measurement (5.923 nodes, 301 reconstructed consolidation events), no
+historical event would have been trimmed at any budget >= 16000, so this is a tail safety net,
+not the common path.
+
+### The budget measures the serialized node, not raw content
+
+`len(json.dumps(node, ensure_ascii=False))` on the **already normalized** node, not
+`len(node["content"])`.
+
+v2 budgeted raw content, which measures the wrong thing: the normalized node also carries `id`,
+`title`, `type` and `space`, and JSON escaping can multiply size — two contents of 12.000 NUL
+characters satisfy a 24000 raw budget and serialize to ~144k. The Codex peer found this.
 
 ### A setting of its own, not #192's
 
 New setting `claude_maintenance_cluster_max_chars`, default **24000**, applied per cluster.
 
-The default reuses #192's measurement because it was taken on this same store: 5.923 nodes and
-301 reconstructed consolidation events, worst real event 12.961 chars, theoretical worst case
-24.038. At any budget >= 16000 none of the 301 historical events would have been split, so the
-split is a safety net for the tail, not the common path.
+The default reuses #192's measurement because it was taken on this same store: worst real event
+12.961 chars, theoretical worst case 24.038.
 
-**Batch bound.** The budget caps a *sub*-cluster, not the batch, and one original cluster of
-`consolidation_max_cluster_nodes` yields up to `floor(max_cluster_nodes / 2)` sub-clusters — a
-sub-cluster needs two nodes to survive. So the phase-1 consolidation payload is bounded by
-`4 clusters x floor(5 / 2) x 24000 = 192_000` characters, roughly 48k tokens, not the 96k
-characters a per-cluster reading would suggest. That is the number the worst-case test asserts.
+**Batch bound.** One prefix per cluster and at most 4 clusters gives a consolidation payload of at
+most `4 x 24000 = 96_000` serialized characters — true by construction, unlike v2's number. The
+phase-1 tool result also carries the three screening batches (up to 25 pairs each at 300 chars,
+roughly 45k), so the whole response is bounded at ~141k characters, about 35k tokens.
 
-It is **not** `consolidation_max_prompt_chars`: that setting exists only on PR #260, still open,
-so reusing it would chain this PR behind that one. The consumers also differ — the Claude agent's
-window is not Ollama's `num_ctx`, so a shared number would be coincidence rather than design.
-
-### Split applied in `get_maintenance_batches`, not in the finder
+### Trim applied in `get_maintenance_batches`, not in the finder
 
 `_find_consolidation_clusters` is shared with the background consolidator, which has its own
-budget policy on PR #260. Splitting inside it would impose this route's policy on that one. The
-split happens in `get_maintenance_batches`, so the emitted batch is already split and the MCP
-formatter needs to know nothing about budgets — one decision point, one place to test.
+budget policy on PR #260. Trimming inside it would impose this route's policy on that one. The
+trim happens in `get_maintenance_batches`, after `_norm`, so it measures exactly what ships and
+the MCP formatter needs to know nothing about budgets.
 
 ### `type` fix included
 
@@ -118,21 +137,35 @@ def _norm(node: dict, content_limit: int | None = 400) -> dict:
 Screening batches keep calling `_norm(...)` with no argument. Only consolidation passes
 `content_limit=None`.
 
-### Change (b) — split oversized clusters in `get_maintenance_batches`
+### Change (b) — trim oversized clusters in `get_maintenance_batches`
 
-A module-level helper, so it is testable without going through the engine:
+A module-level helper, testable without going through the engine:
 
 ```python
-def _split_cluster_to_budget(cluster: list[dict], budget: int) -> list[list[dict]]:
-    """Greedy bin-pack a cluster into sub-clusters within `budget` characters.
+def _select_cluster_within_budget(
+    cluster: list[dict], budget: int, min_size: int
+) -> list[dict]:
+    """Longest prefix of `cluster` whose serialized size fits `budget`.
 
-    Order is preserved (seed first, then descending similarity). Sub-clusters of
-    fewer than 2 nodes are dropped: a single node has nothing to consolidate with.
+    The cluster arrives seed-first, matches by descending similarity, so the
+    prefix keeps the most central nodes. Nodes are never sliced; those left out
+    stay in the working tier. Returns [] when the prefix cannot reach `min_size`.
     """
 ```
 
-A node whose own content exceeds `budget` forms a one-node sub-cluster, which is then dropped,
-and the engine logs a WARNING naming the node id and its size.
+Applied to the **normalized** cluster, so the measurement is of what actually ships:
+
+```python
+        cluster_budget = getattr(self.settings, "claude_maintenance_cluster_max_chars", 24000)
+        min_size = self.settings.consolidation_min_cluster_size
+        consolidation_clusters = [
+            trimmed
+            for cluster in consolidation_clusters
+            if (trimmed := _select_cluster_within_budget(
+                [_norm(n, content_limit=None) for n in cluster], cluster_budget, min_size
+            ))
+        ]
+```
 
 ### Change (c) — the MCP formatter stops cutting cluster content
 
@@ -173,21 +206,24 @@ proved sufficient with two similar nodes.
    and the two `_nd` at `conflict_detector.py:199` / `duplicate_merger.py:222`) — so it stayed
    green even with `_norm`'s limit removed and guarded nothing. Both peers found this.
 
-**Split policy:**
+**Trim policy:**
 
-5. `test_oversized_cluster_is_split_not_truncated` — a cluster over budget yields two or more
-   sub-clusters, and every node's content is intact in whichever sub-cluster holds it.
-6. `test_single_node_subcluster_is_dropped` — a leftover of one node does not reach the batch.
-7. `test_node_larger_than_budget_is_dropped_with_warning` — the node stays out and a WARNING
-   names it (`caplog`).
-8. `test_worst_case_cardinality_stays_bounded` — 4 clusters x 5 nodes of 100k chars; the
-   serialized batch stays within 4 x budget. This is the test both peers asked for: proof that
-   a genuinely large payload remains operable, which the 600-char tests do not provide.
+5. `test_cluster_within_budget_is_returned_whole` — nothing is trimmed when it fits.
+6. `test_oversized_cluster_is_trimmed_to_a_prefix` — the prefix keeps the leading nodes, every
+   kept node's content is intact, and the dropped ones are absent.
+7. `test_seed_is_never_dropped` — the case that killed v2: a large seed followed by smaller
+   matches. The seed must be in the result. Red against a next-fit implementation.
+8. `test_cluster_below_min_size_after_trim_is_dropped_with_warning` — `caplog` names the cluster.
+9. `test_budget_counts_serialized_size_not_raw_content` — a node whose content is short but whose
+   JSON escaping is large is budgeted by its serialized size. Red against a `len(content)` budget.
+10. `test_worst_case_cardinality_stays_bounded` — 4 clusters of `max_cluster_nodes` pairable
+    nodes; every emitted cluster serializes within budget, the batch within `4 x budget`, and the
+    result is non-empty (so it cannot pass by emitting nothing).
 
 **Type:**
 
-9. `test_clusters_carry_node_type` — `_find_consolidation_clusters` emits `type`.
-10. `test_consolidation_cluster_carries_type` — it survives into the batch.
+11. `test_clusters_carry_node_type` — `_find_consolidation_clusters` emits `type`.
+12. `test_consolidation_cluster_carries_type` — it survives into the batch.
 
 ## Verification gates (FORK-WORKFLOW.md)
 
@@ -203,7 +239,18 @@ proved sufficient with two similar nodes.
 
 ## Review history
 
-`/council` 2026-08-26, run `82c0d868-82a0a0a5-78c861c9`, profiles architecture+performance.
-Cursor and Codex both returned `needs-attention`; neither approved. Seven findings, none
-rejected. v1's two load-bearing premises — that `_norm` was the single cut point, and that an
-uncapped batch could not lose data — were both falsified. This document is the rewrite.
+Two `/council` runs, both profiles architecture+performance, both with Cursor and Codex
+returning `needs-attention` and neither approving.
+
+- **v1**, run `82c0d868-82a0a0a5-78c861c9`: 7 findings, none rejected. Falsified both of v1's
+  load-bearing premises — that `_norm` was the single cut point (the MCP formatter cuts at 200),
+  and that an uncapped batch could not lose data.
+- **v2**, run `5bf5592c-8c32273c-050cf979`: 4 findings, all HIGH, none rejected. Both peers
+  converged on the next-fit packing discarding pairable nodes and on the 192k bound measuring
+  only raw content.
+
+**Note on the review setup:** the peers review the working tree of `Tools/ormah`, which is on
+`local-main` (~693 commits ahead), while this plan targets `upstream/main`. In the v2 run the
+Cursor peer recommended reusing `_split_cluster_to_fit` "already in this tree" — it exists on
+`local-main` and on the #192 branch, but **not** on `upstream/main`. Peer behavioural findings
+hold; every file or symbol reference must be re-checked against the island before acting on it.

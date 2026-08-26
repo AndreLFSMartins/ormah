@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Reversible Promotion + Seven-Day Initial Lease (#223)</title>
+<title>Reversible Promotion + Seven-Day Initial Lease — Implementation Plan</title>
 <style>
 /* rich-doc design system — Anthropic brand, document-oriented.
    Light paper/ink, Lora italic display, Poppins body, system mono.
@@ -139,324 +139,410 @@ summary:hover{color:var(--accent)}
 <body>
 <nav class="toc">
   <div class="eyebrow">[ PLAN ]</div>
-  <div class="doc-title">Reversible Promotion + Seven-Day Initial Lease (#223)</div>
-  <a href="#overview">Overview</a>
-  <a href="#global-constraints">Global Constraints</a>
-  <a href="#test-gate" class="lvl-3">The test gate — run both halves, every time</a>
-  <a href="#structure-overview">Structure &amp; Task Dependencies</a>
-  <a href="#file-structure" class="lvl-3">Files by responsibility</a>
-  <a href="#task-dependencies" class="lvl-3">Task dependencies</a>
-  <a href="#task-1">Task 1: Seven-day lease default + promotion_floor</a>
-  <a href="#task-1-interfaces" class="lvl-3">Interfaces</a>
-  <a href="#task-2">Task 2: superseded_by on the model and in Markdown</a>
-  <a href="#task-2-interfaces" class="lvl-3">Interfaces</a>
-  <a href="#task-3">Task 3: superseded_by in schema, migration and reindex</a>
-  <a href="#task-3-interfaces" class="lvl-3">Interfaces</a>
-  <a href="#task-4">Task 4: remember() uses the configured initial stability</a>
-  <a href="#task-4-interfaces" class="lvl-3">Interfaces</a>
-  <a href="#task-5">Task 5: Promotion inside _record_confirmed_use</a>
-  <a href="#task-5-interfaces" class="lvl-3">Interfaces</a>
-  <a href="#task-6">Task 6: Consolidation provenance and its ordering fail-safe</a>
-  <a href="#task-6-interfaces" class="lvl-3">Interfaces</a>
-  <a href="#task-6-why-order-matters" class="lvl-3">Why marking comes BEFORE demoting</a>
-  <a href="#task-7">Task 7: Version pin, docs-in-code, and the full verification gate</a>
-  <a href="#task-7-interfaces" class="lvl-3">Interfaces</a>
-  <a href="#task-7-version-decision" class="lvl-3">Why the version stays at 2</a>
-  <a href="#task-7-final-checks" class="lvl-3">Final checks</a>
-  <a href="#related-references">Related references</a>
+  <div class="doc-title">Reversible Promotion + Seven-Day Initial Lease — Implementation Plan</div>
+  <a href="#h-overview">Overview</a>
+  <a href="#h-spec-ref" class="lvl-3">Specification</a>
+  <a href="#h-stack" class="lvl-3">Tech Stack</a>
+  <a href="#h-constraints" class="lvl-3">Global Constraints</a>
+  <a href="#h-file-structure" class="lvl-3">File Structure</a>
+  <a href="#h-dependencies" class="lvl-3">Task Dependencies</a>
+  <a href="#h-task-1">Task 1: Seven-day lease default + promotion_floor</a>
+  <a href="#h-task-1-purpose" class="lvl-3">Purpose</a>
+  <a href="#h-task-1-interfaces" class="lvl-3">Interfaces</a>
+  <a href="#h-task-1-design" class="lvl-3">Design Note: max, Never a Sum</a>
+  <a href="#h-task-1-steps" class="lvl-3">Steps</a>
+  <a href="#h-task-2">Task 2: superseded_by on the model and in Markdown</a>
+  <a href="#h-task-2-purpose" class="lvl-3">Purpose</a>
+  <a href="#h-task-2-design" class="lvl-3">Design Note: Not on UpdateNodeRequest</a>
+  <a href="#h-task-2-steps" class="lvl-3">Steps</a>
+  <a href="#h-task-3">Task 3: superseded_by in schema, migration and reindex</a>
+  <a href="#h-task-3-purpose" class="lvl-3">Purpose</a>
+  <a href="#h-task-3-design" class="lvl-3">Design Note: The Builder Change is Load-Bearing</a>
+  <a href="#h-task-3-steps" class="lvl-3">Steps</a>
+  <a href="#h-task-4">Task 4: remember() uses the configured initial stability</a>
+  <a href="#h-task-4-purpose" class="lvl-3">Purpose</a>
+  <a href="#h-task-4-design" class="lvl-3">Design Note: Three 1.0 Defaults Stay Put</a>
+  <a href="#h-task-4-steps" class="lvl-3">Steps</a>
+  <a href="#h-task-5">Task 5: Promotion inside _record_confirmed_use</a>
+  <a href="#h-task-5-purpose" class="lvl-3">Purpose</a>
+  <a href="#h-task-5-design" class="lvl-3">Design Note: Qualification Needs No New Logic</a>
+  <a href="#h-task-5-steps" class="lvl-3">Steps</a>
+  <a href="#h-task-6">Task 6: Consolidation provenance and its ordering fail-safe</a>
+  <a href="#h-task-6-purpose" class="lvl-3">Purpose</a>
+  <a href="#h-task-6-design" class="lvl-3">Design Notes</a>
+  <a href="#h-task-6-steps" class="lvl-3">Steps</a>
+  <a href="#h-task-7">Task 7: Version pin, docs-in-code, and the full verification gate</a>
+  <a href="#h-task-7-purpose" class="lvl-3">Purpose</a>
+  <a href="#h-task-7-design" class="lvl-3">Design Note: Version Stays at 2</a>
+  <a href="#h-task-7-steps" class="lvl-3">Steps</a>
+  <a href="#h-cherry-pick-note" class="lvl-3">Note: Cherry-pick to local-main</a>
+  <a href="#h-test-gate">The Test Gate — Run Both Halves, Every Time</a>
 </nav>
 <main>
-<div class="doc">
-  <h1>Reversible Promotion + Seven-Day Initial Lease (#223)</h1>
+<div class="eyebrow">Ormah Issue #223</div>
 
-  <div class="statement">
-    Give archival nodes a way back to working on confirmed use, and give every new node a seven-day unused lease instead of a ~29-hour one.
+<h1><em>Reversible Promotion</em> + Seven-Day Initial Lease</h1>
+
+<p class="statement">Give <code>archival</code> nodes a way back to <code>working</code> on confirmed use, and extend new nodes from a ~29-hour default lease to seven days.</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="big">7</div>
+    <div class="label">Implementation tasks</div>
   </div>
+  <div class="metric">
+    <div class="big">9</div>
+    <div class="label">Files modified</div>
+  </div>
+  <div class="metric">
+    <div class="big">4</div>
+    <div class="label">Test suites expanded</div>
+  </div>
+</div>
 
-  <section class="phase p-o">
-    <h2 id="overview">Overview</h2>
+<section id="overview">
+<h2 id="h-overview">Overview</h2>
 
-    <p><strong>Goal:</strong> Implement reversible promotion and extend the initial lease period for new nodes from ~29 hours to seven days.</p>
+<p>This plan implements two complementary lifecycle improvements to Ormah's memory system:</p>
 
-    <p><strong>Architecture:</strong> One pure function (<code>lifecycle.promotion_floor</code>) supplies the floor; the tier flip happens inside <code>MemoryEngine._record_confirmed_use</code>, which already owns the at-most-once confirmed-use claim, so promotion inherits its qualification rules for free. A new <code>superseded_by</code> field, written by the consolidator, blocks automatic promotion for exactly the nodes a consolidation replaced.</p>
+<ul>
+  <li><em>Reversible promotion:</em> Confirmed re-use of an archived node brings it back to <code>working</code> tier, unless the node was explicitly superseded by a consolidation.</li>
+  <li><em>Extended initial lease:</em> New nodes now start with a 5.814-day stability (seven days at retrieval threshold 0.3) instead of 1.0 days (~29 hours).</li>
+</ul>
 
-    <p><strong>Tech Stack:</strong> Python 3.11+, pydantic, SQLite (sqlite-vec), pytest (<code>asyncio_mode = auto</code>), ruff.</p>
+<p>The architecture is minimal: one pure function (<code>lifecycle.promotion_floor</code>) supplies the floor; the tier flip happens inside <code>MemoryEngine._record_confirmed_use</code>, which already owns the at-most-once confirmed-use claim. A new <code>superseded_by</code> field, written by the consolidator, blocks automatic promotion for exactly the nodes a consolidation replaced.</p>
 
-    <p><strong>Spec (read first):</strong> <code>docs/superpowers/specs/2026-08-17-issue-223-reversible-promotion-design.md</code></p>
-  </section>
+<h3 id="h-spec-ref">Specification</h3>
+<p>The source of truth: <code>docs/superpowers/specs/2026-08-17-issue-223-reversible-promotion-design.md</code></p>
 
-  <section>
-    <h2 id="global-constraints">Global Constraints</h2>
+<h3 id="h-stack">Tech Stack</h3>
+<table>
+  <tr>
+    <td>Language</td>
+    <td>Python 3.11+</td>
+  </tr>
+  <tr>
+    <td>Framework</td>
+    <td>FastAPI, pytest</td>
+  </tr>
+  <tr>
+    <td>Database</td>
+    <td>SQLite (sqlite-vec)</td>
+  </tr>
+  <tr>
+    <td>Lint</td>
+    <td>ruff</td>
+  </tr>
+</table>
 
-    <ul>
-      <li><strong>Work in the island, never in <code>Tools/ormah</code>:</strong> <code>/Users/andre/Documents/GitHub/Tools/ormah-wt-223</code>, branch <code>feat/223-reversible-promotion</code>, cut from <code>upstream/main</code> plus two dependency merges (top: <code>06b6447</code>).</li>
-      <li><strong>The island is NOT <code>local-main</code>.</strong> <code>archived_at</code>, <code>forgetting_manager.py</code> and <code>docs/lifecycle/</code> do not exist there. Never copy a line number from <code>local-main</code>; reference symbols.</li>
-      <li><strong>Nothing under <code>docs/</code>, <code>.env.example</code>, <code>docs/lifecycle/</code>, <code>.council/</code> or <code>docs/superpowers/</code> may be committed on this branch.</strong> This plan lives on <code>local-main</code> only.</li>
-      <li><strong>Every test command must prove which tree it imported.</strong> A number from the wrong tree has already been retracted once in this work.</li>
-      <li><strong>Never pipe pytest to <code>tail</code></strong> — the exit code becomes <code>tail</code>'s. Redirect and record <code>$?</code>.</li>
-      <li><strong>Baseline (re-derived 2026-08-17):</strong> <code>1925 passed, 12 failed</code>. All 12 are pre-existing. A task is green when the failure count is still 12 and no new name appears.</li>
-      <li><strong>Push is explicit:</strong> <code>git push fork feat/223-reversible-promotion</code>. The branch has no upstream on purpose; a bare <code>git push</code> is refused.</li>
-    </ul>
+<h3 id="h-constraints">Global Constraints</h3>
 
-    <h3 id="test-gate">The test gate — run both halves, every time</h3>
+<ul>
+  <li><strong>Work island:</strong> <code>/Users/andre/Documents/GitHub/Tools/ormah-wt-223</code>, branch <code>feat/223-reversible-promotion</code>. Re-based 2026-08-23 to clean <code>upstream/main</code> (90c431e) with no dependency merges.</li>
+  <li><strong>Protected paths:</strong> Nothing under <code>docs/</code>, <code>.env.example</code>, <code>.council/</code>, or <code>docs/superpowers/</code> may be committed to this branch — the plan itself lives on <code>local-main</code> only.</li>
+  <li><strong>Test isolation:</strong> Every test command must prove which tree it imported. Pipe <code>pytest</code> to a file, capture <code>$?</code> separately — the exit code becomes the shell's otherwise.</li>
+  <li><strong>Baseline (re-derived 2026-08-23):</strong> <code>1948 passed, 4 failed, 1 deselected</code>. All 4 are environmental (3× <code>tests/test_setup.py::TestConfigureCodexMcp</code>, 1× <code>tests/test_adapters/test_space_detect.py::test_detect_returns_none_for_home</code>). A task is green when these four <em>names</em> are still the only failures.</li>
+  <li><strong>Dependencies landed:</strong> PRs #234 and #239 have merged upstream; the island already sits clean on <code>upstream/main</code>.</li>
+</ul>
 
-    <p>Each test run must prove it uses the correct tree:</p>
+<h3 id="h-file-structure">File Structure</h3>
 
-    <pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah-wt-223
+<table>
+  <tr>
+    <th>File</th>
+    <th>Responsibility</th>
+    <th>Task</th>
+  </tr>
+  <tr>
+    <td><code>src/ormah/config.py</code></td>
+    <td><code>fsrs_initial_stability</code> default <code>1.0 → 5.814</code></td>
+    <td>1</td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/lifecycle.py</code></td>
+    <td>new pure <code>promotion_floor(stability, initial_stability)</code></td>
+    <td>1</td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/models/node.py</code></td>
+    <td>new <code>superseded_by: str | None</code> on <code>MemoryNode</code></td>
+    <td>2</td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/store/markdown.py</code></td>
+    <td>serialize when not <code>None</code>; parse via <code>meta.get</code></td>
+    <td>2</td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/index/schema.sql</code></td>
+    <td><code>superseded_by TEXT</code> on <code>nodes</code></td>
+    <td>3</td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/index/db.py</code></td>
+    <td>one entry in the <code>enrichment_migrations</code> pair list</td>
+    <td>3</td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/index/builder.py</code></td>
+    <td>carry <code>superseded_by</code> through <code>INSERT OR REPLACE</code></td>
+    <td>3</td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/engine/memory_engine.py</code></td>
+    <td><code>remember()</code> initial stability; promotion in <code>_record_confirmed_use</code>; <code>_mark_superseded</code>; version comment</td>
+    <td>4, 5, 6, 7</td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/background/consolidator.py</code></td>
+    <td>mark provenance <strong>before</strong> demoting</td>
+    <td>6</td>
+  </tr>
+</table>
+
+<div class="callout">
+  <strong>Note:</strong> <code>builder.py</code> is not in the spec's original file list but is required. <code>_index_file_nodes_only</code> runs <code>INSERT OR REPLACE INTO nodes</code> with an explicit column list. In SQLite, <code>REPLACE</code> is DELETE+INSERT, so any omitted column reverts to its DEFAULT. Without this change, the consolidator's own <code>update_node(tier=archival)</code> re-indexes the file and wipes <code>superseded_by</code> back to <code>NULL</code>. The promotion gate itself reads Markdown and blocks correctly, but the index column would be permanently <code>NULL</code>, which violates the contract #209 relies on.
+</div>
+
+<h3 id="h-dependencies">Task Dependencies</h3>
+
+<p>Tasks 1–3 are independent of each other. Task 4 needs Task 1. Task 5 needs Tasks 1–3. Task 6 needs Tasks 2, 3, and 5. Task 7 is last.</p>
+
+</section>
+
+<section id="task-1">
+<div class="phase p-o"><span class="pn">1</span> Seven-Day Lease &amp; Promotion Floor</div>
+
+<h2 id="h-task-1">Task 1: Seven-day lease default + <code>promotion_floor</code></h2>
+
+<p class="meta">Files: <code>src/ormah/config.py</code>, <code>src/ormah/lifecycle.py</code> · Tests: <code>tests/test_lifecycle.py</code>, <code>tests/test_background/test_decay_manager.py</code></p>
+
+<h3 id="h-task-1-purpose">Purpose</h3>
+
+<p>Set the initial stability to <code>5.814</code> (days), which gives new nodes a seven-day unused lease instead of ~29 hours. Provide a pure function <code>promotion_floor(stability, initial_stability)</code> that lifts a node's stability to at least the initial value, used by promotion logic.</p>
+
+<h3 id="h-task-1-interfaces">Interfaces</h3>
+
+<dl>
+  <dt>Consumes</dt>
+  <dd><code>lifecycle.retrievability(days_since, stability, *, fallback_stability=1.0)</code> — already exists</dd>
+  <dt>Produces</dt>
+  <dd><code>lifecycle.promotion_floor(stability: float, initial_stability: float) → float</code>, used by Task 5<br/>
+  <code>Settings.fsrs_initial_stability == 5.814</code>, used by Tasks 4 and 5</dd>
+</dl>
+
+<h3 id="h-task-1-design">Design Note: <code>max</code>, Never a Sum</h3>
+
+<p>The floor uses <code>max</code> rather than addition because it makes "the post-update floor does not amplify the same event into a longer-than-initial lease" <em>structural</em> rather than incidental, and repeated promotions are idempotent.</p>
+
+<h3 id="h-task-1-steps">Steps</h3>
+
+<ol>
+  <li>Write failing lease + floor tests</li>
+  <li>Run tests to verify they fail</li>
+  <li>Change <code>fsrs_initial_stability</code> default in <code>config.py</code> to 5.814</li>
+  <li>Add the pure <code>promotion_floor</code> function to <code>lifecycle.py</code></li>
+  <li>Run tests to verify they pass</li>
+  <li>Write the decay-cadence test (sets stability directly, not via <code>remember()</code>)</li>
+  <li>Check config suite did not regress</li>
+  <li>Lint and commit</li>
+</ol>
+
+</section>
+
+<section id="task-2">
+<div class="phase p-b"><span class="pn">2</span> Superseded Field &amp; Serialization</div>
+
+<h2 id="h-task-2">Task 2: <code>superseded_by</code> on the model and in Markdown</h2>
+
+<p class="meta">Files: <code>src/ormah/models/node.py</code>, <code>src/ormah/store/markdown.py</code> · Tests: <code>tests/test_store/test_markdown.py</code></p>
+
+<h3 id="h-task-2-purpose">Purpose</h3>
+
+<p>Add a <code>superseded_by</code> field to <code>MemoryNode</code> that records when a node was replaced by a consolidation. Serialize it to Markdown frontmatter only when set.</p>
+
+<h3 id="h-task-2-design">Design Note: Not on <code>UpdateNodeRequest</code></h3>
+
+<p>Deliberately omitted from the public update API. <code>superseded_by</code> is <em>policy state</em> written by the consolidator; no agent sets it. Adding it to <code>UpdateNodeRequest</code> would expose an escape hatch #191 withheld.</p>
+
+<h3 id="h-task-2-steps">Steps</h3>
+
+<ol>
+  <li>Write failing roundtrip tests (survives Markdown, absent when <code>None</code>, backward compat)</li>
+  <li>Run tests to verify they fail</li>
+  <li>Add field to <code>MemoryNode</code></li>
+  <li>Parse it in <code>parse_node</code></li>
+  <li>Serialize it in <code>serialize_node</code> only when not <code>None</code></li>
+  <li>Run store tests to verify they pass</li>
+  <li>Lint and commit</li>
+</ol>
+
+</section>
+
+<section id="task-3">
+<div class="phase p-g"><span class="pn">3</span> Index Column &amp; Migration</div>
+
+<h2 id="h-task-3">Task 3: <code>superseded_by</code> in schema, migration and reindex</h2>
+
+<p class="meta">Files: <code>src/ormah/index/schema.sql</code>, <code>src/ormah/index/db.py</code>, <code>src/ormah/index/builder.py</code> · Tests: <code>tests/test_index/test_migration_superseded.py</code> (create), <code>tests/test_index/test_builder.py</code></p>
+
+<h3 id="h-task-3-purpose">Purpose</h3>
+
+<p>Add the <code>superseded_by TEXT</code> column to SQLite schema and migrations, and update reindex to preserve it during <code>INSERT OR REPLACE</code> operations.</p>
+
+<h3 id="h-task-3-design">Design Note: The Builder Change is Load-Bearing</h3>
+
+<p><code>_index_file_nodes_only</code> runs <code>INSERT OR REPLACE INTO nodes</code> with an explicit column list. In SQLite, <code>REPLACE</code> is DELETE+INSERT, so a missing column reverts to DEFAULT (NULL). Task 6's consolidator marks the node, then calls <code>update_node(tier=archival)</code>, which calls <code>builder.index_single</code>; without this change the marker is wiped within the same loop iteration.</p>
+
+<h3 id="h-task-3-steps">Steps</h3>
+
+<ol>
+  <li>Write failing migration test (adds column, leaves existing rows NULL, is idempotent)</li>
+  <li>Write failing reindex-survival test</li>
+  <li>Add column to fresh-store schema</li>
+  <li>Add migration entry to <code>enrichment_migrations</code></li>
+  <li>Update <code>_index_file_nodes_only</code> to include <code>superseded_by</code> (19 columns, 19 values, count carefully)</li>
+  <li>Run tests to verify they pass</li>
+  <li>Lint and commit</li>
+</ol>
+
+</section>
+
+<section id="task-4">
+<div class="phase p-o"><span class="pn">4</span> Initial Stability in Remember</div>
+
+<h2 id="h-task-4">Task 4: <code>remember()</code> uses the configured initial stability</h2>
+
+<p class="meta">Files: <code>src/ormah/engine/memory_engine.py</code> · Tests: <code>tests/test_engine/test_memory_engine.py</code></p>
+
+<h3 id="h-task-4-purpose">Purpose</h3>
+
+<p>Wire the configured <code>fsrs_initial_stability</code> setting into node creation so every node created via <code>remember()</code> starts at the configured value.</p>
+
+<h3 id="h-task-4-design">Design Note: Three <code>1.0</code> Defaults Stay Put</h3>
+
+<p><code>MemoryNode.stability</code>'s model default, <code>parse_node</code>'s fallback, and the schema DEFAULT stay as 1.0. Changing any would retroactively rescale old nodes, which #191 forbids. <strong>Only <code>remember()</code> changes.</strong></p>
+
+<h3 id="h-task-4-steps">Steps</h3>
+
+<ol>
+  <li>Write failing tests (with non-default value, to disk and index)</li>
+  <li>Add <code>stability=self.settings.fsrs_initial_stability,</code> to <code>MemoryNode(...)</code> in <code>remember()</code></li>
+  <li>Run all engine and background tests</li>
+  <li>Lint and commit</li>
+</ol>
+
+</section>
+
+<section id="task-5">
+<div class="phase p-b"><span class="pn">5</span> Promotion Inside Confirmed Use</div>
+
+<h2 id="h-task-5">Task 5: Promotion inside <code>_record_confirmed_use</code></h2>
+
+<p class="meta">Files: <code>src/ormah/engine/memory_engine.py</code> · Tests: <code>tests/test_engine/test_reversible_promotion.py</code> (create), plus 5 existing test files</p>
+
+<h3 id="h-task-5-purpose">Purpose</h3>
+
+<p>Move archival nodes back to <code>working</code> when they receive a qualified confirmed-use signal, unless marked superseded. Apply the promotion floor so post-update stability reaches at least the initial value.</p>
+
+<h3 id="h-task-5-design">Design Note: Qualification Needs No New Logic</h3>
+
+<p><code>_claim_confirmed_use</code> already fail-closes on correct signal, source, and <code>was_injected</code>. All callers pass through it. Placement inside <code>_record_confirmed_use</code> inherits qualification for free. A contract test prevents future callers from reopening the hole.</p>
+
+<h3 id="h-task-5-steps">Steps</h3>
+
+<ol>
+  <li>Write cooldown-interaction tests (bounded update first, then floor; floor even when cooldown blocks; floor does not stack)</li>
+  <li>Create <code>test_reversible_promotion.py</code> with behavior tests</li>
+  <li>Add promotion block in <code>_record_confirmed_use</code> after cooldown block</li>
+  <li>Widen the UPDATE to write all changed fields</li>
+  <li>Write audit entry after transaction</li>
+  <li>Add qualification matrix test</li>
+  <li>Add <code>TierManager.promote</code> guard and audit log tests</li>
+  <li>Add concurrency test and run 5 times</li>
+  <li>Lint and commit</li>
+</ol>
+
+</section>
+
+<section id="task-6">
+<div class="phase p-g"><span class="pn">6</span> Consolidation Provenance</div>
+
+<h2 id="h-task-6">Task 6: Consolidation provenance and its ordering fail-safe</h2>
+
+<p class="meta">Files: <code>src/ormah/engine/memory_engine.py</code> (new method), <code>src/ormah/background/consolidator.py</code> · Tests: <code>tests/test_background/test_consolidator.py</code></p>
+
+<h3 id="h-task-6-purpose">Purpose</h3>
+
+<p>Mark consolidated source nodes with the ID of the consolidation node that replaced them. Enforce marking <em>before</em> demotion — the fail-safe: a crash between the two leaves the node marked and working (harmless), not unmarked and archival (promotable).</p>
+
+<h3 id="h-task-6-design">Design Notes</h3>
+
+<p><strong>Why separate writer:</strong> <code>superseded_by</code> is absent from <code>UpdateNodeRequest</code>, so needs its own writer decorated <code>@_serialized_memory_operation</code>.</p>
+
+<p><strong>Why no <code>touch_updated()</code>:</strong> The next line is <code>update_node(tier=archival)</code>, which already advances <code>updated</code>. A second bump would be redundant.</p>
+
+<h3 id="h-task-6-steps">Steps</h3>
+
+<ol>
+  <li>Write failing provenance tests (marks sources, survives reindex, blocks promotion, fail-safe on crash)</li>
+  <li>Add <code>_mark_superseded</code> method to <code>MemoryEngine</code></li>
+  <li>In <code>consolidator.py</code>'s <code>_apply_consolidation</code>, call <code>_mark_superseded</code> before <code>update_node</code></li>
+  <li>Run consolidator, background, and engine tests</li>
+  <li>Lint and commit</li>
+</ol>
+
+</section>
+
+<section id="task-7">
+<div class="phase p-o"><span class="pn">7</span> Verification &amp; Version Pin</div>
+
+<h2 id="h-task-7">Task 7: Version pin, docs-in-code, and the full verification gate</h2>
+
+<p class="meta">Files: <code>src/ormah/engine/memory_engine.py</code> · Tests: <code>tests/test_engine/test_lifecycle_model_version.py</code></p>
+
+<h3 id="h-task-7-purpose">Purpose</h3>
+
+<p>Record the deliberate decision not to bump the lifecycle model version. Run full verification and prepare the branch for push.</p>
+
+<h3 id="h-task-7-design">Design Note: Version Stays at 2</h3>
+
+<p>The version records <em>which reinforcement model wrote stability values</em>. #223 changes a creation default and adds a column; it does not change the model. A bump would not help: this is a store-level flag spanning both eras of nodes. No data is rewritten.</p>
+
+<h3 id="h-task-7-steps">Steps</h3>
+
+<ol>
+  <li>Write version-pin test (should pass immediately)</li>
+  <li>Add decision comment to <code>_lifecycle_model_version</code> docstring</li>
+  <li>Confirm PR carries only docs-in-code: <code>git diff --name-only upstream/main...HEAD | grep -E '^(docs/|\.env\.example|\.council/)'</code> must print <code>clean: no product docs</code></li>
+  <li>Confirm island is clean: <code>git log --oneline upstream/main..HEAD</code> shows only your commits</li>
+  <li>Run full suite: <code>1948 + &lt;added tests&gt; passed, 4 failed</code> with only baseline names</li>
+  <li>Confirm baseline failures untouched: <code>git diff --name-only upstream/main...HEAD | grep -E 'test_setup|space_detect'</code> must print <code>clean</code></li>
+  <li>Lint and commit</li>
+  <li><strong>Stop before pushing.</strong> Report to André: full-suite numbers, git log output, confirmation of clean docs</li>
+  <li>When approved: <code>git push fork feat/223-reversible-promotion</code> (never bare push, never to fork/fix/220-confirmed-use)</li>
+</ol>
+
+<h3 id="h-cherry-pick-note">Note: Cherry-pick to <code>local-main</code></h3>
+
+<p>When later cherry-picked onto <code>local-main</code>, the promotion is incomplete there. <code>local-main</code> has <code>archived_at</code> and <code>forgetting_manager</code> (#28), so promoted nodes keep stale timestamps. The cherry-pick must additionally clear <code>archived_at</code> on the node and in the index UPDATE.</p>
+
+<p>Use <code>git cherry-pick</code>, not merge. Check for hygiene commits deleting <code>docs/superpowers/</code> first.</p>
+
+</section>
+
+<section id="test-gate">
+<h2 id="h-test-gate">The Test Gate — Run Both Halves, Every Time</h2>
+
+<pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah-wt-223
 env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"
-#   printed path MUST contain ormah-wt-223/ — if not, STOP, the run is against local-main
-env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest &lt;target&gt; -q &gt; out.txt 2&gt;&amp;1
+#   printed path MUST contain ormah-wt-223/ — if not, STOP
+env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -m pytest &lt;target&gt; -q &gt; out.txt 2>&1
 echo "PYTEST_EXIT=$?" &gt;&gt; out.txt</code></pre>
 
-    <p>Six of the twelve baseline failures need a clean <code>HOME</code> to pass; to isolate, add <code>HOME=$(mktemp -d)</code>.</p>
-  </section>
+<p>Six baseline failures need <code>HOME=$(mktemp -d)</code> to pass; add it to isolate.</p>
 
-  <section>
-    <h2 id="structure-overview">Structure &amp; Task Dependencies</h2>
-
-    <div class="metrics">
-      <div class="metric">
-        <div class="big">8</div>
-        <div class="label">Tasks</div>
-      </div>
-      <div class="metric">
-        <div class="big">9</div>
-        <div class="label">Files to modify</div>
-      </div>
-      <div class="metric">
-        <div class="big">7</div>
-        <div class="label">Test files</div>
-      </div>
-    </div>
-
-    <h3 id="file-structure">Files by responsibility</h3>
-
-    <table>
-      <thead>
-        <tr>
-          <th>File</th>
-          <th>Responsibility</th>
-          <th>Task</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td><code>src/ormah/config.py</code></td>
-          <td><code>fsrs_initial_stability</code> default <code>1.0 → 5.814</code></td>
-          <td>1</td>
-        </tr>
-        <tr>
-          <td><code>src/ormah/lifecycle.py</code></td>
-          <td>new pure <code>promotion_floor(stability, initial_stability)</code></td>
-          <td>1</td>
-        </tr>
-        <tr>
-          <td><code>src/ormah/models/node.py</code></td>
-          <td>new <code>superseded_by: str | None</code> on <code>MemoryNode</code></td>
-          <td>2</td>
-        </tr>
-        <tr>
-          <td><code>src/ormah/store/markdown.py</code></td>
-          <td>serialize when not <code>None</code>; parse via <code>meta.get</code></td>
-          <td>2</td>
-        </tr>
-        <tr>
-          <td><code>src/ormah/index/schema.sql</code></td>
-          <td><code>superseded_by TEXT</code> on <code>nodes</code></td>
-          <td>3</td>
-        </tr>
-        <tr>
-          <td><code>src/ormah/index/db.py</code></td>
-          <td>one entry in the <code>enrichment_migrations</code> pair list</td>
-          <td>3</td>
-        </tr>
-        <tr>
-          <td><code>src/ormah/index/builder.py</code></td>
-          <td>carry <code>superseded_by</code> through <code>INSERT OR REPLACE</code></td>
-          <td>3</td>
-        </tr>
-        <tr>
-          <td><code>src/ormah/engine/memory_engine.py</code></td>
-          <td><code>remember()</code> initial stability; promotion in <code>_record_confirmed_use</code>; <code>_mark_superseded</code>; version comment</td>
-          <td>4, 5, 6, 7</td>
-        </tr>
-        <tr>
-          <td><code>src/ormah/background/consolidator.py</code></td>
-          <td>mark provenance <em>before</em> demoting</td>
-          <td>6</td>
-        </tr>
-      </tbody>
-    </table>
-
-    <p class="callout"><strong>Note on builder.py:</strong> It is not in the spec's list of seven files, but it is required. <code>_index_file_nodes_only</code> runs <code>INSERT OR REPLACE INTO nodes</code> with an explicit column list, and <code>REPLACE</code> is DELETE+INSERT, so any omitted column reverts to its DEFAULT. Without this change the consolidator's own <code>update_node(tier=archival)</code> — called one line after marking — re-indexes the file and wipes <code>superseded_by</code> back to <code>NULL</code>.</p>
-
-    <h3 id="task-dependencies">Task dependencies</h3>
-
-    <p>Tasks 1–3 are independent of each other. Task 4 needs Task 1. Task 5 needs Tasks 1–3. Task 6 needs Tasks 2, 3 and 5. Task 7 is last.</p>
-  </section>
-
-  <section class="phase p-b">
-    <h2 id="task-1">Task 1: Seven-day lease default + <code>promotion_floor</code></h2>
-
-    <p><span class="eyebrow">Files</span></p>
-    <ul>
-      <li>Modify: <code>src/ormah/config.py</code> (symbol: <code>fsrs_initial_stability</code>)</li>
-      <li>Modify: <code>src/ormah/lifecycle.py</code> (append after <code>reinforcement_due</code>)</li>
-      <li>Test: <code>tests/test_lifecycle.py</code></li>
-      <li>Test: <code>tests/test_background/test_decay_manager.py</code></li>
-    </ul>
-
-    <h3 id="task-1-interfaces">Interfaces</h3>
-    <p><strong>Consumes:</strong> <code>lifecycle.retrievability(days_since, stability, *, fallback_stability=1.0)</code> — already exists.</p>
-    <p><strong>Produces:</strong> <code>lifecycle.promotion_floor(stability: float, initial_stability: float) → float</code>, used by <a href="#task-5">Task 5</a>. <code>Settings.fsrs_initial_stability == 5.814</code>, used by <a href="#task-4">Task 4</a> and <a href="#task-5">Task 5</a>.</p>
-
-    <p><strong>Why <code>max</code>, never a sum:</strong> <code>max</code> is what makes "the post-update floor does not amplify the same event into a longer-than-initial lease" structural rather than incidental, and makes repeated promotions idempotent.</p>
-
-    <p><strong>Key steps:</strong> Write failing tests → run them to confirm failure → change config default → add pure function → verify tests pass → check decay cadence → lint and commit.</p>
-  </section>
-
-  <section class="phase p-g">
-    <h2 id="task-2">Task 2: <code>superseded_by</code> on the model and in Markdown</h2>
-
-    <p><span class="eyebrow">Files</span></p>
-    <ul>
-      <li>Modify: <code>src/ormah/models/node.py</code> (symbol: <code>MemoryNode</code>)</li>
-      <li>Modify: <code>src/ormah/store/markdown.py</code> (symbols: <code>parse_node</code>, <code>serialize_node</code>)</li>
-      <li>Test: <code>tests/test_store/test_markdown.py</code></li>
-    </ul>
-
-    <h3 id="task-2-interfaces">Interfaces</h3>
-    <p><strong>Produces:</strong> <code>MemoryNode.superseded_by: str | None</code>, read by <a href="#task-5">Task 5</a>'s promotion gate and written by <a href="#task-6">Task 6</a>'s <code>_mark_superseded</code>.</p>
-
-    <p class="callout warn"><strong>Deliberately NOT on <code>UpdateNodeRequest</code>.</strong> This is policy state written by the consolidator; no agent sets it. Adding it there would expose a way to unblock a superseded node through the public API, which is exactly the escape #191 withheld.</p>
-
-    <p><strong>Key tests:</strong> Verify roundtrip survival, absent from frontmatter when null, and backward compatibility with pre-#223 files.</p>
-  </section>
-
-  <section class="phase p-o">
-    <h2 id="task-3">Task 3: <code>superseded_by</code> in schema, migration and reindex</h2>
-
-    <p><span class="eyebrow">Files</span></p>
-    <ul>
-      <li>Modify: <code>src/ormah/index/schema.sql</code> (table <code>nodes</code>)</li>
-      <li>Modify: <code>src/ormah/index/db.py</code> (symbol: <code>Database._migrate</code>, list <code>enrichment_migrations</code>)</li>
-      <li>Modify: <code>src/ormah/index/builder.py</code> (symbol: <code>IndexBuilder._index_file_nodes_only</code>)</li>
-      <li>Test: <code>tests/test_index/test_migration_superseded.py</code> (create)</li>
-      <li>Test: <code>tests/test_index/test_builder.py</code></li>
-    </ul>
-
-    <h3 id="task-3-interfaces">Interfaces</h3>
-    <p><strong>Consumes:</strong> <code>MemoryNode.superseded_by</code> from <a href="#task-2">Task 2</a>.</p>
-    <p><strong>Produces:</strong> a <code>superseded_by TEXT</code> column on <code>nodes</code> that survives a reindex, read by <a href="#task-6">Task 6</a>'s test and by #209 later.</p>
-
-    <p class="callout"><strong>The builder change is load-bearing.</strong> <code>_index_file_nodes_only</code> runs <code>INSERT OR REPLACE INTO nodes</code> with an explicit column list. In SQLite <code>REPLACE</code> is DELETE + INSERT, so a column absent from that list is recreated at its DEFAULT — <code>NULL</code>. <a href="#task-6">Task 6</a>'s consolidator marks the node and then calls <code>update_node(tier=archival)</code>, which calls <code>builder.index_single</code>; without this change the marker is wiped from the index within the same loop iteration that wrote it.</p>
-
-    <p><strong>Key tests:</strong> Migration adds column and preserves existing rows as null; migration is idempotent; reindex preserves the marker through <code>INSERT OR REPLACE</code>.</p>
-  </section>
-
-  <section class="phase p-b">
-    <h2 id="task-4">Task 4: <code>remember()</code> uses the configured initial stability</h2>
-
-    <p><span class="eyebrow">Files</span></p>
-    <ul>
-      <li>Modify: <code>src/ormah/engine/memory_engine.py</code> (symbol: <code>MemoryEngine.remember</code>)</li>
-      <li>Test: <code>tests/test_engine/test_memory_engine.py</code></li>
-    </ul>
-
-    <h3 id="task-4-interfaces">Interfaces</h3>
-    <p><strong>Consumes:</strong> <code>Settings.fsrs_initial_stability</code> from <a href="#task-1">Task 1</a>.</p>
-    <p><strong>Produces:</strong> nothing new; every node created after this task carries the configured stability.</p>
-
-    <p><strong>Three <code>1.0</code> defaults deliberately stay put:</strong> <code>MemoryNode.stability</code>'s <code>Field(default=1.0)</code>, <code>parse_node</code>'s <code>meta.get("stability", 1.0)</code> fallback, and <code>stability REAL DEFAULT 1.0</code> in <code>schema.sql</code>. Changing any of them would retroactively rescale nodes that never carried the field, which #191 forbids. <strong>Only <code>remember()</code> changes.</strong></p>
-
-    <p><strong>The <code>Self</code> node:</strong> Built by <code>_ensure_self_node</code> keeps <code>1.0</code> and is unaffected — it is <code>core</code>, and <code>run_decay</code> queries <code>tier = 'working'</code> and additionally skips <code>user_node_id</code>. Do not touch <code>_ensure_self_node</code>.</p>
-  </section>
-
-  <section class="phase p-g">
-    <h2 id="task-5">Task 5: Promotion inside <code>_record_confirmed_use</code></h2>
-
-    <p><span class="eyebrow">Files</span></p>
-    <ul>
-      <li>Modify: <code>src/ormah/engine/memory_engine.py</code> (symbol: <code>MemoryEngine._record_confirmed_use</code>)</li>
-      <li>Test: <code>tests/test_engine/test_reversible_promotion.py</code> (create)</li>
-      <li>Test: <code>tests/test_engine/test_reinforcement_cooldown.py</code></li>
-      <li>Test: <code>tests/test_engine/test_confirmed_use_contract.py</code></li>
-      <li>Test: <code>tests/test_engine/test_tier_manager.py</code></li>
-      <li>Test: <code>tests/test_engine/test_audit_log.py</code></li>
-      <li>Test: <code>tests/test_engine/test_recall_concurrency.py</code></li>
-    </ul>
-
-    <h3 id="task-5-interfaces">Interfaces</h3>
-    <p><strong>Consumes:</strong> <code>lifecycle.promotion_floor</code> (<a href="#task-1">Task 1</a>), <code>Settings.fsrs_initial_stability</code> (<a href="#task-1">Task 1</a>), <code>MemoryNode.superseded_by</code> (<a href="#task-2">Task 2</a>), the <code>superseded_by</code> index column (<a href="#task-3">Task 3</a>).</p>
-    <p><strong>Produces:</strong> a promoting <code>_record_confirmed_use</code>; <a href="#task-6">Task 6</a> relies on <code>superseded_by</code> blocking it.</p>
-
-    <p class="callout"><strong>Qualification needs no new logic.</strong> <code>_claim_confirmed_use</code> already fail-closes on <code>signal == 1</code>, <code>source in _CONFIRMED_USE_SOURCES</code>, <code>was_injected == 1</code>, and at-most-once. Promotion placed inside <code>_record_confirmed_use</code> inherits "unqualified sources do not promote" for free.</p>
-
-    <p><strong>Order matters:</strong> Bounded update runs before the floor — the bounded update gives <code>1 → 2.0</code> (spacing saturates at cap 2.0); the floor then lifts <code>2.0 → 5.814</code>. The inverted order would give ~8.23.</p>
-
-    <p><strong>Superseded nodes:</strong> Only consolidation sources (marked with <code>superseded_by</code>) are blocked from promotion. A generic <code>derived_from</code> target promotes, which is the narrowing #191 asked for.</p>
-  </section>
-
-  <section class="phase p-o">
-    <h2 id="task-6">Task 6: Consolidation provenance and its ordering fail-safe</h2>
-
-    <p><span class="eyebrow">Files</span></p>
-    <ul>
-      <li>Modify: <code>src/ormah/engine/memory_engine.py</code> (new symbol: <code>MemoryEngine._mark_superseded</code>)</li>
-      <li>Modify: <code>src/ormah/background/consolidator.py</code> (symbol: <code>_apply_consolidation</code>)</li>
-      <li>Test: <code>tests/test_background/test_consolidator.py</code></li>
-    </ul>
-
-    <h3 id="task-6-interfaces">Interfaces</h3>
-    <p><strong>Consumes:</strong> <code>MemoryNode.superseded_by</code> (<a href="#task-2">Task 2</a>), the index column that survives reindex (<a href="#task-3">Task 3</a>), and the promotion gate (<a href="#task-5">Task 5</a>).</p>
-    <p><strong>Produces:</strong> <code>MemoryEngine._mark_superseded(source_id: str, consolidation_id: str) → None</code>.</p>
-
-    <h3 id="task-6-why-order-matters">Why marking comes BEFORE demoting</h3>
-
-    <p>The order is the fail-safe. Crashing between the two leaves the node <code>working</code> + marked, which is harmless: the marker only blocks <em>automatic</em> promotion, and a <code>working</code> node is not looking for one. The reverse order would leave it <code>archival</code> + unmarked — exactly the promotable node #223 must not create.</p>
-
-    <p><code>_mark_superseded</code> deliberately does not call <code>touch_updated()</code>. In the only production path the <code>engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))</code> on the next line advances <code>updated</code> anyway.</p>
-  </section>
-
-  <section class="phase p-b">
-    <h2 id="task-7">Task 7: Version pin, docs-in-code, and the full verification gate</h2>
-
-    <p><span class="eyebrow">Files</span></p>
-    <ul>
-      <li>Modify: <code>src/ormah/engine/memory_engine.py</code> (symbol: <code>MemoryEngine._lifecycle_model_version</code>)</li>
-      <li>Test: <code>tests/test_engine/test_lifecycle_model_version.py</code></li>
-    </ul>
-
-    <h3 id="task-7-interfaces">Interfaces</h3>
-    <p><strong>Consumes:</strong> everything from <a href="#task-1">Tasks 1</a>–<a href="#task-6">6</a>.</p>
-    <p><strong>Produces:</strong> the branch, ready to push.</p>
-
-    <h3 id="task-7-version-decision">Why the version stays at 2</h3>
-
-    <p><code>lifecycle_model_version</code> stays at <code>2</code>. Nothing reads it on the promotion path and no existing data is rewritten — the <code>PRAGMA</code>-guarded <code>ALTER</code> is self-describing and idempotent. The version records <em>which reinforcement model wrote this store</em>, and #223 does not change the reinforcement model; it changes a creation default and adds a column. Bumping it would not help either way: it is a store-level flag, and a real store spans both eras of nodes. This is a recorded decision, not an omission — hence a test pinning it.</p>
-
-    <h3 id="task-7-final-checks">Final checks</h3>
-
-    <p><strong>Product documentation:</strong> The PR's documentation is: the <code>superseded_by</code> field comment (<a href="#task-2">Task 2</a>), the <code>promotion_floor</code> docstring (<a href="#task-1">Task 1</a>), the promotion paragraph in <code>_record_confirmed_use</code> (<a href="#task-5">Task 5</a>), the derivation comment on <code>fsrs_initial_stability</code> (<a href="#task-1">Task 1</a>), the <code>_mark_superseded</code> docstring (<a href="#task-6">Task 6</a>), and this version note — plus the PR body. Nothing in <code>docs/</code>, <code>.env.example</code>, or <code>.council/</code> should be committed.</p>
-
-    <p><strong>Baseline verification:</strong> The full test suite should still show <code>1925 passed, 12 failed</code> — the exact same 12 baseline failures, plus any new tests you added.</p>
-
-    <p><strong>After approval:</strong> Push is explicit: <code>git push fork feat/223-reversible-promotion</code>. The branch has no upstream on purpose; a bare <code>git push</code> is refused. After PRs #234 and #239 land upstream, rebase: <code>git rebase --onto upstream/main 06b6447</code>.</p>
-  </section>
-
-  <section>
-    <h2 id="related-references">Related references</h2>
-
-    <ul>
-      <li><strong>Spec:</strong> <code>docs/superpowers/specs/2026-08-17-issue-223-reversible-promotion-design.md</code></li>
-      <li><strong>Issue #223:</strong> Reversible promotion design</li>
-      <li><strong>Issue #191:</strong> Promotion escape hatch, backward-compatibility rule</li>
-      <li><strong>Issue #209:</strong> SQL consumer for superseded_by</li>
-      <li><strong>PR #234:</strong> Dependency needed before merge</li>
-      <li><strong>PR #239:</strong> Dependency needed before merge</li>
-    </ul>
-  </section>
-</div>
+</section>
   <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
   <div class="signature">
     <div class="name">rich-doc</div>
@@ -465,4 +551,4 @@ echo "PYTEST_EXIT=$?" &gt;&gt; out.txt</code></pre>
 </main>
 </body>
 </html>
-<!-- rich-doc-src-sha256:a9705c5d620282b1dfa96d540bad3c9d92f2ae1b631cda4f511a264390a59dea -->
+<!-- rich-doc-src-sha256:dcc3f510691e77dfb0a3219ba8ce17ec9cf6f008e78965037a91f0451ea5808a -->

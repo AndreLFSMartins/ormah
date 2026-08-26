@@ -1,11 +1,11 @@
-### Task 2: Uncap the consolidation batch and apply the split
+### Task 2: Uncap the consolidation batch and apply the trim
 
 **Files:**
 - Modify: `src/ormah/engine/memory_engine.py:1824-1831` (the `_norm` closure) and `:1855-1858` (the consolidation entry of the returned dict)
 - Test: `tests/test_background/test_run_maintenance.py`
 
 **Interfaces:**
-- Consumes: `_split_cluster_to_budget(cluster, budget)` and `Settings.claude_maintenance_cluster_max_chars` from Task 1.
+- Consumes: `_select_cluster_within_budget(cluster, budget, min_size)` and `Settings.claude_maintenance_cluster_max_chars` from Task 1.
 - Produces: `_norm(node: dict, content_limit: int | None = 400) -> dict` — Task 4 asserts on the `type` key this helper emits; Task 3 consumes the uncapped `content` it now puts in `consolidation_clusters`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -65,7 +65,7 @@ class TestConsolidationBatchFidelity:
 
         It monkeypatches the finder because the real one already slices to 400 in
         `_node_dict` (auto_linker.py:154), so asserting on its output would stay
-        green even with _norm's limit removed.
+        green even with _norm's limit removed. Both council peers found that.
         """
         import ormah.background.auto_linker as auto_linker
 
@@ -90,8 +90,10 @@ class TestConsolidationBatchFidelity:
             for node in (candidate["node_a"], candidate["node_b"]):
                 assert len(node["content"]) == 400, "screening batches must stay truncated"
 
-    def test_oversized_cluster_is_split_in_the_batch(self, engine, monkeypatch):
-        """A cluster over budget reaches the batch as sub-clusters, content intact."""
+    def test_oversized_cluster_is_trimmed_in_the_batch(self, engine, monkeypatch):
+        """A cluster over budget reaches the batch as a prefix, contents intact."""
+        import json
+
         import ormah.background.consolidator as consolidator
 
         nodes = [
@@ -100,31 +102,34 @@ class TestConsolidationBatchFidelity:
                 "title": f"node {i}",
                 "type": "fact",
                 "space": "testproject",
-                "content": "z" * 400,
+                "content": "z" * 6000,
             }
-            for i in range(4)
+            for i in range(5)
         ]
-        monkeypatch.setattr(consolidator, "_find_consolidation_clusters", lambda engine, limit: [nodes])
-        engine.settings.claude_maintenance_cluster_max_chars = 900
+        monkeypatch.setattr(
+            consolidator, "_find_consolidation_clusters", lambda engine, limit: [nodes]
+        )
+        engine.settings.claude_maintenance_cluster_max_chars = 24000
 
         batches = engine.get_maintenance_batches()
 
         clusters = batches["consolidation_clusters"]
-        assert len(clusters) == 2, f"expected a split into 2 sub-clusters, got {len(clusters)}"
-        for cluster in clusters:
-            for node in cluster:
-                assert len(node["content"]) == 400, "split must never slice content"
+        assert len(clusters) == 1, "a prefix is one cluster, never several"
+        kept = clusters[0]
+        assert [n["id"] for n in kept] == ["n0", "n1", "n2"], (
+            "three 6000-char nodes serialize to 18_258; a fourth reaches 24_344, over 24_000"
+        )
+        for node in kept:
+            assert len(node["content"]) == 6000, "trim must never slice a node"
+        assert len(json.dumps(kept, ensure_ascii=False)) <= 24000
 
     def test_worst_case_cardinality_stays_bounded(self, engine, monkeypatch):
-        """Four max-size clusters of large nodes must not produce an unbounded batch.
+        """Four max-size clusters of large nodes stay within `4 x budget`.
 
-        The bound is NOT `n_clusters * budget`. The budget caps each *sub*-cluster,
-        and one original cluster of `max_cluster_nodes` yields up to
-        `floor(max_cluster_nodes / 2)` of them (a sub-cluster needs 2 nodes to
-        survive). With the defaults: 4 x floor(5/2) x 24000 = 192_000 chars.
-
-        Node size is chosen at just over half the budget so the split actually
-        fires: 12_001-char nodes pack two per sub-cluster and leave a remainder.
+        With one prefix per cluster the bound is exactly `n_clusters * budget` —
+        unlike v2's bin-packing, where the sub-cluster count was unbounded. Node
+        size is 6000 chars so the trim actually fires (3 of 5 survive), and
+        `assert clusters` keeps the test from passing by emitting nothing.
         """
         import json
 
@@ -132,7 +137,6 @@ class TestConsolidationBatchFidelity:
 
         budget = engine.settings.claude_maintenance_cluster_max_chars
         max_nodes = engine.settings.consolidation_max_cluster_nodes
-        node_chars = budget // 2 + 1
         big_clusters = [
             [
                 {
@@ -140,7 +144,7 @@ class TestConsolidationBatchFidelity:
                     "title": f"node {c}-{i}",
                     "type": "fact",
                     "space": "testproject",
-                    "content": "w" * node_chars,
+                    "content": "w" * 6000,
                 }
                 for i in range(max_nodes)
             ]
@@ -153,19 +157,19 @@ class TestConsolidationBatchFidelity:
         batches = engine.get_maintenance_batches()
 
         clusters = batches["consolidation_clusters"]
-        assert clusters, "the split dropped everything — the fixture proves nothing"
+        assert clusters, "the trim dropped everything — the fixture proves nothing"
+        assert len(clusters) == 4, "one prefix per cluster"
         for sub in clusters:
-            total = sum(len(n["content"]) for n in sub)
-            assert total <= budget, f"sub-cluster of {total} chars exceeds the budget"
+            assert len(json.dumps(sub, ensure_ascii=False)) <= budget
 
-        payload = json.dumps(clusters)
-        bound = 4 * (max_nodes // 2) * budget + 4096
+        payload = json.dumps(clusters, ensure_ascii=False)
+        bound = 4 * budget + 4096
         assert len(payload) <= bound, (
             f"consolidation batch is unbounded: {len(payload)} chars, bound {bound}"
         )
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Run the tests and read each failure**
 
 ```bash
 cd /Users/andre/Documents/GitHub/Tools/ormah-wt-259
@@ -175,18 +179,16 @@ echo "PYTEST_EXIT=$?" >> /tmp/t2.txt
 cat /tmp/t2.txt
 ```
 
-Expected, and each for its own reason — read the failures, do not just count them:
+Expected, each for its own reason — read the messages, do not just count:
 
-- `test_consolidation_cluster_carries_full_content` FAILS: content is the first 400 chars.
-- `test_norm_truncates_screening_batches` PASSES: it is a guard, green before and after. It is
-  not vacuous now — with `_norm`'s default changed to `None` it goes red, which is the whole
-  point of the monkeypatch.
-- `test_oversized_cluster_is_split_in_the_batch` FAILS: one cluster comes back, not two.
-- `test_worst_case_cardinality_stays_bounded` FAILS on the per-sub-cluster assertion: with no
-  split, one cluster of 5 x 12001 chars comes back as a single 60005-char entry, over the
-  24000 budget. (It cannot fail on the payload bound instead — today `_norm` cuts everything
-  to 400 chars, so the serialized size is tiny. The per-sub-cluster check is what makes this
-  test red before the fix; read the failure message to confirm which assertion fired.)
+- `test_consolidation_cluster_carries_full_content` **FAILS**: content is the first 400 chars.
+- `test_norm_truncates_screening_batches` **PASSES**. It is a guard, green before and after; Step 5
+  proves it is not vacuous.
+- `test_oversized_cluster_is_trimmed_in_the_batch` **FAILS**: all five nodes come back, each cut to
+  400 chars, so both the id list and the content-length assertion are wrong.
+- `test_worst_case_cardinality_stays_bounded` **PASSES**. Today `_norm` cuts everything to 400
+  chars, so four short clusters serialize well within budget. This is a bound guard, not a red
+  test — its job is to fail if a later change removes the trim, and Step 5 proves that it does.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -204,30 +206,31 @@ Replace the `_norm` closure in `get_maintenance_batches`:
             }
 ```
 
-Right after `consolidation_clusters = _find_consolidation_clusters(self, limit=4)`, apply the
-budget:
+Right after `consolidation_clusters = _find_consolidation_clusters(self, limit=4)`, normalize and
+trim in one step — the budget must measure what actually ships, so `_norm` runs first:
 
 ```python
         cluster_budget = getattr(self.settings, "claude_maintenance_cluster_max_chars", 24000)
+        min_size = self.settings.consolidation_min_cluster_size
         consolidation_clusters = [
-            sub
+            trimmed
             for cluster in consolidation_clusters
-            for sub in _split_cluster_to_budget(cluster, cluster_budget)
+            if (trimmed := _select_cluster_within_budget(
+                [_norm(n, content_limit=None) for n in cluster], cluster_budget, min_size
+            ))
         ]
 ```
 
-and in the returned dict, the consolidation entry only:
+and in the returned dict, the consolidation entry becomes a plain passthrough — the nodes are
+already normalized:
 
 ```python
-            "consolidation_clusters": [
-                [_norm(n, content_limit=None) for n in cluster]
-                for cluster in consolidation_clusters
-            ],
+            "consolidation_clusters": consolidation_clusters,
 ```
 
 Leave `_norm_pair` and the three screening entries exactly as they are. The `summary` string is
-built from `consolidation_clusters` after the split, so its cluster count reports sub-clusters —
-that is intended and matches #192's decision.
+built from `consolidation_clusters` after the trim, so a cluster dropped for exceeding the budget
+is not counted — correct, since it was never handed to the agent.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -241,26 +244,43 @@ cat /tmp/t2b.txt
 Expected: `PYTEST_EXIT=0`, whole file green — including the pre-existing
 `test_content_truncated_to_400`, which asserts on `link_candidates` and must not regress.
 
-- [ ] **Step 5: Prove the guard actually guards**
+- [ ] **Step 5: Prove both guards actually guard (mutation check)**
 
-Not a code change — a one-off mutation check, then revert it:
+Neither guard is red in Step 2, so each must be shown to go red under the mutation it exists to
+catch. Run both, reverting after each. **This step is not optional:** v1 shipped a guard that
+passed its own mutation.
+
+Mutation A — remove `_norm`'s screening limit:
 
 ```bash
-# temporarily change _norm's default to None
 sed -i '' 's/def _norm(node: dict, content_limit: int | None = 400)/def _norm(node: dict, content_limit: int | None = None)/' src/ormah/engine/memory_engine.py
 env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
-  "tests/test_background/test_run_maintenance.py::TestConsolidationBatchFidelity::test_norm_truncates_screening_batches" -q > /tmp/t2m.txt 2>&1
-echo "PYTEST_EXIT=$?" >> /tmp/t2m.txt
-cat /tmp/t2m.txt
+  "tests/test_background/test_run_maintenance.py::TestConsolidationBatchFidelity::test_norm_truncates_screening_batches" -q > /tmp/t2mA.txt 2>&1
+echo "PYTEST_EXIT=$?" >> /tmp/t2mA.txt
+cat /tmp/t2mA.txt
 git checkout -- src/ormah/engine/memory_engine.py
 ```
 
-Expected: the mutated run **FAILS**. If it passes, the guard is still vacuous — fix the test
-before committing. This step exists because v1's guard passed this mutation.
+Expected: **FAILS** — content arrives at 600 chars instead of 400.
+
+Mutation B — remove the trim:
+
+```bash
+sed -i '' 's/if (trimmed := _select_cluster_within_budget(/if (trimmed := (lambda c, b, m: c)(/' src/ormah/engine/memory_engine.py
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest \
+  "tests/test_background/test_run_maintenance.py::TestConsolidationBatchFidelity::test_worst_case_cardinality_stays_bounded" -q > /tmp/t2mB.txt 2>&1
+echo "PYTEST_EXIT=$?" >> /tmp/t2mB.txt
+cat /tmp/t2mB.txt
+git checkout -- src/ormah/engine/memory_engine.py
+```
+
+Expected: **FAILS** on the per-cluster serialized assertion — five 6000-char nodes serialize to
+30_450 chars, over the 24_000 budget. If either mutation passes, the guard is vacuous: fix
+the test before committing.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/ormah/engine/memory_engine.py tests/test_background/test_run_maintenance.py
-git commit -m "fix(engine): consolidation batch carries full content, split to budget (#259)"
+git commit -m "fix(engine): consolidation batch carries full content, trimmed to budget (#259)"
 ```
