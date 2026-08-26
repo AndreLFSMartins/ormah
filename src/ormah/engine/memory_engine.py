@@ -210,7 +210,8 @@ class MemoryEngine:
         full_rebuild logs and skips files it cannot hash, parse, or index, then
         returns a partial count, so "the rebuild finished" does not mean "the
         graph is whole". The check belongs here rather than on the caller: both
-        paths this issue is about — startup() and BackupService.rebuild_index —
+        paths this issue is about — startup() (including the start that
+        follows a CLI BackupService.restore) and MemoryEngine.rebuild_index —
         reach the migration without ever seeing the builder's bookkeeping.
 
         list_paths() globs nodes/*.md only, and soft-deleted files are moved to
@@ -1373,9 +1374,8 @@ class MemoryEngine:
         re-evaluated here; the seed's per-node predicate decides which restored
         nodes are genuinely pre-FSRS, and _migrate_fsrs itself withholds the
         version marker if the rebuild left the graph incomplete. Serialized
-        because the seed calls
-        file_store inside db.transaction(); holding the memory lock first keeps
-        the memory -> db order used by reinforcement.
+        because the seed calls file_store inside db.transaction(); holding the
+        memory lock first keeps the memory -> db order used by reinforcement.
         """
         count = self.builder.full_rebuild()
         self._reindex_all_embeddings()
