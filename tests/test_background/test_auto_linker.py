@@ -452,11 +452,16 @@ def test_a_foreground_write_completes_while_the_job_is_inside_the_llm(engine):
 
     job_is_inside_llm = threading.Event()
     foreground_write_done = threading.Event()
+    llm_saw_the_write = []
 
     def blocking_llm(*args, **kwargs):
         job_is_inside_llm.set()
-        # Deadlocks the test only if L_mem is held here — which is the bug.
-        assert foreground_write_done.wait(timeout=10.0), "foreground write never completed"
+        # Record the wait's outcome instead of asserting on it. An assert raised here
+        # would be swallowed by run_auto_linker's own blanket `except Exception`, which
+        # then releases L_mem — the writer would unblock, both outer assertions would
+        # still read true, and a reintroduced whole-run lock would show up as a ~10s
+        # slow pass instead of a red test. Carrying the value out makes it a hard failure.
+        llm_saw_the_write.append(foreground_write_done.wait(timeout=10.0))
         return json.dumps({"relationship": "supports", "reason": "same topic"})
 
     def foreground_write():
@@ -476,7 +481,9 @@ def test_a_foreground_write_completes_while_the_job_is_inside_the_llm(engine):
         job_thread.join(timeout=20.0)
 
     writer.join(timeout=5.0)
-    assert foreground_write_done.is_set(), "L_mem was held across the LLM call"
+    assert llm_saw_the_write, "the fake LLM was never called — the fixture stopped exercising the job"
+    assert all(llm_saw_the_write), "L_mem was held across the LLM call"
+    assert foreground_write_done.is_set()
     assert not job_thread.is_alive()
 
 
