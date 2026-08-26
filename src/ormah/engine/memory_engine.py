@@ -172,8 +172,25 @@ class MemoryEngine:
         if version >= LIFECYCLE_MODEL_VERSION:
             return
 
-        if version == 0:
-            self._seed_stability_from_access_count()
+        # Run the seed for every version below the current model, not only for
+        # a store-wide "pre-FSRS" verdict (#236, council round 1, Codex F2). A
+        # restored graph can mix externally authored pre-FSRS nodes with Ormah's
+        # own; the store-wide guard resolves such a graph as migrated and would
+        # skip all of them. The per-node predicate inside the seed is what keeps
+        # this safe — on a store with nothing to do it matches no rows.
+        self._seed_stability_from_access_count()
+
+        if not self._graph_is_fully_indexed():
+            # Recording a version over a partial graph is the one irreversible
+            # mistake here (council round 2, Codex F2; round 3, Cursor F1): a
+            # pre-FSRS node that lands on a later incremental pass would sit
+            # behind the early return above forever. Seeding what IS indexed is
+            # safe and idempotent, so keep it and simply withhold the marker.
+            logger.warning(
+                "Lifecycle migration ran on an incomplete graph; withholding the "
+                "version marker so the next start re-evaluates it."
+            )
+            return
 
         with self.db.transaction() as conn:
             conn.execute(
@@ -186,6 +203,21 @@ class MemoryEngine:
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
             )
+
+    def _graph_is_fully_indexed(self) -> bool:
+        """True when every Markdown node file has a row in the index.
+
+        full_rebuild logs and skips files it cannot hash, parse, or index, then
+        returns a partial count, so "the rebuild finished" does not mean "the
+        graph is whole". The check belongs here rather than on the caller: both
+        paths this issue is about — startup() and BackupService.rebuild_index —
+        reach the migration without ever seeing the builder's bookkeeping.
+
+        list_paths() globs nodes/*.md only, and soft-deleted files are moved to
+        deleted/, so tombstones are absent from both sides of the comparison.
+        """
+        indexed = self.db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        return len(self.file_store.list_paths()) == indexed
 
     def _lifecycle_model_version(self) -> int:
         """Read the store's lifecycle-model version, upgrading the legacy flag.
@@ -229,24 +261,36 @@ class MemoryEngine:
         return 1 if reviewed else 0
 
     def _seed_stability_from_access_count(self) -> None:
-        """Seed FSRS stability from access_count, updating both DB and markdown."""
+        """Seed FSRS stability from access_count, updating both DB and markdown.
+
+        Eligibility is per node, not per store (#236, council round 1). A node
+        qualifies only when it carries no evidence of its own lifecycle state:
+        no last_review, the default stability, and a real usage history. Any
+        other node — one Ormah reinforced, one seeded by an earlier run, one an
+        external tool wrote a real stability into — is left untouched in the DB
+        and on disk. Fail-closed, because the seed is destructive: skipping a
+        node leaves a default in place, seeding one destroys a real value.
+
+        This is also what makes the migration resumable. Markdown writes below
+        are not rolled back with the DB transaction, so a failed save leaves
+        earlier files rewritten; on the next run those nodes no longer qualify
+        and the ones not yet reached still do.
+        """
         rows = self.db.conn.execute(
-            "SELECT id, access_count, last_accessed FROM nodes"
+            "SELECT id, access_count, last_accessed FROM nodes "
+            "WHERE last_review IS NULL AND stability = 1.0 AND access_count > 0"
         ).fetchall()
 
         with self.db.transaction() as conn:
             for r in rows:
-                access_count = r["access_count"] or 0
-                stability = min(30.0, access_count * 2.0) if access_count > 0 else 1.0
+                stability = min(30.0, r["access_count"] * 2.0)
                 last_review = r["last_accessed"]
 
-                # Update DB
                 conn.execute(
                     "UPDATE nodes SET stability = ?, last_review = ? WHERE id = ?",
                     (stability, last_review, r["id"]),
                 )
 
-                # Update markdown file
                 node = self.file_store.load(r["id"])
                 if node is not None:
                     node.stability = stability
@@ -257,7 +301,7 @@ class MemoryEngine:
                             pass
                     self.file_store.save(node)
 
-        logger.info("FSRS data migration complete: seeded %d nodes from access_count", len(rows))
+        logger.info("FSRS data migration: seeded %d eligible nodes from access_count", len(rows))
 
     def _seed_initial_maintenance_grace_period(self) -> None:
         """Avoid firing agent-backed maintenance immediately on fresh installs."""
