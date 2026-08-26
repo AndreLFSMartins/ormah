@@ -1614,10 +1614,21 @@ class MemoryEngine:
             f"ID: {node.id} | valid_until: {node.valid_until.isoformat()}"
         )
 
+    @_serialized_memory_operation
     def rebuild_index(self) -> int:
-        """Full rebuild of the index from markdown files, including embeddings."""
+        """Full rebuild of the index from markdown files, including embeddings.
+
+        full_rebuild wipes the lifecycle markers (#236), so the migration is
+        re-evaluated here; the seed's per-node predicate decides which restored
+        nodes are genuinely pre-FSRS, and _migrate_fsrs itself withholds the
+        version marker if the rebuild left the graph incomplete. Serialized
+        because the seed calls
+        file_store inside db.transaction(); holding the memory lock first keeps
+        the memory -> db order used by reinforcement.
+        """
         count = self.builder.full_rebuild()
         self._reindex_all_embeddings()
+        self._migrate_fsrs()
         return count
 
     @_serialized_memory_operation
@@ -2619,10 +2630,13 @@ class MemoryEngine:
         Lock order: this decorator acquires the memory lock before the body
         opens db.transaction(), i.e. memory-lock -> db-lock. The inverse order
         (db-lock -> memory-lock, via file_store calls inside a transaction)
-        exists in _seed_stability_from_access_count and _migrate_identity_tiers, but both run only
-        from startup() before the server serves, so the two orders never
-        interleave today. Invariant this depends on: never call file_store
-        inside db.transaction() outside startup().
+        exists in _seed_stability_from_access_count, _migrate_identity_tiers,
+        and _ensure_self_node. They run from startup() before the server
+        serves, or — for the seed, via rebuild_index (#236) — under
+        _serialized_memory_operation, where the memory RLock is already held
+        and the order collapses to memory -> db. Invariant this depends on:
+        never call file_store inside db.transaction() outside startup() or a
+        _serialized_memory_operation.
         """
         node = self.file_store.load(node_id)
         if node is None:
