@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -314,3 +315,61 @@ def test_an_admin_rebuild_re_records_the_version(engine):
     engine.rebuild_index()
 
     assert _version(engine) == "2"
+
+
+def test_rebuild_index_holds_the_memory_lock_across_the_seeds_file_write(engine):
+    """#236: rebuild_index must hold _memory_operation_lock for its whole body.
+
+    _seed_stability_from_access_count writes to file_store.save() from INSIDE
+    engine.db.transaction() -- the inverse of the order every other memory job
+    uses (memory lock, then db transaction; see _record_confirmed_use's
+    docstring). @_serialized_memory_operation on rebuild_index is what turns
+    that inverted db -> file order back into memory -> db -> file, the same
+    order the rest of the engine relies on to avoid two operations taking the
+    two locks in opposite sequences and deadlocking. Remove the decorator and
+    the seed's file_store.save() runs with no outer lock held at all.
+
+    A reentrant lock is always acquirable from the thread that already holds
+    it, so testing "is the lock held" from the test's own thread would pass
+    vacuously regardless of whether rebuild_index acquired it. The only
+    reliable signal is a non-blocking acquire attempt from a different
+    thread: it succeeds iff nobody holds the lock.
+    """
+    node_id = _make_node(engine)
+    _write_lifecycle(engine, node_id, stability=1.0, access_count=5, last_review=None)
+    _unmigrated_meta(engine)
+
+    real_save = engine.file_store.save
+    calls: list[bool] = []
+
+    def probe_lock_held_by_another_thread() -> bool:
+        result: list[bool] = []
+
+        def attempt():
+            acquired = engine._memory_operation_lock.acquire(blocking=False)
+            if acquired:
+                engine._memory_operation_lock.release()
+            result.append(not acquired)
+
+        probe = threading.Thread(target=attempt)
+        probe.start()
+        probe.join(timeout=5.0)
+        assert not probe.is_alive(), "lock probe thread did not finish"
+        return result[0]
+
+    def save_and_record_lock_state(node):
+        calls.append(probe_lock_held_by_another_thread())
+        return real_save(node)
+
+    engine.file_store.save = save_and_record_lock_state
+    try:
+        engine.rebuild_index()
+    finally:
+        engine.file_store.save = real_save
+
+    assert calls, "file_store.save was never reached -- the test proves nothing"
+    assert all(calls), (
+        "rebuild_index's memory lock was not held while the seed wrote to "
+        "file_store.save() -- the db-transaction-then-file-write order is "
+        "no longer wrapped in the engine's memory -> db -> file sequence"
+    )
