@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from ormah.engine.memory_engine import LIFECYCLE_MODEL_VERSION
 from ormah.models.node import CreateNodeRequest, NodeType, Tier
 
@@ -171,3 +173,128 @@ def test_223_does_not_bump_the_lifecycle_model_version(engine):
     engine._record_confirmed_use(node_id)
 
     assert engine._lifecycle_model_version() == 2
+
+
+def _unmigrated_meta(engine) -> None:
+    """Put the store back to 'no lifecycle marker', the way full_rebuild does."""
+    engine.db.conn.execute("DELETE FROM meta WHERE key = 'lifecycle_model_version'")
+    engine.db.conn.execute("DELETE FROM meta WHERE key = 'fsrs_migrated'")
+    engine.db.conn.commit()
+
+
+def _write_lifecycle(engine, node_id: str, *, stability: float,
+                     access_count: int, last_review) -> None:
+    """Set a node's lifecycle fields in the DURABLE source, then reindex.
+
+    Council round 3, Cursor F3: a fixture that only UPDATEs SQLite proves
+    nothing about restore, because full_rebuild reindexes from Markdown and
+    throws the DB row away. Everything these tests assert about a restored
+    graph has to start on disk.
+    """
+    node = engine.file_store.load(node_id)
+    node.stability = stability
+    node.access_count = access_count
+    node.last_review = last_review
+    engine.file_store.save(node)
+    engine.builder.full_rebuild()
+
+
+def test_the_seed_never_overwrites_stability_it_did_not_produce(engine):
+    """Codex F1: externally authored Markdown may carry a real stability with
+    no last_review. The invariant that every Ormah writer stamps last_review
+    says nothing about such a file, so eligibility must be decided per node."""
+    node_id = _make_node(engine)
+    _write_lifecycle(engine, node_id, stability=42.0, access_count=5, last_review=None)
+    _unmigrated_meta(engine)
+
+    engine._migrate_fsrs()
+
+    assert _stability(engine, node_id) == 42.0, "the seed destroyed a stability it did not write"
+    assert _version(engine) == "2"
+
+
+def test_a_mixed_store_seeds_only_its_unreviewed_nodes(engine):
+    """Codex F2: one migrated node must not suppress the seed for the rest."""
+    reviewed = _make_node(engine)
+    unreviewed = _make_node(engine)
+    _write_lifecycle(engine, reviewed, stability=42.0, access_count=5,
+                     last_review=datetime.now(timezone.utc))
+    _write_lifecycle(engine, unreviewed, stability=1.0, access_count=5, last_review=None)
+    _unmigrated_meta(engine)
+
+    engine._migrate_fsrs()
+
+    assert _stability(engine, reviewed) == 42.0, "an earned value was reseeded"
+    assert _stability(engine, unreviewed) == 10.0, "a pre-FSRS node was skipped"
+
+
+def test_a_node_with_no_usage_history_is_left_alone(engine):
+    """access_count = 0 carries no signal, so the seed must not touch the node
+    — not its stability, and not its last_review."""
+    node_id = _make_node(engine)
+    _write_lifecycle(engine, node_id, stability=1.0, access_count=0, last_review=None)
+    _unmigrated_meta(engine)
+
+    engine._migrate_fsrs()
+
+    row = engine.db.conn.execute(
+        "SELECT stability, last_review FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+    assert row["stability"] == 1.0
+    assert row["last_review"] is None, "the seed stamped a node it did not change"
+
+
+def test_an_interrupted_seed_resumes_on_the_next_run(engine):
+    """Codex F3: Markdown writes are not rolled back with the DB transaction.
+    The per-node predicate is what makes the retry correct — a node already
+    seeded no longer qualifies, one not yet reached still does."""
+    first = _make_node(engine)
+    second = _make_node(engine)
+    for node_id in (first, second):
+        _write_lifecycle(engine, node_id, stability=1.0, access_count=5, last_review=None)
+    _unmigrated_meta(engine)
+
+    real_save = engine.file_store.save
+    saved: list[str] = []
+
+    def save_once_then_fail(node):
+        if saved:
+            raise OSError("disk full")
+        saved.append(node.id)
+        return real_save(node)
+
+    engine.file_store.save = save_once_then_fail
+    with pytest.raises(OSError):
+        engine._migrate_fsrs()
+    engine.file_store.save = real_save
+
+    assert _version(engine) is None, "a version was recorded over a failed seed"
+
+    engine._migrate_fsrs()
+
+    assert _stability(engine, first) == 10.0
+    assert _stability(engine, second) == 10.0
+    assert _version(engine) == "2"
+
+
+def test_no_version_is_recorded_while_a_file_is_missing_from_the_index(engine):
+    """Council round 2 (Codex F2) / round 3 (Cursor F1): recording version 2
+    over a graph that did not fully index strands every node that only lands on
+    a later incremental pass. The check has to live here, because startup() and
+    BackupService.rebuild_index call this method without consulting the builder."""
+    node_id = _make_node(engine)
+    _write_lifecycle(engine, node_id, stability=1.0, access_count=5, last_review=None)
+    _unmigrated_meta(engine)
+    # A file on disk that never made it into the index — exactly the shape
+    # full_rebuild leaves behind when a file fails to hash, parse, or index.
+    (engine.file_store.nodes_dir / "broken.md").write_text("not: [valid", encoding="utf-8")
+
+    engine._migrate_fsrs()
+
+    assert _version(engine) is None, "a version was recorded over an incomplete graph"
+    assert _stability(engine, node_id) == 10.0, "indexed nodes were not seeded"
+
+    (engine.file_store.nodes_dir / "broken.md").unlink()
+    engine._migrate_fsrs()
+
+    assert _version(engine) == "2"
