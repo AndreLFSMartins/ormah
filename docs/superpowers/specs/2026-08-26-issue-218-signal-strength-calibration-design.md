@@ -129,7 +129,7 @@ of observed rows.
 ```python
 _OVERLAP_FLOOR, _OVERLAP_SPAN, _OVERLAP_K = 0.40, 0.38, 1.0
 
-def token_overlap_strength(ratio: float, polarity: int) -> float:
+def token_overlap_strength(ratio: float) -> float:
     """Monotone over [gate, +inf), asymptotic to the band ceiling.
 
     Ties reappear only where float64 can no longer separate the tail: f(36.5) is
@@ -137,8 +137,6 @@ def token_overlap_strength(ratio: float, polarity: int) -> float:
     overlap_ratio maxes at 7.583, five times below that, so the whole real domain
     is separated -- 344 distinct values over ratios 0.5..39.9 at 0.1 steps.
     """
-    if polarity == 0:
-        return 0.0
     return _OVERLAP_FLOOR + _OVERLAP_SPAN * (
         1.0 - math.exp(-_OVERLAP_K * max(ratio - 0.5, 0.0))
     )
@@ -177,7 +175,7 @@ one purpose, importable by both, is the seam.
 
 | # | site | change |
 |---|---|---|
-| 1 | `_node_usage_evidence` (`session_watcher.py:111-160`), four `return` | constants + `token_overlap_strength` |
+| 1 | `_node_usage_evidence` (`session_watcher.py:111-160`), four `return` | constants + `token_overlap_strength(ratio)` |
 | 2 | judge record build (`session_watcher.py:549`) | `confidence` → `judge_strength(confidence, min_confidence, polarity)` |
 | 3 | `submit_feedback` signals INSERT (`memory_engine.py:2792`) | literal `1.0` → `feedback_strength(source, signal)` |
 
@@ -194,8 +192,10 @@ def judge_strength(confidence: float, min_confidence: float, polarity: int) -> f
 `polarity = 0` is unreachable through `submit_feedback`'s public surfaces — every external route
 passes `FeedbackRequest` with `signal: Literal[1, -1]` (`routes_agent.py:187`), and the MCP
 adapter posts to `/agent/feedback` rather than calling the engine. Only a direct Python caller
-could pass `0`. The convention is still enforced in each channel function: one line each,
-fail-closed, one application point per channel.
+could pass `0`. The convention is enforced wherever polarity can actually vary — `judge_strength`
+and `feedback_strength` take it and return `0.0` for zero. `token_overlap_strength` does not: its
+only caller sits in the `referenced` branch, and the no-match branch already returns `0.0`
+structurally. A polarity parameter there would be dead code.
 
 ### 4.6 Backfill
 
