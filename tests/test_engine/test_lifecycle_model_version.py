@@ -570,6 +570,12 @@ def test_stale_index_access_count_does_not_drive_the_formula(engine):
 
     node = engine.file_store.load(node_id)
     node.access_count = 10
+    # Set the pre-FSRS shape on disk explicitly rather than relying on the
+    # model default: fsrs_initial_stability is a settable knob, and a store
+    # whose remember() seeds a non-1.0 initial stability would make this
+    # fixture silently prove nothing.
+    node.stability = 1.0
+    node.last_review = None
     engine.file_store.save(node)
 
     engine._migrate_fsrs()
