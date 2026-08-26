@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_conflict_type
-from ormah.background.memory_lock import serialized_memory_job
+from ormah.background.memory_lock import RestoredUnderfoot, restore_aware_job
 from ormah.models.node import Connection, EdgeType
 
 logger = logging.getLogger(__name__)
@@ -292,8 +292,8 @@ def _find_conflict_candidates(
     return candidates
 
 
-@serialized_memory_job
-def run_conflict_detection(engine) -> dict | None:
+@restore_aware_job
+def run_conflict_detection(engine, epoch: int) -> dict | None:
     """Find potentially contradicting nodes and create edges.
 
     Seeds are delta-selected via a seq watermark (#81): only nodes newer than
@@ -373,32 +373,35 @@ def run_conflict_detection(engine) -> dict | None:
             now = datetime.now(timezone.utc).isoformat()
             conflict_type = llm_result.get("type", "tension")
 
-            with engine.db.transaction() as db_conn:
-                if conflict_type == "evolution":
-                    evolved = llm_result.get("evolved_node", "b")
-                    if evolved == "a":
-                        newer_id, older_id = node_a["id"], node_b["id"]
-                    else:
-                        newer_id, older_id = node_b["id"], node_a["id"]
+            with engine.memory_operation_at(epoch):
+                with engine.db.transaction() as db_conn:
+                    if conflict_type == "evolution":
+                        evolved = llm_result.get("evolved_node", "b")
+                        if evolved == "a":
+                            newer_id, older_id = node_a["id"], node_b["id"]
+                        else:
+                            newer_id, older_id = node_b["id"], node_a["id"]
 
-                    # OR IGNORE: auto_linker also emits contradicts, and both jobs run
-                    # concurrently over overlapping pairs. A concurrent writer may have
-                    # created this exact edge while the LLM was judging — same race as #117.
-                    cur = db_conn.execute(
-                        "INSERT OR IGNORE INTO edges (source_id, target_id, edge_type, weight, created, reason) "
-                        "VALUES (?, ?, 'evolved_from', 0.9, ?, ?)",
-                        (newer_id, older_id, now, explanation),
-                    )
-                    edge_type_str = "evolved_from"
-                    source_id, target_id = newer_id, older_id
-                else:
-                    cur = db_conn.execute(
-                        "INSERT OR IGNORE INTO edges (source_id, target_id, edge_type, weight, created, reason) "
-                        "VALUES (?, ?, 'contradicts', 0.9, ?, ?)",
-                        (node_a["id"], node_b["id"], now, explanation),
-                    )
-                    edge_type_str = "contradicts"
-                    source_id, target_id = node_a["id"], node_b["id"]
+                        # OR IGNORE: auto_linker also emits contradicts, and both jobs run
+                        # concurrently over overlapping pairs. A concurrent writer may have
+                        # created this exact edge while the LLM was judging — same race as #117.
+                        cur = db_conn.execute(
+                            "INSERT OR IGNORE INTO edges "
+                            "(source_id, target_id, edge_type, weight, created, reason) "
+                            "VALUES (?, ?, 'evolved_from', 0.9, ?, ?)",
+                            (newer_id, older_id, now, explanation),
+                        )
+                        edge_type_str = "evolved_from"
+                        source_id, target_id = newer_id, older_id
+                    else:
+                        cur = db_conn.execute(
+                            "INSERT OR IGNORE INTO edges "
+                            "(source_id, target_id, edge_type, weight, created, reason) "
+                            "VALUES (?, ?, 'contradicts', 0.9, ?, ?)",
+                            (node_a["id"], node_b["id"], now, explanation),
+                        )
+                        edge_type_str = "contradicts"
+                        source_id, target_id = node_a["id"], node_b["id"]
 
             # Queue the markdown connection UNCONDITIONALLY, not only when we won the
             # insert (Codex R2, critical #1 — the same data-loss path Task 1 closes).
@@ -419,21 +422,23 @@ def run_conflict_detection(engine) -> dict | None:
 
         # Persist new connections to markdown files
         for nid, new_connections in dirty_nodes.items():
-            try:
-                mem_node = engine.file_store.load(nid)
-                if mem_node is None:
-                    continue
-                existing = {(c.target, c.edge.value) for c in mem_node.connections}
-                fresh = [
-                    c for c in new_connections if (c.target, c.edge.value) not in existing
-                ]
-                if not fresh:
-                    continue
-                mem_node.connections.extend(fresh)
-                mem_node.touch_updated()
-                engine.file_store.save(mem_node)
-            except Exception as e:
-                logger.debug("Failed to persist conflict edge to markdown for %s: %s", nid[:8], e)
+            with engine.memory_operation_at(epoch):
+                try:
+                    mem_node = engine.file_store.load(nid)
+                    if mem_node is None:
+                        continue
+                    existing = {(c.target, c.edge.value) for c in mem_node.connections}
+                    fresh = [
+                        c for c in new_connections if (c.target, c.edge.value) not in existing
+                    ]
+                    if not fresh:
+                        continue
+                    mem_node.connections.extend(fresh)
+                    mem_node.touch_updated()
+                    engine.file_store.save(mem_node)
+                except Exception as e:
+                    logger.debug(
+                        "Failed to persist conflict edge to markdown for %s: %s", nid[:8], e)
 
         # ponytail: contiguous-prefix advance; a deterministically failing seed
         # parks the cursor — dead-letter escape hatch is upstream #122.
@@ -463,6 +468,8 @@ def run_conflict_detection(engine) -> dict | None:
         logger.info("conflict_detector run: %s", stats)
         return stats
 
+    except RestoredUnderfoot:
+        raise
     except Exception as e:
         logger.warning("Conflict detection failed: %s", e)
         return {"error": str(e)}

@@ -5,14 +5,14 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
-from ormah.background.memory_lock import serialized_memory_job
+from ormah.background.memory_lock import RestoredUnderfoot, restore_aware_job
 from ormah.models.node import normalize_space
 
 logger = logging.getLogger(__name__)
 
 
-@serialized_memory_job
-def run_auto_cluster(engine) -> None:
+@restore_aware_job
+def run_auto_cluster(engine, epoch: int) -> None:
     """Assign unassigned nodes to spaces based on their connections."""
     try:
         # Skip user-curated globals (space_locked) and the self node — a None space on
@@ -52,44 +52,55 @@ def run_auto_cluster(engine) -> None:
             if most_common is None:
                 continue
 
-            # Re-check the source of truth (markdown) before writing: the index row may be
-            # stale, or the node may have been locked between selection and now. Never
-            # reassign a locked node or the self node.
-            node = engine.file_store.load(node_id)
-            if node is None or node_id == engine.user_node_id:
-                continue
-            if node.space_locked:
-                # The file (source of truth) says locked but the index selected it — heal the
-                # stale index row so this node stops resurfacing in the query every run.
-                with engine.db.transaction() as conn:
-                    conn.execute(
-                        "UPDATE nodes SET space = ?, space_locked = 1 WHERE id = ?",
-                        (node.space, node_id),
-                    )
-                continue
-            node.space = most_common
-            node.touch_updated()   # real edit -> advance `updated` for LWW sync ordering
-            # ponytail: a concurrent lock landing between this recheck and save() loses to
-            # last-writer here (the index UPDATE below is still guarded). Bounded: hourly job,
-            # microsecond window, single-user, self-heals next run. A cross-store file<->SQLite
-            # lock would close it but is overkill for this context.
-            engine.file_store.save(node)
-            updates.append((most_common, node_id))
+            # Update markdown file. Re-check and save are one exclusive step: the
+            # candidate query above ran outside the lock (#240), so everything it
+            # reported must be revalidated here before anything is written.
+            with engine.memory_operation_at(epoch):
+                # Re-check the source of truth (markdown) before writing: the index row may
+                # be stale, or the node may have been locked between selection and now.
+                # Never reassign a locked node or the self node.
+                node = engine.file_store.load(node_id)
+                if node is None or node_id == engine.user_node_id:
+                    continue
+                if node.space_locked:
+                    # The file (source of truth) says locked but the index selected it — heal
+                    # the stale index row so this node stops resurfacing in the query.
+                    with engine.db.transaction() as conn:
+                        conn.execute(
+                            "UPDATE nodes SET space = ?, space_locked = 1 WHERE id = ?",
+                            (node.space, node_id),
+                        )
+                    continue
+                # Revalidate: the candidate query said this node had no space, but that was
+                # read outside the lock. A space assigned since is the user's, not ours (#240).
+                if node.space:
+                    logger.debug(
+                        "Auto-cluster left %s alone: a space was assigned since the scan",
+                        node_id[:8])
+                    continue
+                node.space = most_common
+                node.touch_updated()   # real edit -> advance `updated` for LWW sync ordering
+                engine.file_store.save(node)
+                updates.append((most_common, node_id))
+
             assigned += 1
 
         if updates:
             chunk_size = 100
             for i in range(0, len(updates), chunk_size):
-                with engine.db.transaction() as conn:
-                    for space_val, node_id in updates[i : i + chunk_size]:
-                        # Guard the index write too: a concurrent lock after the recheck
-                        # above must not be clobbered.
-                        conn.execute(
-                            "UPDATE nodes SET space = ? WHERE id = ? AND space_locked = 0",
-                            (space_val, node_id),
-                        )
+                with engine.memory_operation_at(epoch):
+                    with engine.db.transaction() as conn:
+                        for space_val, node_id in updates[i : i + chunk_size]:
+                            # Guard the index write too: a concurrent lock after the recheck
+                            # above must not be clobbered.
+                            conn.execute(
+                                "UPDATE nodes SET space = ? WHERE id = ? AND space_locked = 0",
+                                (space_val, node_id),
+                            )
         if assigned:
             logger.info("Auto-cluster assigned %d nodes to spaces", assigned)
 
+    except RestoredUnderfoot:
+        raise
     except Exception as e:
         logger.warning("Auto-cluster failed: %s", e)
