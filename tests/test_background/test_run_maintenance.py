@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.models.node import CreateNodeRequest, NodeType
 
@@ -273,3 +275,121 @@ class TestWhisperSignal:
         text = engine.get_whisper_context(prompt="how does Python indexing work")
         assert MAINTENANCE_DUE_SIGNAL in text
         assert "continue the conversation without blocking the user" in text
+
+
+class TestSelectClusterWithinBudget:
+    """The per-node metadata overhead is ~77 chars for these fixtures; budgets below
+    are chosen with that measured overhead in mind, so each case exercises the
+    boundary it names."""
+
+    def _node(self, nid: str, chars: int, content: str | None = None) -> dict:
+        return {
+            "id": nid,
+            "title": f"t{nid}",
+            "type": "fact",
+            "space": "s",
+            "content": content if content is not None else "x" * chars,
+        }
+
+    def _size(self, node: dict) -> int:
+        return len(json.dumps(node, ensure_ascii=False))
+
+    def test_cluster_within_budget_is_returned_whole(self):
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node(f"n{i}", 400) for i in range(5)]
+        assert _select_cluster_within_budget(cluster, budget=24000, min_size=2) == cluster
+
+    def test_oversized_cluster_is_trimmed(self, caplog):
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node(f"n{i}", 500) for i in range(4)]
+        budget = self._size(cluster[0]) * 2 + 10  # exactly two nodes fit
+
+        with caplog.at_level("INFO"):
+            result = _select_cluster_within_budget(cluster, budget=budget, min_size=2)
+
+        assert [n["id"] for n in result] == ["n0", "n1"]
+        for node in result:
+            assert len(node["content"]) == 500, "trim must never slice a node"
+        assert "trimmed" in caplog.text
+
+    def test_an_oversized_match_does_not_hide_the_smaller_ones(self, caplog):
+        """The v3 defect: a strict prefix stopped here and lost seed + m2.
+
+        Sizes: seed 177, m1 24_073, m2 173 serialized. `seed + m1` is 24_250,
+        over budget; `seed + m2` is 350, well under. Stopping at m1 returns [].
+        """
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("seed", 100), self._node("m1", 24000), self._node("m2", 100)]
+
+        with caplog.at_level("INFO"):
+            result = _select_cluster_within_budget(cluster, budget=24000, min_size=2)
+
+        assert [n["id"] for n in result] == ["seed", "m2"]
+        assert "m1" in caplog.text, "the skipped node must be named in the log"
+
+    def test_repeated_cycles_make_progress(self):
+        """No starvation: the finder rebuilds the same ordered cluster every cycle,
+        so a cluster that yields nothing once would yield nothing forever."""
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("seed", 100), self._node("m1", 24000), self._node("m2", 100)]
+
+        results = [
+            _select_cluster_within_budget(cluster, budget=24000, min_size=2)
+            for _ in range(3)
+        ]
+
+        assert all(r for r in results), "a cycle produced nothing — this cluster is starved"
+        assert all([n["id"] for n in r] == ["seed", "m2"] for r in results)
+
+    def test_a_kept_cluster_always_contains_the_seed(self):
+        """The invariant next-fit violated: never consolidate without the seed."""
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("seed", 600), self._node("m1", 400), self._node("m2", 400)]
+        budget = self._size(cluster[0]) + self._size(cluster[1]) + 10
+
+        result = _select_cluster_within_budget(cluster, budget=budget, min_size=2)
+
+        assert result, "this budget fits two nodes; the cluster should survive"
+        assert result[0]["id"] == "seed"
+
+    def test_cluster_below_min_size_after_trim_is_dropped_with_warning(self, caplog):
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node(f"n{i}", 12001) for i in range(5)]
+
+        with caplog.at_level("WARNING"):
+            result = _select_cluster_within_budget(cluster, budget=24000, min_size=2)
+
+        assert result == []
+        assert caplog.records, "a dropped cluster must never be silent"
+
+    def test_seed_larger_than_the_budget_drops_the_cluster(self, caplog):
+        """An oversized seed must not claim the cluster and starve its matches —
+        it drops the whole cluster, explicitly, with the seed named."""
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("huge", 30000), self._node("a", 100), self._node("b", 100)]
+
+        with caplog.at_level("WARNING"):
+            result = _select_cluster_within_budget(cluster, budget=24000, min_size=2)
+
+        assert result == []
+        assert "huge" in caplog.text
+
+    def test_budget_counts_serialized_size_not_raw_content(self, caplog):
+        """3000 NUL chars are 3000 raw but 18_070 serialized — a len(content)
+        budget would keep this cluster; the serialized budget must drop it."""
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node("esc", 0, content="\x00" * 3000), self._node("a", 400)]
+        assert self._size(cluster[0]) > 5000 > len(cluster[0]["content"])
+
+        with caplog.at_level("WARNING"):
+            result = _select_cluster_within_budget(cluster, budget=5000, min_size=2)
+
+        assert result == [], "the budget is measuring raw content, not the serialized node"

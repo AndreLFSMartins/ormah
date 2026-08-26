@@ -95,6 +95,64 @@ def _serialized_memory_operation(method):
     return locked
 
 
+def _select_cluster_within_budget(
+    cluster: list[dict], budget: int, min_size: int
+) -> list[dict]:
+    """Greedy seed-first selection of nodes whose serialized sizes fit `budget`.
+
+    The seed is always kept: it is the node the cluster was built around, and a
+    consolidation written without it is not a consolidation of that cluster. The
+    matches follow in descending similarity; a match that does not fit is
+    *skipped*, not a stop signal — stopping at the first oversized match would
+    hide every smaller match behind it, and because the finder rebuilds the same
+    ordered cluster every cycle, it would hide them permanently.
+
+    Nodes are never sliced. Returns [] when the seed alone exceeds the budget or
+    when fewer than `min_size` nodes fit.
+    """
+    if not cluster:
+        return []
+
+    seed, matches = cluster[0], cluster[1:]
+    seed_size = len(json.dumps(seed, ensure_ascii=False))
+    if seed_size > budget:
+        logger.warning(
+            "consolidation: seed %s serializes to %d chars, over the %d-char budget; "
+            "cluster dropped, its nodes stay in the working tier",
+            seed.get("id", "?"), seed_size, budget,
+        )
+        return []
+
+    selected = [seed]
+    used = seed_size
+    skipped: list[str] = []
+
+    for node in matches:
+        size = len(json.dumps(node, ensure_ascii=False))
+        if used + size > budget:
+            skipped.append(node.get("id", "?"))
+            continue
+        selected.append(node)
+        used += size
+
+    if len(selected) < min_size:
+        logger.warning(
+            "consolidation: only %d of %d nodes fit the %d-char budget (minimum %d); "
+            "cluster dropped, its nodes stay in the working tier",
+            len(selected), len(cluster), budget, min_size,
+        )
+        return []
+
+    if skipped:
+        logger.info(
+            "consolidation: cluster trimmed from %d to %d nodes to fit the %d-char budget "
+            "(skipped: %s)",
+            len(cluster), len(selected), budget, ", ".join(skipped),
+        )
+
+    return selected
+
+
 class MemoryEngine:
     """Main facade: remember(), recall(), connect(), context()."""
 
