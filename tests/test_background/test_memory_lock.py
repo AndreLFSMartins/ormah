@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from ormah.background.memory_lock import RestoredUnderfoot, restore_aware_job
@@ -22,11 +24,40 @@ def test_memory_operation_at_raises_once_the_epoch_moves(engine):
 
 
 def test_memory_operation_at_holds_l_mem_while_it_yields(engine):
-    """The check and the mutation must be atomic w.r.t. the restore (spec §2)."""
+    """The check and the mutation must be atomic w.r.t. the restore (spec §2).
+
+    A same-thread ``acquire(blocking=False)`` can't tell "lock held by me" from
+    "lock free" because ``_memory_operation_lock`` is reentrant. Use a second
+    thread instead: it can only acquire the lock when nobody else holds it.
+    """
     epoch = engine.restore_epoch
+    entered = threading.Event()
+    probe_done = threading.Event()
+    result = {}
+
+    def probe_from_other_thread():
+        entered.wait(timeout=5)
+        acquired = engine._memory_operation_lock.acquire(timeout=0.2)
+        if acquired:
+            engine._memory_operation_lock.release()
+        result["acquired_while_held"] = acquired
+        probe_done.set()
+
+    prober = threading.Thread(target=probe_from_other_thread)
+    prober.start()
     with engine.memory_operation_at(epoch):
-        assert engine._memory_operation_lock.acquire(blocking=False) is True
-        engine._memory_operation_lock.release()
+        entered.set()
+        # Hold the context open until the other thread has actually tried
+        # and failed to acquire the lock, so the exclusion window is real.
+        assert probe_done.wait(timeout=5), "probe thread never reported back"
+    prober.join(timeout=5)
+
+    assert result.get("acquired_while_held") is False
+
+    # And the lock must be free again once the context manager has exited.
+    released = engine._memory_operation_lock.acquire(timeout=1)
+    assert released is True
+    engine._memory_operation_lock.release()
 
 
 def test_reload_restored_graph_bumps_the_epoch(engine):
