@@ -47,13 +47,3 @@ def restore_aware_job(job):
 
     return wrapper
 
-
-def serialized_memory_job(job):
-    """Deprecated: whole-run exclusion. Being replaced by restore_aware_job (#240)."""
-
-    @wraps(job)
-    def locked(engine, *args, **kwargs):
-        with engine.memory_operation():
-            return job(engine, *args, **kwargs)
-
-    return locked
