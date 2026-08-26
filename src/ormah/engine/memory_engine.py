@@ -42,6 +42,7 @@ from ormah.models.node import (
     UpdateNodeRequest,
 )
 from ormah.store.file_store import FileStore
+from ormah.store.markdown import parse_node
 from ormah.text.tokens import STOP_WORDS
 
 logger = logging.getLogger(__name__)
@@ -217,11 +218,50 @@ class MemoryEngine:
         follows a CLI BackupService.restore) and MemoryEngine.rebuild_index —
         reach the migration without ever seeing the builder's bookkeeping.
 
+        Membership AND cardinality (#236, council rounds 4 and 5). Equal counts
+        do not establish that every file has its row: a file replaced externally
+        by a different node while the process was stopped leaves both sides at
+        the same count while the id sets diverge. Membership alone is not enough
+        either: a set discards multiplicity, so two files carrying the same id
+        collapse to one entry against SQLite's single row and would read as
+        complete (round 5, Codex high@0.99). Both checks are kept.
+
+        A file that fails to parse returns False before any comparison, and the
+        ordering is load-bearing. An unparseable file contributes no id, so it
+        would drop out of BOTH sets and a bare set equality would call such a
+        graph complete — the opposite of what this guard exists to say. Fail
+        closed on every edge: unreadable file, duplicate id, or sets unequal in
+        either direction.
+
         list_paths() globs nodes/*.md only, and soft-deleted files are moved to
         deleted/, so tombstones are absent from both sides of the comparison.
         """
-        indexed = self.db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
-        return len(self.file_store.list_paths()) == indexed
+        paths = self.file_store.list_paths()
+        on_disk: set[str] = set()
+        for path in paths:
+            try:
+                on_disk.add(parse_node(path.read_text(encoding="utf-8")).id)
+            except Exception:
+                logger.warning(
+                    "Lifecycle completeness check: cannot read %s; treating the "
+                    "graph as incomplete.",
+                    path,
+                )
+                return False
+
+        if len(on_disk) != len(paths):
+            logger.warning(
+                "Lifecycle completeness check: %d files carry only %d distinct "
+                "node ids; treating the graph as incomplete.",
+                len(paths),
+                len(on_disk),
+            )
+            return False
+
+        indexed = {
+            row["id"] for row in self.db.conn.execute("SELECT id FROM nodes").fetchall()
+        }
+        return on_disk == indexed
 
     def _lifecycle_model_version(self) -> int:
         """Read the store's lifecycle-model version, upgrading the legacy flag.
