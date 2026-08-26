@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from ormah.engine import memory_engine
 from ormah.engine.memory_engine import LIFECYCLE_MODEL_VERSION
 from ormah.models.node import CreateNodeRequest, MemoryNode, NodeType, Tier
+from ormah.store.markdown import parse_node, serialize_node
 
 
 def _version(engine) -> str | None:
@@ -436,3 +438,105 @@ def test_a_node_indexed_after_the_migration_is_still_seeded(engine):
     )
     assert engine.file_store.load(latecomer.id).stability == 10.0, "Markdown was not reseeded"
     assert _version(engine) == "2", "the marker should be left exactly as it was"
+
+
+def test_equal_counts_with_different_membership_withhold_the_version(engine):
+    """#236, council round 4 (Codex, high @ 0.97): len(list_paths()) ==
+    COUNT(*) proves cardinality, not membership. An indexed file replaced
+    externally by a different node while the process was stopped leaves both
+    sides at the same count while the id sets diverge. Recording the version
+    over that graph asserts a completed migration that never happened."""
+    node_id = _make_node(engine)
+    _unmigrated_meta(engine)
+
+    # Swap one indexed file for an unindexed stranger: one file out, one file
+    # in, so the counts stay identical and only the membership changes.
+    target = next(
+        path for path in engine.file_store.list_paths()
+        if parse_node(path.read_text(encoding="utf-8")).id == node_id
+    )
+    target.unlink()
+    stranger = MemoryNode(
+        type=NodeType.fact,
+        title="Stranger",
+        content="On disk, never indexed",
+    )
+    engine.file_store.save(stranger)
+
+    on_disk = len(engine.file_store.list_paths())
+    indexed = engine.db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    assert on_disk == indexed, "the fixture must keep the counts equal, or it proves nothing"
+
+    engine._migrate_fsrs()
+
+    assert _version(engine) is None, (
+        "a version was recorded over a graph whose membership does not match the index"
+    )
+
+
+def test_two_files_sharing_one_id_withhold_the_version(engine):
+    """#236, council round 5 (Codex, high @ 0.99): a set of parsed ids discards
+    multiplicity. Two Markdown files carrying the same node.id collapse to one
+    entry while SQLite holds one row, so bare set equality calls the graph
+    complete -- a case the cardinality check this task replaces used to reject."""
+    node_id = _make_node(engine)
+    _unmigrated_meta(engine)
+
+    # The store already holds the Self node, so assert against the baseline
+    # rather than absolute counts.
+    indexed = engine.db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    assert len(engine.file_store.list_paths()) == indexed, (
+        "the fixture must start from a balanced graph, or it proves nothing"
+    )
+
+    # A duplicate the way an external tool makes one: same id, different title,
+    # therefore a different filename, written straight to disk so FileStore's
+    # _path_for cannot reuse the existing file.
+    original = next(
+        path for path in engine.file_store.list_paths()
+        if parse_node(path.read_text(encoding="utf-8")).id == node_id
+    )
+    node = parse_node(original.read_text(encoding="utf-8"))
+    node.title = "Renamed by an external tool"
+    duplicate = original.parent / f"fact_renamed-by-an-external-tool_{node.short_id}.md"
+    duplicate.write_text(serialize_node(node), encoding="utf-8")
+
+    assert len(engine.file_store.list_paths()) == indexed + 1, (
+        "the duplicate must add one file and no row, or it proves nothing"
+    )
+    assert engine.db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == indexed
+
+    engine._migrate_fsrs()
+
+    assert _version(engine) is None, (
+        "a version was recorded over a graph holding two files for one id"
+    )
+
+
+def test_a_store_at_the_current_version_never_parses_the_graph(engine, monkeypatch):
+    """#236, council round 5 (Cursor, medium @ 0.93): the early return must sit
+    above the completeness guard. Nothing else pins that ordering -- the
+    latecomer test stays green either way -- and losing it puts a full-store
+    Markdown parse on every startup(), synchronous in the lifespan."""
+    assert _version(engine) == "2"
+
+    # Count calls rather than raise: _graph_is_fully_indexed wraps the parse in
+    # `except Exception`, which swallows AssertionError and fails closed, so a
+    # raising sentinel is invisible to the test and pins nothing.
+    calls: list[str] = []
+    real_parse = memory_engine.parse_node
+
+    def _spy(text):
+        calls.append(text)
+        return real_parse(text)
+
+    monkeypatch.setattr(memory_engine, "parse_node", _spy)
+
+    engine._migrate_fsrs()
+
+    assert not calls, (
+        "a store at the current version parsed the graph: the early return no "
+        "longer sits above the completeness guard, so every startup() now pays "
+        "a full-store Markdown parse"
+    )
+    assert _version(engine) == "2"
