@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ormah import lifecycle
+from ormah import signal_strength
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
@@ -2800,7 +2801,7 @@ class MemoryEngine:
                     resolved_node_id,
                     "feedback_submitted",
                     signal,
-                    1.0,
+                    signal_strength.feedback_strength(source, signal),
                     source,
                     session_id,
                     "submit_feedback",
