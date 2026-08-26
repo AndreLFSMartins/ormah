@@ -504,10 +504,14 @@ def test_auto_linker_aborts_when_a_restore_lands_mid_run(engine):
         return json.dumps({"relationship": "supports", "reason": "same topic"})
 
     edges_before = engine.db.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
+    epoch_before = engine.restore_epoch
 
     with patch(_LLM_PATCH, side_effect=fake_llm):
         from ormah.background.auto_linker import run_auto_linker
         run_auto_linker(engine)  # returns cleanly, no raise
+
+    assert engine.restore_epoch > epoch_before, \
+        "the fake LLM was never called — the fixture stopped exercising the job"
 
     edges_after = engine.db.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
     assert edges_after == edges_before

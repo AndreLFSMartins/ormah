@@ -321,6 +321,7 @@ def test_conflict_detection_aborts_when_a_restore_lands_mid_run(engine):
     engine.settings.llm_provider = "ollama"
 
     edges_before = engine.db.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
+    epoch_before = engine.restore_epoch
 
     # The bump must land AFTER the job read its entry epoch: restore_aware_job reads
     # engine.restore_epoch at call time, so bumping before the call would hand the job the
@@ -336,6 +337,9 @@ def test_conflict_detection_aborts_when_a_restore_lands_mid_run(engine):
     with patch("ormah.background.llm_client.llm_generate", side_effect=fake_llm):
         from ormah.background.conflict_detector import run_conflict_detection
         run_conflict_detection(engine)  # returns cleanly
+
+    assert engine.restore_epoch > epoch_before, \
+        "the fake LLM was never called — the fixture stopped exercising the job"
 
     edges_after = engine.db.conn.execute("SELECT COUNT(*) AS c FROM edges").fetchone()["c"]
     assert edges_after == edges_before
