@@ -168,17 +168,20 @@ class MemoryEngine:
 
     def _migrate_fsrs(self) -> None:
         """Seed FSRS stability once, and record the store's lifecycle-model version."""
+        # The seed runs on every call, gated by nothing (#236, council round 4,
+        # Codex high@0.98). A store-wide marker cannot decide a per-node
+        # question: a pre-FSRS node can arrive at any time — an external tool
+        # writes it into nodes/ and incremental_update indexes it — long after
+        # the store records the current version. Gating the seed on that marker
+        # stranded such a node at stability 1.0 forever. The per-node predicate
+        # inside the seed is what makes this cheap and safe: on a store with
+        # nothing to do it matches no rows, and a node it already seeded no
+        # longer qualifies.
+        self._seed_stability_from_access_count()
+
         version = self._lifecycle_model_version()
         if version >= LIFECYCLE_MODEL_VERSION:
             return
-
-        # Run the seed for every version below the current model, not only for
-        # a store-wide "pre-FSRS" verdict (#236, council round 1, Codex F2). A
-        # restored graph can mix externally authored pre-FSRS nodes with Ormah's
-        # own; the store-wide guard resolves such a graph as migrated and would
-        # skip all of them. The per-node predicate inside the seed is what keeps
-        # this safe — on a store with nothing to do it matches no rows.
-        self._seed_stability_from_access_count()
 
         if not self._graph_is_fully_indexed():
             # Recording a version over a partial graph is the one irreversible

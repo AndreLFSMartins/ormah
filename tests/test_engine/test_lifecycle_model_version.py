@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from ormah.engine.memory_engine import LIFECYCLE_MODEL_VERSION
-from ormah.models.node import CreateNodeRequest, NodeType, Tier
+from ormah.models.node import CreateNodeRequest, MemoryNode, NodeType, Tier
 
 
 def _version(engine) -> str | None:
@@ -373,3 +373,31 @@ def test_rebuild_index_holds_the_memory_lock_across_the_seeds_file_write(engine)
         "file_store.save() -- the db-transaction-then-file-write order is "
         "no longer wrapped in the engine's memory -> db -> file sequence"
     )
+
+
+def test_a_node_indexed_after_the_migration_is_still_seeded(engine):
+    """#236, council round 4 (Codex, high @ 0.98): the store-wide marker must
+    not gate the per-node seed. A pre-FSRS Markdown node dropped into nodes/ by
+    an external tool and picked up by incremental_update arrives AFTER the store
+    already records version 2. Under the old early return it kept stability 1.0
+    forever, so decay treated a well-used memory as brand new."""
+    assert _version(engine) == "2"
+
+    latecomer = MemoryNode(
+        type=NodeType.fact,
+        title="Latecomer",
+        content="Used five times before FSRS existed",
+        access_count=5,
+        stability=1.0,
+        last_review=None,
+    )
+    engine.file_store.save(latecomer)
+    engine.builder.incremental_update()
+
+    engine._migrate_fsrs()
+
+    assert _stability(engine, latecomer.id) == 10.0, (
+        "the store-wide version marker short-circuited the per-node seed"
+    )
+    assert engine.file_store.load(latecomer.id).stability == 10.0, "Markdown was not reseeded"
+    assert _version(engine) == "2", "the marker should be left exactly as it was"
