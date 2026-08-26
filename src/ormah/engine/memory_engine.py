@@ -439,23 +439,51 @@ class MemoryEngine:
 
         with self.db.transaction() as conn:
             for r in rows:
+                node = self.file_store.load(r["id"])
+                if node is None:
+                    continue
+
                 stability = min(30.0, r["access_count"] * 2.0)
                 last_review = r["last_accessed"]
+                last_review_dt: datetime | None = None
+                if last_review:
+                    try:
+                        last_review_dt = datetime.fromisoformat(last_review)
+                    except (ValueError, TypeError):
+                        last_review_dt = None
+
+                # Re-check the predicate against the loaded node, not just the
+                # SQLite row that qualified it (council-pr, round 1: Codex
+                # high@0.99, Cursor high@0.90, converged independently).
+                # startup() with a non-empty index never refreshes it before
+                # _migrate_fsrs() runs, so the index can be stale relative to
+                # disk -- an external tool wrote a real stability into a node
+                # the index still shows as pre-FSRS. Writing unconditionally
+                # from the stale row would destroy that newer value on disk.
+                #
+                # A node this same seed already wrote in an earlier,
+                # interrupted attempt is not such a case: the formula is
+                # deterministic, so its disk state already equals what this
+                # pass would produce again. Recognizing that keeps the
+                # resumability this method's docstring promises (Codex F3) --
+                # a node the failed attempt had already (re)written still
+                # converges instead of being skipped as "someone else's value".
+                pre_fsrs = node.last_review is None and node.stability == 1.0
+                already_seeded = (
+                    node.stability == stability and node.last_review == last_review_dt
+                )
+                if not (pre_fsrs or already_seeded):
+                    continue
 
                 conn.execute(
                     "UPDATE nodes SET stability = ?, last_review = ? WHERE id = ?",
                     (stability, last_review, r["id"]),
                 )
 
-                node = self.file_store.load(r["id"])
-                if node is not None:
-                    node.stability = stability
-                    if last_review:
-                        try:
-                            node.last_review = datetime.fromisoformat(last_review)
-                        except (ValueError, TypeError):
-                            pass
-                    self.file_store.save(node)
+                node.stability = stability
+                if last_review_dt is not None:
+                    node.last_review = last_review_dt
+                self.file_store.save(node)
 
         logger.info("FSRS data migration: seeded %d eligible nodes from access_count", len(rows))
 
