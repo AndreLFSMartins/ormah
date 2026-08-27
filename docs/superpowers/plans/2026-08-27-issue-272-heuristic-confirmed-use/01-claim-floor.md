@@ -240,7 +240,9 @@ and the `signals` row on one number rather than two that happen to agree.
 Fix any site the grep finds that still omits the argument, then re-run the full suite.
 
 ```bash
-python -m pytest tests/ -q 2>&1 | tail -20
+python -m pytest tests/ -q > /tmp/ormah-272-run.txt 2>&1; RC=$?
+tail -20 /tmp/ormah-272-run.txt
+echo "pytest exit=$RC"   # 0, or only baseline IDs failed
 ```
 
 - [ ] **Step 9: Lint and commit**

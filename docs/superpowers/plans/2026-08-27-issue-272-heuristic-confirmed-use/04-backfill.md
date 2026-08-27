@@ -4,7 +4,7 @@
 **Read `00-overview.md` first — its Global Constraints apply.**
 
 **Files:**
-- Modify: `src/ormah/engine/memory_engine.py` (`:66` version constant, `:167` call site, new method after `_migrate_signal_strength` ends at `:259`)
+- Modify: `src/ormah/engine/memory_engine.py` (`:66` version constant, `:167` call site inside `startup()` which begins at `:126`, new method after `_migrate_signal_strength` ends at `:259`)
 - Test: `tests/test_engine/test_confirmed_use_contract.py`
 
 **Interfaces:**
@@ -20,9 +20,13 @@ measured store (2026-08-26): **42 pairs** — 29 `node_id`, 13 `sentence`, 0 `ti
 
 ## Two rules this migration must not break
 
-1. **It must run AFTER `_migrate_signal_strength`.** This migration reads `signals.strength`, and that
-   is the migration which normalises the column onto the ladder. Running first would compare pre-ladder
-   values against a ladder-derived floor.
+1. **It must run AFTER `_migrate_signal_strength` — this is a safety rule, not tidiness.**
+   `signals.strength` is declared `REAL NOT NULL DEFAULT 1.0` (`schema.sql:174`), so **every
+   pre-ladder row carries 1.0, which is above the 0.80 floor.** Running this backfill first would
+   confirm every stale positive heuristic row in the store — the 1,587 `token_overlap` ones
+   included — and the claim is a monotonic latch with no undo and a markdown write already on disk.
+   Found by council round 2 (Cursor); `test_backfill_runs_from_startup_and_only_after_the_ladder`
+   pins it in both directions.
 2. **Reinforcement runs after the transaction commits.** `_record_confirmed_use` does file I/O; calling
    it inside would take `db_lock` before `memory_lock` (#220 §4.3).
 
@@ -167,6 +171,135 @@ def test_backfill_cutoff_advances_to_the_highest_processed_id(engine):
     assert engine._meta_int("heuristic_confirmed_use_version") == 1
 
 
+def test_backfill_skips_a_signal_whose_node_is_not_the_events_node(engine):
+    """#272, council R1 (Codex HIGH): the claim helper does not check event/node ownership.
+
+    It inserts the node id it is handed after testing only was_injected. The live
+    path reads both ids off one whisper_log row so they always agree; the backfill
+    reads them from different tables, so a legacy or hand-repaired signal could
+    reinforce a node the agent never saw for that event.
+    """
+    victim, other = _make_nodes(engine, count=2)
+    log_id = _seed_whisper_log(engine, victim)
+    # The event belongs to `victim`, but the signal names `other`.
+    _seed_heuristic_signal(engine, other, log_id, strength=0.98)
+
+    before_other = _snapshot(engine, other)
+    engine._migrate_heuristic_confirmed_use()
+
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ? AND node_id = ?",
+        (log_id, other),
+    ).fetchone()
+    assert claim is None, "a signal claimed an event that belonged to a different node"
+    assert _snapshot(engine, other) == before_other
+
+
+def test_backfill_cutoff_clears_every_kind_of_ineligible_tail(engine):
+    """#272, council R1+R3 (Codex): no eligibility predicate may live in the WHERE.
+
+    Three shapes, because the defect reappeared in three disguises across the review:
+      - polarity 0            -> excluded by a WHERE predicate (round 1)
+      - was_injected = 0      -> excluded by a WHERE predicate (round 1)
+      - whisper_log_id NULL   -> excluded by an INNER JOIN (round 3). The column is
+                                 nullable and ON DELETE SET NULL, so whisper_log_cleanup
+                                 orphans rows routinely — this is the common case, not
+                                 an exotic one.
+    Any of them at the high-id tail must still advance the cutoff, or every boot
+    rescans a growing tail forever.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    not_injected_log = _seed_whisper_log(engine, target, prompt="caching not injected")
+    engine.db.conn.execute(
+        "UPDATE whisper_log SET was_injected = 0 WHERE id = ?", (not_injected_log,)
+    )
+
+    def _tail(whisper_log_id, polarity):
+        engine.db.conn.execute(
+            """
+            INSERT INTO signals
+                (whisper_log_id, node_id, signal_type, polarity, strength, source,
+                 session_id, surface, space, prompt_hash, evidence, created)
+            VALUES (?, ?, 'whisper_referenced', ?, 0.98, 'transcript_watcher_heuristic',
+                    's1', 'transcript', 'myproject', 'h', ?, datetime('now'))
+            """,
+            (whisper_log_id, target, polarity, json.dumps({"match": "node_id"})),
+        )
+
+    _tail(log_id, 0)                # polarity 0
+    _tail(not_injected_log, 1)      # was_injected = 0
+    _tail(None, 1)                  # orphaned: no whisper_log parent at all
+    engine.db.conn.commit()
+
+    highest = engine.db.conn.execute(
+        "SELECT MAX(id) AS m FROM signals WHERE source = 'transcript_watcher_heuristic'"
+    ).fetchone()["m"]
+
+    engine._migrate_heuristic_confirmed_use()
+
+    assert engine._meta_int("heuristic_confirmed_use_cutoff") == highest, (
+        "an ineligible trailing row pinned the cutoff — the scan window will grow forever"
+    )
+    assert engine.db.conn.execute(
+        "SELECT COUNT(*) AS n FROM confirmed_use_claims"
+    ).fetchone()["n"] == 0, "an ineligible row was claimed"
+
+
+def test_backfill_runs_from_startup_and_only_after_the_ladder(engine):
+    """#272, council R1+R2 (Cursor): pins the call site AND the migration order.
+
+    The order is a SAFETY requirement, not tidiness. `signals.strength` is
+    `REAL NOT NULL DEFAULT 1.0`, so every pre-ladder row carries 1.0 — above the
+    0.80 floor. Running this backfill before _migrate_signal_strength would confirm
+    every stale positive heuristic row, token_overlap included, and the claim is a
+    monotonic latch: there is no undo.
+
+    The two seeds are chosen so that swapping the two calls in startup() turns BOTH
+    assertions red:
+      - token_overlap seeded at a stale 1.0 -> the ladder rewrites it to ~0.55, below
+        the floor -> must NOT claim. Runs first, and it claims.
+      - node_id seeded at a stale 0.50 -> the ladder rewrites it to 0.98 -> must claim.
+        Runs first, and it does not.
+    """
+    overlap_node, verbatim_node = _make_nodes(engine, count=2)
+    overlap_log = _seed_whisper_log(engine, overlap_node, prompt="caching overlap")
+    verbatim_log = _seed_whisper_log(engine, verbatim_node, prompt="caching verbatim")
+
+    _seed_heuristic_signal(
+        engine, overlap_node, overlap_log, strength=1.0, match="token_overlap",
+    )
+    engine.db.conn.execute(
+        "UPDATE signals SET evidence = ? WHERE whisper_log_id = ?",
+        (json.dumps({"match": "token_overlap", "overlap_ratio": 1.0}), overlap_log),
+    )
+    _seed_heuristic_signal(engine, verbatim_node, verbatim_log, strength=0.50)
+
+    # Force both migrations to re-run on the next startup.
+    engine.db.conn.execute(
+        "DELETE FROM meta WHERE key IN "
+        "('heuristic_confirmed_use_version', 'heuristic_confirmed_use_cutoff', "
+        "'signal_strength_ladder_version', 'signal_strength_ladder_cutoff')"
+    )
+    engine.db.conn.commit()
+
+    engine.startup()
+
+    verbatim_claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (verbatim_log,)
+    ).fetchone()
+    assert verbatim_claim is not None, (
+        "startup() never ran the backfill, or ran it before the ladder rewrote 0.50 to 0.98"
+    )
+
+    overlap_claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (overlap_log,)
+    ).fetchone()
+    assert overlap_claim is None, (
+        "a stale DEFAULT-1.0 token_overlap row confirmed — the backfill ran before the ladder"
+    )
+
+
 def test_backfill_isolates_one_nodes_failure(engine):
     """#272 D4: one unreadable node must not cost every later node its repair."""
     first, second = _make_nodes(engine, count=2)
@@ -244,27 +377,46 @@ Add this method immediately after `_migrate_signal_strength` ends (`:259`, befor
 
         confirmed_node_ids: list[str] = []
         with self.db.transaction() as conn:
-            # The floor is applied in Python, not in the WHERE, so the cutoff can advance
-            # over EVERY row examined. Filtering in SQL would leave the cutoff pinned to
-            # the id of the last above-floor row, and since 97% of heuristic rows are
-            # below it, the scan window would grow without bound — and would never
-            # advance at all on a store whose newest heuristic rows are all token_overlap.
+            # EVERY eligibility test is applied in Python, and the SELECT filters only on
+            # source and the cutoff. Council round 1 (Codex, MEDIUM) caught the earlier
+            # shape: any predicate in the WHERE hides those rows' ids from the loop, so
+            # processed_max stalls behind them and every boot rescans a growing tail —
+            # and on a store whose newest heuristic rows are all polarity 0, non-injected,
+            # or below the floor, the cutoff never advances at all.
+            # LEFT JOIN, not INNER. Council round 3 (Codex, MEDIUM): signals.whisper_log_id
+            # is nullable and declared ON DELETE SET NULL, so whisper_log_cleanup orphans
+            # rows routinely. An INNER JOIN drops those ids before the loop sees them —
+            # the same cutoff stall in a third disguise. Missing provenance is ineligible,
+            # but it is ineligible IN PYTHON, after its id has advanced the high-water mark.
             rows = conn.execute(
                 """
-                SELECT s.id, s.whisper_log_id, s.node_id, s.strength
+                SELECT s.id, s.whisper_log_id, s.node_id, s.strength, s.polarity,
+                       wl.was_injected, wl.node_id AS event_node_id
                 FROM signals s
-                JOIN whisper_log wl ON wl.id = s.whisper_log_id
+                LEFT JOIN whisper_log wl ON wl.id = s.whisper_log_id
                 WHERE s.id > ?
                   AND s.source = ?
-                  AND s.polarity = 1
-                  AND wl.was_injected = 1
                 ORDER BY s.id ASC
                 """,
                 (lower_bound, signal_strength.HEURISTIC_SOURCE),
             ).fetchall()
             processed_max = lower_bound
             for row in rows:
-                if row["strength"] >= HEURISTIC_CONFIRM_FLOOR and self._claim_confirmed_use(
+                # Council round 1 (Codex, HIGH): the claim helper inserts the node id it is
+                # GIVEN, checking only that the event was injected — it never asserts the
+                # node belongs to the event. The live path is safe because its query reads
+                # both ids from the same whisper_log row, but here they come from different
+                # tables, so a legacy or hand-repaired signal could reinforce a node the
+                # agent never saw for this event. Checked explicitly.
+                eligible = (
+                    row["whisper_log_id"] is not None
+                    and row["event_node_id"] is not None  # LEFT JOIN found no parent row
+                    and row["polarity"] == 1
+                    and row["was_injected"] == 1
+                    and row["node_id"] == row["event_node_id"]
+                    and row["strength"] >= HEURISTIC_CONFIRM_FLOOR
+                )
+                if eligible and self._claim_confirmed_use(
                     conn,
                     row["whisper_log_id"],
                     row["node_id"],
@@ -308,20 +460,24 @@ the helper stays the single authority on what confirms.
 
 - [ ] **Step 5: Call it at boot, in the right order**
 
-At `:167`, immediately after `self._migrate_signal_strength()`:
+`startup()` already calls `_migrate_fsrs()` and `_migrate_signal_strength()` at `:166-167`. **Insert
+only the new call**, immediately after `_migrate_signal_strength()` — do not re-add the two lines
+above it:
 
 ```python
-        self._migrate_fsrs()
         self._migrate_signal_strength()
-        # MUST follow _migrate_signal_strength — it reads the column that migration
-        # normalises onto the ladder (#272).
+        # MUST follow _migrate_signal_strength. signals.strength defaults to 1.0, which is
+        # ABOVE the confirm floor, so running this first would claim every stale positive
+        # heuristic row — token_overlap included — and the claim cannot be undone (#272).
         self._migrate_heuristic_confirmed_use()
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
 ```bash
-python -m pytest tests/test_engine/test_confirmed_use_contract.py -v 2>&1 | tail -30
+python -m pytest tests/test_engine/test_confirmed_use_contract.py -v > /tmp/ormah-272-file.txt 2>&1; RC=$?
+tail -30 /tmp/ormah-272-file.txt
+echo "pytest exit=$RC"
 ```
 
 Expected: PASS, all six new tests plus every pre-existing contract.
@@ -329,7 +485,9 @@ Expected: PASS, all six new tests plus every pre-existing contract.
 - [ ] **Step 7: Run the full suite**
 
 ```bash
-python -m pytest tests/ -q 2>&1 | tail -20
+python -m pytest tests/ -q > /tmp/ormah-272-run.txt 2>&1; RC=$?
+tail -20 /tmp/ormah-272-run.txt
+echo "pytest exit=$RC"   # 0, or only baseline IDs failed
 ```
 
 - [ ] **Step 8: Lint and commit**

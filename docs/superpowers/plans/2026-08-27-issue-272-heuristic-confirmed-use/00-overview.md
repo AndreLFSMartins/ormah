@@ -31,6 +31,16 @@ route that can still confirm them. A boot migration backfills rows the defect al
   implementation. A test that passes on first run is a plan defect — stop and report it.
 - **The baseline of already-failing tests is measured once, in Task 0**, and shared by every later
   task. "Tests pass" means *no test ID outside that baseline fails*. `make lint` before every commit.
+- **Never pipe `pytest` straight into `tail`/`tee` and read `$?`.** Council round 3 (Codex) caught
+  this: a pipeline's status is the LAST command's, so `pytest ... | tail` reports success while the
+  suite fails — which would silently defeat the rule directly above it. Every full-suite run in this
+  plan uses:
+
+  ```bash
+  python -m pytest tests/ -q > /tmp/ormah-272-run.txt 2>&1; RC=$?
+  tail -20 /tmp/ormah-272-run.txt
+  echo "pytest exit=$RC"   # must be 0, or the only failures are baseline IDs
+  ```
 - The floor is `HEURISTIC_CONFIRM_FLOOR = signal_strength.IMPLICIT` (0.80), defined by reference to
   the ladder so the two cannot drift.
 - **Never modify `_record_confirmed_use`'s body, and never call it inside an open transaction** — it
@@ -82,7 +92,9 @@ Expected: `BASE OK`. `WRONG BASE` means it was cut from `upstream/main` — remo
 
 ```bash
 pip install -e ".[dev]" -q
-python -m pytest tests/ -q 2>&1 | tail -30 | tee /tmp/ormah-272-baseline.txt
+python -m pytest tests/ -q > /tmp/ormah-272-baseline.txt 2>&1; RC=$?
+tail -30 /tmp/ormah-272-baseline.txt
+echo "pytest exit=$RC"
 ```
 
 Record the exact failing test IDs — this is the baseline for every later task. A fully green suite

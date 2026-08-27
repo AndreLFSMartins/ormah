@@ -352,7 +352,9 @@ def test_heuristic_below_the_floor_does_not_record_confirmed_use(engine, tmp_pat
 - [ ] **Step 6: Run the tests to verify they pass**
 
 ```bash
-python -m pytest tests/test_background/test_session_watcher.py -v 2>&1 | tail -30
+python -m pytest tests/test_background/test_session_watcher.py -v > /tmp/ormah-272-file.txt 2>&1; RC=$?
+tail -30 /tmp/ormah-272-file.txt
+echo "pytest exit=$RC"
 ```
 
 Expected: PASS, including `test_replaying_the_judge_does_not_reconfirm` and every other pre-existing
@@ -361,7 +363,9 @@ test. Any failure outside the Task 0 baseline is a regression.
 - [ ] **Step 7: Run the full suite**
 
 ```bash
-python -m pytest tests/ -q 2>&1 | tail -20
+python -m pytest tests/ -q > /tmp/ormah-272-run.txt 2>&1; RC=$?
+tail -20 /tmp/ormah-272-run.txt
+echo "pytest exit=$RC"   # 0, or only baseline IDs failed
 ```
 
 - [ ] **Step 8: Lint and commit**

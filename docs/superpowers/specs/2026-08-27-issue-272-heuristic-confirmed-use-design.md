@@ -183,6 +183,21 @@ Every test below is written before its implementation and must fail first.
 | 13 | Backfill: cutoff advances to highest processed id, not `MAX(id)` | pinned as in #218 |
 | 14 | Backfill: one node's mutator raises | remaining nodes still reinforced |
 | 15 | Backfill: `strength` below floor / `was_injected = 0` / claim exists | skipped in each case |
+| 16 | Backfill: signal whose `node_id` differs from its event's `node_id` | no claim, no reinforcement |
+| 17 | Backfill: ineligible trailing rows (polarity 0, non-injected) | cutoff still clears them |
+| 18 | Backfill reached through `startup()`, ladder-first | a stale `DEFAULT 1.0` `token_overlap` row does **not** claim; a stale 0.50 `node_id` row does |
+
+Cases 16–18 came from the Dev Council (2026-08-27) and each pins a defect the first draft had:
+
+- **16** — `_claim_confirmed_use` inserts the node id it is *handed*, verifying only `was_injected`;
+  it never asserts the node belongs to the event. The live path is safe because its query reads both
+  ids from one `whisper_log` row, but the backfill reads them from different tables.
+- **17** — any eligibility predicate left in the `WHERE` hides those rows' ids from the loop, so the
+  cutoff stalls behind them and every boot rescans a growing tail.
+- **18** — the sharpest one: `signals.strength` is `REAL NOT NULL DEFAULT 1.0` (`schema.sql:174`), so
+  every pre-ladder row sits **above** the 0.80 floor. Ordering this migration after
+  `_migrate_signal_strength` is therefore a safety requirement — running it first would confirm every
+  stale positive heuristic row in the store, and the claim is a monotonic latch with no undo.
 
 Gate: the failing-test baseline is measured **once in the worktree at the start** and is shared input
 to every task. "Tests pass" means no test ID outside that list fails. `make lint` before each commit.
@@ -206,3 +221,20 @@ Per `FORK-WORKFLOW.md`:
 - **The PR declares its dependency on #273 in the body.** While #273 is open, this PR's diff carries
   #218's commits; once #273 merges, rebase the island onto `upstream/main` so the diff reduces to this
   change alone.
+
+### 7.1 A merge-down risk that does not exist in this PR
+
+Council round 1 raised archival resurrection and, on round 2, withdrew it for this base — correctly.
+On `fix/218-signal-strength-ladder`, `_record_confirmed_use` (`:2121`) mutates only `stability`,
+`last_review`, `last_accessed` and `access_count`; there is no `TierManager.promote`, no `tier`
+assignment, and `archived_at` does not exist upstream at all.
+
+**On `local-main` it is a different function.** At `:2884` it promotes `archival → working` through
+`TierManager.promote` and clears `archived_at` — the code's own comment says "local-main only (#28)".
+So when this work merges down into the branch the Beta actually runs, the boot backfill will
+**resurrect archived nodes in bulk on the next restart**, stamping decades-old use as `now`.
+
+That is out of scope for this PR and must not be designed around here. It is recorded so the
+merge-down is a decision rather than a surprise: before merging into `local-main`, decide whether the
+backfill should skip `tier = archival`, and remember that the daemon restarts under launchd
+`KeepAlive`, so the migration runs the moment the branch goes live.

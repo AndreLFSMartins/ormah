@@ -39,6 +39,33 @@ the watcher's own signal source — which is the same blindness #220's contract 
 
 ---
 
+## The judge preamble is mandatory in every test below
+
+Council round 1 (Cursor, HIGH) caught this and it was verified against the base: the judge does not
+run unless **both** flags are on. `_feedback_llm_judge_enabled` is
+
+```python
+return bool(
+    getattr(settings, "feedback_llm_judge_enabled", False)
+    and getattr(settings, "llm_enabled", False)   # llm_enabled is llm_provider != "none"
+)
+```
+
+and the defaults leave it off. A test that omits the preamble asserts `mock_llm.called` against a
+judge that structurally cannot run — it fails identically before and after a correct implementation,
+so it cannot falsify anything.
+
+The payload key is **`verdicts`**, not `judgments`: `_llm_judge_whisper_usage` reads
+`parsed.get("verdicts")`. `_LLM_PATCH` (`"ormah.background.llm_client.llm_generate"`) is the right
+target — that is the symbol the judge imports.
+
+Every test in this task therefore carries:
+
+```python
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+```
+
 - [ ] **Step 1: Write the failing tests**
 
 Add to `tests/test_background/test_session_watcher.py`:
@@ -64,8 +91,10 @@ def test_a_weak_heuristic_hit_still_reaches_the_judge(engine, tmp_path):
     whisper_log_id = _insert_injected_whisper_log(
         engine, node_id=node_id, session_id="weak-to-judge-session", prompt=prompt,
     )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
 
-    llm_response = json.dumps({"judgments": [{
+    llm_response = json.dumps({"verdicts": [{
         "whisper_log_id": whisper_log_id,
         "verdict": "used",
         "confidence": 0.95,
@@ -99,6 +128,10 @@ def test_a_confirming_heuristic_hit_does_not_reach_the_judge(engine, tmp_path):
     _insert_injected_whisper_log(
         engine, node_id=node_id, session_id="strong-skips-judge-session", prompt=prompt,
     )
+    # The judge is ENABLED here on purpose: with it off, "not called" would be
+    # vacuously true and the test would pass against any suppression rule at all.
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
 
     with patch(_LLM_PATCH) as mock_llm:
         _record_whisper_usage_signals(engine, transcript)
@@ -107,13 +140,20 @@ def test_a_confirming_heuristic_hit_does_not_reach_the_judge(engine, tmp_path):
 
 
 def test_an_already_confirmed_event_is_not_rejudged_on_reingest(engine, tmp_path):
-    """#272 D3: the claim table settles the re-ingest case the strength cannot.
+    """#272 D3: on RE-INGEST the claim table is the only authority left.
 
-    On a second pass has_heuristic is true and the strength is not in scope, so
-    confirmed_use_claims is the only authority on whether this event is settled.
+    Council R3 (Cursor, MEDIUM) rejected the first version of this test: it used a
+    verbatim response, so the base's old rule suppressed the judge on BOTH passes
+    (`referenced` on the first, `heuristic_polarity == 1` on the second) and the test
+    passed unchanged. It proved nothing about `already_confirmed`.
+
+    The response is unreferenced instead, and the claim comes from MCP feedback. On
+    the second pass `has_heuristic` is true with polarity 0, so the base computes
+    `referenced = False` and QUEUES the judge — red today. Only `already_confirmed`
+    can suppress it, which is exactly the predicate under test.
     """
     prompt = "How should we solve feedback collection?"
-    response = "The right fix is the transcript watcher mines feedback usage approach."
+    response = "I don't know."
     transcript_path = tmp_path / "reingest-session.jsonl"
     _write_turn_jsonl(transcript_path, prompt, response)
     transcript = parse_transcript(transcript_path)
@@ -123,16 +163,23 @@ def test_an_already_confirmed_event_is_not_rejudged_on_reingest(engine, tmp_path
         type="fact",
         title="Transcript watcher mines feedback usage",
     ))
-    _insert_injected_whisper_log(
+    whisper_log_id = _insert_injected_whisper_log(
         engine, node_id=node_id, session_id="reingest-session", prompt=prompt,
     )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
 
+    # The claim arrives through MCP, the one caller has_llm_judge cannot see.
+    engine.submit_feedback(node_id, signal=1, source="implicit", whisper_log_id=whisper_log_id)
+
+    # First pass writes the polarity-0 heuristic row that makes the next pass a re-ingest.
     with patch(_LLM_PATCH) as first_llm:
         _record_whisper_usage_signals(engine, transcript)
-    assert not first_llm.called
+    assert not first_llm.called, "the judge ran on an event MCP had already confirmed"
 
     after_first = _lifecycle(engine, node_id)
 
+    # Second pass: has_heuristic is now true, polarity 0. Only the claim can settle it.
     with patch(_LLM_PATCH) as second_llm:
         _record_whisper_usage_signals(engine, transcript)
 
@@ -141,9 +188,16 @@ def test_an_already_confirmed_event_is_not_rejudged_on_reingest(engine, tmp_path
 
 
 def test_mcp_feedback_suppresses_the_judge_for_that_event(engine, tmp_path):
-    """#272 D3: closes the cross-caller blindness has_llm_judge cannot see (#220 13a)."""
+    """#272 D3: closes the cross-caller blindness has_llm_judge cannot see (#220 13a).
+
+    The response is deliberately UNREFERENCED. Council R2 (Cursor, MEDIUM) caught the
+    earlier fixture: it overlapped the node, so `referenced` was already true and the
+    base's `not referenced` suppressed the judge on its own — the test passed before
+    and after, proving nothing. With no textual reference, the base queues the judge
+    (red today) and only `already_confirmed` can suppress it (green after).
+    """
     prompt = "What about the retention policy?"
-    response = "Retention uses decay, stability and archival thresholds together."
+    response = "I don't know."
     transcript_path = tmp_path / "mcp-first-session.jsonl"
     _write_turn_jsonl(transcript_path, prompt, response)
     transcript = parse_transcript(transcript_path)
@@ -156,6 +210,8 @@ def test_mcp_feedback_suppresses_the_judge_for_that_event(engine, tmp_path):
     whisper_log_id = _insert_injected_whisper_log(
         engine, node_id=node_id, session_id="mcp-first-session", prompt=prompt,
     )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
 
     engine.submit_feedback(node_id, signal=1, source="implicit", whisper_log_id=whisper_log_id)
     after_feedback = _lifecycle(engine, node_id)
@@ -175,12 +231,36 @@ python -m pytest tests/test_background/test_session_watcher.py \
 ```
 
 Expected: FAIL.
-- `test_a_weak_heuristic_hit_still_reaches_the_judge` fails on `assert mock_llm.called` — today any hit
-  suppresses the judge.
-- `test_mcp_feedback_suppresses_the_judge_for_that_event` fails on `assert not mock_llm.called` — today
-  a weak hit that was already confirmed through MCP is still queued.
-- `test_a_confirming_heuristic_hit_does_not_reach_the_judge` should already PASS (a title hit sets
-  `referenced`), so it is a regression pin, not a red test.
+
+**Red (must fail today):**
+
+- `test_a_weak_heuristic_hit_still_reaches_the_judge` — fails on `assert mock_llm.called`. Today any
+  hit suppresses the judge.
+- `test_mcp_feedback_suppresses_the_judge_for_that_event` — fails on `assert not mock_llm.called`. The
+  response is unreferenced, so the base queues the judge; only `already_confirmed` can stop it.
+- `test_an_already_confirmed_event_is_not_rejudged_on_reingest` — fails on the same assertion, on the
+  re-ingest pass where `heuristic_polarity` is 0.
+
+**Green (regression pins, not red tests):**
+
+- `test_a_confirming_heuristic_hit_does_not_reach_the_judge` — a title hit already sets `referenced`,
+  so the base suppresses the judge for its own reason. It pins that the new rule does not lose that.
+
+Council round 3 (Cursor) rejected an earlier version of the re-ingest test that belonged in the second
+list while being claimed for the first. If a test in the red list passes on the first run, stop: the
+fixture is wrong, and adjusting the assertion instead would bake in a test that cannot fail.
+
+**Sanity check before implementing — the preamble must actually arm the judge.** If
+`test_a_weak_heuristic_hit_still_reaches_the_judge` fails on `mock_llm.called` even after Step 4, the
+judge is off rather than suppressed, and the test is unfalsifiable. Confirm the preamble works first:
+
+```bash
+python -m pytest tests/test_background/test_session_watcher.py \
+  -k "test_llm_judge_used_verdict_records_confirmed_use" -v
+```
+
+That pre-existing test uses the same preamble and must pass on the untouched base. If it does, the
+preamble is right and any remaining failure is the real defect.
 
 - [ ] **Step 3: Add `already_confirmed` to the row query**
 
@@ -261,7 +341,9 @@ detail of that decision.
 - [ ] **Step 6: Run the tests to verify they pass**
 
 ```bash
-python -m pytest tests/test_background/test_session_watcher.py -v 2>&1 | tail -30
+python -m pytest tests/test_background/test_session_watcher.py -v > /tmp/ormah-272-file.txt 2>&1; RC=$?
+tail -30 /tmp/ormah-272-file.txt
+echo "pytest exit=$RC"
 ```
 
 Expected: PASS, all four new tests plus every pre-existing one.
@@ -269,7 +351,9 @@ Expected: PASS, all four new tests plus every pre-existing one.
 - [ ] **Step 7: Run the full suite**
 
 ```bash
-python -m pytest tests/ -q 2>&1 | tail -20
+python -m pytest tests/ -q > /tmp/ormah-272-run.txt 2>&1; RC=$?
+tail -20 /tmp/ormah-272-run.txt
+echo "pytest exit=$RC"   # 0, or only baseline IDs failed
 ```
 
 - [ ] **Step 8: Lint and commit**
