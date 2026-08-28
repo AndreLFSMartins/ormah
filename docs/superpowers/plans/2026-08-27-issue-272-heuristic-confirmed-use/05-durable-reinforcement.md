@@ -7,8 +7,9 @@ with the one documented exception below.**
 **Files:**
 - Modify: `src/ormah/index/schema.sql` (`:243-248`, the `confirmed_use_claims` table)
 - Modify: `src/ormah/index/db.py` (`_migrate`, after the `idx_nodes_seq` block)
-- Modify: `src/ormah/engine/memory_engine.py` (`:2121` the mutator, `:855` `recall_node`, `:2805`
-  `submit_feedback`, plus the backfill call site Task 4 creates)
+- Modify: `src/ormah/engine/memory_engine.py` (`:2121` the mutator, `:2766` the `INSERT` inside
+  `_claim_confirmed_use`, `:855` `recall_node`, `:2805` `submit_feedback`, plus the backfill call
+  site Task 4 creates)
 - Modify: `src/ormah/background/session_watcher.py` (`:573`, `:610`, `:623` — the judge block, plus
   the heuristic block Task 2 creates)
 - Create: `src/ormah/background/reinforcement_retry.py`
@@ -64,21 +65,49 @@ that fails — disk full, `SQLITE_BUSY`, I/O error, not merely a crash — leave
 while the `nodes` row and the claim roll back. No ordering can enrol a filesystem in a SQLite
 transaction.
 
-What makes it safe is **where the new values come from**: the mutator computes them from the `nodes`
-row, never by incrementing the markdown it loaded, so a retry recomputes the *same* target and
-overwrites the phantom instead of compounding it. The markdown is a projection of lifecycle state,
-which is already how `decay_manager` and `importance_scorer` treat it.
+What makes it safe is **where the new values come from** — two sources, and both must be pinned:
+
+1. **The counters come from the `nodes` row**, never from incrementing the markdown that was loaded.
+   `access_count` is therefore `row["access_count"] + 1` on every attempt, so a retry recomputes the
+   *same* target and overwrites the phantom instead of compounding it.
+2. **The clock comes from the claim's `claimed_at`**, never from `datetime.now()`. Council round 1
+   (Cursor, MEDIUM, 0.92) caught that point 1 alone is not enough: `access_count` converges exactly,
+   but `stability`, `last_review` and `last_accessed` are all functions of *when the write runs*.
+   `lifecycle.reinforced_stability` takes `days_since`, derived from `now - anchor`; a sweeper
+   running six hours after the failed attempt would feed it a larger `days_since` and land on a
+   different number. Reading the clock from `claimed_at` makes the target a pure function of the
+   claim: same claim, same result, whether the apply happens inline or on a sweep days later.
+
+Point 2 also fixes a truthfulness bug that predates the retry. `last_accessed` is the decay anchor.
+A late retry stamping `datetime.now()` would tell `decay_manager` the memory was used at retry time,
+crediting it with recency it never earned. The use happened at `claimed_at`; that is what gets
+recorded.
+
+The markdown is a projection of lifecycle state, which is already how `decay_manager` and
+`importance_scorer` treat it.
 
 What remains is a window in which a reader of the *file* sees a value one step ahead of the row.
 Nothing reads the file for lifecycle, and the next run closes it. Step 1's
 `test_failed_commit_does_not_inflate_the_counter` is the proof of this property, not optional
-coverage.
+coverage — and it asserts on `stability` as well as on the counter, because point 2 is the half a
+counter-only assertion cannot see.
 
 ---
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_engine/test_confirmed_use_contract.py`:
+`tests/test_engine/test_confirmed_use_contract.py` needs these imports at the top if they are not
+already there — the helpers and tests below use all four:
+
+```python
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+
+from ormah import lifecycle
+```
+
+Then add:
 
 ```python
 def _claim_row(engine, log_id, node_id):
@@ -94,6 +123,84 @@ def _take_claim(engine, log_id, node_id):
         engine._claim_confirmed_use(
             conn, log_id, node_id, signal=1, source="explicit", strength=1.0,
         )
+
+
+def _age_for_fsrs(engine, log_id, node_id, node_days=20, claim_days=10):
+    """Push the node's last_accessed and the claim's claimed_at into the past.
+
+    Without this the FSRS assertions are vacuous. _make_nodes seeds last_accessed
+    from datetime.now(), and a claim taken milliseconds later gives days_since ~= 0
+    — so `now = claimed_at` and `now = datetime.now()` produce the SAME stability to
+    any tolerance, and the test would pass with the bug fully present.
+
+    Two different ages are required, not one. days_since is `now - last_accessed`
+    clamped at 0, so ageing only the claim would leave both variants clamped to 0
+    and still indistinguishable. With last_accessed 20 days back and claimed_at 10
+    days back, the claimed_at clock yields days_since = 10 and the wall clock yields
+    days_since = 20 — a gap the assertions can see.
+
+    The nodes row is the source the mutator reads, so ageing the row is enough; the
+    markdown is overwritten from it on the next write.
+    """
+    node_at = datetime.now(timezone.utc) - timedelta(days=node_days)
+    claim_at = datetime.now(timezone.utc) - timedelta(days=claim_days)
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "UPDATE nodes SET last_accessed = ? WHERE id = ?",
+            (node_at.isoformat(), node_id),
+        )
+        conn.execute(
+            "UPDATE confirmed_use_claims SET claimed_at = ? "
+            "WHERE whisper_log_id = ? AND node_id = ?",
+            (claim_at.strftime("%Y-%m-%d %H:%M:%S"), log_id, node_id),
+        )
+
+
+def _as_utc(claimed_at):
+    """The mutator's clock: claimed_at, as SQLite wrote it, made tz-aware.
+
+    datetime('now') emits 'YYYY-MM-DD HH:MM:SS' in UTC with no offset, so the
+    conversion is a fromisoformat plus an explicit tzinfo — never an astimezone,
+    which would treat the naive value as local time and shift it.
+    """
+    return datetime.fromisoformat(claimed_at).replace(tzinfo=timezone.utc)
+
+
+def _expected_reinforced_stability(engine, base_row, claimed_at):
+    """ONE application of the growth formula, mirroring the mutator step for step.
+
+    Recomputed rather than hardcoded: a literal would still pass if the mutator
+    stopped calling reinforced_stability at all. It mirrors the mutator exactly —
+    same gate, same anchor expression, same clock — so if the two ever diverge the
+    test fails instead of quietly asserting a different formula.
+    """
+    now = _as_utc(claimed_at)
+    last_review = (
+        datetime.fromisoformat(base_row["last_review"])
+        if base_row["last_review"]
+        else None
+    )
+    last_accessed = (
+        datetime.fromisoformat(base_row["last_accessed"])
+        if base_row["last_accessed"]
+        else None
+    )
+    if not lifecycle.reinforcement_due(
+        last_review, now, engine.settings.fsrs_reinforcement_cooldown_days
+    ):
+        return base_row["stability"]
+
+    anchor = last_accessed or last_review
+    days_since = max((now - anchor).total_seconds() / 86400, 0.0)
+    return lifecycle.reinforced_stability(
+        base_row["stability"],
+        days_since,
+        growth_factor=engine.settings.fsrs_growth_factor,
+        growth_exponent=engine.settings.fsrs_growth_exponent,
+        spacing_cap=engine.settings.fsrs_spacing_cap,
+        max_stability=engine.settings.fsrs_max_stability,
+        initial_stability=engine.settings.fsrs_initial_stability,
+    )
 
 
 def test_mutator_failure_leaves_no_residue(engine, monkeypatch):
@@ -122,31 +229,53 @@ def test_failed_commit_does_not_inflate_the_counter(engine, monkeypatch):
 
     os.replace cannot be rolled back and COMMIT runs after the transaction body, so a
     failing COMMIT leaves the markdown one step ahead of the nodes row. Because the new
-    values are computed FROM the nodes row, the retry recomputes the same target and
-    overwrites the phantom — it must not add a second increment on top of it.
+    values are computed FROM the nodes row and the clock comes FROM claimed_at, the
+    retry recomputes the same target and overwrites the phantom — it must not add a
+    second increment, nor a second stability step, on top of it.
+
+    The failure is injected through Database.transaction, NOT through conn.execute.
+    Council round 1 (Codex, MEDIUM, 1.0) proved by execution that patching the
+    connection raises AttributeError: 'sqlite3.Connection' object attribute 'execute'
+    is read-only, so the earlier draft of this test could never have run. Raising after
+    the with-body returns is behaviourally identical to a failing COMMIT: file_store.save
+    has already run and os.replace is irreversible, and the real transaction's
+    except-clause issues the ROLLBACK that discards the row and the claim.
     """
     target = _make_nodes(engine, count=1)[0]
     log_id = _seed_whisper_log(engine, target)
     _take_claim(engine, log_id, target)
+    # Required, not decorative: without it claimed_at and the wall clock are
+    # milliseconds apart and every FSRS assertion below passes with the bug present.
+    _age_for_fsrs(engine, log_id, target)
 
-    baseline = engine.db.conn.execute(
-        "SELECT access_count FROM nodes WHERE id = ?", (target,)
-    ).fetchone()["access_count"]
+    base_row = engine.db.conn.execute(
+        "SELECT access_count, stability, last_accessed, last_review FROM nodes "
+        "WHERE id = ?",
+        (target,),
+    ).fetchone()
+    baseline, baseline_stability = base_row["access_count"], base_row["stability"]
+    # The whole row is kept, not just two fields: _expected_reinforced_stability
+    # mirrors the mutator, which reads last_accessed and last_review from it too.
+    # Asserting against a value derived from what _make_nodes actually seeded, rather
+    # than from an assumption about it, is what keeps this from passing for the wrong
+    # reason if the fixture changes.
 
-    real_execute = engine.db.conn.execute
+    real_transaction = type(engine.db).transaction
 
-    def commit_fails(sql, *args, **kwargs):
-        if sql.strip().upper().startswith("COMMIT"):
+    @contextmanager
+    def commit_fails(self):
+        with real_transaction(self) as conn:
+            yield conn
             raise sqlite3.OperationalError("disk I/O error")
-        return real_execute(sql, *args, **kwargs)
 
-    monkeypatch.setattr(engine.db.conn, "execute", commit_fails)
+    monkeypatch.setattr(type(engine.db), "transaction", commit_fails)
     with pytest.raises(sqlite3.OperationalError):
         engine._record_confirmed_use(target, whisper_log_id=log_id)
     monkeypatch.undo()
 
     # The markdown ran ahead; the row and the claim did not.
-    assert engine.file_store.load(target).access_count == baseline + 1
+    phantom = engine.file_store.load(target)
+    assert phantom.access_count == baseline + 1
     assert engine.db.conn.execute(
         "SELECT access_count FROM nodes WHERE id = ?", (target,)
     ).fetchone()["access_count"] == baseline
@@ -156,10 +285,62 @@ def test_failed_commit_does_not_inflate_the_counter(engine, monkeypatch):
 
     after = _snapshot(engine, target)
     assert after["file"] == after["db"], "the stores did not converge"
-    assert engine.db.conn.execute(
-        "SELECT access_count FROM nodes WHERE id = ?", (target,)
-    ).fetchone()["access_count"] == baseline + 1, (
+    final = engine.db.conn.execute(
+        "SELECT access_count, stability, last_accessed FROM nodes WHERE id = ?",
+        (target,),
+    ).fetchone()
+    assert final["access_count"] == baseline + 1, (
         "one event produced more than one increment"
+    )
+
+    # The FSRS half of convergence: the retry must land on the SAME stability the
+    # phantom did, which is only true because the clock came from claimed_at. With
+    # datetime.now() the two attempts feed different days_since to
+    # reinforced_stability and this equality fails — that is the bug this pins.
+    assert final["stability"] == pytest.approx(phantom.stability), (
+        "the retry recomputed a different FSRS target than the failed attempt"
+    )
+    assert final["stability"] != pytest.approx(baseline_stability), (
+        "stability never moved, so the equality above proves nothing"
+    )
+
+    # And it is ONE application of the growth formula, not two compounded.
+    claimed_at = _claim_row(engine, log_id, target)["claimed_at"]
+    expected = _expected_reinforced_stability(engine, base_row, claimed_at)
+    assert final["stability"] == pytest.approx(expected), (
+        "stability compounded across the failed attempt and the retry"
+    )
+
+    # The assertion that actually kills the bug. With the wall clock the mutator would
+    # feed days_since = (now - last_accessed) = 20 days instead of the claim's 10, so
+    # this value must NOT be reachable. Computed, not hardcoded, so it tracks whatever
+    # the settings say.
+    wall_clock_target = lifecycle.reinforced_stability(
+        baseline_stability,
+        max(
+            (
+                datetime.now(timezone.utc)
+                - datetime.fromisoformat(base_row["last_accessed"])
+            ).total_seconds()
+            / 86400,
+            0.0,
+        ),
+        growth_factor=engine.settings.fsrs_growth_factor,
+        growth_exponent=engine.settings.fsrs_growth_exponent,
+        spacing_cap=engine.settings.fsrs_spacing_cap,
+        max_stability=engine.settings.fsrs_max_stability,
+        initial_stability=engine.settings.fsrs_initial_stability,
+    )
+    assert wall_clock_target != pytest.approx(expected), (
+        "the two clocks agree, so this test cannot tell them apart — widen the ages "
+        "in _age_for_fsrs"
+    )
+    assert final["stability"] != pytest.approx(wall_clock_target), (
+        "the mutator used datetime.now() instead of the claim's claimed_at"
+    )
+
+    assert final["last_accessed"] == _as_utc(claimed_at).isoformat(), (
+        "last_accessed records the retry's clock instead of when the memory was used"
     )
 
 
@@ -206,9 +387,12 @@ def test_missing_node_ends_orphaned_not_applied(engine):
     target = _make_nodes(engine, count=1)[0]
     log_id = _seed_whisper_log(engine, target)
     with engine.db.transaction() as conn:
+        # `state` named explicitly: the DEFAULT is terminal (Step 3), and a claim that
+        # starts terminal would reach 'orphaned' by never being touched at all.
         conn.execute(
-            "INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at) "
-            "VALUES (?, 'ghost-node', datetime('now'))",
+            "INSERT INTO confirmed_use_claims "
+            "(whisper_log_id, node_id, claimed_at, state) "
+            "VALUES (?, 'ghost-node', datetime('now'), 'pending')",
             (log_id,),
         )
 
@@ -222,7 +406,59 @@ def test_missing_node_ends_orphaned_not_applied(engine):
     assert row["reinforced_at"] is None
 ```
 
-`sqlite3` must be imported at the top of the file if it is not already.
+One more contract test, for the compatibility hole the DEFAULT opens (Step 3 explains the choice):
+
+```python
+def test_a_claim_written_without_state_is_not_swept(engine):
+    """#272 D5-10: an old binary's INSERT must land terminal, not pending.
+
+    Council round 1 (Codex, HIGH, 0.99) found this. The pre-#272 _claim_confirmed_use
+    inserts (whisper_log_id, node_id, claimed_at) without naming `state`, so it takes
+    whatever the column DEFAULT gives. That binary's _record_confirmed_use has no idea
+    the column exists and never marks the row applied — so if the DEFAULT were
+    'pending', the row would sit there forever and the new sweeper would reinforce it
+    again every hour, on top of the reinforcement the old binary already did.
+
+    This is not hypothetical: CLAUDE.md documents issue #238, where `make server`
+    starts a second, launchd-unmanaged process against the same store. Two binaries on
+    one database is a state this project has already been in.
+
+    The DEFAULT is therefore terminal ('legacy_unknown') and only the new code inserts
+    'pending' explicitly. This test writes the OLD statement verbatim.
+    """
+    node_id = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, node_id)
+
+    with engine.db.transaction() as conn:
+        # Verbatim the pre-#272 statement: the column list omits `state`.
+        conn.execute(
+            "INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at) "
+            "VALUES (?, ?, datetime('now'))",
+            (log_id, node_id),
+        )
+
+    row = _claim_row(engine, log_id, node_id)
+    assert row["state"] == "legacy_unknown", (
+        "an old binary's claim landed in a state the sweeper will retry forever"
+    )
+
+
+def test_the_new_claim_path_writes_pending(engine):
+    """#272 D5-10b: the guard above must not disable the feature it protects.
+
+    If _claim_confirmed_use stopped naming `state`, every new claim would inherit the
+    terminal DEFAULT and nothing would ever be swept — the durability this whole task
+    adds would be silently off, and every other test here would still pass because
+    they exercise the mutator directly. This is the test that fails in that case.
+    """
+    node_id = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, node_id)
+    _take_claim(engine, log_id, node_id)
+
+    assert _claim_row(engine, log_id, node_id)["state"] == "pending", (
+        "a fresh claim is not pending, so the sweeper can never pick it up"
+    )
+```
 
 Create `tests/test_background/test_reinforcement_retry.py`:
 
@@ -235,14 +471,19 @@ from ormah.background.reinforcement_retry import run_reinforcement_retry
 
 
 def _stale_claim(engine, log_id, node_id, minutes_ago=30):
-    """Insert a claim that was taken but never applied, old enough to be swept."""
+    """Insert a claim that was taken but never applied, old enough to be swept.
+
+    `state` is named explicitly. The column DEFAULT is the terminal 'legacy_unknown'
+    (Step 3), so an INSERT that omits it produces a row the sweeper correctly ignores
+    — which would make every test in this file pass vacuously.
+    """
     claimed_at = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
     with engine.db.transaction() as conn:
         conn.execute(
-            "INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at) "
-            "VALUES (?, ?, ?)",
+            "INSERT INTO confirmed_use_claims "
+            "(whisper_log_id, node_id, claimed_at, state) VALUES (?, ?, ?, 'pending')",
             (log_id, node_id, claimed_at),
         )
 
@@ -327,7 +568,63 @@ def test_sweeper_isolates_one_bad_node_from_the_batch(engine, seeded_claim, monk
     run_reinforcement_retry(engine)
 
     assert _snapshot(engine, node_id) != before, "a sibling failure abandoned the batch"
+
+
+def test_a_wall_of_failing_claims_does_not_starve_the_newest(
+    engine, seeded_claim, monkeypatch
+):
+    """#272 D5-11: permanently-failing claims must not monopolise every run.
+
+    Council round 1 (Codex, MEDIUM, 0.96) found this. Per-row isolation only saves the
+    rest of THIS batch; it does nothing about the next run picking the same rows. With
+    `ORDER BY claimed_at ASC LIMIT _BATCH_SIZE` and no record of attempts, _BATCH_SIZE
+    permanently-broken claims fill every batch forever and a claim taken today is never
+    tried at all — the sweeper reports itself healthy while the feature it exists to
+    deliver is dead for every new claim.
+
+    last_attempt_at plus the retry backoff is what breaks the tie: an attempted row
+    steps out of the eligible set until the backoff expires, so the next run reaches
+    past the wall. The wall here is deliberately larger than _BATCH_SIZE and OLDER than
+    the victim, so claimed_at ordering alone would never get to it.
+    """
+    log_id, node_id, before = seeded_claim
+
+    wall = _BATCH_SIZE + 5
+    for i in range(wall):
+        _stale_claim(engine, log_id, f"broken-{i}", minutes_ago=600 + i)
+    _stale_claim(engine, log_id, node_id, minutes_ago=30)
+
+    real = engine._record_confirmed_use
+
+    def flaky(target, *, whisper_log_id):
+        if target.startswith("broken-"):
+            raise OSError("disk full")
+        return real(target, whisper_log_id=whisper_log_id)
+
+    monkeypatch.setattr(engine, "_record_confirmed_use", flaky)
+
+    run_reinforcement_retry(engine)
+    assert _snapshot(engine, node_id) == before, (
+        "the wall is not large enough — the victim was reached on run 1, so run 2 "
+        "proves nothing"
+    )
+
+    run_reinforcement_retry(engine)
+
+    assert _snapshot(engine, node_id) != before, (
+        "the failing wall starved the newer claim across every run"
+    )
 ```
+
+`_BATCH_SIZE` is imported alongside `run_reinforcement_retry`:
+
+```python
+from ormah.background.reinforcement_retry import _BATCH_SIZE, run_reinforcement_retry
+```
+
+The first `run_reinforcement_retry` consumes exactly `_BATCH_SIZE` broken rows and stamps their
+`last_attempt_at`; the victim is younger than all of them and outside the first batch. The second run
+skips every stamped row, reaches the remaining 5 broken ones plus the victim, and repairs it.
 
 Add the fixture this file needs, at the top of `tests/test_background/test_reinforcement_retry.py`,
 importing the helpers the contract file already defines:
@@ -399,7 +696,8 @@ def test_migration_marks_preexisting_claims_legacy_unknown(tmp_path):
 
 ```bash
 python -m pytest tests/test_engine/test_confirmed_use_contract.py \
-  -k "residue or failed_commit or happy_path_agrees or at_most_once_on_an_applied or ends_orphaned or legacy_unknown" -v
+  -k "residue or failed_commit or happy_path_agrees or at_most_once_on_an_applied \
+      or ends_orphaned or legacy_unknown or without_state or writes_pending" -v
 python -m pytest tests/test_background/test_reinforcement_retry.py -v
 ```
 
@@ -408,7 +706,16 @@ Expected: FAIL. The contract tests fail with
 `OperationalError: no such column: state`; the sweeper file fails at import with
 `ModuleNotFoundError: No module named 'ormah.background.reinforcement_retry'`.
 
-- [ ] **Step 3: Add the column, in the schema and in the migration**
+**Read the failure text, do not just count reds.** Three of these tests can fail for a reason that
+is not the missing feature, and taking that as the expected red would hide a broken test:
+
+- `test_failed_commit_does_not_inflate_the_counter` must fail on the missing keyword argument. If it
+  fails with `AttributeError: ... 'execute' is read-only`, the `Database.transaction` patch was not
+  applied and you are looking at the defect council round 1 found — fix the test, not the source.
+- `test_a_claim_written_without_state_is_not_swept` and `test_the_new_claim_path_writes_pending`
+  must fail on `no such column: state`. Anything else means the schema edit landed early.
+
+- [ ] **Step 3: Add the column — schema, migration, and the claim that writes it**
 
 In `src/ormah/index/schema.sql`, replace the `confirmed_use_claims` table at `:243-248`:
 
@@ -422,9 +729,21 @@ CREATE TABLE IF NOT EXISTS confirmed_use_claims (
     --   applied        it landed; reinforced_at carries when
     --   legacy_unknown written before this column existed; outcome unknowable
     --   orphaned       the node is gone, so there is nothing left to reinforce
-    state          TEXT NOT NULL DEFAULT 'pending'
+    --
+    -- The DEFAULT is TERMINAL, and deliberately so. A pre-#272 binary running against
+    -- this database inserts (whisper_log_id, node_id, claimed_at) without naming this
+    -- column, and its mutator never marks anything applied. A 'pending' default would
+    -- leave that row eligible forever and the sweeper would re-reinforce it every
+    -- hour, compounding the reinforcement the old binary already performed. Two
+    -- binaries on one store is not hypothetical here — see issue #238 in CLAUDE.md.
+    -- Only the new _claim_confirmed_use writes 'pending', and it names the column.
+    state          TEXT NOT NULL DEFAULT 'legacy_unknown'
                    CHECK (state IN ('pending', 'applied', 'legacy_unknown', 'orphaned')),
     reinforced_at  TEXT,
+    -- When the sweeper last tried this claim. Without it, ORDER BY claimed_at ASC
+    -- LIMIT N lets N permanently-failing claims fill every batch forever and no new
+    -- claim is ever attempted.
+    last_attempt_at TEXT,
     PRIMARY KEY (whisper_log_id, node_id)
 );
 ```
@@ -454,17 +773,28 @@ In `src/ormah/index/db.py`, inside `_migrate`, immediately after the
                 conn.execute(
                     "ALTER TABLE confirmed_use_claims ADD COLUMN reinforced_at TEXT"
                 )
+            if claim_cols and "last_attempt_at" not in claim_cols:
+                conn.execute(
+                    "ALTER TABLE confirmed_use_claims ADD COLUMN last_attempt_at TEXT"
+                )
             if claim_cols and "state" not in claim_cols:
+                # Counted BEFORE the ALTER, because after it every row already reads
+                # legacy_unknown and there is nothing left to distinguish.
+                legacy = conn.execute(
+                    "SELECT COUNT(*) FROM confirmed_use_claims"
+                ).fetchone()[0]
                 # The column lands plain: ADD COLUMN cannot carry the CHECK. Fresh
                 # databases get the constraint from schema.sql; migrated ones rely on
                 # the writers, which only ever set the four listed values.
+                #
+                # The DEFAULT does double duty. It backfills every existing row to
+                # legacy_unknown in one statement — no UPDATE needed — and it is the
+                # same terminal default schema.sql carries, so an old binary writing
+                # into this migrated database lands terminal too.
                 conn.execute(
                     "ALTER TABLE confirmed_use_claims "
-                    "ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'"
+                    "ADD COLUMN state TEXT NOT NULL DEFAULT 'legacy_unknown'"
                 )
-                legacy = conn.execute(
-                    "UPDATE confirmed_use_claims SET state = 'legacy_unknown'"
-                ).rowcount
                 # Measured, not guessed: the size of the historical gap is logged so it
                 # can be reasoned about instead of assumed away.
                 logger.info(
@@ -474,10 +804,12 @@ In `src/ormah/index/db.py`, inside `_migrate`, immediately after the
                 )
 
             # Partial index: the sweeper only ever selects the pending rows, which are a
-            # vanishing fraction of the table.
+            # vanishing fraction of the table. Keyed on the same expression the sweeper
+            # orders by, so the batch scan stays index-only.
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_claims_pending "
-                "ON confirmed_use_claims(claimed_at) WHERE state = 'pending'"
+                "ON confirmed_use_claims(COALESCE(last_attempt_at, claimed_at)) "
+                "WHERE state = 'pending'"
             )
 ```
 
@@ -487,6 +819,31 @@ below, already carrying both columns and the `CHECK`.
 
 `db.py` needs a module logger if it has none; check for `logger = logging.getLogger(__name__)` at
 the top and add it with the `import logging` if absent.
+
+Finally, the claim itself. Because the DEFAULT is terminal, `_claim_confirmed_use` must now name
+`state` — otherwise every new claim lands `legacy_unknown` and the sweeper never sees a single row,
+which would leave this whole task shipped and inert. In `src/ormah/engine/memory_engine.py`, the
+`INSERT` inside `_claim_confirmed_use` (base `:2766-2774`):
+
+```python
+        conn.execute(
+            """
+            INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at, state)
+            SELECT wl.id, ?, datetime('now'), 'pending'
+            FROM whisper_log wl
+            WHERE wl.id = ? AND wl.was_injected = 1
+            ON CONFLICT DO NOTHING
+            """,
+            (node_id, whisper_log_id),
+        )
+```
+
+Only the column list and the `SELECT` list change — the `WHERE`, the `ON CONFLICT DO NOTHING` and
+the parameters are untouched, so the `changes()` contract every caller depends on is unchanged.
+`test_the_new_claim_path_writes_pending` is the test that fails if this edit is skipped.
+
+**This is the only edit Task 5 makes inside `_claim_confirmed_use`.** Its signature, its fail-closed
+guard and its gating logic belong to Task 1 and are not touched here.
 
 - [ ] **Step 4: Make the mutator's writes converge**
 
@@ -502,9 +859,18 @@ gives for `strength` on `_claim_confirmed_use`: a default would let a future cal
 durability in silence. Every reinforcement descends from a claim, and `_claim_confirmed_use` returns
 `False` when `whisper_log_id is None`, so no call site can reach here without one.
 
-Replace the whole body from `node = self.file_store.load(node_id)` to the end of the method. The
-lifecycle arithmetic is unchanged — what changes is that its **inputs come from the `nodes` row**,
-read inside the transaction, instead of from the markdown that was loaded:
+Rewrite the body from `node = self.file_store.load(node_id)` to the end of the method into the form
+below. **Do not delete what you do not recognise.** If the method carries code this plan does not
+show, that code is not stale — it is a neighbouring branch that landed first, and dropping it is a
+silent revert. The known case is issue #223's reversible-promotion block, which exists on
+`local-main` inside this method but not on this task's base; when both branches merge, whoever
+rebases hits a real conflict, and "the plan said replace the whole body" is not a licence to resolve
+it by deletion. Preserve any such block, keep it on the same side of the transaction it is on today,
+and report what you found rather than adapting it silently.
+
+The lifecycle arithmetic is unchanged. Two things move: its **inputs come from the `nodes` row**,
+read inside the transaction, instead of from the markdown that was loaded — and its **clock comes
+from the claim's `claimed_at`** instead of from `datetime.now()`:
 
 ```python
         node = self.file_store.load(node_id)
@@ -517,9 +883,10 @@ read inside the transaction, instead of from the markdown that was loaded:
         #
         # NOT atomic across the two stores: os.replace is irreversible and COMMIT runs
         # after this body, so a failed COMMIT can leave the markdown one step ahead.
-        # What makes that safe is computing the new values FROM the nodes row, so a
-        # retry recomputes the same target and overwrites the phantom instead of
-        # compounding it — one event, one increment.
+        # What makes that safe is that the target is a pure function of the claim:
+        # the counters come FROM the nodes row and the clock comes FROM claimed_at, so
+        # a retry recomputes the SAME values and overwrites the phantom instead of
+        # compounding it — one event, one increment, one stability step.
         with self.db.transaction() as conn:
             conn.execute(
                 "UPDATE confirmed_use_claims SET state = 'applied', "
@@ -532,6 +899,14 @@ read inside the transaction, instead of from the markdown that was loaded:
                 # the same shape _claim_confirmed_use uses. Nothing may sit between the
                 # UPDATE and this read.
                 return
+
+            # reinforced_at records when the write ran; claimed_at is when the memory
+            # was actually used, and that is the clock the lifecycle values use.
+            claim = conn.execute(
+                "SELECT claimed_at FROM confirmed_use_claims "
+                "WHERE whisper_log_id = ? AND node_id = ?",
+                (whisper_log_id, node_id),
+            ).fetchone()
 
             row = conn.execute(
                 "SELECT access_count, last_accessed, stability, last_review "
@@ -550,7 +925,19 @@ read inside the transaction, instead of from the markdown that was loaded:
                 )
                 return
 
-            now = datetime.now(timezone.utc)
+            # Issue #272 (council round 1, Cursor): the clock is the claim's, not the
+            # wall clock. reinforced_stability is a function of days_since, so a sweep
+            # six hours after a failed attempt would compute a DIFFERENT target and the
+            # convergence promise above would hold for access_count only. Sourcing it
+            # from claimed_at makes the whole target a pure function of the claim.
+            #
+            # It is also the honest value: last_accessed is the decay anchor, and a late
+            # retry stamping the wall clock would credit the memory with recency it
+            # never earned. datetime('now') writes UTC with no offset, so the tzinfo is
+            # attached explicitly — astimezone would read the naive value as local time.
+            now = datetime.fromisoformat(claim["claimed_at"]).replace(
+                tzinfo=timezone.utc
+            )
             stability = row["stability"]
             last_review = (
                 datetime.fromisoformat(row["last_review"]) if row["last_review"] else None
@@ -609,17 +996,31 @@ The `anchor` expression keeps the base's exact shape (`last_accessed or last_rev
 guard) so the semantics are unchanged; only the source of the two values moves from the file to the
 row. If they ever disagree, the row wins — which is the point.
 
+`now` no longer means "when this ran". Everything downstream of it — the `reinforcement_due` gate,
+`days_since`, `last_review`, `last_accessed` — is now anchored to `claimed_at`. On the happy path
+the two differ by milliseconds and nothing observable changes; on a retry the difference is the
+whole point. `reinforced_at`, set by the `UPDATE` above, is the one field that still records the
+wall clock, because it answers a different question: *when did the write land*, not *when was the
+memory used*. Keep them distinct.
+
 Append to the method's docstring, after the existing lock-order paragraph:
 
 ```
         Issue #272: the claim's outcome commits with this write, so a reinforcement
         that never landed stays visible as state = 'pending' and
-        run_reinforcement_retry repairs it. The new values are computed from the
-        nodes row rather than from the loaded markdown, which makes the retry
-        idempotent: os.replace cannot be rolled back and COMMIT runs after this
-        body, so a failed COMMIT can leave the file one step ahead — recomputing
-        from the row overwrites that phantom instead of compounding it. The
-        markdown is a projection of the lifecycle state, not a second source of it.
+        run_reinforcement_retry repairs it. The retry is idempotent because the
+        target is a pure function of the claim: the counters come from the nodes
+        row rather than from the loaded markdown, and the clock comes from
+        claimed_at rather than from datetime.now(). os.replace cannot be rolled
+        back and COMMIT runs after this body, so a failed COMMIT can leave the file
+        one step ahead — recomputing the same values overwrites that phantom
+        instead of compounding it. The markdown is a projection of the lifecycle
+        state, not a second source of it.
+
+        claimed_at is also the truthful clock. last_accessed is the decay anchor,
+        and a sweep hours after the fact stamping datetime.now() would credit the
+        memory with recency it never earned. reinforced_at, not these fields,
+        records when the write itself landed.
 ```
 
 - [ ] **Step 5: Update every call site**
@@ -733,8 +1134,12 @@ _record_confirmed_use runs after that transaction commits with its exception iso
 Before #272 a transient failure there was permanent: the claim was taken, so nothing
 retried. The claim now carries a state, and this job sweeps the rows still 'pending'.
 
-'legacy_unknown' (written before the state column existed) and 'orphaned' (the node is
-gone) are terminal and never swept.
+'legacy_unknown' (written before the state column existed, or by a binary that predates
+it) and 'orphaned' (the node is gone) are terminal and never swept.
+
+Each attempt stamps last_attempt_at, and an attempted row is ineligible until the
+backoff expires. That is what stops a wall of permanently-failing claims from filling
+every batch and starving every newer claim.
 
 Not LLM-gated, so it keeps working under ORMAH_LLM_PROVIDER=none.
 """
@@ -754,6 +1159,16 @@ _GRACE_MINUTES = 5
 # file I/O under the memory lock, while that job is pure SQL.
 _BATCH_SIZE = 200
 
+# How long an attempted-and-still-pending claim steps out of the eligible set.
+#
+# Without this the job starves: `ORDER BY claimed_at ASC LIMIT _BATCH_SIZE` with no
+# record of attempts lets _BATCH_SIZE permanently-failing claims fill every batch
+# forever, so a claim taken today is never tried once. Per-row exception isolation
+# does not help — it saves the rest of THIS batch, and the next run selects the same
+# rows. Deliberately longer than the hourly interval so a broken row is retried at
+# most once per couple of runs rather than every run.
+_RETRY_BACKOFF_MINUTES = 180
+
 
 def run_reinforcement_retry(engine) -> None:
     """Re-apply reinforcements for claims left unapplied."""
@@ -764,14 +1179,32 @@ def run_reinforcement_retry(engine) -> None:
             FROM confirmed_use_claims
             WHERE state = 'pending'
               AND claimed_at < datetime('now', ?)
-            ORDER BY claimed_at ASC
+              AND (last_attempt_at IS NULL OR last_attempt_at < datetime('now', ?))
+            ORDER BY COALESCE(last_attempt_at, claimed_at) ASC
             LIMIT ?
             """,
-            (f"-{_GRACE_MINUTES} minutes", _BATCH_SIZE),
+            (
+                f"-{_GRACE_MINUTES} minutes",
+                f"-{_RETRY_BACKOFF_MINUTES} minutes",
+                _BATCH_SIZE,
+            ),
         ).fetchall()
 
         if not rows:
             return
+
+        # Stamped BEFORE the loop, in its own committed transaction, for two reasons.
+        # A row whose reinforcement raises would otherwise never record the attempt —
+        # the mutator rolls its own transaction back — and a process killed mid-batch
+        # would leave no trace either. Both cases would reopen the starvation this
+        # column exists to close. Marking a row that then succeeds costs nothing: it
+        # leaves 'pending' only if it failed, and success makes it terminal anyway.
+        with engine.db.transaction() as conn:
+            conn.executemany(
+                "UPDATE confirmed_use_claims SET last_attempt_at = datetime('now') "
+                "WHERE whisper_log_id = ? AND node_id = ?",
+                [(r["whisper_log_id"], r["node_id"]) for r in rows],
+            )
 
         repaired = 0
         for row in rows:
@@ -884,11 +1317,21 @@ lost the reinforcement permanently — and the mutator was not atomic with itsel
 so a half-applied write left markdown and database diverged.
 
 confirmed_use_claims gains a state: pending, applied, legacy_unknown, orphaned.
-The mutator now computes the new lifecycle values FROM the nodes row rather than
-by incrementing the markdown it loaded, which makes the write idempotent: a
-failed COMMIT after os.replace leaves the file one step ahead, and the retry
-recomputes the same target and overwrites it instead of compounding it. This is
-convergence, not atomicity — os.replace cannot join a SQLite transaction.
+The mutator now makes its target a pure function of the claim — the counters come
+FROM the nodes row instead of from the markdown it loaded, and the clock comes
+FROM claimed_at instead of from datetime.now(). That is what makes the write
+idempotent: a failed COMMIT after os.replace leaves the file one step ahead, and
+the retry recomputes the same values and overwrites it instead of compounding
+them. This is convergence, not atomicity — os.replace cannot join a SQLite
+transaction. Sourcing the clock from claimed_at is also the truthful choice:
+last_accessed is the decay anchor, and a sweep hours later stamping the wall
+clock would credit the memory with recency it never earned.
+
+The state DEFAULT is terminal, not 'pending'. A pre-#272 binary inserts without
+naming the column and never marks anything applied, so a 'pending' default would
+leave its rows eligible forever and the sweeper would re-reinforce them every
+hour — issue #238's two-processes-one-store, which this repo has already seen.
+Only the new claim path writes 'pending', and it names the column.
 
 Pre-existing claims become legacy_unknown, never applied. The premise of this fix
 is that some claims lost their reinforcement; the old schema cannot tell those
@@ -899,6 +1342,9 @@ Calling file_store inside db.transaction() is safe in this method only: the
 serialized decorator already holds _memory_operation_lock and FileStore shares
 that RLock, so the call re-enters rather than inverting the memory->db order.
 
-reinforcement_retry sweeps the pending claims past a 5-minute grace margin. It is
-not LLM-gated, so it survives ORMAH_LLM_PROVIDER=none."
+reinforcement_retry sweeps the pending claims past a 5-minute grace margin,
+stamping last_attempt_at so an attempted row steps out of the eligible set until
+the backoff expires. Without that, a batch of permanently-failing claims would
+fill every run and no newer claim would ever be tried. It is not LLM-gated, so it
+survives ORMAH_LLM_PROVIDER=none."
 ```
