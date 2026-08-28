@@ -51,9 +51,14 @@ route that can still confirm them. A boot migration backfills rows the defect al
   separate transactions, and #238's second unmanaged process can write into the gap. This applies
   to Task 4; the live path (Tasks 2–3) has the strength in hand from `_node_usage_evidence` and
   never reads the column.
-- **Never modify `_record_confirmed_use`'s body, and never call it inside an open transaction** — it
-  does file I/O and would take `db_lock` before `memory_lock`, inverting every serialized writer's
-  order (#220 §4.3).
+- **Tasks 1–4: never modify `_record_confirmed_use`'s body, and never call it inside an open
+  transaction** — it does file I/O and would take `db_lock` before `memory_lock`, inverting every
+  serialized writer's order (#220 §4.3). **Task 5 reorders that body, and only that body:**
+  `FileStore` is constructed with the engine's own `_memory_operation_lock` (`:109`, `:1424`), an
+  `RLock` that `@_serialized_memory_operation` already holds when the body runs — so a `file_store`
+  call made from inside the method's *own* transaction re-enters a lock this thread owns rather than
+  taking `db_lock` first. The rule is unchanged for every **caller**, Task 5's included: they all
+  still invoke the mutator outside their own transaction.
 
 ## Task Order and Dependencies
 
@@ -64,9 +69,11 @@ route that can still confirm them. A boot migration backfills rows the defect al
 | 2 | `02-watcher-claim.md` | Heuristic block claims and reinforces | 1 |
 | 3 | `03-judge-suppression.md` | Judge suppression re-anchored on confirmation | 2 |
 | 4 | `04-backfill.md` | Boot migration backfills historical rows | 1 |
+| 5 | `05-durable-reinforcement.md` | Reinforcement survives a failed write (#220 debt) | 2, 3, 4 |
 
 Tasks 1→2→3 are strictly sequential — each consumes the previous signature. Task 4 needs only Task 1
-and may run in parallel with 2 and 3.
+and may run in parallel with 2 and 3. Task 5 is last: it changes `_record_confirmed_use`'s signature
+and must therefore see every call site, including the two that Tasks 2 and 4 create.
 
 ## Shared Interfaces — defined in Task 1, consumed by Tasks 2, 3 and 4
 
