@@ -110,7 +110,15 @@ def test_a_weak_heuristic_hit_still_reaches_the_judge(engine, tmp_path):
     could neither claim nor be judged. That is 1,587 of the 1,629 measured rows.
     """
     prompt = "What about the retention policy?"
-    response = "Retention uses decay, stability and archival thresholds together."
+    # MEASURED by executing _node_usage_evidence, not reasoned about: this text gives
+    # match="token_overlap", overlap_ratio 0.6, strength 0.436 — a REAL weak hit, below
+    # the 0.80 floor. The previous text ("Retention uses decay, stability and archival
+    # thresholds together.") gave overlap_ratio 0.4, under OVERLAP_GATE 0.5, so the
+    # match was "none": no hit, polarity 0, and NO affinity row written at all.
+    response = (
+        "The decay process lowers stability, and archival thresholds eventually "
+        "move things along."
+    )
     transcript_path = tmp_path / "weak-to-judge-session.jsonl"
     _write_turn_jsonl(transcript_path, prompt, response)
     transcript = parse_transcript(transcript_path)
@@ -157,7 +165,15 @@ def test_an_irrelevant_verdict_overrides_the_weak_heuristic_affinity(engine, tmp
     records the negative verdict either way. The affinity row is the falsifier.
     """
     prompt = "What about the retention policy?"
-    response = "Retention uses decay, stability and archival thresholds together."
+    # MEASURED by executing _node_usage_evidence, not reasoned about: this text gives
+    # match="token_overlap", overlap_ratio 0.6, strength 0.436 — a REAL weak hit, below
+    # the 0.80 floor. The previous text ("Retention uses decay, stability and archival
+    # thresholds together.") gave overlap_ratio 0.4, under OVERLAP_GATE 0.5, so the
+    # match was "none": no hit, polarity 0, and NO affinity row written at all.
+    response = (
+        "The decay process lowers stability, and archival thresholds eventually "
+        "move things along."
+    )
     transcript_path = tmp_path / "irrelevant-override-session.jsonl"
     _write_turn_jsonl(transcript_path, prompt, response)
     transcript = parse_transcript(transcript_path)
@@ -228,7 +244,15 @@ def test_explicit_feedback_outranks_a_later_judge_verdict(engine, tmp_path):
     attribution back to itself.
     """
     prompt = "What about the retention policy?"
-    response = "Retention uses decay, stability and archival thresholds together."
+    # MEASURED by executing _node_usage_evidence, not reasoned about: this text gives
+    # match="token_overlap", overlap_ratio 0.6, strength 0.436 — a REAL weak hit, below
+    # the 0.80 floor. The previous text ("Retention uses decay, stability and archival
+    # thresholds together.") gave overlap_ratio 0.4, under OVERLAP_GATE 0.5, so the
+    # match was "none": no hit, polarity 0, and NO affinity row written at all.
+    response = (
+        "The decay process lowers stability, and archival thresholds eventually "
+        "move things along."
+    )
     transcript_path = tmp_path / "explicit-outranks-session.jsonl"
     _write_turn_jsonl(transcript_path, prompt, response)
     transcript = parse_transcript(transcript_path)

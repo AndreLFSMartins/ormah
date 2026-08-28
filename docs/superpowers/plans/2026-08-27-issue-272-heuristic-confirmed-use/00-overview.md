@@ -60,6 +60,23 @@ route that can still confirm them. A boot migration backfills rows the defect al
   taking `db_lock` first. The rule is unchanged for every **caller**, Task 5's included: they all
   still invoke the mutator outside their own transaction.
 
+- **A fixture's prose is not evidence — measure it.** Five fixtures in this plan asserted a
+  condition they did not produce, and each passed with its target bug fully present: one patched
+  `sqlite3.Connection.execute` (read-only, raises `AttributeError`, so it never ran); one settled the
+  event before the code under test could run; one used a `response` whose `overlap_ratio` was 0.4,
+  under `OVERLAP_GATE` 0.5, so `_node_usage_evidence` returned `match: "none"` and no heuristic path
+  was touched — inherited by two further tests; one parametrized `(0.40, 0.7799)` pair collapsed to
+  the same recomputed 0.40 because the seeded `evidence` carried no `overlap_ratio`. **Before relying
+  on a fixture, execute the function that classifies it** (`_node_usage_evidence`,
+  `strength_from_evidence`) and confirm the real `match`, `overlap_ratio` and `strength`. For every
+  test, name the one line of implementation you would break to turn it red; if you cannot, the test
+  is defective.
+- **`~/.config/ormah/.env` sets `ORMAH_LLM_PROVIDER=claude_cli`, an invalid value, and `config.py`
+  resolves `env_file` from a FIXED path — not from `HOME`.** So overriding `HOME` does not isolate
+  you from it, and constructing `Settings()` directly can fail for reasons that have nothing to do
+  with your change. Measured during the Task 3 fixture audit. Export `ORMAH_LLM_PROVIDER=none` for
+  standalone scripts if it bites; the pytest suite currently neutralizes it some other way.
+
 - **Every `file:line` in this plan was measured against the BASE, before any task ran.** Tasks edit
   the same two files, so later tasks' citations drift by the lines earlier tasks added. Measured by
   the pre-flight scan: Task 3's `session_watcher.py:588-595` (the judge's affinity write) sits around

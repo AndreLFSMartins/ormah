@@ -57,8 +57,17 @@ migrated.
 Add to `tests/test_engine/test_confirmed_use_contract.py`:
 
 ```python
-def _seed_heuristic_signal(engine, node_id, whisper_log_id, strength, match="node_id"):
-    """Write a positive heuristic signal row as the pre-#272 code would have."""
+def _seed_heuristic_signal(
+    engine, node_id, whisper_log_id, strength, match="node_id", overlap_ratio=None
+):
+    """Write a positive heuristic signal row as the pre-#272 code would have.
+
+    ``strength`` lands in the COLUMN only, which is exactly what the backfill
+    refuses to trust. ``overlap_ratio``, when given, goes into ``evidence`` — and
+    that is the value ``strength_from_evidence`` actually recomputes from. Seeding
+    a ``token_overlap`` case without it makes every such case collapse to
+    ``OVERLAP_FLOOR`` (0.40), no matter what the column says.
+    """
     engine.db.conn.execute(
         """
         INSERT INTO signals
@@ -67,7 +76,16 @@ def _seed_heuristic_signal(engine, node_id, whisper_log_id, strength, match="nod
         VALUES (?, ?, 'whisper_referenced', 1, ?, 'transcript_watcher_heuristic',
                 's1', 'transcript', 'myproject', 'h', ?, datetime('now'))
         """,
-        (whisper_log_id, node_id, strength, json.dumps({"match": match})),
+        (
+            whisper_log_id,
+            node_id,
+            strength,
+            json.dumps(
+                {"match": match}
+                if overlap_ratio is None
+                else {"match": match, "overlap_ratio": overlap_ratio}
+            ),
+        ),
     )
     engine.db.conn.commit()
 
@@ -105,13 +123,30 @@ def test_backfill_is_idempotent(engine):
     assert _snapshot(engine, target) == after_first, "the backfill reinforced twice"
 
 
-@pytest.mark.parametrize("strength,match", [(0.40, "token_overlap"), (0.7799, "token_overlap")])
-def test_backfill_skips_rows_below_the_floor(engine, strength, match):
-    """#272 D4: the backfill uses the same floor as the live path."""
+# MEASURED: overlap_ratio, not the strength column, is what the backfill recomputes
+# from. Without it BOTH cases collapse to OVERLAP_FLOOR 0.40 and the pair is one test
+# run twice, while reading as if it bracketed the floor. Verified:
+#   token_overlap_strength(0.5)    -> 0.40
+#   token_overlap_strength(8.7428) -> 0.7799   (asymptotic, still strictly under 0.80)
+@pytest.mark.parametrize("strength,match,overlap_ratio", [
+    (0.40, "token_overlap", 0.5),
+    (0.7799, "token_overlap", 8.7428),
+])
+def test_backfill_skips_rows_below_the_floor(engine, strength, match, overlap_ratio):
+    """#272 D4: the backfill uses the same floor as the live path.
+
+    The two cases must recompute to DIFFERENT strengths (0.40 and ~0.7799), both
+    under the 0.80 floor — see the measurement above the parametrize. Passing
+    overlap_ratio through is what makes them differ; drop it and this is one test
+    run twice.
+    """
     ids = _make_nodes(engine, count=1)
     target = ids[0]
     log_id = _seed_whisper_log(engine, target)
-    _seed_heuristic_signal(engine, target, log_id, strength=strength, match=match)
+    _seed_heuristic_signal(
+        engine, target, log_id, strength=strength, match=match,
+        overlap_ratio=overlap_ratio,
+    )
 
     before = _snapshot(engine, target)
     engine._migrate_heuristic_confirmed_use()
