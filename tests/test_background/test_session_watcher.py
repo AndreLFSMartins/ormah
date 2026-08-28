@@ -2770,3 +2770,331 @@ def test_one_failing_node_does_not_skip_the_rest_of_the_batch(engine, tmp_path):
     assert _lifecycle(engine, second_id) != before_second, (
         "the first node's failure skipped the second node's reinforcement"
     )
+
+
+def test_a_weak_heuristic_hit_still_reaches_the_judge(engine, tmp_path):
+    """#272 D3: below the floor, the judge is the only route left — do not suppress it.
+
+    Before #272 any heuristic hit suppressed the judge, so a token_overlap match
+    could neither claim nor be judged. That is 1,587 of the 1,629 measured rows.
+    """
+    prompt = "What about the retention policy?"
+    # MEASURED by executing _node_usage_evidence, not reasoned about: this text gives
+    # match="token_overlap", overlap_ratio 0.6, strength 0.436 — a REAL weak hit, below
+    # the 0.80 floor. The previous text ("Retention uses decay, stability and archival
+    # thresholds together.") gave overlap_ratio 0.4, under OVERLAP_GATE 0.5, so the
+    # match was "none": no hit, polarity 0, and NO affinity row written at all.
+    response = (
+        "The decay process lowers stability, and archival thresholds eventually "
+        "move things along."
+    )
+    transcript_path = tmp_path / "weak-to-judge-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Decay lowers stability until archival thresholds move a node out of working.",
+        type="fact",
+        title="Decay stability archival thresholds",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="weak-to-judge-session", prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    llm_response = json.dumps({"verdicts": [{
+        "whisper_log_id": whisper_log_id,
+        "verdict": "used",
+        "confidence": 0.95,
+        "reason": "The answer applies the retention guidance.",
+    }]})
+    before = _lifecycle(engine, node_id)
+    with patch(_LLM_PATCH, return_value=llm_response) as mock_llm:
+        _record_whisper_usage_signals(engine, transcript)
+
+    assert mock_llm.called, "a weak heuristic hit suppressed the judge"
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert claim is not None, "the judge confirmed nothing for a weak heuristic hit"
+    assert _lifecycle(engine, node_id) != before
+
+
+def test_an_irrelevant_verdict_overrides_the_weak_heuristic_affinity(engine, tmp_path):
+    """#272, council (Codex HIGH): the judge outranks the heuristic for the same event.
+
+    This task is what makes the conflict reachable: a token_overlap hit now gets both
+    an affinity +1 from the heuristic block AND a trip to the judge. affinity has a
+    unique (node_id, whisper_log_id) index and _insert_affinity is ON CONFLICT DO
+    NOTHING, so without Step 5 the judge's -1 is silently dropped and retrieval keeps
+    consuming a +1 the judge just rejected.
+
+    Red before Step 5 on the final row's polarity, not on the signal: the signals table
+    records the negative verdict either way. The affinity row is the falsifier.
+    """
+    prompt = "What about the retention policy?"
+    # MEASURED by executing _node_usage_evidence, not reasoned about: this text gives
+    # match="token_overlap", overlap_ratio 0.6, strength 0.436 — a REAL weak hit, below
+    # the 0.80 floor. The previous text ("Retention uses decay, stability and archival
+    # thresholds together.") gave overlap_ratio 0.4, under OVERLAP_GATE 0.5, so the
+    # match was "none": no hit, polarity 0, and NO affinity row written at all.
+    response = (
+        "The decay process lowers stability, and archival thresholds eventually "
+        "move things along."
+    )
+    transcript_path = tmp_path / "irrelevant-override-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Decay lowers stability until archival thresholds move a node out of working.",
+        type="fact",
+        title="Decay stability archival thresholds",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="irrelevant-override-session", prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    llm_response = json.dumps({"verdicts": [{
+        "whisper_log_id": whisper_log_id,
+        "verdict": "irrelevant",
+        "confidence": 0.95,
+        "reason": "The answer never uses the injected memory.",
+    }]})
+    with patch(_LLM_PATCH, return_value=llm_response) as mock_llm:
+        _record_whisper_usage_signals(engine, transcript)
+
+    assert mock_llm.called, "the weak hit never reached the judge — check Step 4"
+
+    affinity = engine.db.conn.execute(
+        "SELECT signal, source FROM affinity WHERE node_id = ? AND whisper_log_id = ?",
+        (node_id, whisper_log_id),
+    ).fetchall()
+    assert len(affinity) == 1, "the unique index should keep exactly one row per event"
+    assert affinity[0]["signal"] == -1, (
+        "the heuristic's +1 survived an irrelevant verdict — retrieval will keep boosting "
+        "a memory the judge rejected"
+    )
+    assert affinity[0]["source"] == "auto_llm_judge"
+
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert claim is None, "a negative verdict took a confirmed-use claim"
+
+
+def test_explicit_feedback_outranks_a_later_judge_verdict(engine, tmp_path):
+    """#272: precedence is explicit > auto_llm_judge > auto_heuristic, not last-write-wins.
+
+    Step 5's UPDATE is scoped to source = 'auto_heuristic' precisely so a human's
+    explicit feedback is never overwritten by an automated verdict. Drop that WHERE
+    clause and this goes red.
+
+    The feedback is NEGATIVE, and that is load-bearing — not a stylistic choice.
+    An earlier draft used signal=1 and could not fail: a positive explicit feedback
+    takes the _claim_confirmed_use latch synchronously inside _submit_feedback_locked
+    (memory_engine.py:2842-2849), so Step 3's already_confirmed reads True, Step 4's
+    `settled` is True, the judge is never queued, the patched LLM is never called and
+    Step 5's UPDATE never runs at all. The assertion then passed on Task 2's
+    ON CONFLICT DO NOTHING alone, with the scoping clause deleted or intact.
+
+    signal=-1 is the path that reaches Step 5: _claim_confirmed_use returns False for
+    any signal != 1, so the affinity row is written as 'explicit' while NO claim is
+    taken. already_confirmed is False, `confirms` is False (the response only
+    token-overlaps, whose band supremum 0.78 sits under the 0.80 floor), so the event
+    is unsettled, the judge runs, and its UPDATE fires against a row whose source is
+    'explicit'. Only the `AND source = 'auto_heuristic'` clause leaves it standing.
+
+    It is also the real scenario: a human marked a memory as NOT useful, which does
+    not settle the event, and the judge's later verdict must not overwrite the
+    attribution back to itself.
+    """
+    prompt = "What about the retention policy?"
+    # MEASURED by executing _node_usage_evidence, not reasoned about: this text gives
+    # match="token_overlap", overlap_ratio 0.6, strength 0.436 — a REAL weak hit, below
+    # the 0.80 floor. The previous text ("Retention uses decay, stability and archival
+    # thresholds together.") gave overlap_ratio 0.4, under OVERLAP_GATE 0.5, so the
+    # match was "none": no hit, polarity 0, and NO affinity row written at all.
+    response = (
+        "The decay process lowers stability, and archival thresholds eventually "
+        "move things along."
+    )
+    transcript_path = tmp_path / "explicit-outranks-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Decay lowers stability until archival thresholds move a node out of working.",
+        type="fact",
+        title="Decay stability archival thresholds",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="explicit-outranks-session", prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    # A human says this memory was NOT useful, through MCP. This writes the affinity
+    # row as 'explicit' WITHOUT taking the claim (signal != 1), which is what leaves
+    # the event unsettled so the judge below actually runs. See the docstring.
+    engine.submit_feedback(node_id, signal=-1, source="explicit", whisper_log_id=whisper_log_id)
+
+    llm_response = json.dumps({"verdicts": [{
+        "whisper_log_id": whisper_log_id,
+        "verdict": "irrelevant",
+        "confidence": 0.95,
+        "reason": "The answer never uses the injected memory.",
+    }]})
+    with patch(_LLM_PATCH, return_value=llm_response) as mock_judge:
+        _record_whisper_usage_signals(engine, transcript)
+
+    affinity = engine.db.conn.execute(
+        "SELECT signal, source FROM affinity WHERE node_id = ? AND whisper_log_id = ?",
+        (node_id, whisper_log_id),
+    ).fetchone()
+    assert affinity["source"] == "explicit", "an automated verdict overwrote explicit feedback"
+    assert affinity["signal"] == -1, "the human's negative signal was replaced"
+
+    # The guard on the guard: if the judge never ran, the two assertions above hold
+    # trivially and prove nothing about the scoping clause. This is what the earlier
+    # signal=1 draft failed silently.
+    assert mock_judge.called, (
+        "the judge never ran, so Step 5's UPDATE never executed and this test cannot "
+        "distinguish a scoped UPDATE from an unscoped one"
+    )
+
+
+def test_a_confirming_heuristic_hit_does_not_reach_the_judge(engine, tmp_path):
+    """#272 D3: judging an event that already confirmed is wasted spend.
+
+    Council (Cursor, MEDIUM) on the final plan: asserting only `not mock_llm.called`
+    is not enough. The plan itself notes this already passes on the old `referenced`
+    rule, so on its own it pins nothing about #272. Worse, an implementation that
+    calls _claim_confirmed_use only when `not llm_judge_enabled` would keep every
+    Task 2 test green (the judge is off by default there) AND this one green — while
+    in production, with the judge armed, a verbatim hit would be neither claimed nor
+    judged. The claim and lifecycle assertions below are what falsify that.
+    """
+    prompt = "How should we solve feedback collection?"
+    response = "The right fix is the transcript watcher mines feedback usage approach."
+    transcript_path = tmp_path / "strong-skips-judge-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="The transcript watcher mines feedback usage from completed transcripts.",
+        type="fact",
+        title="Transcript watcher mines feedback usage",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="strong-skips-judge-session", prompt=prompt,
+    )
+    # The judge is ENABLED here on purpose: with it off, "not called" would be
+    # vacuously true and the test would pass against any suppression rule at all.
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    before = _lifecycle(engine, node_id)
+    with patch(_LLM_PATCH) as mock_llm:
+        _record_whisper_usage_signals(engine, transcript)
+
+    assert not mock_llm.called, "a confirming heuristic hit was judged anyway"
+
+    # The judge is ARMED here. These two are what stop a claim-only-when-judge-disabled
+    # implementation from shipping green.
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ? AND node_id = ?",
+        (whisper_log_id, node_id),
+    ).fetchone()
+    assert claim is not None, (
+        "a verbatim hit took no claim while the judge was enabled — it is now neither "
+        "confirmed nor judged"
+    )
+    assert _lifecycle(engine, node_id) != before, "the claim was taken but nothing reinforced"
+
+
+def test_an_already_confirmed_event_is_not_rejudged_on_reingest(engine, tmp_path):
+    """#272 D3: on RE-INGEST the claim table is the only authority left.
+
+    Council R3 (Cursor, MEDIUM) rejected the first version of this test: it used a
+    verbatim response, so the base's old rule suppressed the judge on BOTH passes
+    (`referenced` on the first, `heuristic_polarity == 1` on the second) and the test
+    passed unchanged. It proved nothing about `already_confirmed`.
+
+    The response is unreferenced instead, and the claim comes from MCP feedback. On
+    the second pass `has_heuristic` is true with polarity 0, so the base computes
+    `referenced = False` and QUEUES the judge — red today. Only `already_confirmed`
+    can suppress it, which is exactly the predicate under test.
+    """
+    prompt = "How should we solve feedback collection?"
+    response = "I don't know."
+    transcript_path = tmp_path / "reingest-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="The transcript watcher mines feedback usage from completed transcripts.",
+        type="fact",
+        title="Transcript watcher mines feedback usage",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="reingest-session", prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    # The claim arrives through MCP, the one caller has_llm_judge cannot see.
+    engine.submit_feedback(node_id, signal=1, source="implicit", whisper_log_id=whisper_log_id)
+
+    # First pass writes the polarity-0 heuristic row that makes the next pass a re-ingest.
+    with patch(_LLM_PATCH) as first_llm:
+        _record_whisper_usage_signals(engine, transcript)
+    assert not first_llm.called, "the judge ran on an event MCP had already confirmed"
+
+    after_first = _lifecycle(engine, node_id)
+
+    # Second pass: has_heuristic is now true, polarity 0. Only the claim can settle it.
+    with patch(_LLM_PATCH) as second_llm:
+        _record_whisper_usage_signals(engine, transcript)
+
+    assert not second_llm.called, "a settled event was sent to the judge on re-ingest"
+    assert _lifecycle(engine, node_id) == after_first, "the event reinforced twice"
+
+
+def test_mcp_feedback_suppresses_the_judge_for_that_event(engine, tmp_path):
+    """#272 D3: closes the cross-caller blindness has_llm_judge cannot see (#220 13a).
+
+    The response is deliberately UNREFERENCED. Council R2 (Cursor, MEDIUM) caught the
+    earlier fixture: it overlapped the node, so `referenced` was already true and the
+    base's `not referenced` suppressed the judge on its own — the test passed before
+    and after, proving nothing. With no textual reference, the base queues the judge
+    (red today) and only `already_confirmed` can suppress it (green after).
+    """
+    prompt = "What about the retention policy?"
+    response = "I don't know."
+    transcript_path = tmp_path / "mcp-first-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Decay lowers stability until archival thresholds move a node out of working.",
+        type="fact",
+        title="Decay stability archival thresholds",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="mcp-first-session", prompt=prompt,
+    )
+    engine.settings.llm_provider = "ollama"
+    engine.settings.feedback_llm_judge_enabled = True
+
+    engine.submit_feedback(node_id, signal=1, source="implicit", whisper_log_id=whisper_log_id)
+    after_feedback = _lifecycle(engine, node_id)
+
+    with patch(_LLM_PATCH) as mock_llm:
+        _record_whisper_usage_signals(engine, transcript)
+
+    assert not mock_llm.called, "an event already confirmed through MCP was judged again"
+    assert _lifecycle(engine, node_id) == after_feedback, "the event reinforced twice"
