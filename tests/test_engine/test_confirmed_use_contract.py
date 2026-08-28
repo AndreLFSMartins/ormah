@@ -1204,6 +1204,116 @@ def test_backfill_isolates_one_nodes_failure(engine):
     assert _snapshot(engine, second) != before_second, "node 2 lost its backfill"
 
 
+def test_backfill_does_not_advance_last_accessed_to_boot_time(engine):
+    """Council #272 finding 1: a historical use must not be recorded as use now.
+
+    last_accessed sits BETWEEN the signal's logged_at and boot time, so with the
+    truthful clock max(claimed_at, last_accessed) keeps it; with the buggy boot
+    clock the claim wins and drags it to now — which is exactly the RED.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _seed_heuristic_signal(engine, target, log_id, strength=0.98)
+    event_time = datetime.now(timezone.utc) - timedelta(days=10)
+    anchor_time = datetime.now(timezone.utc) - timedelta(days=2)
+    engine.db.conn.execute(
+        "UPDATE whisper_log SET logged_at = ? WHERE id = ?",
+        (event_time.isoformat(), log_id),
+    )
+    engine.db.conn.execute(
+        "UPDATE nodes SET last_accessed = ? WHERE id = ?",
+        (anchor_time.isoformat(), target),
+    )
+    engine.db.conn.commit()
+
+    engine._migrate_heuristic_confirmed_use()
+
+    row = engine.db.conn.execute(
+        "SELECT last_accessed FROM nodes WHERE id = ?", (target,)
+    ).fetchone()
+    assert datetime.fromisoformat(row["last_accessed"]) == anchor_time, (
+        "backfilling a 10-day-old signal moved last_accessed to boot time — "
+        "the claim must carry the event's clock, not the wall clock"
+    )
+
+
+def test_backfill_claim_carries_the_events_time_normalized(engine):
+    """Council #272 finding 1: claimed_at = logged_at, in datetime('now') shape.
+
+    The space-format assertion is the sweeper's contract: reinforcement_retry
+    compares claimed_at lexicographically against datetime('now', ...), where
+    'T' (0x54) sorts above ' ' (0x20).
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _seed_heuristic_signal(engine, target, log_id, strength=0.98)
+    engine.db.conn.execute(
+        "UPDATE whisper_log SET logged_at = '2026-08-15T12:00:00.123456+00:00' "
+        "WHERE id = ?",
+        (log_id,),
+    )
+    engine.db.conn.commit()
+
+    engine._migrate_heuristic_confirmed_use()
+
+    row = _claim_row(engine, log_id, target)
+    assert row is not None, "the backfill claimed nothing"
+    assert row["claimed_at"] == "2026-08-15 12:00:00", (
+        f"claimed_at is {row['claimed_at']!r}: the backfill must stamp the "
+        "event's logged_at, normalized to SQLite's space-format UTC"
+    )
+
+
+def test_backfill_survives_a_malformed_logged_at(engine):
+    """Guard, not RED: a malformed logged_at falls back to the boot clock.
+
+    datetime('not-a-timestamp') is NULL and claimed_at is NOT NULL — without the
+    COALESCE the INSERT raises IntegrityError and the whole backfill transaction
+    dies at boot. Falling back keeps today's behavior for that one row instead of
+    losing the signal forever (the cutoff advances regardless).
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _seed_heuristic_signal(engine, target, log_id, strength=0.98)
+    engine.db.conn.execute(
+        "UPDATE whisper_log SET logged_at = 'not-a-timestamp' WHERE id = ?",
+        (log_id,),
+    )
+    engine.db.conn.commit()
+
+    engine._migrate_heuristic_confirmed_use()
+
+    row = _claim_row(engine, log_id, target)
+    assert row is not None, "a malformed logged_at must not cost the claim"
+    assert "T" not in row["claimed_at"]
+    stamped = datetime.fromisoformat(row["claimed_at"]).replace(tzinfo=timezone.utc)
+    assert abs((datetime.now(timezone.utc) - stamped).total_seconds()) < 60
+
+
+def test_live_claim_still_stamps_now(engine):
+    """Guard, not RED: the historical clock is backfill-only (decision 2026-08-28).
+
+    A live claim's skew from its event is minutes; its sources' semantics
+    (explicit/implicit/judge) are out of this fix's scope.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    engine.db.conn.execute(
+        "UPDATE whisper_log SET logged_at = ? WHERE id = ?",
+        ((datetime.now(timezone.utc) - timedelta(days=10)).isoformat(), log_id),
+    )
+    engine.db.conn.commit()
+
+    _take_claim(engine, log_id, target)
+
+    row = _claim_row(engine, log_id, target)
+    assert "T" not in row["claimed_at"]
+    stamped = datetime.fromisoformat(row["claimed_at"]).replace(tzinfo=timezone.utc)
+    assert abs((datetime.now(timezone.utc) - stamped).total_seconds()) < 60, (
+        "a live claim must keep the wall clock even when its event is old"
+    )
+
+
 # --- Task 5: durable reinforcement (#220 debt) ------------------------------
 
 

@@ -366,6 +366,7 @@ class MemoryEngine:
                     signal=1,
                     source="auto_heuristic",
                     strength=strength,
+                    historical=True,
                 ):
                     confirmed_node_ids.append((row["whisper_log_id"], row["node_id"]))
                 processed_max = max(processed_max, row["id"])
@@ -2962,6 +2963,7 @@ class MemoryEngine:
         signal: int,
         source: str,
         strength: float,
+        historical: bool = False,
     ) -> bool:
         """Take the at-most-once confirmed-use claim for one (event, node) pair.
 
@@ -3012,15 +3014,31 @@ class MemoryEngine:
         # the CALLER is wrong, and dropping the claim would hide that instead of failing.
         if source == "auto_heuristic" and strength < HEURISTIC_CONFIRM_FLOOR:
             return False
+        # Issue #272 (council finding 1): a backfilled claim carries the EVENT's
+        # clock, not the boot's — claimed_at drives last_accessed, last_review and
+        # FSRS in _record_confirmed_use, so stamping datetime('now') would credit
+        # 2-13 day old uses with recency they never earned. The truthful timestamp
+        # comes from the very whisper_log row this INSERT already reads, and SQLite's
+        # datetime() normalizes its Python-isoformat shape ('...T...+00:00') to the
+        # same space-format UTC datetime('now') writes — the sweeper compares
+        # claimed_at lexicographically (reinforcement_retry.py), so mixed shapes
+        # would misorder. COALESCE: a malformed logged_at (datetime() -> NULL) falls
+        # back to the boot clock rather than aborting the whole backfill transaction
+        # (claimed_at is NOT NULL) or orphaning the signal forever (the cutoff
+        # advances regardless). Live claims keep datetime('now'): their skew is
+        # minutes, and their sources' semantics are not this fix's scope.
         conn.execute(
             """
             INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at, state)
-            SELECT wl.id, ?, datetime('now'), 'pending'
+            SELECT wl.id, ?,
+                   CASE WHEN ? THEN COALESCE(datetime(wl.logged_at), datetime('now'))
+                        ELSE datetime('now') END,
+                   'pending'
             FROM whisper_log wl
             WHERE wl.id = ? AND wl.was_injected = 1
             ON CONFLICT DO NOTHING
             """,
-            (node_id, whisper_log_id),
+            (node_id, 1 if historical else 0, whisper_log_id),
         )
         return conn.execute("SELECT changes()").fetchone()[0] == 1
 
