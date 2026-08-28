@@ -63,14 +63,26 @@ body.** Verified on the base:
 Nothing about the callers changes: they still call the mutator outside their own transaction.
 `04-backfill.md`'s rule 2 stands untouched.
 
-## The known limitation, stated so a reviewer does not have to find it
+## This is convergence, not atomicity — do not describe it as atomic
 
-A process crash between `FileStore.save`'s successful `os.replace` and the transaction's `COMMIT`
-leaves the markdown ahead of both the database and the claim. The sweeper then re-runs the mutator,
-which reloads the already-incremented node and increments again: one event, two increments. This is
-irreducible without two-phase commit, and is strictly better than today's outcome — permanent loss
-plus permanent divergence. Do not "fix" it by adding a compensating read; that reintroduces deriving
-state from the node, which `_claim_confirmed_use`'s docstring exists to prevent.
+An earlier draft of this task put the markdown write inside the transaction and called the result
+atomic. **Council round 1 refuted that** (run `98918652-c2f6a005-fc06a07a`, Codex, HIGH, confidence
+0.99) and the refutation is correct: `os.replace` is irreversible, and `Database.transaction` issues
+its `COMMIT` *after* the body returns. A `COMMIT` that fails — disk full, `SQLITE_BUSY`, I/O error,
+not merely a crash — leaves the markdown advanced while the `nodes` row and the claim roll back. No
+ordering inside the body can enrol a filesystem in a SQLite transaction.
+
+What makes that safe is **where the new values come from**: the mutator computes them from the
+`nodes` row, inside the transaction, never by incrementing the markdown it loaded. A retry therefore
+recomputes the *same* target and overwrites the phantom instead of compounding it — one event, one
+increment, however many times the write is retried. The markdown is a projection of the lifecycle
+state, not a second source of it, which is already how `decay_manager` and `importance_scorer` treat
+it.
+
+What remains is a window in which a reader of the *file* sees a value one step ahead of the row. No
+subsystem reads the file for lifecycle, and the next run closes it. Step 1's
+`test_failed_commit_does_not_inflate_the_counter` is what holds this property — it is not optional
+coverage, it is the proof.
 
 ---
 
@@ -81,20 +93,24 @@ Add to `tests/test_engine/test_confirmed_use_contract.py`:
 ```python
 def _claim_row(engine, log_id, node_id):
     return engine.db.conn.execute(
-        "SELECT claimed_at, reinforced_at FROM confirmed_use_claims "
+        "SELECT claimed_at, state, reinforced_at FROM confirmed_use_claims "
         "WHERE whisper_log_id = ? AND node_id = ?",
         (log_id, node_id),
     ).fetchone()
 
 
-def test_mutator_failure_leaves_no_residue(engine, monkeypatch):
-    """#272 D5a: a failed save rolls back the claim mark AND the nodes row."""
-    target = _make_nodes(engine, count=1)[0]
-    log_id = _seed_whisper_log(engine, target)
+def _take_claim(engine, log_id, node_id):
     with engine.db.transaction() as conn:
         engine._claim_confirmed_use(
-            conn, log_id, target, signal=1, source="explicit", strength=1.0,
+            conn, log_id, node_id, signal=1, source="explicit", strength=1.0,
         )
+
+
+def test_mutator_failure_leaves_no_residue(engine, monkeypatch):
+    """#272 D5-1: a failed save rolls back the claim state AND the nodes row."""
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _take_claim(engine, log_id, target)
 
     before = _snapshot(engine, target)
 
@@ -106,19 +122,62 @@ def test_mutator_failure_leaves_no_residue(engine, monkeypatch):
         engine._record_confirmed_use(target, whisper_log_id=log_id)
 
     assert _snapshot(engine, target) == before, "the failed mutator left a partial write"
-    assert _claim_row(engine, log_id, target)["reinforced_at"] is None, (
-        "the claim was marked applied even though nothing was applied"
+    assert _claim_row(engine, log_id, target)["state"] == "pending", (
+        "the claim left 'pending' even though nothing was applied"
     )
 
 
-def test_happy_path_commits_claim_row_and_markdown_together(engine):
-    """#272 D5f: on success all three move."""
+def test_failed_commit_does_not_inflate_the_counter(engine, monkeypatch):
+    """#272 D5-2: the convergence claim, tested at the one place it can break.
+
+    os.replace cannot be rolled back and COMMIT runs after the transaction body, so a
+    failing COMMIT leaves the markdown one step ahead of the nodes row. Because the new
+    values are computed FROM the nodes row, the retry recomputes the same target and
+    overwrites the phantom — it must not add a second increment on top of it.
+    """
     target = _make_nodes(engine, count=1)[0]
     log_id = _seed_whisper_log(engine, target)
-    with engine.db.transaction() as conn:
-        engine._claim_confirmed_use(
-            conn, log_id, target, signal=1, source="explicit", strength=1.0,
-        )
+    _take_claim(engine, log_id, target)
+
+    baseline = engine.db.conn.execute(
+        "SELECT access_count FROM nodes WHERE id = ?", (target,)
+    ).fetchone()["access_count"]
+
+    real_execute = engine.db.conn.execute
+
+    def commit_fails(sql, *args, **kwargs):
+        if sql.strip().upper().startswith("COMMIT"):
+            raise sqlite3.OperationalError("disk I/O error")
+        return real_execute(sql, *args, **kwargs)
+
+    monkeypatch.setattr(engine.db.conn, "execute", commit_fails)
+    with pytest.raises(sqlite3.OperationalError):
+        engine._record_confirmed_use(target, whisper_log_id=log_id)
+    monkeypatch.undo()
+
+    # The markdown ran ahead; the row and the claim did not.
+    assert engine.file_store.load(target).access_count == baseline + 1
+    assert engine.db.conn.execute(
+        "SELECT access_count FROM nodes WHERE id = ?", (target,)
+    ).fetchone()["access_count"] == baseline
+    assert _claim_row(engine, log_id, target)["state"] == "pending"
+
+    engine._record_confirmed_use(target, whisper_log_id=log_id)
+
+    after = _snapshot(engine, target)
+    assert after["file"] == after["db"], "the stores did not converge"
+    assert engine.db.conn.execute(
+        "SELECT access_count FROM nodes WHERE id = ?", (target,)
+    ).fetchone()["access_count"] == baseline + 1, (
+        "one event produced more than one increment"
+    )
+
+
+def test_happy_path_agrees_across_claim_row_and_markdown(engine):
+    """#272 D5-9: on success all three carry the same values."""
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _take_claim(engine, log_id, target)
 
     before = _snapshot(engine, target)
     engine._record_confirmed_use(target, whisper_log_id=log_id)
@@ -126,17 +185,16 @@ def test_happy_path_commits_claim_row_and_markdown_together(engine):
 
     assert after != before, "nothing was reinforced"
     assert after["file"] == after["db"], "markdown and database disagree"
-    assert _claim_row(engine, log_id, target)["reinforced_at"] is not None
+    row = _claim_row(engine, log_id, target)
+    assert row["state"] == "applied"
+    assert row["reinforced_at"] is not None
 
 
-def test_mutator_is_at_most_once_on_a_marked_claim(engine):
-    """#272 D5c: a second call on an applied claim is a no-op."""
+def test_mutator_is_at_most_once_on_an_applied_claim(engine):
+    """#272 D5-4: a second call on an applied claim is a no-op."""
     target = _make_nodes(engine, count=1)[0]
     log_id = _seed_whisper_log(engine, target)
-    with engine.db.transaction() as conn:
-        engine._claim_confirmed_use(
-            conn, log_id, target, signal=1, source="explicit", strength=1.0,
-        )
+    _take_claim(engine, log_id, target)
     engine._record_confirmed_use(target, whisper_log_id=log_id)
 
     after_first = _snapshot(engine, target)
@@ -145,12 +203,15 @@ def test_mutator_is_at_most_once_on_a_marked_claim(engine):
     assert _snapshot(engine, target) == after_first, "the second call reinforced again"
 
 
-def test_missing_node_terminates_the_claim(engine):
-    """#272 D5d: a deleted node must not leave the sweeper retrying forever.
+def test_missing_node_ends_orphaned_not_applied(engine):
+    """#272 D5-7: a deleted node is terminal, and is not recorded as a success.
 
     The claim is inserted directly for a node_id that has no markdown file. Only
     whisper_log_id carries a foreign key (PRAGMA foreign_keys=ON), so a claim can
     legitimately outlive its node — which is exactly the state being tested.
+
+    'applied' would be a lie of the same kind the legacy migration refuses to write,
+    so the assertion pins the distinction, not merely "it stopped being pending".
     """
     target = _make_nodes(engine, count=1)[0]
     log_id = _seed_whisper_log(engine, target)
@@ -163,10 +224,15 @@ def test_missing_node_terminates_the_claim(engine):
 
     engine._record_confirmed_use("ghost-node", whisper_log_id=log_id)
 
-    assert _claim_row(engine, log_id, "ghost-node")["reinforced_at"] is not None, (
-        "a claim for a deleted node stayed unapplied — the sweeper will retry it forever"
+    row = _claim_row(engine, log_id, "ghost-node")
+    assert row["state"] == "orphaned", (
+        "a claim for a deleted node must be orphaned, never pending (retried forever) "
+        "nor applied (a reinforcement that never happened)"
     )
+    assert row["reinforced_at"] is None
 ```
+
+`sqlite3` must be imported at the top of the file if it is not already.
 
 Create `tests/test_background/test_reinforcement_retry.py`:
 
@@ -191,23 +257,41 @@ def _stale_claim(engine, log_id, node_id, minutes_ago=30):
         )
 
 
-def test_sweeper_reinforces_an_orphaned_claim(engine, seeded_claim):
-    """#272 D5b: a claim the mutator never applied is repaired."""
+def test_sweeper_reinforces_a_pending_claim(engine, seeded_claim):
+    """#272 D5-3: a claim the mutator never applied is repaired."""
     log_id, node_id, before = seeded_claim
     _stale_claim(engine, log_id, node_id)
 
     run_reinforcement_retry(engine)
 
     row = engine.db.conn.execute(
-        "SELECT reinforced_at FROM confirmed_use_claims WHERE whisper_log_id = ?",
+        "SELECT state, reinforced_at FROM confirmed_use_claims WHERE whisper_log_id = ?",
         (log_id,),
     ).fetchone()
-    assert row["reinforced_at"] is not None, "the sweeper did not mark the claim"
+    assert row["state"] == "applied", "the sweeper did not apply the claim"
+    assert row["reinforced_at"] is not None
     assert _snapshot(engine, node_id) != before, "the sweeper marked but did not reinforce"
 
 
+def test_sweeper_never_touches_terminal_claims(engine, seeded_claim):
+    """#272 D5-8a: legacy_unknown and orphaned are terminal, not work items."""
+    log_id, node_id, before = seeded_claim
+    _stale_claim(engine, log_id, node_id)
+    with engine.db.transaction() as conn:
+        conn.execute(
+            "UPDATE confirmed_use_claims SET state = 'legacy_unknown' "
+            "WHERE whisper_log_id = ? AND node_id = ?",
+            (log_id, node_id),
+        )
+
+    run_reinforcement_retry(engine)
+
+    assert _snapshot(engine, node_id) == before, "the sweeper re-reinforced a legacy claim"
+    assert _claim_row(engine, log_id, node_id)["state"] == "legacy_unknown"
+
+
 def test_sweeper_is_at_most_once_across_runs(engine, seeded_claim):
-    """#272 D5c: running the sweeper twice reinforces once."""
+    """#272 D5-4: running the sweeper twice reinforces once."""
     log_id, node_id, _ = seeded_claim
     _stale_claim(engine, log_id, node_id)
 
@@ -219,7 +303,7 @@ def test_sweeper_is_at_most_once_across_runs(engine, seeded_claim):
 
 
 def test_sweeper_skips_claims_inside_the_grace_margin(engine, seeded_claim):
-    """#272 D5b: a claim taken seconds ago may still be in flight — do not race it."""
+    """#272 D5-5: a claim taken seconds ago may still be in flight — do not race it."""
     log_id, node_id, before = seeded_claim
     _stale_claim(engine, log_id, node_id, minutes_ago=0)
 
@@ -229,7 +313,7 @@ def test_sweeper_skips_claims_inside_the_grace_margin(engine, seeded_claim):
 
 
 def test_sweeper_isolates_one_bad_node_from_the_batch(engine, seeded_claim, monkeypatch):
-    """#272 D5b: one RAISING node must not abandon the rest of the batch.
+    """#272 D5-6: one RAISING node must not abandon the rest of the batch.
 
     The failure has to be injected. A claim for a node that merely does not exist
     returns cleanly through the terminal-claim path and would prove nothing about
@@ -262,6 +346,7 @@ importing the helpers the contract file already defines:
 import pytest
 
 from tests.test_engine.test_confirmed_use_contract import (  # noqa: E402
+    _claim_row,
     _make_nodes,
     _seed_whisper_log,
     _snapshot,
@@ -280,10 +365,15 @@ Add to `tests/test_engine/test_confirmed_use_contract.py` (the migration test �
 `Database`, so it does not use the `engine` fixture):
 
 ```python
-def test_migration_stamps_preexisting_claims_as_reinforced(tmp_path):
-    """#272 D5e: claims written before this task were ALREADY reinforced.
+def test_migration_marks_preexisting_claims_legacy_unknown(tmp_path):
+    """#272 D5-8b: pre-#272 claims are neither swept nor recorded as successes.
 
-    Leaving them NULL would make the first sweep re-reinforce the whole history.
+    Council round 1 (Codex, HIGH) killed the first draft, which stamped them
+    reinforced. The premise of this task is that SOME of those claims lost their
+    reinforcement; the old schema cannot tell which, so calling them applied would
+    hide exactly the data loss the task exists to repair. 'pending' is equally wrong
+    — the majority did apply, and re-running them is mass over-reinforcement of an
+    at-most-once latch. The assertion pins the third state, not "not pending".
     """
     from ormah.index.db import Database
 
@@ -305,23 +395,27 @@ def test_migration_stamps_preexisting_claims_as_reinforced(tmp_path):
     db._migrate()
 
     row = db.conn.execute(
-        "SELECT claimed_at, reinforced_at FROM confirmed_use_claims"
+        "SELECT state, reinforced_at FROM confirmed_use_claims"
     ).fetchone()
-    assert row["reinforced_at"] == row["claimed_at"], (
-        "a pre-existing claim was left unmarked and will be re-reinforced"
+    assert row["state"] == "legacy_unknown", (
+        "a pre-existing claim was classified, but its outcome is not knowable"
+    )
+    assert row["reinforced_at"] is None, (
+        "reinforced_at asserts a reinforcement happened — it did not, or is unknown"
     )
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-python -m pytest tests/test_engine/test_confirmed_use_contract.py -k "residue or commits_claim_row or at_most_once_on_a_marked or terminates_the_claim or stamps_preexisting" -v
+python -m pytest tests/test_engine/test_confirmed_use_contract.py \
+  -k "residue or failed_commit or happy_path_agrees or at_most_once_on_an_applied or ends_orphaned or legacy_unknown" -v
 python -m pytest tests/test_background/test_reinforcement_retry.py -v
 ```
 
 Expected: FAIL. The contract tests fail with
 `TypeError: _record_confirmed_use() got an unexpected keyword argument 'whisper_log_id'` and
-`OperationalError: no such column: reinforced_at`; the sweeper file fails at import with
+`OperationalError: no such column: state`; the sweeper file fails at import with
 `ModuleNotFoundError: No module named 'ormah.background.reinforcement_retry'`.
 
 - [ ] **Step 3: Add the column, in the schema and in the migration**
@@ -333,8 +427,13 @@ CREATE TABLE IF NOT EXISTS confirmed_use_claims (
     whisper_log_id INTEGER NOT NULL REFERENCES whisper_log(id) ON DELETE CASCADE,
     node_id        TEXT NOT NULL,
     claimed_at     TEXT NOT NULL,
-    -- Issue #272: NULL means the claim was taken but the reinforcement it promised
-    -- has not landed yet. The sweeper retries exactly these rows.
+    -- Issue #272: the claim's outcome, which the latch alone could not express.
+    --   pending        the reinforcement has not landed yet — the sweeper retries these
+    --   applied        it landed; reinforced_at carries when
+    --   legacy_unknown written before this column existed; outcome unknowable
+    --   orphaned       the node is gone, so there is nothing left to reinforce
+    state          TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (state IN ('pending', 'applied', 'legacy_unknown', 'orphaned')),
     reinforced_at  TEXT,
     PRIMARY KEY (whisper_log_id, node_id)
 );
@@ -344,11 +443,17 @@ In `src/ormah/index/db.py`, inside `_migrate`, immediately after the
 `CREATE INDEX IF NOT EXISTS idx_nodes_seq` line:
 
 ```python
-            # Issue #272: confirmed_use_claims gains a completion state. Every claim
-            # written before this migration was already reinforced by the old code
-            # path, so they are stamped in the same transaction as the ALTER —
-            # leaving them NULL would make the first sweep re-reinforce the entire
-            # history of the store.
+            # Issue #272: confirmed_use_claims gains an outcome. Rows written before
+            # this column existed become 'legacy_unknown', NOT 'applied'.
+            #
+            # Stamping them as successes was this plan's first draft, and the council
+            # (Codex, HIGH) refuted it: the premise of this task is that some claims
+            # committed and then lost their reinforcement, those rows are exactly the
+            # ones the defect produced, and the old schema cannot tell them apart from
+            # the successes. Calling them applied would hide the data loss forever.
+            # Calling them pending is no better — the overwhelming majority DID apply,
+            # and re-running them would be mass over-reinforcement of an at-most-once
+            # latch. 'legacy_unknown' is terminal for the sweeper and honest about why.
             claim_cols = [
                 row[1]
                 for row in conn.execute(
@@ -359,23 +464,41 @@ In `src/ormah/index/db.py`, inside `_migrate`, immediately after the
                 conn.execute(
                     "ALTER TABLE confirmed_use_claims ADD COLUMN reinforced_at TEXT"
                 )
+            if claim_cols and "state" not in claim_cols:
+                # The column lands plain: ADD COLUMN cannot carry the CHECK. Fresh
+                # databases get the constraint from schema.sql; migrated ones rely on
+                # the writers, which only ever set the four listed values.
                 conn.execute(
-                    "UPDATE confirmed_use_claims SET reinforced_at = claimed_at"
+                    "ALTER TABLE confirmed_use_claims "
+                    "ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'"
+                )
+                legacy = conn.execute(
+                    "UPDATE confirmed_use_claims SET state = 'legacy_unknown'"
+                ).rowcount
+                # Measured, not guessed: the size of the historical gap is logged so it
+                # can be reasoned about instead of assumed away.
+                logger.info(
+                    "confirmed_use_claims: %d pre-#272 claim(s) marked legacy_unknown "
+                    "(outcome not recoverable from the old schema)",
+                    legacy,
                 )
 
-            # Partial index: the sweeper only ever selects the unapplied rows, which
-            # are a vanishing fraction of the table.
+            # Partial index: the sweeper only ever selects the pending rows, which are a
+            # vanishing fraction of the table.
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_claims_unreinforced "
-                "ON confirmed_use_claims(claimed_at) WHERE reinforced_at IS NULL"
+                "CREATE INDEX IF NOT EXISTS idx_claims_pending "
+                "ON confirmed_use_claims(claimed_at) WHERE state = 'pending'"
             )
 ```
 
 `claim_cols` is checked for truthiness first: on a database old enough not to have the table at all,
 `PRAGMA table_info` returns an empty list and the `ALTER` must not run — `schema.sql` creates it
-below, already carrying the column.
+below, already carrying both columns and the `CHECK`.
 
-- [ ] **Step 4: Make the mutator atomic**
+`db.py` needs a module logger if it has none; check for `logger = logging.getLogger(__name__)` at
+the top and add it with the `import logging` if absent.
+
+- [ ] **Step 4: Make the mutator's writes converge**
 
 In `src/ormah/engine/memory_engine.py`, replace `_record_confirmed_use`'s signature and the tail of
 its body (`:2121`, and `:2170-2184` for the write block):
@@ -389,68 +512,127 @@ gives for `strength` on `_claim_confirmed_use`: a default would let a future cal
 durability in silence. Every reinforcement descends from a claim, and `_claim_confirmed_use` returns
 `False` when `whisper_log_id is None`, so no call site can reach here without one.
 
-Replace the early return for a missing node:
+Replace the whole body from `node = self.file_store.load(node_id)` to the end of the method. The
+lifecycle arithmetic is unchanged — what changes is that its **inputs come from the `nodes` row**,
+read inside the transaction, instead of from the markdown that was loaded:
 
 ```python
         node = self.file_store.load(node_id)
-        if node is None:
-            # Issue #272: terminal, not silent. Without marking, the claim would stay
-            # unapplied forever and the sweeper would retry a node that cannot come
-            # back, every cycle. There is nothing to reinforce, so the promise is
-            # discharged.
-            with self.db.transaction() as conn:
-                conn.execute(
-                    "UPDATE confirmed_use_claims SET reinforced_at = datetime('now') "
-                    "WHERE whisper_log_id = ? AND node_id = ? AND reinforced_at IS NULL",
-                    (whisper_log_id, node_id),
-                )
-            return
-```
 
-Replace the write block (`file_store.save` followed by the transaction) with a single transaction:
-
-```python
-        # Issue #272: the claim mark, the row update and the markdown write are one
-        # act. If the save raises, the rollback undoes both updates and the sweeper
-        # retries; if an update raises, the save never happens.
+        # Issue #272: one transaction covers the claim's outcome, the nodes row and the
+        # markdown write.
         #
         # Calling file_store inside db.transaction() is safe HERE and nowhere else:
         # @_serialized_memory_operation already holds _memory_operation_lock, and
         # FileStore was constructed with that same RLock (:109), so this re-enters a
         # lock this thread owns rather than acquiring db_lock before memory_lock.
+        #
+        # This is NOT atomicity across the two stores, and must not be described as
+        # such: os.replace is irreversible and COMMIT runs after this body returns, so
+        # a failed COMMIT can leave the markdown one step ahead. What makes that safe
+        # is that the new values are computed from the nodes row, so a retry recomputes
+        # the SAME target and overwrites the phantom instead of compounding it. One
+        # event yields one increment however many times the write is retried.
         with self.db.transaction() as conn:
             conn.execute(
-                "UPDATE confirmed_use_claims SET reinforced_at = datetime('now') "
-                "WHERE whisper_log_id = ? AND node_id = ? AND reinforced_at IS NULL",
+                "UPDATE confirmed_use_claims SET state = 'applied', "
+                "reinforced_at = datetime('now') "
+                "WHERE whisper_log_id = ? AND node_id = ? AND state = 'pending'",
                 (whisper_log_id, node_id),
             )
             if conn.execute("SELECT changes()").fetchone()[0] != 1:
-                # Another runner applied this claim first. At-most-once, the same
-                # shape _claim_confirmed_use uses. Nothing may sit between the UPDATE
-                # and this read.
+                # Already applied, terminal, or claimed by another runner. At-most-once,
+                # the same shape _claim_confirmed_use uses. Nothing may sit between the
+                # UPDATE and this read.
                 return
+
+            row = conn.execute(
+                "SELECT access_count, last_accessed, stability, last_review "
+                "FROM nodes WHERE id = ?",
+                (node_id,),
+            ).fetchone()
+            if node is None or row is None:
+                # Terminal, and honest about which terminal. Marking it 'applied' would
+                # record a reinforcement that never happened — the same falsehood the
+                # legacy migration above refuses to write.
+                conn.execute(
+                    "UPDATE confirmed_use_claims SET state = 'orphaned', "
+                    "reinforced_at = NULL "
+                    "WHERE whisper_log_id = ? AND node_id = ?",
+                    (whisper_log_id, node_id),
+                )
+                return
+
+            now = datetime.now(timezone.utc)
+            stability = row["stability"]
+            last_review = (
+                datetime.fromisoformat(row["last_review"]) if row["last_review"] else None
+            )
+            last_accessed = (
+                datetime.fromisoformat(row["last_accessed"])
+                if row["last_accessed"]
+                else None
+            )
+
+            # One numeric stability update per node per cooldown window (#221): the
+            # old formula let ten same-session touches compound to ~57x.
+            if lifecycle.reinforcement_due(
+                last_review, now, self.settings.fsrs_reinforcement_cooldown_days
+            ):
+                # reinforcement cooldown can leave last_review a full window behind a
+                # use that already landed inside it (PR #239 review comment):
+                # last_accessed is the actual spacing signal, last_review only gates.
+                anchor = last_accessed or last_review
+                days_since = max((now - anchor).total_seconds() / 86400, 0.0)
+                stability = lifecycle.reinforced_stability(
+                    stability,
+                    days_since,
+                    growth_factor=self.settings.fsrs_growth_factor,
+                    growth_exponent=self.settings.fsrs_growth_exponent,
+                    spacing_cap=self.settings.fsrs_spacing_cap,
+                    max_stability=self.settings.fsrs_max_stability,
+                    initial_stability=self.settings.fsrs_initial_stability,
+                )
+                last_review = now
+
+            access_count = row["access_count"] + 1
+
             conn.execute(
                 "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, "
                 "last_review = ? WHERE id = ?",
                 (
-                    node.access_count,
-                    node.last_accessed.isoformat(),
-                    node.stability,
-                    node.last_review.isoformat() if node.last_review else None,
+                    access_count,
+                    now.isoformat(),
+                    stability,
+                    last_review.isoformat() if last_review else None,
                     node_id,
                 ),
             )
+
+            # The markdown is the projection: it is set to the computed values, never
+            # incremented from whatever it happened to hold.
+            node.access_count = access_count
+            node.last_accessed = now
+            node.stability = stability
+            node.last_review = last_review
             self.file_store.save(node)
 ```
+
+The `anchor` expression keeps the base's exact shape (`last_accessed or last_review`, no `None`
+guard) so the semantics are unchanged; only the source of the two values moves from the file to the
+row. If they ever disagree, the row wins — which is the point.
 
 Append to the method's docstring, after the existing lock-order paragraph:
 
 ```
-        Issue #272: the claim's completion mark commits with this write, so a claim
-        whose reinforcement never landed stays visible as reinforced_at IS NULL and
-        run_reinforcement_retry repairs it. The one window that remains is a process
-        crash between os.replace and COMMIT: the markdown is then ahead, and the
-        retry produces a second increment for one event. Irreducible without 2PC.
+        Issue #272: the claim's outcome commits with this write, so a reinforcement
+        that never landed stays visible as state = 'pending' and
+        run_reinforcement_retry repairs it. The new values are computed from the
+        nodes row rather than from the loaded markdown, which makes the retry
+        idempotent: os.replace cannot be rolled back and COMMIT runs after this
+        body, so a failed COMMIT can leave the file one step ahead — recomputing
+        from the row overwrites that phantom instead of compounding it. The
+        markdown is a projection of the lifecycle state, not a second source of it.
 ```
 
 - [ ] **Step 5: Update every call site**
@@ -562,8 +744,10 @@ Create `src/ormah/background/reinforcement_retry.py`:
 _claim_confirmed_use takes a monotonic latch inside the caller's transaction, and
 _record_confirmed_use runs after that transaction commits with its exception isolated.
 Before #272 a transient failure there was permanent: the claim was taken, so nothing
-retried. The claim now carries reinforced_at, and this job sweeps the rows where it is
-still NULL.
+retried. The claim now carries a state, and this job sweeps the rows still 'pending'.
+
+'legacy_unknown' (written before the state column existed) and 'orphaned' (the node is
+gone) are terminal and never swept.
 
 Not LLM-gated, so it keeps working under ORMAH_LLM_PROVIDER=none.
 """
@@ -591,7 +775,7 @@ def run_reinforcement_retry(engine) -> None:
             """
             SELECT whisper_log_id, node_id
             FROM confirmed_use_claims
-            WHERE reinforced_at IS NULL
+            WHERE state = 'pending'
               AND claimed_at < datetime('now', ?)
             ORDER BY claimed_at ASC
             LIMIT ?
@@ -712,15 +896,22 @@ after it, exception isolated. The latch is monotonic, so one transient failure
 lost the reinforcement permanently — and the mutator was not atomic with itself,
 so a half-applied write left markdown and database diverged.
 
-confirmed_use_claims gains reinforced_at, marked inside the mutator's own
-transaction alongside the nodes UPDATE and the markdown save, so the three commit
-or roll back together. Pre-existing claims are stamped by the migration: they were
-already reinforced, and leaving them NULL would re-reinforce the whole store.
+confirmed_use_claims gains a state: pending, applied, legacy_unknown, orphaned.
+The mutator now computes the new lifecycle values FROM the nodes row rather than
+by incrementing the markdown it loaded, which makes the write idempotent: a
+failed COMMIT after os.replace leaves the file one step ahead, and the retry
+recomputes the same target and overwrites it instead of compounding it. This is
+convergence, not atomicity — os.replace cannot join a SQLite transaction.
+
+Pre-existing claims become legacy_unknown, never applied. The premise of this fix
+is that some claims lost their reinforcement; the old schema cannot tell those
+from the successes, so recording them as applied would hide the very data loss
+being repaired. The migration logs how many it found.
 
 Calling file_store inside db.transaction() is safe in this method only: the
 serialized decorator already holds _memory_operation_lock and FileStore shares
 that RLock, so the call re-enters rather than inverting the memory->db order.
 
-reinforcement_retry sweeps the claims left NULL past a 5-minute grace margin. It
-is not LLM-gated, so it survives ORMAH_LLM_PROVIDER=none."
+reinforcement_retry sweeps the pending claims past a 5-minute grace margin. It is
+not LLM-gated, so it survives ORMAH_LLM_PROVIDER=none."
 ```
