@@ -45,44 +45,34 @@ Spec: `docs/superpowers/specs/2026-08-28-durable-reinforcement-after-claim-desig
 
 ## Why this task may reorder the mutator, and Tasks 1–4 may not
 
-The overview's global constraint says never call `_record_confirmed_use` inside an open transaction,
-because that would take `db_lock` before `memory_lock` and invert every serialized writer's order
-(#220 §4.3). **That rule is correct for callers, and larger than necessary for the mutator's own
-body.** Verified on the base:
-
-- `FileStore` is constructed with the engine's **own** lock —
-  `FileStore(settings.nodes_dir, self._memory_operation_lock)` at `memory_engine.py:109` and again
-  at `:1424` — and `_memory_operation_lock` is a `threading.RLock` (`:108`).
-- `@_serialized_memory_operation` (`:94-99`) acquires that lock before the body runs, so inside
-  `_record_confirmed_use` the thread **already holds it**. A `file_store` call made from within
-  `db.transaction()` therefore re-enters a lock it owns; it acquires nothing new and the memory→db
-  order is unchanged.
-- `Database.transaction` (`index/db.py:68-82`) is reentrant per thread and issues `ROLLBACK` only at
-  depth 1, so the rollback this task relies on is real.
+`00-overview.md` carries the full reasoning under Global Constraints; the short form is that
+`FileStore` is built with the engine's own `_memory_operation_lock` (`memory_engine.py:109`,
+`:1424`), an `RLock` that `@_serialized_memory_operation` (`:94-99`) already holds when the body
+runs, so a `file_store` call from inside the method's own transaction re-enters rather than
+acquiring `db_lock` first. `Database.transaction` (`index/db.py:68-82`) is reentrant per thread and
+rolls back only at depth 1, so the rollback this task relies on is real.
 
 Nothing about the callers changes: they still call the mutator outside their own transaction.
 `04-backfill.md`'s rule 2 stands untouched.
 
 ## This is convergence, not atomicity — do not describe it as atomic
 
-An earlier draft of this task put the markdown write inside the transaction and called the result
-atomic. **Council round 1 refuted that** (run `98918652-c2f6a005-fc06a07a`, Codex, HIGH, confidence
-0.99) and the refutation is correct: `os.replace` is irreversible, and `Database.transaction` issues
-its `COMMIT` *after* the body returns. A `COMMIT` that fails — disk full, `SQLITE_BUSY`, I/O error,
-not merely a crash — leaves the markdown advanced while the `nodes` row and the claim roll back. No
-ordering inside the body can enrol a filesystem in a SQLite transaction.
+An earlier draft called this atomic. **Council round 1 refuted that** (run
+`98918652-c2f6a005-fc06a07a`, Codex, HIGH, confidence 0.99) and was right: `os.replace` is
+irreversible and `Database.transaction` issues its `COMMIT` *after* the body returns, so a `COMMIT`
+that fails — disk full, `SQLITE_BUSY`, I/O error, not merely a crash — leaves the markdown advanced
+while the `nodes` row and the claim roll back. No ordering can enrol a filesystem in a SQLite
+transaction.
 
-What makes that safe is **where the new values come from**: the mutator computes them from the
-`nodes` row, inside the transaction, never by incrementing the markdown it loaded. A retry therefore
-recomputes the *same* target and overwrites the phantom instead of compounding it — one event, one
-increment, however many times the write is retried. The markdown is a projection of the lifecycle
-state, not a second source of it, which is already how `decay_manager` and `importance_scorer` treat
-it.
+What makes it safe is **where the new values come from**: the mutator computes them from the `nodes`
+row, never by incrementing the markdown it loaded, so a retry recomputes the *same* target and
+overwrites the phantom instead of compounding it. The markdown is a projection of lifecycle state,
+which is already how `decay_manager` and `importance_scorer` treat it.
 
-What remains is a window in which a reader of the *file* sees a value one step ahead of the row. No
-subsystem reads the file for lifecycle, and the next run closes it. Step 1's
-`test_failed_commit_does_not_inflate_the_counter` is what holds this property — it is not optional
-coverage, it is the proof.
+What remains is a window in which a reader of the *file* sees a value one step ahead of the row.
+Nothing reads the file for lifecycle, and the next run closes it. Step 1's
+`test_failed_commit_does_not_inflate_the_counter` is the proof of this property, not optional
+coverage.
 
 ---
 
@@ -520,19 +510,16 @@ read inside the transaction, instead of from the markdown that was loaded:
         node = self.file_store.load(node_id)
 
         # Issue #272: one transaction covers the claim's outcome, the nodes row and the
-        # markdown write.
+        # markdown write. Calling file_store inside db.transaction() is safe HERE and
+        # nowhere else: @_serialized_memory_operation already holds
+        # _memory_operation_lock and FileStore shares that RLock (:109), so this
+        # re-enters rather than taking db_lock before memory_lock.
         #
-        # Calling file_store inside db.transaction() is safe HERE and nowhere else:
-        # @_serialized_memory_operation already holds _memory_operation_lock, and
-        # FileStore was constructed with that same RLock (:109), so this re-enters a
-        # lock this thread owns rather than acquiring db_lock before memory_lock.
-        #
-        # This is NOT atomicity across the two stores, and must not be described as
-        # such: os.replace is irreversible and COMMIT runs after this body returns, so
-        # a failed COMMIT can leave the markdown one step ahead. What makes that safe
-        # is that the new values are computed from the nodes row, so a retry recomputes
-        # the SAME target and overwrites the phantom instead of compounding it. One
-        # event yields one increment however many times the write is retried.
+        # NOT atomic across the two stores: os.replace is irreversible and COMMIT runs
+        # after this body, so a failed COMMIT can leave the markdown one step ahead.
+        # What makes that safe is computing the new values FROM the nodes row, so a
+        # retry recomputes the same target and overwrites the phantom instead of
+        # compounding it — one event, one increment.
         with self.db.transaction() as conn:
             conn.execute(
                 "UPDATE confirmed_use_claims SET state = 'applied', "
