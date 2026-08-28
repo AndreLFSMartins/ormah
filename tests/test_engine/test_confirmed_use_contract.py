@@ -1590,6 +1590,32 @@ def test_mutator_is_at_most_once_on_an_applied_claim(engine):
     assert _snapshot(engine, target) == after_first, "the second call reinforced again"
 
 
+def test_a_failed_latch_never_loads_the_file(engine, monkeypatch):
+    """Council #272 finding 2: the load belongs inside the transaction, after
+    the latch. Observable consequence — and this test's RED: when the claim is
+    already applied, the mutator must return before any file I/O. Today the
+    load runs unconditionally before the transaction even opens.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target)
+    _take_claim(engine, log_id, target)
+    engine._record_confirmed_use(target, whisper_log_id=log_id)  # applies the claim
+
+    calls = []
+    real_load = engine.file_store.load
+    monkeypatch.setattr(
+        engine.file_store, "load",
+        lambda node_id: calls.append(node_id) or real_load(node_id),
+    )
+
+    engine._record_confirmed_use(target, whisper_log_id=log_id)  # latch fails
+
+    assert calls == [], (
+        "the mutator loaded the markdown for a claim it then refused to apply — "
+        "the load must sit inside the transaction, after the at-most-once latch"
+    )
+
+
 def test_missing_node_ends_orphaned_not_applied(engine):
     """#272 D5-7: a deleted node is terminal, and is not recorded as a success.
 

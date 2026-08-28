@@ -2293,8 +2293,6 @@ class MemoryEngine:
         memory with recency it never earned. reinforced_at, not these fields,
         records when the write itself landed.
         """
-        node = self.file_store.load(node_id)
-
         # Issue #272: one transaction covers the claim's outcome, the nodes row and the
         # markdown write. Calling file_store inside db.transaction() is safe HERE and
         # nowhere else: @_serialized_memory_operation already holds
@@ -2307,6 +2305,12 @@ class MemoryEngine:
         # the counters come FROM the nodes row and the clock comes FROM claimed_at, so
         # a retry recomputes the SAME values and overwrites the phantom instead of
         # compounding it — one event, one increment, one stability step.
+        #
+        # The load also lives inside (council #272 finding 2): BEGIN IMMEDIATE can
+        # block up to busy_timeout between statements, and loading before the
+        # transaction reopened the load->save window this method had closed. A
+        # failed latch now returns before any file I/O. Cross-process, load and
+        # save remain non-atomic — that race predates this branch.
         with self.db.transaction() as conn:
             conn.execute(
                 "UPDATE confirmed_use_claims SET state = 'applied', "
@@ -2319,6 +2323,8 @@ class MemoryEngine:
                 # the same shape _claim_confirmed_use uses. Nothing may sit between the
                 # UPDATE and this read.
                 return
+
+            node = self.file_store.load(node_id)
 
             # reinforced_at records when the write ran; claimed_at is when the memory
             # was actually used, and that is the clock the lifecycle values use.
