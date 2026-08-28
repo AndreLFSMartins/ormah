@@ -2401,45 +2401,221 @@ def test_llm_judge_unused_verdict_does_not_record_confirmed_use(engine, tmp_path
     assert _lifecycle(engine, node_id) == before, "an unused verdict changed lifecycle fields"
 
 
-def test_heuristic_positive_does_not_record_confirmed_use(engine, tmp_path):
-    """Issue #220: auto_heuristic yields polarity 1 but never confirms use.
+@pytest.mark.parametrize("title,content,response,should_confirm", [
+    # title match (0.94) — the title appears verbatim in the response
+    (
+        "Transcript watcher mines feedback usage",
+        "The transcript watcher mines feedback usage from completed transcripts.",
+        "The right fix is the transcript watcher mines feedback usage approach.",
+        True,
+    ),
+    # sentence match (0.92) — a content sentence appears verbatim
+    (
+        "Vector search notes",
+        "Sqlite vec stores embeddings inside the same database file as the nodes.",
+        "As noted: sqlite vec stores embeddings inside the same database file as the nodes.",
+        True,
+    ),
+])
+def test_verbatim_heuristic_match_confirms_use(
+    engine, tmp_path, title, content, response, should_confirm,
+):
+    """#272: a verbatim heuristic hit reinforces the memory. Contract 12, inverted.
 
-    The heuristic path is excluded pending #218 signal calibration. This is the
-    case that matters: it is positive, so only the source keeps it out.
+    This is the issue's acceptance criterion: 0 of 1,629 positive heuristic pairs
+    took a claim, because only the judge block ever called _claim_confirmed_use.
     """
     prompt = "How should we solve feedback collection?"
-    response = "The right fix is the transcript watcher mines feedback usage approach."
-    transcript_path = tmp_path / "heuristic-no-confirm-session.jsonl"
+    transcript_path = tmp_path / "verbatim-confirm-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(content=content, type="fact", title=title))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="verbatim-confirm-session", prompt=prompt,
+    )
+
+    before = _lifecycle(engine, node_id)
+    recorded = _record_whisper_usage_signals(engine, transcript)
+
+    assert recorded == 1
+    signal = engine.db.conn.execute(
+        "SELECT polarity, strength FROM signals WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert signal["polarity"] == 1
+    assert signal["strength"] >= 0.80, "fixture did not produce a verbatim match — check the text"
+
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ? AND node_id = ?",
+        (whisper_log_id, node_id),
+    ).fetchone()
+    assert claim is not None, "the heuristic path took no confirmed-use claim"
+    assert _lifecycle(engine, node_id) != before, "the claim was taken but nothing reinforced"
+
+
+def test_node_id_heuristic_match_confirms_use(engine, tmp_path):
+    """#272 spec case 1: the strongest match kind (0.98).
+
+    Separate from the parametrized test above because the response must quote the
+    node's short id, which only exists after the node is created.
+    """
+    prompt = "Which memory covers the retention policy?"
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Retention is governed by decay and archival thresholds.",
+        type="fact",
+        title="Retention policy overview",
+    ))
+    response = f"That is memory {node_id[:8]}, which covers it."
+
+    transcript_path = tmp_path / "nodeid-confirm-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="nodeid-confirm-session", prompt=prompt,
+    )
+
+    before = _lifecycle(engine, node_id)
+    _record_whisper_usage_signals(engine, transcript)
+
+    signal = engine.db.conn.execute(
+        "SELECT strength, evidence FROM signals WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert json.loads(signal["evidence"])["match"] == "node_id"
+    assert signal["strength"] == signal_strength.VERBATIM_NODE_ID
+
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ? AND node_id = ?",
+        (whisper_log_id, node_id),
+    ).fetchone()
+    assert claim is not None, "a node_id match — the strongest evidence there is — did not claim"
+    assert _lifecycle(engine, node_id) != before
+
+
+def test_token_overlap_heuristic_match_does_not_confirm(engine, tmp_path):
+    """#272 D1: the weak channel records evidence but never reinforces.
+
+    97.4% of heuristic hits are token_overlap; admitting them would give the least
+    precise kind the same lifecycle power as a verbatim node_id match.
+    """
+    prompt = "What about the retention policy?"
+    # Overlapping vocabulary, but no verbatim title or sentence.
+    response = (
+        "The decay process lowers stability, and archival thresholds eventually "
+        "move things along."
+    )
+    transcript_path = tmp_path / "overlap-no-confirm-session.jsonl"
     _write_turn_jsonl(transcript_path, prompt, response)
     transcript = parse_transcript(transcript_path)
 
     node_id, _ = engine.remember(CreateNodeRequest(
-        content="The transcript watcher mines feedback usage from completed transcripts.",
+        content="Decay lowers stability until archival thresholds move a node out of working.",
         type="fact",
-        title="Transcript watcher mines feedback usage",
+        title="Decay stability archival thresholds",
     ))
     whisper_log_id = _insert_injected_whisper_log(
-        engine, node_id=node_id, session_id="heuristic-no-confirm-session", prompt=prompt,
+        engine, node_id=node_id, session_id="overlap-no-confirm-session", prompt=prompt,
     )
 
     before = _lifecycle(engine, node_id)
+    with patch(_LLM_PATCH, return_value=None):  # judge unavailable — isolate the heuristic
+        _record_whisper_usage_signals(engine, transcript)
 
-    recorded = _record_whisper_usage_signals(engine, transcript)
-
-    # The heuristic signal is still recorded — this is about lifecycle, not observability.
-    assert recorded == 1
     signal = engine.db.conn.execute(
-        "SELECT * FROM signals WHERE whisper_log_id = ?", (whisper_log_id,)
+        "SELECT polarity, strength, evidence FROM signals WHERE whisper_log_id = ?",
+        (whisper_log_id,),
     ).fetchone()
-    assert signal["polarity"] == 1
+    assert signal["polarity"] == 1, "fixture did not match at all — check the vocabulary overlap"
+    assert json.loads(signal["evidence"])["match"] == "token_overlap"
+    assert signal["strength"] < 0.80
 
-    assert _lifecycle(engine, node_id) == before, "auto_heuristic confirmed use — it must not"
-
-    # And it claimed nothing, so a later qualified positive can still confirm.
     claim = engine.db.conn.execute(
         "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (whisper_log_id,)
     ).fetchone()
-    assert claim is None, "the heuristic path took a confirmed-use claim"
+    assert claim is None, "token_overlap took a claim — it is below the evidence floor"
+    assert _lifecycle(engine, node_id) == before
+
+
+def test_one_nodes_reinforcement_failure_does_not_stop_the_batch(engine, tmp_path):
+    """#272: the batch is isolated per node, matching the judge path's contract."""
+    prompt = "How should we solve feedback collection?"
+    response = (
+        "Two things: the transcript watcher mines feedback usage approach, "
+        "and sqlite vec stores embeddings inside the same database file as the nodes."
+    )
+    transcript_path = tmp_path / "batch-failure-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    first, _ = engine.remember(CreateNodeRequest(
+        content="The transcript watcher mines feedback usage from completed transcripts.",
+        type="fact", title="Transcript watcher mines feedback usage",
+    ))
+    second, _ = engine.remember(CreateNodeRequest(
+        content="Sqlite vec stores embeddings inside the same database file as the nodes.",
+        type="fact", title="Vector search notes",
+    ))
+    for node_id in (first, second):
+        _insert_injected_whisper_log(
+            engine, node_id=node_id, session_id="batch-failure-session", prompt=prompt,
+        )
+
+    before_second = _lifecycle(engine, second)
+    real = engine._record_confirmed_use
+
+    def flaky(node_id):
+        if node_id == first:
+            raise ZeroDivisionError("simulated mutator failure")
+        return real(node_id)
+
+    with patch.object(engine, "_record_confirmed_use", side_effect=flaky):
+        recorded = _record_whisper_usage_signals(engine, transcript)
+
+    assert recorded == 2, "a mutator failure changed the recorded count"
+    assert _lifecycle(engine, second) != before_second, "node 2 lost its reinforcement"
+
+
+def test_heuristic_below_the_floor_does_not_record_confirmed_use(engine, tmp_path):
+    """Contract 12, as amended by #272: the floor, not the source, is the gate.
+
+    Before #272 no heuristic hit could confirm. Now a verbatim one does, and only
+    evidence below HEURISTIC_CONFIRM_FLOOR is kept out. The verbatim half of this
+    contract lives in test_verbatim_heuristic_match_confirms_use.
+    """
+    prompt = "What about the retention policy?"
+    response = (
+        "The decay process lowers stability, and archival thresholds eventually "
+        "move things along."
+    )
+    transcript_path = tmp_path / "contract12-session.jsonl"
+    _write_turn_jsonl(transcript_path, prompt, response)
+    transcript = parse_transcript(transcript_path)
+
+    node_id, _ = engine.remember(CreateNodeRequest(
+        content="Decay lowers stability until archival thresholds move a node out of working.",
+        type="fact",
+        title="Decay stability archival thresholds",
+    ))
+    whisper_log_id = _insert_injected_whisper_log(
+        engine, node_id=node_id, session_id="contract12-session", prompt=prompt,
+    )
+
+    before = _lifecycle(engine, node_id)
+    with patch(_LLM_PATCH, return_value=None):
+        recorded = _record_whisper_usage_signals(engine, transcript)
+
+    assert recorded == 1
+    signal = engine.db.conn.execute(
+        "SELECT polarity, strength FROM signals WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert signal["polarity"] == 1, "the signal is still recorded — this is lifecycle, not observability"
+    assert signal["strength"] < 0.80
+
+    assert _lifecycle(engine, node_id) == before, "a below-floor hit confirmed use — it must not"
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (whisper_log_id,)
+    ).fetchone()
+    assert claim is None, "a below-floor hit took a confirmed-use claim"
 
 
 def test_replaying_the_judge_does_not_reconfirm(engine, tmp_path):

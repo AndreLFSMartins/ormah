@@ -505,6 +505,7 @@ def _record_whisper_usage_signals(
         if llm_judge_enabled and not has_llm_judge and not referenced:
             llm_groups.setdefault((prompt_text, response), []).append(row)
 
+    heuristic_confirmed_ids: list[str] = []
     with engine.db.transaction() as conn:
         for record in heuristic_records:
             row = record["row"]
@@ -527,6 +528,40 @@ def _record_whisper_usage_signals(
                     source=_HEURISTIC_AFFINITY_SOURCE,
                     confirmed_at=now_iso,
                 )
+                # Issue #272: the same at-most-once claim the judge block takes. The
+                # engine gates it on HEURISTIC_CONFIRM_FLOOR, so a token_overlap hit
+                # records its evidence here and confirms nothing.
+                #
+                # _insert_affinity MUST stay above this call: the claim helper reads
+                # changes(), so nothing may sit between its INSERT and that read.
+                if engine._claim_confirmed_use(
+                    conn,
+                    row["id"],
+                    row["node_id"],
+                    signal=1,
+                    source=_HEURISTIC_AFFINITY_SOURCE,
+                    strength=record["strength"],
+                ):
+                    heuristic_confirmed_ids.append(row["node_id"])
+
+    # Issue #272: reinforcement runs after the transaction commits — _record_confirmed_use
+    # does file I/O, and calling it inside would hold the process-wide write lock across
+    # N markdown saves and take db_lock before memory_lock, inverting the order every
+    # serialized writer uses.
+    #
+    # This is deliberately NOT the judge's loop below: the `if not llm_groups: return`
+    # that follows means the judge's loop never runs when there is nothing to judge —
+    # which, since a confirming heuristic hit now suppresses the judge, is exactly the
+    # case this loop exists for.
+    #
+    # Isolated per node: the signals and claims are already committed, so letting one
+    # failure escape would abandon every later node with its claim taken and nothing to
+    # retry it. At-most-once means a miss is logged, never raised.
+    for node_id in heuristic_confirmed_ids:
+        try:
+            engine._record_confirmed_use(node_id)
+        except Exception:
+            logger.exception("confirmed-use reinforcement failed for node %s", node_id)
 
     if not llm_groups:
         return recorded
