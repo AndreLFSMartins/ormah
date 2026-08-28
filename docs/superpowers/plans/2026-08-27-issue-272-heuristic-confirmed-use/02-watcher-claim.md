@@ -16,6 +16,18 @@
 The heuristic commit block writes a signal and an affinity row, then stops. This is the change the
 issue is actually about: **0 of 1,629** positive heuristic pairs ever took a claim.
 
+## The affinity row this block writes is settled in Task 3, not here
+
+This block writes `_insert_affinity(signal=1, ...)` for every positive hit — the floor gates the
+*claim*, not the affinity row — so a `token_overlap` hit still records a `+1` here, exactly as it
+does today. That is deliberate and unchanged.
+
+It only becomes a problem once Task 3 starts sending those weak hits to the judge, because affinity
+is unique per `(node_id, whisper_log_id)` and `_insert_affinity` is `ON CONFLICT DO NOTHING`: a later
+`irrelevant` verdict could not overwrite this row. **Task 3 owns that fix** (its Step 5), since Task 3
+is what makes the path reachable. Nothing to do about it here — do not pre-emptively change this
+block's affinity write.
+
 ## The two ordering rules — both load-bearing
 
 1. **`_insert_affinity` must run BEFORE the claim.** The claim helper reads `changes()`, so nothing may

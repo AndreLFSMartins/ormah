@@ -43,6 +43,14 @@ route that can still confirm them. A boot migration backfills rows the defect al
   ```
 - The floor is `HEURISTIC_CONFIRM_FLOOR = signal_strength.IMPLICIT` (0.80), defined by reference to
   the ladder so the two cannot drift.
+- **Never decide eligibility from `signals.strength`.** The column is `REAL NOT NULL DEFAULT 1.0`
+  — above the 0.80 floor — so any stale or pre-ladder row reads as confirmable. Recompute with
+  `signal_strength.strength_from_evidence(source, polarity, evidence)`, which is a pure function of
+  what the row already carries and fail-closed (unknown match → `UNKNOWN` 0.40; polarity 0 → 0.0).
+  Ordering a read after `_migrate_signal_strength` is **not** a substitute: the two commit in
+  separate transactions, and #238's second unmanaged process can write into the gap. This applies
+  to Task 4; the live path (Tasks 2–3) has the strength in hand from `_node_usage_evidence` and
+  never reads the column.
 - **Never modify `_record_confirmed_use`'s body, and never call it inside an open transaction** — it
   does file I/O and would take `db_lock` before `memory_lock`, inverting every serialized writer's
   order (#220 §4.3).

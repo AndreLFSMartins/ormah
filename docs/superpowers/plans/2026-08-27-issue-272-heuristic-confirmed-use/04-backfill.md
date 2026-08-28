@@ -20,13 +20,26 @@ measured store (2026-08-26): **42 pairs** — 29 `node_id`, 13 `sentence`, 0 `ti
 
 ## Two rules this migration must not break
 
-1. **It must run AFTER `_migrate_signal_strength` — this is a safety rule, not tidiness.**
-   `signals.strength` is declared `REAL NOT NULL DEFAULT 1.0` (`schema.sql:174`), so **every
-   pre-ladder row carries 1.0, which is above the 0.80 floor.** Running this backfill first would
-   confirm every stale positive heuristic row in the store — the 1,587 `token_overlap` ones
-   included — and the claim is a monotonic latch with no undo and a markdown write already on disk.
-   Found by council round 2 (Cursor); `test_backfill_runs_from_startup_and_only_after_the_ladder`
-   pins it in both directions.
+1. **Eligibility is recomputed from `evidence`, never read from `signals.strength`.**
+   `signals.strength` is declared `REAL NOT NULL DEFAULT 1.0` (`schema.sql:175`), so **every
+   pre-ladder row carries 1.0, which is above the 0.80 floor.** Trusting the column would confirm
+   every stale positive heuristic row in the store — the 1,587 `token_overlap` ones included — and
+   the claim is a monotonic latch with no undo and a markdown write already on disk.
+
+   **Ordering this after `_migrate_signal_strength` is NOT sufficient**, and the council run on the
+   final plan is what established that — Codex (HIGH) and Cursor (MEDIUM) converged on it
+   independently. The two migrations commit in **separate transactions**. A second unmanaged process
+   running an old binary (#238 — a scenario `_migrate_signal_strength`'s own docstring already
+   admits) can commit a `token_overlap` row carrying the schema default of 1.0 *after* the ladder
+   commits and *before* this SELECT begins. Ordering cannot close an inter-transaction window, and a
+   serial `startup()` test cannot expose one.
+
+   `signal_strength.strength_from_evidence(source, polarity, evidence)` is a pure function of what
+   the row already carries, and it is fail-closed: an unknown, missing or malformed `match` returns
+   `UNKNOWN` (0.40), and `polarity == 0` returns 0.0 — both far below the floor. Recomputing inside
+   this transaction makes the stored column irrelevant to the decision, which is what actually
+   closes the window. The call still runs after `_migrate_signal_strength`, but as defence in depth
+   rather than as the thing standing between a stale 1.0 and an irreversible claim.
 2. **Reinforcement runs after the transaction commits.** `_record_confirmed_use` does file I/O; calling
    it inside would take `db_lock` before `memory_lock` (#220 §4.3).
 
@@ -246,21 +259,29 @@ def test_backfill_cutoff_clears_every_kind_of_ineligible_tail(engine):
     ).fetchone()["n"] == 0, "an ineligible row was claimed"
 
 
-def test_backfill_runs_from_startup_and_only_after_the_ladder(engine):
-    """#272, council R1+R2 (Cursor): pins the call site AND the migration order.
+def test_backfill_runs_from_startup_and_ignores_stale_stored_strength(engine):
+    """#272, council R1+R2 (Cursor) + the final-plan run: call site AND recompute.
 
-    The order is a SAFETY requirement, not tidiness. `signals.strength` is
-    `REAL NOT NULL DEFAULT 1.0`, so every pre-ladder row carries 1.0 — above the
-    0.80 floor. Running this backfill before _migrate_signal_strength would confirm
-    every stale positive heuristic row, token_overlap included, and the claim is a
-    monotonic latch: there is no undo.
+    This test USED to pin the migration order, back when eligibility read
+    `signals.strength`. It no longer can: eligibility is recomputed from `evidence`,
+    so both assertions hold whichever order the two migrations run in. That is the
+    point — the order stopped being load-bearing, and a test claiming to prove an
+    order it can no longer falsify would be worse than no test.
 
-    The two seeds are chosen so that swapping the two calls in startup() turns BOTH
-    assertions red:
-      - token_overlap seeded at a stale 1.0 -> the ladder rewrites it to ~0.55, below
-        the floor -> must NOT claim. Runs first, and it claims.
-      - node_id seeded at a stale 0.50 -> the ladder rewrites it to 0.98 -> must claim.
-        Runs first, and it does not.
+    What it pins now, both of which are real:
+      - `startup()` actually calls the backfill (swap the call out and the verbatim
+        assertion goes red);
+      - the stored column does not decide anything. Both seeds carry a strength that
+        contradicts their evidence, and the outcome follows the evidence:
+          * token_overlap stored at a stale 1.0 (above the floor) -> recomputes to
+            ~0.55 -> must NOT claim;
+          * node_id stored at a stale 0.50 (below the floor) -> recomputes to 0.98
+            -> must claim.
+        An implementation that reads `row["strength"]` turns BOTH red.
+
+    The inter-transaction window itself is covered by
+    test_backfill_ignores_a_stale_row_written_after_the_ladder_committed, which a
+    sequential startup() test cannot express.
     """
     overlap_node, verbatim_node = _make_nodes(engine, count=2)
     overlap_log = _seed_whisper_log(engine, overlap_node, prompt="caching overlap")
@@ -289,15 +310,65 @@ def test_backfill_runs_from_startup_and_only_after_the_ladder(engine):
         "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (verbatim_log,)
     ).fetchone()
     assert verbatim_claim is not None, (
-        "startup() never ran the backfill, or ran it before the ladder rewrote 0.50 to 0.98"
+        "startup() never ran the backfill, or eligibility read the stale stored 0.50 "
+        "instead of recomputing 0.98 from evidence.match = node_id"
     )
 
     overlap_claim = engine.db.conn.execute(
         "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (overlap_log,)
     ).fetchone()
     assert overlap_claim is None, (
-        "a stale DEFAULT-1.0 token_overlap row confirmed — the backfill ran before the ladder"
+        "a stale DEFAULT-1.0 token_overlap row confirmed — eligibility trusted the stored "
+        "column instead of recomputing from evidence"
     )
+
+
+def test_backfill_ignores_a_stale_row_written_after_the_ladder_committed(engine):
+    """#272, final-plan council (Codex HIGH + Cursor MEDIUM, converging independently).
+
+    The falsifier for the inter-transaction window. `_migrate_signal_strength` and this
+    backfill commit SEPARATELY, so an old binary — the second unmanaged process of #238
+    — can write a pre-ladder row carrying the schema default of 1.0 *after* the ladder
+    has committed and *before* this SELECT begins. Ordering the two calls cannot close
+    that window, and a sequential startup() test cannot expose it.
+
+    Simulated exactly: run the ladder to completion, THEN insert the stale row, THEN run
+    only the backfill. An implementation that reads `signals.strength` claims it, and the
+    claim is a monotonic latch with a markdown write already on disk — no undo.
+    """
+    target = _make_nodes(engine, count=1)[0]
+    log_id = _seed_whisper_log(engine, target, prompt="caching stale window")
+
+    # The ladder runs first and commits — exactly as startup() orders it.
+    engine._migrate_signal_strength()
+
+    # The window: an old binary commits a token_overlap row at the schema default of
+    # 1.0, which the ladder has already finished and will not revisit this boot.
+    _seed_heuristic_signal(
+        engine, target, log_id, strength=1.0, match="token_overlap",
+    )
+    engine.db.conn.execute(
+        "UPDATE signals SET evidence = ? WHERE whisper_log_id = ?",
+        (json.dumps({"match": "token_overlap", "overlap_ratio": 1.0}), log_id),
+    )
+    engine.db.conn.commit()
+
+    before = _snapshot(engine, target)
+    engine._migrate_heuristic_confirmed_use()
+
+    claim = engine.db.conn.execute(
+        "SELECT 1 FROM confirmed_use_claims WHERE whisper_log_id = ?", (log_id,)
+    ).fetchone()
+    assert claim is None, (
+        "a stale DEFAULT-1.0 row written in the window between the two migrations took "
+        "an irreversible claim — eligibility must recompute from evidence, not read the column"
+    )
+    assert _snapshot(engine, target) == before
+
+    # The cutoff still advanced past it: ineligible is not unprocessed.
+    assert engine._meta_int("heuristic_confirmed_use_cutoff") == engine.db.conn.execute(
+        "SELECT MAX(id) AS m FROM signals WHERE source = 'transcript_watcher_heuristic'"
+    ).fetchone()["m"]
 
 
 def test_backfill_isolates_one_nodes_failure(engine):
@@ -354,9 +425,14 @@ Add this method immediately after `_migrate_signal_strength` ends (`:259`, befor
         rows are evidence of real use that never reached the lifecycle. This repairs
         the ones whose evidence clears HEURISTIC_CONFIRM_FLOOR.
 
-        MUST run after _migrate_signal_strength: it reads signals.strength, and that
-        migration is what normalises the column onto the ladder. Running first would
-        test pre-ladder values against a ladder-derived floor.
+        Eligibility is recomputed from each row's own evidence with
+        strength_from_evidence, and never read from signals.strength. That column
+        defaults to 1.0 -- above the floor -- and _migrate_signal_strength commits in a
+        SEPARATE transaction, so an old binary (#238) can write a stale 1.0 row in the
+        window between the two; ordering alone would not stop this from claiming it. The
+        recompute is a pure function of stored evidence and fail-closed (an unknown or
+        malformed match returns UNKNOWN, 0.40), so the stored column cannot mislead it.
+        Running after _migrate_signal_strength stays correct, as defence in depth.
 
         Rescans on every boot rather than stamping once, for the reason
         _migrate_signal_strength documents: an old binary -- a rollback, or the second
@@ -390,7 +466,7 @@ Add this method immediately after `_migrate_signal_strength` ends (`:259`, befor
             # but it is ineligible IN PYTHON, after its id has advanced the high-water mark.
             rows = conn.execute(
                 """
-                SELECT s.id, s.whisper_log_id, s.node_id, s.strength, s.polarity,
+                SELECT s.id, s.whisper_log_id, s.node_id, s.polarity, s.evidence,
                        wl.was_injected, wl.node_id AS event_node_id
                 FROM signals s
                 LEFT JOIN whisper_log wl ON wl.id = s.whisper_log_id
@@ -408,13 +484,23 @@ Add this method immediately after `_migrate_signal_strength` ends (`:259`, befor
                 # both ids from the same whisper_log row, but here they come from different
                 # tables, so a legacy or hand-repaired signal could reinforce a node the
                 # agent never saw for this event. Checked explicitly.
+                # Recomputed, never read from signals.strength. That column defaults to
+                # 1.0 -- above the floor -- and the ladder migration commits in a separate
+                # transaction, so a stale row written in the window between the two would
+                # otherwise take an irreversible claim. Pure function of stored evidence,
+                # fail-closed: an unknown or malformed match returns UNKNOWN (0.40).
+                strength = signal_strength.strength_from_evidence(
+                    signal_strength.HEURISTIC_SOURCE,
+                    row["polarity"],
+                    row["evidence"],
+                )
                 eligible = (
                     row["whisper_log_id"] is not None
                     and row["event_node_id"] is not None  # LEFT JOIN found no parent row
                     and row["polarity"] == 1
                     and row["was_injected"] == 1
                     and row["node_id"] == row["event_node_id"]
-                    and row["strength"] >= HEURISTIC_CONFIRM_FLOOR
+                    and strength >= HEURISTIC_CONFIRM_FLOOR
                 )
                 if eligible and self._claim_confirmed_use(
                     conn,
@@ -422,7 +508,7 @@ Add this method immediately after `_migrate_signal_strength` ends (`:259`, befor
                     row["node_id"],
                     signal=1,
                     source="auto_heuristic",
-                    strength=row["strength"],
+                    strength=strength,
                 ):
                     confirmed_node_ids.append(row["node_id"])
                 processed_max = max(processed_max, row["id"])
@@ -453,12 +539,13 @@ Add this method immediately after `_migrate_signal_strength` ends (`:259`, befor
             )
 ```
 
-The row's own `strength` is passed to the claim rather than the floor constant: the helper's gate is
-then evaluating the same number the Python guard did, so the two cannot disagree if the floor moves.
+The **recomputed** strength is passed to the claim — not the stored column, and not the floor
+constant: the helper's gate then evaluates the same number the Python guard did, so the two cannot
+disagree if the floor moves.
 The redundancy is deliberate — the guard keeps the loop honest about what it counted as processed, and
 the helper stays the single authority on what confirms.
 
-- [ ] **Step 5: Call it at boot, in the right order**
+- [ ] **Step 5: Call it at boot, after the ladder (defence in depth)**
 
 `startup()` already calls `_migrate_fsrs()` and `_migrate_signal_strength()` at `:166-167`. **Insert
 only the new call**, immediately after `_migrate_signal_strength()` — do not re-add the two lines
@@ -466,9 +553,10 @@ above it:
 
 ```python
         self._migrate_signal_strength()
-        # MUST follow _migrate_signal_strength. signals.strength defaults to 1.0, which is
-        # ABOVE the confirm floor, so running this first would claim every stale positive
-        # heuristic row — token_overlap included — and the claim cannot be undone (#272).
+        # Defence in depth, NOT the safety mechanism: eligibility is recomputed from each
+        # row's own evidence, so a stale DEFAULT-1.0 strength cannot claim whatever the
+        # order. The two migrations commit separately, so ordering never closed that
+        # window on its own anyway (#272).
         self._migrate_heuristic_confirmed_use()
 ```
 
@@ -480,7 +568,7 @@ tail -30 /tmp/ormah-272-file.txt
 echo "pytest exit=$RC"
 ```
 
-Expected: PASS, all six new tests plus every pre-existing contract.
+Expected: PASS, every new backfill test plus every pre-existing contract.
 
 - [ ] **Step 7: Run the full suite**
 
@@ -503,7 +591,12 @@ migration repairs them, using the same floor and the same at-most-once claim as
 the live path.
 
 It rescans rather than stamping once, for the reason _migrate_signal_strength
-documents: an old binary can write pre-fix rows after a one-time stamp. It must
-run after that migration, which is what puts signals.strength on the ladder this
-one reads."
+documents: an old binary can write pre-fix rows after a one-time stamp.
+
+Eligibility is recomputed from each row's own evidence rather than read from
+signals.strength. That column defaults to 1.0, above the floor, and the ladder
+migration commits in a separate transaction — so an old binary writing in the
+window between the two could otherwise have taken an irreversible claim on a
+token_overlap row. Ordering the two calls cannot close an inter-transaction
+window; recomputing makes the stored column irrelevant to the decision."
 ```
