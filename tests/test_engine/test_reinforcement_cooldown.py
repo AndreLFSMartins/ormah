@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -124,6 +125,67 @@ def test_the_cooldown_does_not_freeze_the_decay_anchor(engine):
 
     assert second["last_accessed"] >= first["last_accessed"]
     assert second["last_review"] == first["last_review"]
+
+
+def _seed_pending_claim(engine, node_id: str, claimed_at: datetime) -> int:
+    """Insert a whisper_log row and a 'pending' claim stamped with claimed_at.
+
+    Mirrors _claim_fresh_event's insert shape but takes claimed_at explicitly
+    (rather than SQL datetime('now')) so an out-of-order pair of claims can be
+    built: an older one applied AFTER a newer one already moved last_accessed
+    forward. strftime truncates to whole seconds, matching what
+    _claim_confirmed_use's own datetime('now') produces, so the round trip
+    through the DB does not introduce a spurious sub-second mismatch.
+    """
+    with engine.db.transaction() as conn:
+        cursor = conn.execute(
+            "INSERT INTO whisper_log "
+            "(session_id, prompt_hash, prompt_vec, node_id, score, was_injected, logged_at) "
+            "VALUES ('test-out-of-order', ?, X'00', ?, 1.0, 1, datetime('now'))",
+            (uuid.uuid4().hex, node_id),
+        )
+        whisper_log_id = cursor.lastrowid
+        conn.execute(
+            "INSERT INTO confirmed_use_claims "
+            "(whisper_log_id, node_id, claimed_at, state) VALUES (?, ?, ?, 'pending')",
+            (whisper_log_id, node_id, claimed_at.strftime("%Y-%m-%d %H:%M:%S")),
+        )
+    return whisper_log_id
+
+
+def test_out_of_order_reinforcement_does_not_regress_last_accessed(engine):
+    """Final review I1: a sweep applied out of claimed_at order must not walk
+    last_accessed backwards.
+
+    C1 is claimed at T0, on event E1. C2 is claimed at T1 > T0, on event E2
+    for the SAME node. C2 is applied first (e.g. C1 failed and stayed
+    'pending' while a later use went through cleanly), moving last_accessed
+    to T1. A retry sweep later applies C1 with its own clock, T0. T0 < T1,
+    so the write must not move last_accessed back to T0.
+    """
+    node_id = _make_node(engine)
+    now = datetime.now(timezone.utc)
+    t0 = now - timedelta(hours=2)
+    t1 = now - timedelta(hours=1)
+    assert t0 < t1, "the two claim clocks must be distinguishable and ordered"
+
+    log_c1 = _seed_pending_claim(engine, node_id, t0)
+    log_c2 = _seed_pending_claim(engine, node_id, t1)
+
+    # C2 (the newer claim) lands first.
+    engine._record_confirmed_use(node_id, whisper_log_id=log_c2)
+    after_c2 = _row(engine, node_id)
+    assert after_c2["access_count"] == 1
+
+    # C1 (the older claim) is applied afterwards, as a retry sweep would.
+    engine._record_confirmed_use(node_id, whisper_log_id=log_c1)
+    after_c1 = _row(engine, node_id)
+
+    assert after_c1["access_count"] == 2, "the older claim's use was not counted"
+    assert after_c1["last_accessed"] == after_c2["last_accessed"], (
+        "an out-of-order claim regressed last_accessed: "
+        f"{after_c2['last_accessed']!r} -> {after_c1['last_accessed']!r}"
+    )
 
 
 def test_reinforcement_survives_a_zero_stability_node(engine):

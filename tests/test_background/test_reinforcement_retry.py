@@ -1,10 +1,12 @@
 """#272 D5: the sleep-cycle sweeper that makes the confirmed-use claim durable."""
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from ormah.background.reinforcement_retry import _BATCH_SIZE, run_reinforcement_retry
+from ormah.config import Settings
 from tests.test_engine.test_confirmed_use_contract import (  # noqa: E402
     _claim_row,
     _make_nodes,
@@ -165,3 +167,45 @@ def test_a_wall_of_failing_claims_does_not_starve_the_newest(
     assert _snapshot(engine, node_id) != before, (
         "the failing wall starved the newer claim across every run"
     )
+
+
+def test_scheduler_registers_reinforcement_retry(tmp_path, monkeypatch):
+    """Final review I2: pin the sweeper's scheduler registration.
+
+    Every other test in this file calls run_reinforcement_retry(engine) directly.
+    Deleting the add_job block in start_scheduler would leave every one of them
+    green while the durability this branch exists to add is silently off in
+    production. Same shape as test_scheduler_registers_whisper_log_cleanup
+    (tests/test_background/test_whisper_log_cleanup.py) and its siblings in
+    tests/test_backup.py and tests/test_cloud_jobs.py.
+    """
+    from ormah.background import scheduler as scheduler_module
+
+    class FakeScheduler:
+        def __init__(self):
+            self.jobs = []
+
+        def add_job(self, func, trigger, **kwargs):
+            self.jobs.append({"func": func, "trigger": trigger, **kwargs})
+
+        def start(self):
+            pass
+
+        def get_jobs(self):
+            return self.jobs
+
+    monkeypatch.setattr(scheduler_module, "BackgroundScheduler", FakeScheduler)
+    settings = Settings(
+        memory_dir=tmp_path / "memory",
+        reinforcement_retry_interval_minutes=45,
+    )
+    engine = SimpleNamespace(
+        settings=settings,
+        builder=SimpleNamespace(incremental_update=lambda: (0, 0)),
+    )
+
+    fake_scheduler, _tracker = scheduler_module.start_scheduler(engine)
+
+    job = next(job for job in fake_scheduler.jobs if job["id"] == "reinforcement_retry")
+    assert job["trigger"] == "interval"
+    assert job["minutes"] == 45

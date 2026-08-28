@@ -2273,8 +2273,8 @@ class MemoryEngine:
         exists in _seed_stability_from_access_count, _migrate_identity_tiers,
         and _ensure_self_node, but all three run only from startup() before the
         server serves, so the two orders never interleave today. Invariant this
-        depends on: never call file_store inside db.transaction() outside
-        startup().
+        depends on: never call file_store inside db.transaction() unless the
+        memory lock is already held.
 
         Issue #272: the claim's outcome commits with this write, so a reinforcement
         that never landed stays visible as state = 'pending' and
@@ -2390,12 +2390,19 @@ class MemoryEngine:
 
             access_count = row["access_count"] + 1
 
+            # Final review I1: an out-of-order sweep (an older claim applied after a
+            # newer one already moved last_accessed forward) must not walk the decay
+            # anchor backwards. now stays claimed_at everywhere above — the FSRS clock
+            # is untouched — but the value actually WRITTEN as last_accessed is clamped
+            # to never go earlier than what the row already holds.
+            new_last_accessed = max(now, last_accessed) if last_accessed is not None else now
+
             conn.execute(
                 "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, "
                 "last_review = ? WHERE id = ?",
                 (
                     access_count,
-                    now.isoformat(),
+                    new_last_accessed.isoformat(),
                     stability,
                     last_review.isoformat() if last_review else None,
                     node_id,
@@ -2405,7 +2412,7 @@ class MemoryEngine:
             # The markdown is the projection: it is set to the computed values, never
             # incremented from whatever it happened to hold.
             node.access_count = access_count
-            node.last_accessed = now
+            node.last_accessed = new_last_accessed
             node.stability = stability
             node.last_review = last_review
             self.file_store.save(node)
