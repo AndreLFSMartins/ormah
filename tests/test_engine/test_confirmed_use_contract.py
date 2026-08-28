@@ -756,8 +756,21 @@ def test_recall_search_structured_rejects_positional_tuning_args(engine):
 
 # --- Task 4: backfill the rows the defect already wrote (#272) -------------
 
-def _seed_heuristic_signal(engine, node_id, whisper_log_id, strength, match="node_id"):
-    """Write a positive heuristic signal row as the pre-#272 code would have."""
+def _seed_heuristic_signal(
+    engine, node_id, whisper_log_id, strength, match="node_id", overlap_ratio=None
+):
+    """Write a positive heuristic signal row as the pre-#272 code would have.
+
+    ``strength`` only fills the cosmetic ``signals.strength`` column, which the
+    backfill deliberately ignores — it recomputes from ``evidence`` instead
+    (issue #272). ``overlap_ratio``, when given, is written into ``evidence``
+    and is what actually drives that recompute for a token_overlap row via
+    ``strength_from_evidence``. Defaults to omitted so existing callers keep
+    their current evidence shape unchanged.
+    """
+    evidence = {"match": match}
+    if overlap_ratio is not None:
+        evidence["overlap_ratio"] = overlap_ratio
     engine.db.conn.execute(
         """
         INSERT INTO signals
@@ -766,7 +779,7 @@ def _seed_heuristic_signal(engine, node_id, whisper_log_id, strength, match="nod
         VALUES (?, ?, 'whisper_referenced', 1, ?, 'transcript_watcher_heuristic',
                 's1', 'transcript', 'myproject', 'h', ?, datetime('now'))
         """,
-        (whisper_log_id, node_id, strength, json.dumps({"match": match})),
+        (whisper_log_id, node_id, strength, json.dumps(evidence)),
     )
     engine.db.conn.commit()
 
@@ -804,13 +817,26 @@ def test_backfill_is_idempotent(engine):
     assert _snapshot(engine, target) == after_first, "the backfill reinforced twice"
 
 
-@pytest.mark.parametrize("strength,match", [(0.40, "token_overlap"), (0.7799, "token_overlap")])
-def test_backfill_skips_rows_below_the_floor(engine, strength, match):
-    """#272 D4: the backfill uses the same floor as the live path."""
+@pytest.mark.parametrize("strength,match,overlap_ratio", [
+    (0.40, "token_overlap", 0.5),      # ratio <= OVERLAP_GATE recomputes to the floor itself
+    (0.7799, "token_overlap", 8.7428), # asymptotic near-supremum, still strictly under 0.80
+])
+def test_backfill_skips_rows_below_the_floor(engine, strength, match, overlap_ratio):
+    """#272 D4: the backfill uses the same floor as the live path.
+
+    The seeded ``strength`` only fills the cosmetic ``signals.strength`` column,
+    which the backfill ignores by design — it recomputes from ``evidence`` via
+    ``strength_from_evidence``. ``overlap_ratio`` is what actually drives that
+    recompute, so the two cases genuinely land at different points on the
+    token_overlap band (0.40 and ~0.7799) instead of both silently falling
+    back to the same OVERLAP_FLOOR default.
+    """
     ids = _make_nodes(engine, count=1)
     target = ids[0]
     log_id = _seed_whisper_log(engine, target)
-    _seed_heuristic_signal(engine, target, log_id, strength=strength, match=match)
+    _seed_heuristic_signal(
+        engine, target, log_id, strength=strength, match=match, overlap_ratio=overlap_ratio
+    )
 
     before = _snapshot(engine, target)
     engine._migrate_heuristic_confirmed_use()
