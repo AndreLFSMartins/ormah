@@ -5,7 +5,7 @@
 **Files:**
 - Modify: `src/ormah/engine/memory_engine.py` (`:57`, `:2722`, `:2764`, `:2812`, `:2895`)
 - Test: `tests/test_engine/test_confirmed_use_contract.py`
-- Test: `tests/test_signal_strength.py`
+- Test: `tests/test_engine/test_signal_strength.py`
 
 **Interfaces:**
 - Consumes: `ormah.signal_strength.IMPLICIT` (0.80), `signal_strength.token_overlap_strength(ratio)`,
@@ -31,7 +31,7 @@ case. Only its docstring is stale. **Do not weaken or delete this test.**
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_signal_strength.py`:
+Add to `tests/test_engine/test_signal_strength.py`:
 
 ```python
 def test_token_overlap_never_reaches_the_confirm_floor():
@@ -101,7 +101,7 @@ def test_the_floor_does_not_gate_the_other_sources(engine):
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-python -m pytest tests/test_signal_strength.py -k confirm_floor -v
+python -m pytest tests/test_engine/test_signal_strength.py -k confirm_floor -v
 python -m pytest tests/test_engine/test_confirmed_use_contract.py -k "evidence_floor or other_sources" -v
 ```
 
@@ -213,7 +213,7 @@ def test_auto_heuristic_positive_does_not_confirm(engine):
 - [ ] **Step 7: Run the tests to verify they pass**
 
 ```bash
-python -m pytest tests/test_signal_strength.py tests/test_engine/test_confirmed_use_contract.py -v
+python -m pytest tests/test_engine/test_signal_strength.py tests/test_engine/test_confirmed_use_contract.py -v
 ```
 
 Expected: PASS, including the untouched contract 9 and contracts 10a–10f. Any failure outside the
@@ -250,7 +250,7 @@ echo "pytest exit=$RC"   # 0, or only baseline IDs failed
 ```bash
 make lint
 git add src/ormah/engine/memory_engine.py src/ormah/background/session_watcher.py \
-        tests/test_engine/test_confirmed_use_contract.py tests/test_signal_strength.py
+        tests/test_engine/test_confirmed_use_contract.py tests/test_engine/test_signal_strength.py
 git commit -m "fix(feedback): admit auto_heuristic to confirmed use above an evidence floor (#272)
 
 _CONFIRMED_USE_SOURCES excluded auto_heuristic pending #218 signal calibration,

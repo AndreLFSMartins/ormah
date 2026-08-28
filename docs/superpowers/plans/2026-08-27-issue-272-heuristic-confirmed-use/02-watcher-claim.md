@@ -155,7 +155,15 @@ def test_token_overlap_heuristic_match_does_not_confirm(engine, tmp_path):
     """
     prompt = "What about the retention policy?"
     # Overlapping vocabulary, but no verbatim title or sentence.
-    response = "Retention uses decay, stability and archival thresholds together."
+    # MEASURED, not guessed: this text yields match="token_overlap", overlap_ratio 0.6,
+    # strength ~0.436 — a real weak hit, under the 0.80 floor. The earlier text
+    # ("Retention uses decay, stability and archival thresholds together.") gave
+    # overlap_ratio 0.4, BELOW OVERLAP_GATE 0.5, so _node_usage_evidence returned
+    # match="none" and this test exercised no heuristic path at all.
+    response = (
+        "The decay process lowers stability, and archival thresholds eventually "
+        "move things along."
+    )
     transcript_path = tmp_path / "overlap-no-confirm-session.jsonl"
     _write_turn_jsonl(transcript_path, prompt, response)
     transcript = parse_transcript(transcript_path)
@@ -329,7 +337,15 @@ def test_heuristic_below_the_floor_does_not_record_confirmed_use(engine, tmp_pat
     contract lives in test_verbatim_heuristic_match_confirms_use.
     """
     prompt = "What about the retention policy?"
-    response = "Retention uses decay, stability and archival thresholds together."
+    # MEASURED, not guessed: this text yields match="token_overlap", overlap_ratio 0.6,
+    # strength ~0.436 — a real weak hit, under the 0.80 floor. The earlier text
+    # ("Retention uses decay, stability and archival thresholds together.") gave
+    # overlap_ratio 0.4, BELOW OVERLAP_GATE 0.5, so _node_usage_evidence returned
+    # match="none" and this test exercised no heuristic path at all.
+    response = (
+        "The decay process lowers stability, and archival thresholds eventually "
+        "move things along."
+    )
     transcript_path = tmp_path / "contract12-session.jsonl"
     _write_turn_jsonl(transcript_path, prompt, response)
     transcript = parse_transcript(transcript_path)
