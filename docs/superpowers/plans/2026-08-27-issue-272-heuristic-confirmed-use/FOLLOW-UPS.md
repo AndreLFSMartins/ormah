@@ -110,3 +110,64 @@ Recorded here so they are not mistaken for verified facts:
   depends on any of them — the executable pin is
   `OVERLAP_FLOOR + OVERLAP_SPAN = 0.78 < HEURISTIC_CONFIRM_FLOOR = 0.80`, which is verified.
 - **First-boot cost of the unbounded backfill on a large store** (M6). Never measured.
+
+---
+
+## Raised by `/council-pr` of 2026-08-28, deferred by André
+
+**Line numbers in this section are measured at `19ec283`**, not at `e975a90` like the rest of this
+file — `19ec283` moved `file_store.load()` inside the transaction, which shifted the surrounding
+lines. Run: `RUN_ID=40d8ff05-19ec2837-72e5217b`, `DIFF_BASE=40d8ff0`, peers Cursor (TIMEOUT, no
+verdict) and Codex (`needs-attention`).
+
+Both findings target the durable-retry protocol introduced by `b841235` and `e975a90` — **not** the
+two council fixes of 2026-08-28. Both are Codex `high` findings that arrived **without a
+reproduction command**, so the ADR-0009 evidence gate could execute nothing: they are recorded as
+`unverified_blocking`, meaning **neither confirmed nor refuted**. Nobody has reproduced them; nobody
+has shown they cannot happen. Treat them as plausible and unmeasured.
+
+### C1 — A failed COMMIT can still turn one claim into two increments
+
+`src/ormah/engine/memory_engine.py:2407-2425` · Codex `high`, confidence 0.94
+
+The markdown file is saved before the enclosing SQLite transaction commits. If the save succeeds and
+the COMMIT fails, the file holds `access_count + 1` while the database and the claim roll back.
+Before the retry runs, `update_node` or any other file-to-index path can read that file and promote
+the phantom counter into SQLite via `builder.index_single`. The pending claim then retries from the
+already-incremented row and writes `access_count + 2`.
+
+This contradicts the invariant the branch's own comment asserts — that a retry recomputes the same
+values because "the counters come FROM the nodes row". That holds only while no file-to-index
+operation runs between the failure and the retry.
+
+Codex's suggested direction: do not expose an uncommitted lifecycle value through the authoritative
+markdown; use a durable outbox/reconciliation record, or commit the SQLite result first and make the
+file projection independently retryable from that committed target. Regression test would cover
+save-OK → COMMIT-fail → reindex/update → retry.
+
+**Deferred because** the fix is a design decision about the retry protocol (outbox vs. inverting
+commit/save order), not a patch — it belongs in its own brainstorming and issue, not tacked onto a
+branch already stacked on PR #273.
+
+### C2 — A missing markdown file permanently discards a still-existing node's reinforcement
+
+`src/ormah/engine/memory_engine.py:2342-2351` · Codex `high`, confidence 0.90
+
+The claim is marked terminal `orphaned` when the file load fails **or** the SQLite node row is
+absent. A node can exist in SQLite while its markdown is temporarily absent — sync, restore, or any
+partial filesystem operation. The sweeper then stops retrying forever, even if the file reappears
+seconds later. `test_missing_node_ends_orphaned_not_applied` covers only absence from *both* stores,
+so this one-sided degraded state is undefended.
+
+Codex's suggested direction: treat one-sided absence as recoverable and leave the claim pending with
+backoff; mark `orphaned` only when authoritative deletion is established (index row *and* file
+absent). Tests for DB-present/file-missing followed by file restoration.
+
+**Deferred because** André chose to close the approved scope first. This is the smaller of the two
+and the natural next one to fix.
+
+### Structural note — Cursor cannot review this branch
+
+Cursor has now timed out three consecutive times on this diff (2,434 lines twice, 2,598 lines on
+2026-08-28). Peer-delivery failure is a hard block in the auto-merge gate, so **every `/council-pr`
+on this branch will be born blocked** until the diff is partitioned or Cursor's timeout is raised.
