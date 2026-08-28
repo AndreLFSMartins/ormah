@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ormah.models.node import CreateNodeRequest, NodeType, Tier, UpdateNodeRequest
+from tests.confirmed_use_helpers import reinforce
 
 
 def _archived_at(engine, node_id):
@@ -70,7 +71,7 @@ def test_confirmed_use_promotion_clears_archived_at(engine):
     engine.update_node(node_id, UpdateNodeRequest(tier=Tier.archival))
     assert _archived_at(engine, node_id) is not None, "sanity: the clock must be running"
 
-    engine._record_confirmed_use(node_id)
+    reinforce(engine, node_id)
 
     node = engine.file_store.load(node_id)
     assert node.tier is Tier.working, "sanity: the node must actually have been promoted"

@@ -5,6 +5,7 @@ import math
 
 import pytest
 
+from ormah import signal_strength
 from ormah import signal_strength as ss
 
 
@@ -166,3 +167,24 @@ def test_recompute_stays_finite_and_in_band_for_poisoned_confidence(confidence):
     result = ss.strength_from_evidence(ss.LLM_JUDGE_SOURCE, 1, evidence)
     assert math.isfinite(result)
     assert ss.JUDGE_LO <= result <= ss.JUDGE_HI
+
+
+def test_token_overlap_never_reaches_the_confirm_floor():
+    """#272 D1: token_overlap is excluded from confirmed use BY CONSTRUCTION.
+
+    The band's supremum is OVERLAP_FLOOR + OVERLAP_SPAN == 0.78, so no reachable
+    overlap_ratio can clear a 0.80 floor. Measured max on a live store: 7.583.
+    """
+    from ormah.engine.memory_engine import HEURISTIC_CONFIRM_FLOOR
+
+    for ratio in (0.5, 1.0, 1.167, 1.5, 3.0, 7.583, 37.0, 1e6):
+        assert signal_strength.token_overlap_strength(ratio) < HEURISTIC_CONFIRM_FLOOR
+
+
+def test_verbatim_match_kinds_clear_the_confirm_floor():
+    """#272 D1: the three verbatim kinds are exactly the ones admitted."""
+    from ormah.engine.memory_engine import HEURISTIC_CONFIRM_FLOOR
+
+    assert signal_strength.VERBATIM_NODE_ID >= HEURISTIC_CONFIRM_FLOOR
+    assert signal_strength.VERBATIM_TITLE >= HEURISTIC_CONFIRM_FLOOR
+    assert signal_strength.VERBATIM_SENTENCE >= HEURISTIC_CONFIRM_FLOOR

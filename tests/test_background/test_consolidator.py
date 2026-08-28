@@ -12,6 +12,7 @@ import pytest
 from ormah.background import consolidator
 from ormah.config import Settings
 from ormah.models.node import CreateNodeRequest, NodeType, Tier
+from tests.confirmed_use_helpers import reinforce
 
 
 @pytest.fixture
@@ -530,7 +531,7 @@ def test_a_superseded_source_does_not_come_back_on_confirmed_use(engine):
     b, _ = engine.remember(CreateNodeRequest(content="source two about sqlite vec"))
     _apply_consolidation(engine, [a, b], "sqlite-vec", "merged body", "fact")
 
-    engine._record_confirmed_use(a)
+    reinforce(engine, a)
 
     assert engine.file_store.load(a).tier is Tier.archival
 

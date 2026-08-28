@@ -38,6 +38,7 @@ _TASK_RUNNERS = {
     "synthetic_pattern_monitor": (
         "ormah.background.synthetic_pattern_monitor", "run_synthetic_pattern_monitor",
     ),
+    "reinforcement_retry": ("ormah.background.reinforcement_retry", "run_reinforcement_retry"),
 }
 
 _TASK_DESCRIPTIONS = {
@@ -56,6 +57,7 @@ _TASK_DESCRIPTIONS = {
     "cloud_backup": "Encrypts and uploads a due cloud backup without changing the sync head.",
     "restore_verification": "Downloads, decrypts, rebuilds, and searches the latest cloud backup.",
     "synthetic_pattern_monitor": "Detects synthetic-prompt patterns that stopped matching and proposes removing or repairing them. Proposes only — never edits your config (#143).",
+    "reinforcement_retry": "Re-applies confirmed-use reinforcements whose claim committed but whose write never landed.",
 }
 
 # Order for sleep cycle (full maintenance pass)
@@ -70,6 +72,7 @@ _SLEEP_CYCLE_ORDER = [
     "consolidator",
     "decay_manager",
     "forgetting_manager",
+    "reinforcement_retry",
     "memory_backup",
 ]
 

@@ -29,6 +29,7 @@ from ormah.background.llm_client import (
 from ormah.engine.memory_engine import (
     EXTRACT_ERR_CALL_FAILED,
     EXTRACT_ERR_NO_PROVIDER,
+    HEURISTIC_CONFIRM_FLOOR,
     MemoryEngine,
 )
 from ormah.text.tokens import distinctive_tokens
@@ -444,7 +445,12 @@ def _record_whisper_usage_signals(
                 SELECT 1 FROM signals s
                 WHERE s.whisper_log_id = wl.id
                   AND s.source = ?
-            ) AS has_llm_judge
+            ) AS has_llm_judge,
+            EXISTS (
+                SELECT 1 FROM confirmed_use_claims c
+                WHERE c.whisper_log_id = wl.id
+                  AND c.node_id = wl.node_id
+            ) AS already_confirmed
         FROM whisper_log wl
         LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id
         JOIN nodes n ON n.id = wl.node_id
@@ -478,11 +484,15 @@ def _record_whisper_usage_signals(
         has_heuristic = heuristic_polarity is not None
         has_llm_judge = bool(row["has_llm_judge"])
 
-        referenced = False
+        confirms = False
         if not has_heuristic:
             referenced, strength, evidence = _node_usage_evidence(row, response)
             signal_type = "whisper_referenced" if referenced else "whisper_unreferenced"
             polarity = 1 if referenced else 0
+            # Issue #272: whether THIS hit will take the claim in the transaction below.
+            # Not the same question as `referenced`: a token_overlap hit is referenced
+            # but sits under the floor, so it confirms nothing.
+            confirms = referenced and strength >= HEURISTIC_CONFIRM_FLOOR
             heuristic_records.append({
                 "row": row,
                 "signal_type": signal_type,
@@ -494,12 +504,20 @@ def _record_whisper_usage_signals(
                     "response_chars": len(response),
                 },
             })
-        else:
-            referenced = int(heuristic_polarity) == 1
 
-        if llm_judge_enabled and not has_llm_judge and not referenced:
+        # Issue #272: suppress the judge only for an event that is already settled —
+        # not for any heuristic sighting. A below-floor hit keeps the judge, which is
+        # the only route left that can still confirm it.
+        #
+        # already_confirmed covers the two cases `confirms` cannot: a re-ingest, where
+        # the strength is not in scope at all, and a positive submit_feedback through
+        # MCP, which has_llm_judge is structurally blind to because it only sees this
+        # watcher's own signal source (#220 contract 13a).
+        settled = confirms or bool(row["already_confirmed"])
+        if llm_judge_enabled and not has_llm_judge and not settled:
             llm_groups.setdefault((prompt_text, response), []).append(row)
 
+    heuristic_confirmed_ids: list[tuple[int, str]] = []
     with engine.db.transaction() as conn:
         for record in heuristic_records:
             row = record["row"]
@@ -522,6 +540,40 @@ def _record_whisper_usage_signals(
                     source=_HEURISTIC_AFFINITY_SOURCE,
                     confirmed_at=now_iso,
                 )
+                # Issue #272: the same at-most-once claim the judge block takes. The
+                # engine gates it on HEURISTIC_CONFIRM_FLOOR, so a token_overlap hit
+                # records its evidence here and confirms nothing.
+                #
+                # _insert_affinity MUST stay above this call: the claim helper reads
+                # changes(), so nothing may sit between its INSERT and that read.
+                if engine._claim_confirmed_use(
+                    conn,
+                    row["id"],
+                    row["node_id"],
+                    signal=1,
+                    source=_HEURISTIC_AFFINITY_SOURCE,
+                    strength=record["strength"],
+                ):
+                    heuristic_confirmed_ids.append((row["id"], row["node_id"]))
+
+    # Issue #272: reinforcement runs after the transaction commits — _record_confirmed_use
+    # does file I/O, and calling it inside would hold the process-wide write lock across
+    # N markdown saves and take db_lock before memory_lock, inverting the order every
+    # serialized writer uses.
+    #
+    # This is deliberately NOT the judge's loop below: the `if not llm_groups: return`
+    # that follows means the judge's loop never runs when there is nothing to judge —
+    # which, since a confirming heuristic hit now suppresses the judge, is exactly the
+    # case this loop exists for.
+    #
+    # Isolated per node: the signals and claims are already committed, so letting one
+    # failure escape would abandon every later node with its claim taken and nothing to
+    # retry it. At-most-once means a miss is logged, never raised.
+    for whisper_log_id, node_id in heuristic_confirmed_ids:
+        try:
+            engine._record_confirmed_use(node_id, whisper_log_id=whisper_log_id)
+        except Exception:
+            logger.exception("confirmed-use reinforcement failed for node %s", node_id)
 
     if not llm_groups:
         return recorded
@@ -565,7 +617,7 @@ def _record_whisper_usage_signals(
                 },
             })
 
-    confirmed_node_ids: list[str] = []
+    confirmed_node_ids: list[tuple[int, str]] = []
     with engine.db.transaction() as conn:
         for record in judge_records:
             row = record["row"]
@@ -588,6 +640,35 @@ def _record_whisper_usage_signals(
                     source=_LLM_JUDGE_AFFINITY_SOURCE,
                     confirmed_at=now_iso,
                 )
+                # Issue #272: affinity is keyed unique on (node_id, whisper_log_id) and
+                # _insert_affinity is ON CONFLICT DO NOTHING, so for an event the
+                # heuristic block already wrote a +1 for, the INSERT above is a no-op.
+                # Before this task that could not happen — a positive hit never reached
+                # the judge — but Step 4 is what sends weak hits here, so without this
+                # UPDATE an `irrelevant` verdict would be recorded in signals and
+                # silently ignored by retrieval, which would keep consuming the +1.
+                #
+                # Same shape _submit_feedback_locked uses for explicit feedback
+                # (memory_engine.py:2869-2877): INSERT ... DO NOTHING, then an UPDATE
+                # scoped by source. Scoped to auto_heuristic ONLY — the judge outranks
+                # the heuristic, and explicit feedback outranks the judge.
+                conn.execute(
+                    """
+                    UPDATE affinity
+                    SET signal = ?, source = ?, confirmed_at = ?
+                    WHERE node_id = ?
+                      AND whisper_log_id = ?
+                      AND source = ?
+                    """,
+                    (
+                        record["polarity"],
+                        _LLM_JUDGE_AFFINITY_SOURCE,
+                        now_iso,
+                        row["node_id"],
+                        row["id"],
+                        _HEURISTIC_AFFINITY_SOURCE,
+                    ),
+                )
             # Issue #220: the same at-most-once claim submit_feedback takes, not a
             # parallel polarity check. has_llm_judge only sees this watcher's own
             # signal source, so it is blind to feedback submitted through MCP — the
@@ -601,8 +682,9 @@ def _record_whisper_usage_signals(
                 row["node_id"],
                 signal=record["polarity"],
                 source=_LLM_JUDGE_AFFINITY_SOURCE,
+                strength=record["strength"],
             ):
-                confirmed_node_ids.append(row["node_id"])
+                confirmed_node_ids.append((row["id"], row["node_id"]))
 
     # Issue #220: reinforcement runs after the transaction commits. db.transaction()
     # holds a process-level lock for its whole body and _record_confirmed_use writes
@@ -615,9 +697,9 @@ def _record_whisper_usage_signals(
     # node, and leave both has_llm_judge set and the claims taken — nothing would ever
     # retry them. Failures here are logged, never raised. This is the at-most-once
     # contract.
-    for node_id in confirmed_node_ids:
+    for whisper_log_id, node_id in confirmed_node_ids:
         try:
-            engine._record_confirmed_use(node_id)
+            engine._record_confirmed_use(node_id, whisper_log_id=whisper_log_id)
         except Exception:
             logger.exception("confirmed-use reinforcement failed for node %s", node_id)
 

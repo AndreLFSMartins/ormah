@@ -11,6 +11,7 @@ used concurrently raises ``sqlite3.InterfaceError: bad parameter or other API mi
 import threading
 
 from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, NodeType
+from tests.confirmed_use_helpers import reinforce
 
 
 def _remember(engine, content):
@@ -111,7 +112,7 @@ def test_decay_and_promotion_leave_disk_and_index_agreeing(engine):
 
     def promote():
         try:
-            engine._record_confirmed_use(node_id)
+            reinforce(engine, node_id)
         except BaseException as e:  # noqa: BLE001
             errors.append(e)
 

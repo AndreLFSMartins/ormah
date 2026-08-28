@@ -58,6 +58,18 @@ logger = logging.getLogger(__name__)
 # Higher factor = tighter structural link = more activation propagated.
 _EMBEDDING_SCHEMA_VERSION = 2
 
+# Issue #220: the only feedback sources that count as confirmed use. Fail-closed —
+# anything not listed here, and every negative signal, does not reinforce.
+# auto_heuristic was excluded pending #218 signal calibration; #272 admits it above
+# HEURISTIC_CONFIRM_FLOOR, which the ladder now makes meaningful.
+_CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge", "auto_heuristic"})
+
+# Issue #272: the evidence rung a heuristic hit must reach to confirm use. Defined by
+# reference to the ladder, not as a literal, so the two cannot drift apart in silence.
+# At IMPLICIT (0.80) this admits the three verbatim match kinds and excludes
+# token_overlap by construction — that band's supremum is 0.78.
+HEURISTIC_CONFIRM_FLOOR = signal_strength.IMPLICIT
+
 # Lifecycle-model version. 1 = the legacy FSRS seed (previously recorded as the
 # boolean meta key 'fsrs_migrated'); 2 = bounded reinforcement (#221). An integer
 # so a future curve migration can tell which model produced the stored values.
@@ -76,10 +88,9 @@ EXTRACT_ERR_CALL_FAILED = (
     "timeout or error; see the adapter log). Will retry."
 )
 
-# Issue #220: the only feedback sources that count as confirmed use. Fail-closed —
-# anything not listed here, and every negative signal, does not reinforce.
-# auto_heuristic is excluded pending #218 signal calibration.
-_CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge"})
+# Backfill version for the #272 heuristic confirmed-use repair. Bump to force a full
+# re-scan when the floor or the selection changes.
+HEURISTIC_CONFIRMED_USE_VERSION = 1
 
 
 def _generate_title(content: str, max_chars: int = 60) -> str:
@@ -326,6 +337,11 @@ class MemoryEngine:
         # One-time FSRS data migration: seed stability from access patterns
         self._migrate_fsrs()
         self._migrate_signal_strength()
+        # Defence in depth, NOT the safety mechanism: eligibility is recomputed from each
+        # row's own evidence, so a stale DEFAULT-1.0 strength cannot claim whatever the
+        # order. The two migrations commit separately, so ordering never closed that
+        # window on its own anyway (#272).
+        self._migrate_heuristic_confirmed_use()
 
         self._ensure_self_node()
         self._migrate_identity_tiers()
@@ -418,6 +434,128 @@ class MemoryEngine:
                 len(rows),
                 lower_bound,
                 SIGNAL_STRENGTH_LADDER_VERSION,
+            )
+
+    def _migrate_heuristic_confirmed_use(self) -> None:
+        """Claim and reinforce heuristic rows the pre-#272 code left unclaimed.
+
+        The heuristic detector recorded positive signals for years without ever taking
+        a confirmed-use claim, because only the judge block called the helper. Those
+        rows are evidence of real use that never reached the lifecycle. This repairs
+        the ones whose evidence clears HEURISTIC_CONFIRM_FLOOR.
+
+        Eligibility is recomputed from each row's own evidence with
+        strength_from_evidence, and never read from signals.strength. That column
+        defaults to 1.0 -- above the floor -- and _migrate_signal_strength commits in a
+        SEPARATE transaction, so an old binary (#238) can write a stale 1.0 row in the
+        window between the two; ordering alone would not stop this from claiming it. The
+        recompute is a pure function of stored evidence and fail-closed (an unknown or
+        malformed match returns UNKNOWN, 0.40), so the stored column cannot mislead it.
+        Running after _migrate_signal_strength stays correct, as defence in depth.
+
+        Rescans on every boot rather than stamping once, for the reason
+        _migrate_signal_strength documents: an old binary -- a rollback, or the second
+        unmanaged process of #238 -- can write pre-fix rows AFTER a one-time stamp, and
+        they would stay unclaimed forever on a table the stamp calls migrated.
+
+        The claims are taken inside one transaction and the reinforcement runs after it
+        commits: _record_confirmed_use does file I/O, so calling it inside would hold
+        the process-wide write lock across N markdown saves and take db_lock before
+        memory_lock, inverting the order every serialized writer uses (#220 4.3).
+        """
+        version = self._meta_int("heuristic_confirmed_use_version")
+        lower_bound = (
+            self._meta_int("heuristic_confirmed_use_cutoff")
+            if version >= HEURISTIC_CONFIRMED_USE_VERSION
+            else 0
+        )
+
+        confirmed_node_ids: list[tuple[int, str]] = []
+        with self.db.transaction() as conn:
+            # EVERY eligibility test is applied in Python, and the SELECT filters only on
+            # source and the cutoff. Council round 1 (Codex, MEDIUM) caught the earlier
+            # shape: any predicate in the WHERE hides those rows' ids from the loop, so
+            # processed_max stalls behind them and every boot rescans a growing tail —
+            # and on a store whose newest heuristic rows are all polarity 0, non-injected,
+            # or below the floor, the cutoff never advances at all.
+            # LEFT JOIN, not INNER. Council round 3 (Codex, MEDIUM): signals.whisper_log_id
+            # is nullable and declared ON DELETE SET NULL, so whisper_log_cleanup orphans
+            # rows routinely. An INNER JOIN drops those ids before the loop sees them —
+            # the same cutoff stall in a third disguise. Missing provenance is ineligible,
+            # but it is ineligible IN PYTHON, after its id has advanced the high-water mark.
+            rows = conn.execute(
+                """
+                SELECT s.id, s.whisper_log_id, s.node_id, s.polarity, s.evidence,
+                       wl.was_injected, wl.node_id AS event_node_id
+                FROM signals s
+                LEFT JOIN whisper_log wl ON wl.id = s.whisper_log_id
+                WHERE s.id > ?
+                  AND s.source = ?
+                ORDER BY s.id ASC
+                """,
+                (lower_bound, signal_strength.HEURISTIC_SOURCE),
+            ).fetchall()
+            processed_max = lower_bound
+            for row in rows:
+                # Council round 1 (Codex, HIGH): the claim helper inserts the node id it is
+                # GIVEN, checking only that the event was injected — it never asserts the
+                # node belongs to the event. The live path is safe because its query reads
+                # both ids from the same whisper_log row, but here they come from different
+                # tables, so a legacy or hand-repaired signal could reinforce a node the
+                # agent never saw for this event. Checked explicitly.
+                # Recomputed, never read from signals.strength. That column defaults to
+                # 1.0 -- above the floor -- and the ladder migration commits in a separate
+                # transaction, so a stale row written in the window between the two would
+                # otherwise take an irreversible claim. Pure function of stored evidence,
+                # fail-closed: an unknown or malformed match returns UNKNOWN (0.40).
+                strength = signal_strength.strength_from_evidence(
+                    signal_strength.HEURISTIC_SOURCE,
+                    row["polarity"],
+                    row["evidence"],
+                )
+                eligible = (
+                    row["whisper_log_id"] is not None
+                    and row["event_node_id"] is not None  # LEFT JOIN found no parent row
+                    and row["polarity"] == 1
+                    and row["was_injected"] == 1
+                    and row["node_id"] == row["event_node_id"]
+                    and strength >= HEURISTIC_CONFIRM_FLOOR
+                )
+                if eligible and self._claim_confirmed_use(
+                    conn,
+                    row["whisper_log_id"],
+                    row["node_id"],
+                    signal=1,
+                    source="auto_heuristic",
+                    strength=strength,
+                    historical=True,
+                ):
+                    confirmed_node_ids.append((row["whisper_log_id"], row["node_id"]))
+                processed_max = max(processed_max, row["id"])
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                "('heuristic_confirmed_use_version', ?)",
+                (str(HEURISTIC_CONFIRMED_USE_VERSION),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                "('heuristic_confirmed_use_cutoff', ?)",
+                (str(processed_max),),
+            )
+
+        # Isolated per node: the claims are committed, so letting one failure escape
+        # would abandon every later node with its claim taken and nothing to retry it.
+        for whisper_log_id, node_id in confirmed_node_ids:
+            try:
+                self._record_confirmed_use(node_id, whisper_log_id=whisper_log_id)
+            except Exception:
+                logger.exception("confirmed-use backfill failed for node %s", node_id)
+
+        if confirmed_node_ids:
+            logger.info(
+                "Backfilled confirmed use on %d heuristic events above id %d (#272)",
+                len(confirmed_node_ids),
+                lower_bound,
             )
 
     def _migrate_fsrs(self) -> None:
@@ -1199,6 +1337,7 @@ class MemoryEngine:
                     resolved_node_id,
                     signal=1,
                     source="explicit",
+                    strength=signal_strength.EXPLICIT,
                 )
         if claimed:
             # Isolated, and never propagated — the same contract submit_feedback and the
@@ -1207,7 +1346,9 @@ class MemoryEngine:
             # lifecycle write. At-most-once means the claim stays taken and this
             # reinforcement is simply a logged miss; a retry would only log a second event.
             try:
-                self._record_confirmed_use(resolved_node_id)
+                self._record_confirmed_use(
+                    resolved_node_id, whisper_log_id=target_log_id
+                )
             except Exception:
                 logger.exception(
                     "confirmed-use reinforcement failed for node %s", resolved_node_id
@@ -2881,17 +3022,14 @@ class MemoryEngine:
             self.file_store.save(self_node)
 
     @_serialized_memory_operation
-    def _record_confirmed_use(self, node_id: str) -> None:
-        """Record a confirmed use: update access stats and FSRS stability on disk and DB.
+    def _record_confirmed_use(self, node_id: str, *, whisper_log_id: int) -> None:
+        """Record confirmed use, updating stability only when it is off cooldown.
 
         Serialized because the cooldown is a check-then-write pair (#221,
-        council round 3): all three callers — memory_engine.py:900,
-        memory_engine.py:3331, and background/session_watcher.py:608 — are
-        behind the at-most-once claim latch, but the latch is per whisper
-        event, not per node, so two concurrent confirmed uses of the same
-        node would both read a stale last_review and both bump stability.
-        _memory_operation_lock is an RLock, so a caller that already holds it
-        re-enters safely.
+        council round 3): the recall paths that call this are not themselves
+        serialized, so two concurrent recalls would both read a stale
+        last_review and both bump stability. _memory_operation_lock is an
+        RLock, so the call sites that already hold it re-enter safely.
 
         Lock order: this decorator acquires the memory lock before the body
         opens db.transaction(), i.e. memory-lock -> db-lock. The inverse order
@@ -2903,99 +3041,206 @@ class MemoryEngine:
         and the order collapses to memory -> db. Invariant this depends on:
         never call file_store inside db.transaction() outside startup() or a
         _serialized_memory_operation.
+
+        Issue #272: the claim's outcome commits with this write, so a reinforcement
+        that never landed stays visible as state = 'pending' and
+        run_reinforcement_retry repairs it. The retry is idempotent because the
+        target is a pure function of the claim: the counters come from the nodes
+        row rather than from the loaded markdown, and the clock comes from
+        claimed_at rather than from datetime.now(). os.replace cannot be rolled
+        back and COMMIT runs after this body, so a failed COMMIT can leave the file
+        one step ahead — recomputing the same values overwrites that phantom
+        instead of compounding it. The markdown is a projection of the lifecycle
+        state, not a second source of it.
+
+        claimed_at is also the truthful clock. last_accessed is the decay anchor,
+        and a sweep hours after the fact stamping datetime.now() would credit the
+        memory with recency it never earned. reinforced_at, not these fields,
+        records when the write itself landed.
         """
-        node = self.file_store.load(node_id)
-        if node is None:
-            return
-        now = datetime.now(timezone.utc)
-
-        # One numeric stability update per node per cooldown window (#221): the old
-        # formula let repeated confirmed uses compound without bound. last_accessed
-        # below still advances on every call, and Tasks 3-4 point decay and importance
-        # at it, so a node in active use never reads as stale even though last_review
-        # now lags by up to one cooldown window.
-        if lifecycle.reinforcement_due(
-            node.last_review, now, self.settings.fsrs_reinforcement_cooldown_days
-        ):
-            # reinforcement cooldown can leave last_review a full window behind
-            # a use that already landed inside it (PR #239 review comment):
-            # last_accessed is the actual spacing signal, last_review only gates.
-            anchor = node.last_accessed or node.last_review
-            days_since = max((now - anchor).total_seconds() / 86400, 0.0)
-            node.stability = lifecycle.reinforced_stability(
-                node.stability,
-                days_since,
-                growth_factor=self.settings.fsrs_growth_factor,
-                growth_exponent=self.settings.fsrs_growth_exponent,
-                spacing_cap=self.settings.fsrs_spacing_cap,
-                max_stability=self.settings.fsrs_max_stability,
-                initial_stability=self.settings.fsrs_initial_stability,
-            )
-            node.last_review = now
-
-        # Reversible promotion (#223, decided in #191). Deliberately AFTER the
-        # cooldown block: the bounded update runs on the OLD stability first, then
-        # the floor lifts the result. The floor also runs when the cooldown blocked
-        # the numeric update — otherwise a second confirmed use in one day promotes
-        # with S=1, buying a ~29 h lease that the next decay run immediately revokes.
-        # promotion_floor is max() against a constant, so running it on every
-        # promotion cannot push stability past one initial lease.
-        #
-        # superseded_by blocks ONLY consolidation sources. A generic derived_from
-        # target promotes, which is the narrowing #191 asked for over the originally
-        # proposed blanket exclusion.
-        #
-        # And it blocks only while the consolidation node it points at still exists:
-        # a dangling marker (the replacement was deleted — the #192 scenario) would
-        # otherwise bury this memory forever with nothing left standing in for it, so
-        # the next confirmed use un-buries it. The marker itself is NOT cleared —
-        # it is the provenance record, and only the block is lifted. The extra load
-        # is cheap and rare: it runs only for an archival node that carries a marker.
         promoted = False
-        if node.tier is Tier.archival:
-            superseded_by_live = (
-                node.superseded_by is not None
-                and self.file_store.load(node.superseded_by) is not None
-            )
-            if not superseded_by_live:
-                node.stability = lifecycle.promotion_floor(
-                    node.stability, self.settings.fsrs_initial_stability
-                )
-                # Goes through TierManager.promote(), not `node.tier = ...`: this gives
-                # #223's root cause its first production caller and brings the tier-ordering
-                # guard along. promote() calls touch_updated(), so `updated` advances — that
-                # is correct, the tier genuinely changed, and `updated` feeds LWW sync; not
-                # advancing it would let a stale remote copy win and silently re-archive.
-                promoted = self.tier_manager.promote(node, Tier.working)
-                if promoted:
-                    # local-main only (#28): archived_at does not exist upstream, so the
-                    # #223 PR cannot carry this. update_node already resets the graveyard
-                    # clock when a node leaves archival; promote() bypasses that path, and
-                    # a working node holding archived_at is a state update_node never
-                    # produces — forgetting_manager reads `archived_at is None` as
-                    # "un-aged, protect it", so the stale value is a live contradiction.
-                    node.archived_at = None
-
-        # Standard access tracking
-        node.last_accessed = now
-        node.access_count += 1
-
-        self.file_store.save(node)
+        # Issue #272: one transaction covers the claim's outcome, the nodes row and the
+        # markdown write. Calling file_store inside db.transaction() is safe HERE and
+        # nowhere else: @_serialized_memory_operation already holds
+        # _memory_operation_lock and FileStore shares that RLock (:109), so this
+        # re-enters rather than taking db_lock before memory_lock.
+        #
+        # NOT atomic across the two stores: os.replace is irreversible and COMMIT runs
+        # after this body, so a failed COMMIT can leave the markdown one step ahead.
+        # What makes that safe is that the target is a pure function of the claim:
+        # the counters come FROM the nodes row and the clock comes FROM claimed_at, so
+        # a retry recomputes the SAME values and overwrites the phantom instead of
+        # compounding it — one event, one increment, one stability step.
+        #
+        # The load also lives inside (council #272 finding 2): BEGIN IMMEDIATE can
+        # block up to busy_timeout between statements, and loading before the
+        # transaction reopened the load->save window this method had closed. A
+        # failed latch now returns before any file I/O. Cross-process, load and
+        # save remain non-atomic — that race predates this branch.
         with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE confirmed_use_claims SET state = 'applied', "
+                "reinforced_at = datetime('now') "
+                "WHERE whisper_log_id = ? AND node_id = ? AND state = 'pending'",
+                (whisper_log_id, node_id),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                # Already applied, terminal, or claimed by another runner. At-most-once,
+                # the same shape _claim_confirmed_use uses. Nothing may sit between the
+                # UPDATE and this read.
+                return
+
+            node = self.file_store.load(node_id)
+
+            # reinforced_at records when the write ran; claimed_at is when the memory
+            # was actually used, and that is the clock the lifecycle values use.
+            claim = conn.execute(
+                "SELECT claimed_at FROM confirmed_use_claims "
+                "WHERE whisper_log_id = ? AND node_id = ?",
+                (whisper_log_id, node_id),
+            ).fetchone()
+
+            row = conn.execute(
+                "SELECT access_count, last_accessed, stability, last_review "
+                "FROM nodes WHERE id = ?",
+                (node_id,),
+            ).fetchone()
+            if node is None or row is None:
+                # Terminal, and honest about which terminal. Marking it 'applied' would
+                # record a reinforcement that never happened — the same falsehood the
+                # legacy migration above refuses to write.
+                conn.execute(
+                    "UPDATE confirmed_use_claims SET state = 'orphaned', "
+                    "reinforced_at = NULL "
+                    "WHERE whisper_log_id = ? AND node_id = ?",
+                    (whisper_log_id, node_id),
+                )
+                return
+
+            # Issue #272 (council round 1, Cursor): the clock is the claim's, not the
+            # wall clock. reinforced_stability is a function of days_since, so a sweep
+            # six hours after a failed attempt would compute a DIFFERENT target and the
+            # convergence promise above would hold for access_count only. Sourcing it
+            # from claimed_at makes the whole target a pure function of the claim.
+            #
+            # It is also the honest value: last_accessed is the decay anchor, and a late
+            # retry stamping the wall clock would credit the memory with recency it
+            # never earned. datetime('now') writes UTC with no offset, so the tzinfo is
+            # attached explicitly — astimezone would read the naive value as local time.
+            now = datetime.fromisoformat(claim["claimed_at"]).replace(
+                tzinfo=timezone.utc
+            )
+            stability = row["stability"]
+            last_review = (
+                datetime.fromisoformat(row["last_review"]) if row["last_review"] else None
+            )
+            last_accessed = (
+                datetime.fromisoformat(row["last_accessed"])
+                if row["last_accessed"]
+                else None
+            )
+
+            # One numeric stability update per node per cooldown window (#221): the
+            # old formula let ten same-session touches compound to ~57x.
+            if lifecycle.reinforcement_due(
+                last_review, now, self.settings.fsrs_reinforcement_cooldown_days
+            ):
+                # reinforcement cooldown can leave last_review a full window behind a
+                # use that already landed inside it (PR #239 review comment):
+                # last_accessed is the actual spacing signal, last_review only gates.
+                anchor = last_accessed or last_review
+                days_since = max((now - anchor).total_seconds() / 86400, 0.0)
+                stability = lifecycle.reinforced_stability(
+                    stability,
+                    days_since,
+                    growth_factor=self.settings.fsrs_growth_factor,
+                    growth_exponent=self.settings.fsrs_growth_exponent,
+                    spacing_cap=self.settings.fsrs_spacing_cap,
+                    max_stability=self.settings.fsrs_max_stability,
+                    initial_stability=self.settings.fsrs_initial_stability,
+                )
+                last_review = now
+
+            access_count = row["access_count"] + 1
+
+            # Reversible promotion (#223, decided in #191). Deliberately AFTER the
+            # cooldown block: the bounded update runs on the OLD stability first, then
+            # the floor lifts the result. The floor also runs when the cooldown blocked
+            # the numeric update — otherwise a second confirmed use in one day promotes
+            # with S=1, buying a ~29 h lease that the next decay run immediately revokes.
+            # promotion_floor is max() against a constant, so running it on every
+            # promotion cannot push stability past one initial lease.
+            #
+            # superseded_by blocks ONLY consolidation sources. A generic derived_from
+            # target promotes, which is the narrowing #191 asked for over the originally
+            # proposed blanket exclusion.
+            #
+            # And it blocks only while the consolidation node it points at still exists:
+            # a dangling marker (the replacement was deleted — the #192 scenario) would
+            # otherwise bury this memory forever with nothing left standing in for it, so
+            # the next confirmed use un-buries it. The marker itself is NOT cleared —
+            # it is the provenance record, and only the block is lifted.
+            #
+            # Merged into #272's transaction: the floor now lifts the LOCAL stability
+            # the claim computed, not node.stability, because the nodes row — not the
+            # markdown — is the source the retry recomputes from.
+            if node.tier is Tier.archival:
+                superseded_by_live = (
+                    node.superseded_by is not None
+                    and self.file_store.load(node.superseded_by) is not None
+                )
+                if not superseded_by_live:
+                    stability = lifecycle.promotion_floor(
+                        stability, self.settings.fsrs_initial_stability
+                    )
+                    # Goes through TierManager.promote(), not `node.tier = ...`: this gives
+                    # #223's root cause its first production caller and brings the
+                    # tier-ordering guard along. promote() calls touch_updated(), so
+                    # `updated` advances — that is correct, the tier genuinely changed, and
+                    # `updated` feeds LWW sync; not advancing it would let a stale remote
+                    # copy win and silently re-archive.
+                    promoted = self.tier_manager.promote(node, Tier.working)
+                    if promoted:
+                        # local-main only (#28): archived_at does not exist upstream, so
+                        # the #223 PR cannot carry this. update_node already resets the
+                        # graveyard clock when a node leaves archival; promote() bypasses
+                        # that path, and a working node holding archived_at is a state
+                        # update_node never produces — forgetting_manager reads
+                        # `archived_at is None` as "un-aged, protect it", so the stale
+                        # value is a live contradiction.
+                        node.archived_at = None
+
+            # Final review I1: an out-of-order sweep (an older claim applied after a
+            # newer one already moved last_accessed forward) must not walk the decay
+            # anchor backwards. now stays claimed_at everywhere above — the FSRS clock
+            # is untouched — but the value actually WRITTEN as last_accessed is clamped
+            # to never go earlier than what the row already holds.
+            new_last_accessed = max(now, last_accessed) if last_accessed is not None else now
+
             conn.execute(
                 "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, "
                 "last_review = ?, tier = ?, updated = ?, archived_at = ? WHERE id = ?",
                 (
-                    node.access_count,
-                    node.last_accessed.isoformat(),
-                    node.stability,
-                    node.last_review.isoformat() if node.last_review else None,
+                    access_count,
+                    new_last_accessed.isoformat(),
+                    stability,
+                    last_review.isoformat() if last_review else None,
                     node.tier.value,
                     node.updated.isoformat(),
                     node.archived_at.isoformat() if node.archived_at else None,
                     node_id,
                 ),
             )
+
+            # The markdown is the projection: it is set to the computed values, never
+            # incremented from whatever it happened to hold.
+            node.access_count = access_count
+            node.last_accessed = new_last_accessed
+            node.stability = stability
+            node.last_review = last_review
+            self.file_store.save(node)
+
+    # --- Private helpers ---
 
         if promoted:
             # After the transaction: _write_audit_log opens its own, so it cannot
@@ -3726,6 +3971,8 @@ class MemoryEngine:
         *,
         signal: int,
         source: str,
+        strength: float,
+        historical: bool = False,
     ) -> bool:
         """Take the at-most-once confirmed-use claim for one (event, node) pair.
 
@@ -3759,18 +4006,48 @@ class MemoryEngine:
         mutator instead would let two concurrent confirmations both pass and
         both reinforce; @_serialized_memory_operation keeps the read-modify-write
         correct but cannot enforce once-per-event.
+
+        Issue #272 admits auto_heuristic, but only above HEURISTIC_CONFIRM_FLOOR.
+        submit_feedback needs no special case for it: feedback_strength maps that
+        source to UNKNOWN (0.40), below the floor by construction, because a
+        submit_feedback call carries no evidence of a verbatim match and so cannot
+        earn a verbatim rung.
         """
         if whisper_log_id is None or signal != 1 or source not in _CONFIRMED_USE_SOURCES:
             return False
+        # Issue #272: auto_heuristic confirms only on verbatim evidence. Scoped to that
+        # one source deliberately: explicit (1.00) and implicit (0.80) clear the floor
+        # anyway, and the judge's band starts at 0.82 — applying it to them would add a
+        # second gate on paths that do not need one, and would couple the judge's band
+        # to a constant it does not own. A low strength arriving on those sources means
+        # the CALLER is wrong, and dropping the claim would hide that instead of failing.
+        if source == "auto_heuristic" and strength < HEURISTIC_CONFIRM_FLOOR:
+            return False
+        # Issue #272 (council finding 1): a backfilled claim carries the EVENT's
+        # clock, not the boot's — claimed_at drives last_accessed, last_review and
+        # FSRS in _record_confirmed_use, so stamping datetime('now') would credit
+        # 2-13 day old uses with recency they never earned. The truthful timestamp
+        # comes from the very whisper_log row this INSERT already reads, and SQLite's
+        # datetime() normalizes its Python-isoformat shape ('...T...+00:00') to the
+        # same space-format UTC datetime('now') writes — the sweeper compares
+        # claimed_at lexicographically (reinforcement_retry.py), so mixed shapes
+        # would misorder. COALESCE: a malformed logged_at (datetime() -> NULL) falls
+        # back to the boot clock rather than aborting the whole backfill transaction
+        # (claimed_at is NOT NULL) or orphaning the signal forever (the cutoff
+        # advances regardless). Live claims keep datetime('now'): their skew is
+        # minutes, and their sources' semantics are not this fix's scope.
         conn.execute(
             """
-            INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at)
-            SELECT wl.id, ?, datetime('now')
+            INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at, state)
+            SELECT wl.id, ?,
+                   CASE WHEN ? THEN COALESCE(datetime(wl.logged_at), datetime('now'))
+                        ELSE datetime('now') END,
+                   'pending'
             FROM whisper_log wl
             WHERE wl.id = ? AND wl.was_injected = 1
             ON CONFLICT DO NOTHING
             """,
-            (node_id, whisper_log_id),
+            (node_id, 1 if historical else 0, whisper_log_id),
         )
         return conn.execute("SELECT changes()").fetchone()[0] == 1
 
@@ -3783,11 +4060,13 @@ class MemoryEngine:
     ) -> str:
         """Record feedback while preventing retention from deleting its event."""
         with self.db.transaction():
-            resolved_node_id, became_confirmed, message = self._submit_feedback_locked(
-                node_id=node_id,
-                signal=signal,
-                source=source,
-                whisper_log_id=whisper_log_id,
+            resolved_node_id, became_confirmed, claimed_log_id, message = (
+                self._submit_feedback_locked(
+                    node_id=node_id,
+                    signal=signal,
+                    source=source,
+                    whisper_log_id=whisper_log_id,
+                )
             )
         # Reinforcement runs after the transaction commits: db.transaction() holds a
         # process-level lock for its whole body, and _record_confirmed_use does file
@@ -3799,9 +4078,17 @@ class MemoryEngine:
         # so raising here would report a failure for evidence that was recorded. The
         # contract is at-most-once: the claim stays taken and
         # this reinforcement is simply lost, as a logged miss.
+        #
+        # claimed_log_id, not the whisper_log_id parameter (which may be None on the
+        # legacy fallback path): the claim was taken on the id _submit_feedback_locked
+        # resolved internally, and re-resolving here could pick a DIFFERENT event.
+        # It cannot be None when became_confirmed is True — _claim_confirmed_use
+        # returns False for a None id.
         if became_confirmed:
             try:
-                self._record_confirmed_use(resolved_node_id)
+                self._record_confirmed_use(
+                    resolved_node_id, whisper_log_id=claimed_log_id
+                )
             except Exception:
                 logger.exception(
                     "confirmed-use reinforcement failed for node %s", resolved_node_id
@@ -3814,7 +4101,7 @@ class MemoryEngine:
         signal: int,
         source: str = "explicit",
         whisper_log_id: int | None = None,
-    ) -> tuple[str | None, bool, str]:
+    ) -> tuple[str | None, bool, int | None, str]:
         """Record explicit or implicit feedback signal for a whisper candidate.
 
         When *whisper_log_id* is supplied, feedback attaches to that exact
@@ -3827,7 +4114,7 @@ class MemoryEngine:
             node_id, whisper_log_id,
         )
         if error is not None:
-            return None, False, error
+            return None, False, None, error
         assert resolved_node_id is not None
         assert row is not None
 
@@ -3837,6 +4124,9 @@ class MemoryEngine:
         session_id = row["session_id"]
         space = row["space"]
         whisper_log_id = row["id"]
+        # Computed once and used twice: the claim's floor and the signals row must
+        # agree by construction, not by two call sites happening to match.
+        strength = signal_strength.feedback_strength(source, signal)
 
         with self.db.transaction() as conn:
             became_confirmed = self._claim_confirmed_use(
@@ -3845,6 +4135,7 @@ class MemoryEngine:
                 resolved_node_id,
                 signal=signal,
                 source=source,
+                strength=strength,
             )
             conn.execute(
                 """
@@ -3891,7 +4182,7 @@ class MemoryEngine:
                     resolved_node_id,
                     "feedback_submitted",
                     signal,
-                    signal_strength.feedback_strength(source, signal),
+                    strength,
                     source,
                     session_id,
                     "submit_feedback",
@@ -3916,6 +4207,7 @@ class MemoryEngine:
         return (
             resolved_node_id,
             became_confirmed,
+            whisper_log_id,
             f"Feedback recorded for node {resolved_node_id[:8]}...",
         )
 

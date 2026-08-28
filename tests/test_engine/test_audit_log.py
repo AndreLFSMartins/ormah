@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from ormah.models.node import CreateNodeRequest, NodeType, UpdateNodeRequest
+from tests.confirmed_use_helpers import reinforce
 
 
 def _create_node(engine, title="Test", content="Test content", **kwargs):
@@ -146,7 +147,7 @@ def test_promotion_writes_one_promote_audit_entry(engine):
     node.tier = Tier.archival
     engine.builder.index_single(engine.file_store.save(node))
 
-    engine._record_confirmed_use(node_id)
+    reinforce(engine, node_id)
 
     entries = engine.list_audit_log(node_id=node_id, operation="promote")
     assert len(entries) == 1
@@ -158,6 +159,6 @@ def test_promotion_writes_one_promote_audit_entry(engine):
 def test_a_non_promoting_confirmed_use_writes_no_promote_entry(engine):
     node_id, _ = engine.remember(CreateNodeRequest(content="already working"))
 
-    engine._record_confirmed_use(node_id)
+    reinforce(engine, node_id)
 
     assert engine.list_audit_log(node_id=node_id, operation="promote") == []

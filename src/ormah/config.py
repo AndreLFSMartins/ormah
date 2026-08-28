@@ -124,6 +124,7 @@ class Settings(BaseSettings):
     conflict_check_all_spaces: bool = False
     duplicate_check_interval_minutes: int = 1440
     auto_cluster_interval_minutes: int = 60
+    reinforcement_retry_interval_minutes: int = 60
 
     # Embedding backfill / vector-store reconciliation (#32).
     # Set the interval to a very large value (e.g. 999999) to disable the
@@ -595,6 +596,7 @@ class Settings(BaseSettings):
         "duplicate_check_interval_minutes",
         "auto_cluster_interval_minutes",
         "embedding_backfill_interval_minutes",
+        "reinforcement_retry_interval_minutes",
     )
     @classmethod
     def _interval_minutes_positive(cls, v: int) -> int:

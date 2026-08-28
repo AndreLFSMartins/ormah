@@ -11,6 +11,7 @@ from ormah.engine import memory_engine
 from ormah.engine.memory_engine import LIFECYCLE_MODEL_VERSION
 from ormah.models.node import CreateNodeRequest, MemoryNode, NodeType, Tier
 from ormah.store.markdown import parse_node, serialize_node
+from tests.confirmed_use_helpers import reinforce
 
 
 def _version(engine) -> str | None:
@@ -179,7 +180,7 @@ def test_223_does_not_bump_the_lifecycle_model_version(engine):
     node = engine.file_store.load(node_id)
     node.tier = Tier.archival
     engine.builder.index_single(engine.file_store.save(node))
-    engine._record_confirmed_use(node_id)
+    reinforce(engine, node_id)
 
     assert engine._lifecycle_model_version() == 2
 
