@@ -60,6 +60,15 @@ route that can still confirm them. A boot migration backfills rows the defect al
   taking `db_lock` first. The rule is unchanged for every **caller**, Task 5's included: they all
   still invoke the mutator outside their own transaction.
 
+- **Every `file:line` in this plan was measured against the BASE, before any task ran.** Tasks edit
+  the same two files, so later tasks' citations drift by the lines earlier tasks added. Measured by
+  the pre-flight scan: Task 3's `session_watcher.py:588-595` (the judge's affinity write) sits around
+  `:623-630` once Task 2 has landed, and Task 5's `memory_engine.py:2814` and `:2917-2921` are
+  `:2818` and roughly `:2921-2925` respectively. **Locate every edit by its content — the statement,
+  the signature, the `return (` block — and treat the line number as a hint, never as the address.**
+  If content and line number disagree, the content wins; if you cannot find the content at all, stop
+  and report rather than editing the nearest plausible line.
+
 ## Task Order and Dependencies
 
 | Task | File | Deliverable | Depends on |

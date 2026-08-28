@@ -207,6 +207,25 @@ def test_explicit_feedback_outranks_a_later_judge_verdict(engine, tmp_path):
     Step 5's UPDATE is scoped to source = 'auto_heuristic' precisely so a human's
     explicit feedback is never overwritten by an automated verdict. Drop that WHERE
     clause and this goes red.
+
+    The feedback is NEGATIVE, and that is load-bearing — not a stylistic choice.
+    An earlier draft used signal=1 and could not fail: a positive explicit feedback
+    takes the _claim_confirmed_use latch synchronously inside _submit_feedback_locked
+    (memory_engine.py:2842-2849), so Step 3's already_confirmed reads True, Step 4's
+    `settled` is True, the judge is never queued, the patched LLM is never called and
+    Step 5's UPDATE never runs at all. The assertion then passed on Task 2's
+    ON CONFLICT DO NOTHING alone, with the scoping clause deleted or intact.
+
+    signal=-1 is the path that reaches Step 5: _claim_confirmed_use returns False for
+    any signal != 1, so the affinity row is written as 'explicit' while NO claim is
+    taken. already_confirmed is False, `confirms` is False (the response only
+    token-overlaps, whose band supremum 0.78 sits under the 0.80 floor), so the event
+    is unsettled, the judge runs, and its UPDATE fires against a row whose source is
+    'explicit'. Only the `AND source = 'auto_heuristic'` clause leaves it standing.
+
+    It is also the real scenario: a human marked a memory as NOT useful, which does
+    not settle the event, and the judge's later verdict must not overwrite the
+    attribution back to itself.
     """
     prompt = "What about the retention policy?"
     response = "Retention uses decay, stability and archival thresholds together."
@@ -225,8 +244,10 @@ def test_explicit_feedback_outranks_a_later_judge_verdict(engine, tmp_path):
     engine.settings.llm_provider = "ollama"
     engine.settings.feedback_llm_judge_enabled = True
 
-    # A human says this memory WAS useful, through MCP.
-    engine.submit_feedback(node_id, signal=1, source="explicit", whisper_log_id=whisper_log_id)
+    # A human says this memory was NOT useful, through MCP. This writes the affinity
+    # row as 'explicit' WITHOUT taking the claim (signal != 1), which is what leaves
+    # the event unsettled so the judge below actually runs. See the docstring.
+    engine.submit_feedback(node_id, signal=-1, source="explicit", whisper_log_id=whisper_log_id)
 
     llm_response = json.dumps({"verdicts": [{
         "whisper_log_id": whisper_log_id,
@@ -234,7 +255,7 @@ def test_explicit_feedback_outranks_a_later_judge_verdict(engine, tmp_path):
         "confidence": 0.95,
         "reason": "The answer never uses the injected memory.",
     }]})
-    with patch(_LLM_PATCH, return_value=llm_response):
+    with patch(_LLM_PATCH, return_value=llm_response) as mock_judge:
         _record_whisper_usage_signals(engine, transcript)
 
     affinity = engine.db.conn.execute(
@@ -242,7 +263,15 @@ def test_explicit_feedback_outranks_a_later_judge_verdict(engine, tmp_path):
         (node_id, whisper_log_id),
     ).fetchone()
     assert affinity["source"] == "explicit", "an automated verdict overwrote explicit feedback"
-    assert affinity["signal"] == 1
+    assert affinity["signal"] == -1, "the human's negative signal was replaced"
+
+    # The guard on the guard: if the judge never ran, the two assertions above hold
+    # trivially and prove nothing about the scoping clause. This is what the earlier
+    # signal=1 draft failed silently.
+    assert mock_judge.called, (
+        "the judge never ran, so Step 5's UPDATE never executed and this test cannot "
+        "distinguish a scoped UPDATE from an unscoped one"
+    )
 
 
 def test_a_confirming_heuristic_hit_does_not_reach_the_judge(engine, tmp_path):
@@ -409,9 +438,18 @@ Expected: FAIL.
   anything today) and green after (the UPDATE is scoped to `auto_heuristic`). It is the guard on
   Step 5, not a test of it: drop the `AND source = ...` clause and it goes red.
 
+  **This claim was false until the pre-flight scan caught it, and the fix is the `signal=-1` in the
+  fixture — do not "simplify" it back to `signal=1`.** With positive feedback the latch is taken
+  synchronously inside `_submit_feedback_locked`, `already_confirmed` reads True, Step 4 marks the
+  event settled, the judge is never queued and Step 5's UPDATE never runs; the assertion then held
+  on Task 2's `ON CONFLICT DO NOTHING` alone, scoping clause present or absent. The `assert
+  mock_judge.called` in that test exists to make this failure mode loud instead of silent.
+
 Council round 3 (Cursor) rejected an earlier version of the re-ingest test that belonged in the second
 list while being claimed for the first. If a test in the red list passes on the first run, stop: the
-fixture is wrong, and adjusting the assertion instead would bake in a test that cannot fail.
+fixture is wrong, and adjusting the assertion instead would bake in a test that cannot fail. The
+mirror rule holds for this list: if a test in the GREEN list would stay green with the change it
+claims to guard deleted, it is not a guard — that is exactly what the paragraph above describes.
 
 **Sanity check before implementing — the preamble must actually arm the judge.** If
 `test_a_weak_heuristic_hit_still_reaches_the_judge` fails on `mock_llm.called` even after Step 4, the
