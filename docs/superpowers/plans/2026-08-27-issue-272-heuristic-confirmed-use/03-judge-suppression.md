@@ -458,9 +458,14 @@ Expected: FAIL.
   so the base suppresses the judge for its own reason. It pins that the new rule does not lose that.
   Its claim/lifecycle assertions are green only because Task 2 has already landed; run this task out
   of order and they go red for the right reason.
-- `test_explicit_feedback_outranks_a_later_judge_verdict` — green before Step 5 (nothing overwrites
-  anything today) and green after (the UPDATE is scoped to `auto_heuristic`). It is the guard on
-  Step 5, not a test of it: drop the `AND source = ...` clause and it goes red.
+- `test_explicit_feedback_outranks_a_later_judge_verdict` — **belongs in the RED list, measured.**
+  This entry used to call it a pure green pin. On the pristine base it fails on
+  `assert mock_judge.called`: the old `not referenced` rule suppresses the judge for this fixture's
+  `token_overlap` hit, so Step 5's UPDATE never runs. It therefore needs Steps 3-4 present before it
+  can even reach the thing it guards, and it goes red for a second, independent reason if the
+  `AND source = ...` clause is dropped (verified by mutation: `source` becomes `'auto_llm_judge'`).
+  Sensitive to more of the implementation, not less — a stronger discriminator than the entry
+  claimed.
 
   **This claim was false until the pre-flight scan caught it, and the fix is the `signal=-1` in the
   fixture — do not "simplify" it back to `signal=1`.** With positive feedback the latch is taken
