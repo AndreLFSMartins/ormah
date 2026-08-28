@@ -245,7 +245,12 @@ def test_qualified_positive_feedback_confirms_use(engine, source):
 
 
 def test_auto_heuristic_positive_does_not_confirm(engine):
-    """Contract 9: auto_heuristic is excluded pending #218 — fail-closed."""
+    """Contract 9: submit_feedback(auto_heuristic) is below the #272 evidence floor.
+
+    Not an exclusion by source any more — auto_heuristic IS in the allowlist since
+    #272. feedback_strength maps it to UNKNOWN (0.40), under HEURISTIC_CONFIRM_FLOOR,
+    because a submit_feedback call carries no evidence of a verbatim match.
+    """
     ids = _make_nodes(engine, count=1)
     target = ids[0]
     log_id = _seed_whisper_log(engine, target)
@@ -254,6 +259,46 @@ def test_auto_heuristic_positive_does_not_confirm(engine):
     engine.submit_feedback(target, signal=1, source="auto_heuristic", whisper_log_id=log_id)
 
     assert _snapshot(engine, target) == before, "auto_heuristic must not confirm use"
+
+
+@pytest.mark.parametrize("strength,should_confirm", [
+    (0.80, True),    # exactly the floor — inclusive
+    (0.7999, False), # just below
+    (0.98, True),    # node_id
+    (0.40, False),   # token_overlap floor
+])
+def test_heuristic_claim_respects_the_evidence_floor(engine, strength, should_confirm):
+    """#272 D1/D2: the floor lives in the claim helper, not in its callers."""
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    with engine.db.transaction() as conn:
+        claimed = engine._claim_confirmed_use(
+            conn, log_id, target,
+            signal=1, source="auto_heuristic", strength=strength,
+        )
+
+    assert claimed is should_confirm
+
+
+def test_the_floor_does_not_gate_the_other_sources(engine):
+    """#272 D2: the floor is scoped to auto_heuristic only.
+
+    explicit is 1.00 on the ladder, so a low strength reaching this helper would
+    mean the caller computed it wrong — but gating it here would silently drop a
+    real confirmation instead of surfacing that bug.
+    """
+    ids = _make_nodes(engine, count=1)
+    target = ids[0]
+    log_id = _seed_whisper_log(engine, target)
+
+    with engine.db.transaction() as conn:
+        claimed = engine._claim_confirmed_use(
+            conn, log_id, target, signal=1, source="explicit", strength=0.0,
+        )
+
+    assert claimed is True, "the floor must not apply to non-heuristic sources"
 
 
 @pytest.mark.parametrize("source", ["explicit", "implicit", "auto_llm_judge", "auto_heuristic"])

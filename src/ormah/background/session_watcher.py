@@ -606,6 +606,7 @@ def _record_whisper_usage_signals(
                 row["node_id"],
                 signal=record["polarity"],
                 source=_LLM_JUDGE_AFFINITY_SOURCE,
+                strength=record["strength"],
             ):
                 confirmed_node_ids.append(row["node_id"])
 

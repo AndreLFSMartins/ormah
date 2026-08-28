@@ -53,8 +53,15 @@ _EMBEDDING_SCHEMA_VERSION = 2
 
 # Issue #220: the only feedback sources that count as confirmed use. Fail-closed —
 # anything not listed here, and every negative signal, does not reinforce.
-# auto_heuristic is excluded pending #218 signal calibration.
-_CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge"})
+# auto_heuristic was excluded pending #218 signal calibration; #272 admits it above
+# HEURISTIC_CONFIRM_FLOOR, which the ladder now makes meaningful.
+_CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge", "auto_heuristic"})
+
+# Issue #272: the evidence rung a heuristic hit must reach to confirm use. Defined by
+# reference to the ladder, not as a literal, so the two cannot drift apart in silence.
+# At IMPLICIT (0.80) this admits the three verbatim match kinds and excludes
+# token_overlap by construction — that band's supremum is 0.78.
+HEURISTIC_CONFIRM_FLOOR = signal_strength.IMPLICIT
 
 # Lifecycle-model version. 1 = the legacy FSRS seed (previously recorded as the
 # boolean meta key 'fsrs_migrated'); 2 = bounded reinforcement (#221). An integer
@@ -844,6 +851,7 @@ class MemoryEngine:
                     resolved_node_id,
                     signal=1,
                     source="explicit",
+                    strength=signal_strength.EXPLICIT,
                 )
         if claimed:
             # Isolated, and never propagated — the same contract submit_feedback and the
@@ -2727,6 +2735,7 @@ class MemoryEngine:
         *,
         signal: int,
         source: str,
+        strength: float,
     ) -> bool:
         """Take the at-most-once confirmed-use claim for one (event, node) pair.
 
@@ -2760,8 +2769,22 @@ class MemoryEngine:
         mutator instead would let two concurrent confirmations both pass and
         both reinforce; @_serialized_memory_operation keeps the read-modify-write
         correct but cannot enforce once-per-event.
+
+        Issue #272 admits auto_heuristic, but only above HEURISTIC_CONFIRM_FLOOR.
+        submit_feedback needs no special case for it: feedback_strength maps that
+        source to UNKNOWN (0.40), below the floor by construction, because a
+        submit_feedback call carries no evidence of a verbatim match and so cannot
+        earn a verbatim rung.
         """
         if whisper_log_id is None or signal != 1 or source not in _CONFIRMED_USE_SOURCES:
+            return False
+        # Issue #272: auto_heuristic confirms only on verbatim evidence. Scoped to that
+        # one source deliberately: explicit (1.00) and implicit (0.80) clear the floor
+        # anyway, and the judge's band starts at 0.82 — applying it to them would add a
+        # second gate on paths that do not need one, and would couple the judge's band
+        # to a constant it does not own. A low strength arriving on those sources means
+        # the CALLER is wrong, and dropping the claim would hide that instead of failing.
+        if source == "auto_heuristic" and strength < HEURISTIC_CONFIRM_FLOOR:
             return False
         conn.execute(
             """
@@ -2838,6 +2861,9 @@ class MemoryEngine:
         session_id = row["session_id"]
         space = row["space"]
         whisper_log_id = row["id"]
+        # Computed once and used twice: the claim's floor and the signals row must
+        # agree by construction, not by two call sites happening to match.
+        strength = signal_strength.feedback_strength(source, signal)
 
         with self.db.transaction() as conn:
             became_confirmed = self._claim_confirmed_use(
@@ -2846,6 +2872,7 @@ class MemoryEngine:
                 resolved_node_id,
                 signal=signal,
                 source=source,
+                strength=strength,
             )
             conn.execute(
                 """
@@ -2892,7 +2919,7 @@ class MemoryEngine:
                     resolved_node_id,
                     "feedback_submitted",
                     signal,
-                    signal_strength.feedback_strength(source, signal),
+                    strength,
                     source,
                     session_id,
                     "submit_feedback",
