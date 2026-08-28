@@ -2563,10 +2563,10 @@ def test_one_nodes_reinforcement_failure_does_not_stop_the_batch(engine, tmp_pat
     before_second = _lifecycle(engine, second)
     real = engine._record_confirmed_use
 
-    def flaky(node_id):
+    def flaky(node_id, *, whisper_log_id):
         if node_id == first:
             raise ZeroDivisionError("simulated mutator failure")
-        return real(node_id)
+        return real(node_id, whisper_log_id=whisper_log_id)
 
     with patch.object(engine, "_record_confirmed_use", side_effect=flaky):
         recorded = _record_whisper_usage_signals(engine, transcript)
@@ -2747,10 +2747,10 @@ def test_one_failing_node_does_not_skip_the_rest_of_the_batch(engine, tmp_path):
 
     real_mutator = engine._record_confirmed_use
 
-    def failing_for_first(node_id):
+    def failing_for_first(node_id, *, whisper_log_id):
         if node_id == first_id:
             raise ZeroDivisionError("float division by zero")
-        return real_mutator(node_id)
+        return real_mutator(node_id, whisper_log_id=whisper_log_id)
 
     llm_response = json.dumps({
         "verdicts": [

@@ -308,7 +308,7 @@ class MemoryEngine:
             else 0
         )
 
-        confirmed_node_ids: list[str] = []
+        confirmed_node_ids: list[tuple[int, str]] = []
         with self.db.transaction() as conn:
             # EVERY eligibility test is applied in Python, and the SELECT filters only on
             # source and the cutoff. Council round 1 (Codex, MEDIUM) caught the earlier
@@ -367,7 +367,7 @@ class MemoryEngine:
                     source="auto_heuristic",
                     strength=strength,
                 ):
-                    confirmed_node_ids.append(row["node_id"])
+                    confirmed_node_ids.append((row["whisper_log_id"], row["node_id"]))
                 processed_max = max(processed_max, row["id"])
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES "
@@ -382,9 +382,9 @@ class MemoryEngine:
 
         # Isolated per node: the claims are committed, so letting one failure escape
         # would abandon every later node with its claim taken and nothing to retry it.
-        for node_id in confirmed_node_ids:
+        for whisper_log_id, node_id in confirmed_node_ids:
             try:
-                self._record_confirmed_use(node_id)
+                self._record_confirmed_use(node_id, whisper_log_id=whisper_log_id)
             except Exception:
                 logger.exception("confirmed-use backfill failed for node %s", node_id)
 
@@ -990,7 +990,9 @@ class MemoryEngine:
             # lifecycle write. At-most-once means the claim stays taken and this
             # reinforcement is simply a logged miss; a retry would only log a second event.
             try:
-                self._record_confirmed_use(resolved_node_id)
+                self._record_confirmed_use(
+                    resolved_node_id, whisper_log_id=target_log_id
+                )
             except Exception:
                 logger.exception(
                     "confirmed-use reinforcement failed for node %s", resolved_node_id
@@ -2256,7 +2258,7 @@ class MemoryEngine:
             self.file_store.save(self_node)
 
     @_serialized_memory_operation
-    def _record_confirmed_use(self, node_id: str) -> None:
+    def _record_confirmed_use(self, node_id: str, *, whisper_log_id: int) -> None:
         """Record confirmed use, updating stability only when it is off cooldown.
 
         Serialized because the cooldown is a check-then-write pair (#221,
@@ -2273,53 +2275,140 @@ class MemoryEngine:
         server serves, so the two orders never interleave today. Invariant this
         depends on: never call file_store inside db.transaction() outside
         startup().
+
+        Issue #272: the claim's outcome commits with this write, so a reinforcement
+        that never landed stays visible as state = 'pending' and
+        run_reinforcement_retry repairs it. The retry is idempotent because the
+        target is a pure function of the claim: the counters come from the nodes
+        row rather than from the loaded markdown, and the clock comes from
+        claimed_at rather than from datetime.now(). os.replace cannot be rolled
+        back and COMMIT runs after this body, so a failed COMMIT can leave the file
+        one step ahead — recomputing the same values overwrites that phantom
+        instead of compounding it. The markdown is a projection of the lifecycle
+        state, not a second source of it.
+
+        claimed_at is also the truthful clock. last_accessed is the decay anchor,
+        and a sweep hours after the fact stamping datetime.now() would credit the
+        memory with recency it never earned. reinforced_at, not these fields,
+        records when the write itself landed.
         """
         node = self.file_store.load(node_id)
-        if node is None:
-            return
-        now = datetime.now(timezone.utc)
 
-        # One numeric stability update per node per cooldown window (#221): the
-        # old formula let ten same-session touches compound to ~57x. last_accessed
-        # below still advances on every call, and Task 4 repoints decay and
-        # importance at it, so a node in active use never reads as stale even
-        # though last_review now lags by up to one cooldown window.
-        if lifecycle.reinforcement_due(
-            node.last_review, now, self.settings.fsrs_reinforcement_cooldown_days
-        ):
-            # reinforcement cooldown can leave last_review a full window behind
-            # a use that already landed inside it (PR #239 review comment):
-            # last_accessed is the actual spacing signal, last_review only gates.
-            anchor = node.last_accessed or node.last_review
-            days_since = max((now - anchor).total_seconds() / 86400, 0.0)
-            node.stability = lifecycle.reinforced_stability(
-                node.stability,
-                days_since,
-                growth_factor=self.settings.fsrs_growth_factor,
-                growth_exponent=self.settings.fsrs_growth_exponent,
-                spacing_cap=self.settings.fsrs_spacing_cap,
-                max_stability=self.settings.fsrs_max_stability,
-                initial_stability=self.settings.fsrs_initial_stability,
-            )
-            node.last_review = now
-
-        # Standard access tracking
-        node.last_accessed = now
-        node.access_count += 1
-
-        self.file_store.save(node)
+        # Issue #272: one transaction covers the claim's outcome, the nodes row and the
+        # markdown write. Calling file_store inside db.transaction() is safe HERE and
+        # nowhere else: @_serialized_memory_operation already holds
+        # _memory_operation_lock and FileStore shares that RLock (:109), so this
+        # re-enters rather than taking db_lock before memory_lock.
+        #
+        # NOT atomic across the two stores: os.replace is irreversible and COMMIT runs
+        # after this body, so a failed COMMIT can leave the markdown one step ahead.
+        # What makes that safe is that the target is a pure function of the claim:
+        # the counters come FROM the nodes row and the clock comes FROM claimed_at, so
+        # a retry recomputes the SAME values and overwrites the phantom instead of
+        # compounding it — one event, one increment, one stability step.
         with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE confirmed_use_claims SET state = 'applied', "
+                "reinforced_at = datetime('now') "
+                "WHERE whisper_log_id = ? AND node_id = ? AND state = 'pending'",
+                (whisper_log_id, node_id),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                # Already applied, terminal, or claimed by another runner. At-most-once,
+                # the same shape _claim_confirmed_use uses. Nothing may sit between the
+                # UPDATE and this read.
+                return
+
+            # reinforced_at records when the write ran; claimed_at is when the memory
+            # was actually used, and that is the clock the lifecycle values use.
+            claim = conn.execute(
+                "SELECT claimed_at FROM confirmed_use_claims "
+                "WHERE whisper_log_id = ? AND node_id = ?",
+                (whisper_log_id, node_id),
+            ).fetchone()
+
+            row = conn.execute(
+                "SELECT access_count, last_accessed, stability, last_review "
+                "FROM nodes WHERE id = ?",
+                (node_id,),
+            ).fetchone()
+            if node is None or row is None:
+                # Terminal, and honest about which terminal. Marking it 'applied' would
+                # record a reinforcement that never happened — the same falsehood the
+                # legacy migration above refuses to write.
+                conn.execute(
+                    "UPDATE confirmed_use_claims SET state = 'orphaned', "
+                    "reinforced_at = NULL "
+                    "WHERE whisper_log_id = ? AND node_id = ?",
+                    (whisper_log_id, node_id),
+                )
+                return
+
+            # Issue #272 (council round 1, Cursor): the clock is the claim's, not the
+            # wall clock. reinforced_stability is a function of days_since, so a sweep
+            # six hours after a failed attempt would compute a DIFFERENT target and the
+            # convergence promise above would hold for access_count only. Sourcing it
+            # from claimed_at makes the whole target a pure function of the claim.
+            #
+            # It is also the honest value: last_accessed is the decay anchor, and a late
+            # retry stamping the wall clock would credit the memory with recency it
+            # never earned. datetime('now') writes UTC with no offset, so the tzinfo is
+            # attached explicitly — astimezone would read the naive value as local time.
+            now = datetime.fromisoformat(claim["claimed_at"]).replace(
+                tzinfo=timezone.utc
+            )
+            stability = row["stability"]
+            last_review = (
+                datetime.fromisoformat(row["last_review"]) if row["last_review"] else None
+            )
+            last_accessed = (
+                datetime.fromisoformat(row["last_accessed"])
+                if row["last_accessed"]
+                else None
+            )
+
+            # One numeric stability update per node per cooldown window (#221): the
+            # old formula let ten same-session touches compound to ~57x.
+            if lifecycle.reinforcement_due(
+                last_review, now, self.settings.fsrs_reinforcement_cooldown_days
+            ):
+                # reinforcement cooldown can leave last_review a full window behind a
+                # use that already landed inside it (PR #239 review comment):
+                # last_accessed is the actual spacing signal, last_review only gates.
+                anchor = last_accessed or last_review
+                days_since = max((now - anchor).total_seconds() / 86400, 0.0)
+                stability = lifecycle.reinforced_stability(
+                    stability,
+                    days_since,
+                    growth_factor=self.settings.fsrs_growth_factor,
+                    growth_exponent=self.settings.fsrs_growth_exponent,
+                    spacing_cap=self.settings.fsrs_spacing_cap,
+                    max_stability=self.settings.fsrs_max_stability,
+                    initial_stability=self.settings.fsrs_initial_stability,
+                )
+                last_review = now
+
+            access_count = row["access_count"] + 1
+
             conn.execute(
                 "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, "
                 "last_review = ? WHERE id = ?",
                 (
-                    node.access_count,
-                    node.last_accessed.isoformat(),
-                    node.stability,
-                    node.last_review.isoformat() if node.last_review else None,
+                    access_count,
+                    now.isoformat(),
+                    stability,
+                    last_review.isoformat() if last_review else None,
                     node_id,
                 ),
             )
+
+            # The markdown is the projection: it is set to the computed values, never
+            # incremented from whatever it happened to hold.
+            node.access_count = access_count
+            node.last_accessed = now
+            node.stability = stability
+            node.last_review = last_review
+            self.file_store.save(node)
 
     # --- Private helpers ---
 
@@ -2918,8 +3007,8 @@ class MemoryEngine:
             return False
         conn.execute(
             """
-            INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at)
-            SELECT wl.id, ?, datetime('now')
+            INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at, state)
+            SELECT wl.id, ?, datetime('now'), 'pending'
             FROM whisper_log wl
             WHERE wl.id = ? AND wl.was_injected = 1
             ON CONFLICT DO NOTHING
@@ -2937,11 +3026,13 @@ class MemoryEngine:
     ) -> str:
         """Record feedback while preventing retention from deleting its event."""
         with self.db.transaction():
-            resolved_node_id, became_confirmed, message = self._submit_feedback_locked(
-                node_id=node_id,
-                signal=signal,
-                source=source,
-                whisper_log_id=whisper_log_id,
+            resolved_node_id, became_confirmed, claimed_log_id, message = (
+                self._submit_feedback_locked(
+                    node_id=node_id,
+                    signal=signal,
+                    source=source,
+                    whisper_log_id=whisper_log_id,
+                )
             )
         # Reinforcement runs after the transaction commits: db.transaction() holds a
         # process-level lock for its whole body, and _record_confirmed_use does file
@@ -2953,9 +3044,17 @@ class MemoryEngine:
         # so raising here would report a failure for evidence that was recorded. The
         # contract is at-most-once: the claim stays taken and
         # this reinforcement is simply lost, as a logged miss.
+        #
+        # claimed_log_id, not the whisper_log_id parameter (which may be None on the
+        # legacy fallback path): the claim was taken on the id _submit_feedback_locked
+        # resolved internally, and re-resolving here could pick a DIFFERENT event.
+        # It cannot be None when became_confirmed is True — _claim_confirmed_use
+        # returns False for a None id.
         if became_confirmed:
             try:
-                self._record_confirmed_use(resolved_node_id)
+                self._record_confirmed_use(
+                    resolved_node_id, whisper_log_id=claimed_log_id
+                )
             except Exception:
                 logger.exception(
                     "confirmed-use reinforcement failed for node %s", resolved_node_id
@@ -2968,7 +3067,7 @@ class MemoryEngine:
         signal: int,
         source: str = "explicit",
         whisper_log_id: int | None = None,
-    ) -> tuple[str | None, bool, str]:
+    ) -> tuple[str | None, bool, int | None, str]:
         """Record explicit or implicit feedback signal for a whisper candidate.
 
         When *whisper_log_id* is supplied, feedback attaches to that exact
@@ -2981,7 +3080,7 @@ class MemoryEngine:
             node_id, whisper_log_id,
         )
         if error is not None:
-            return None, False, error
+            return None, False, None, error
         assert resolved_node_id is not None
         assert row is not None
 
@@ -3074,6 +3173,7 @@ class MemoryEngine:
         return (
             resolved_node_id,
             became_confirmed,
+            whisper_log_id,
             f"Feedback recorded for node {resolved_node_id[:8]}...",
         )
 

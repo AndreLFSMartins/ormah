@@ -521,7 +521,7 @@ def _record_whisper_usage_signals(
         if llm_judge_enabled and not has_llm_judge and not settled:
             llm_groups.setdefault((prompt_text, response), []).append(row)
 
-    heuristic_confirmed_ids: list[str] = []
+    heuristic_confirmed_ids: list[tuple[int, str]] = []
     with engine.db.transaction() as conn:
         for record in heuristic_records:
             row = record["row"]
@@ -558,7 +558,7 @@ def _record_whisper_usage_signals(
                     source=_HEURISTIC_AFFINITY_SOURCE,
                     strength=record["strength"],
                 ):
-                    heuristic_confirmed_ids.append(row["node_id"])
+                    heuristic_confirmed_ids.append((row["id"], row["node_id"]))
 
     # Issue #272: reinforcement runs after the transaction commits — _record_confirmed_use
     # does file I/O, and calling it inside would hold the process-wide write lock across
@@ -573,9 +573,9 @@ def _record_whisper_usage_signals(
     # Isolated per node: the signals and claims are already committed, so letting one
     # failure escape would abandon every later node with its claim taken and nothing to
     # retry it. At-most-once means a miss is logged, never raised.
-    for node_id in heuristic_confirmed_ids:
+    for whisper_log_id, node_id in heuristic_confirmed_ids:
         try:
-            engine._record_confirmed_use(node_id)
+            engine._record_confirmed_use(node_id, whisper_log_id=whisper_log_id)
         except Exception:
             logger.exception("confirmed-use reinforcement failed for node %s", node_id)
 
@@ -621,7 +621,7 @@ def _record_whisper_usage_signals(
                 },
             })
 
-    confirmed_node_ids: list[str] = []
+    confirmed_node_ids: list[tuple[int, str]] = []
     with engine.db.transaction() as conn:
         for record in judge_records:
             row = record["row"]
@@ -688,7 +688,7 @@ def _record_whisper_usage_signals(
                 source=_LLM_JUDGE_AFFINITY_SOURCE,
                 strength=record["strength"],
             ):
-                confirmed_node_ids.append(row["node_id"])
+                confirmed_node_ids.append((row["id"], row["node_id"]))
 
     # Issue #220: reinforcement runs after the transaction commits. db.transaction()
     # holds a process-level lock for its whole body and _record_confirmed_use writes
@@ -701,9 +701,9 @@ def _record_whisper_usage_signals(
     # node, and leave both has_llm_judge set and the claims taken — nothing would ever
     # retry them. Failures here are logged, never raised. This is the at-most-once
     # contract.
-    for node_id in confirmed_node_ids:
+    for whisper_log_id, node_id in confirmed_node_ids:
         try:
-            engine._record_confirmed_use(node_id)
+            engine._record_confirmed_use(node_id, whisper_log_id=whisper_log_id)
         except Exception:
             logger.exception("confirmed-use reinforcement failed for node %s", node_id)
 
