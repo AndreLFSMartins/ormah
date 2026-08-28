@@ -72,6 +72,10 @@ LIFECYCLE_MODEL_VERSION = 2
 # values or mappings change, so a stamped store recomputes from its evidence.
 SIGNAL_STRENGTH_LADDER_VERSION = 1
 
+# Backfill version for the #272 heuristic confirmed-use repair. Bump to force a full
+# re-scan when the floor or the selection changes.
+HEURISTIC_CONFIRMED_USE_VERSION = 1
+
 
 def _generate_title(content: str, max_chars: int = 60) -> str:
     """Generate a short title from the first line/sentence of content."""
@@ -172,6 +176,11 @@ class MemoryEngine:
         # One-time FSRS data migration: seed stability from access patterns
         self._migrate_fsrs()
         self._migrate_signal_strength()
+        # Defence in depth, NOT the safety mechanism: eligibility is recomputed from each
+        # row's own evidence, so a stale DEFAULT-1.0 strength cannot claim whatever the
+        # order. The two migrations commit separately, so ordering never closed that
+        # window on its own anyway (#272).
+        self._migrate_heuristic_confirmed_use()
 
         self._ensure_self_node()
         self._migrate_identity_tiers()
@@ -263,6 +272,127 @@ class MemoryEngine:
                 len(rows),
                 lower_bound,
                 SIGNAL_STRENGTH_LADDER_VERSION,
+            )
+
+    def _migrate_heuristic_confirmed_use(self) -> None:
+        """Claim and reinforce heuristic rows the pre-#272 code left unclaimed.
+
+        The heuristic detector recorded positive signals for years without ever taking
+        a confirmed-use claim, because only the judge block called the helper. Those
+        rows are evidence of real use that never reached the lifecycle. This repairs
+        the ones whose evidence clears HEURISTIC_CONFIRM_FLOOR.
+
+        Eligibility is recomputed from each row's own evidence with
+        strength_from_evidence, and never read from signals.strength. That column
+        defaults to 1.0 -- above the floor -- and _migrate_signal_strength commits in a
+        SEPARATE transaction, so an old binary (#238) can write a stale 1.0 row in the
+        window between the two; ordering alone would not stop this from claiming it. The
+        recompute is a pure function of stored evidence and fail-closed (an unknown or
+        malformed match returns UNKNOWN, 0.40), so the stored column cannot mislead it.
+        Running after _migrate_signal_strength stays correct, as defence in depth.
+
+        Rescans on every boot rather than stamping once, for the reason
+        _migrate_signal_strength documents: an old binary -- a rollback, or the second
+        unmanaged process of #238 -- can write pre-fix rows AFTER a one-time stamp, and
+        they would stay unclaimed forever on a table the stamp calls migrated.
+
+        The claims are taken inside one transaction and the reinforcement runs after it
+        commits: _record_confirmed_use does file I/O, so calling it inside would hold
+        the process-wide write lock across N markdown saves and take db_lock before
+        memory_lock, inverting the order every serialized writer uses (#220 4.3).
+        """
+        version = self._meta_int("heuristic_confirmed_use_version")
+        lower_bound = (
+            self._meta_int("heuristic_confirmed_use_cutoff")
+            if version >= HEURISTIC_CONFIRMED_USE_VERSION
+            else 0
+        )
+
+        confirmed_node_ids: list[str] = []
+        with self.db.transaction() as conn:
+            # EVERY eligibility test is applied in Python, and the SELECT filters only on
+            # source and the cutoff. Council round 1 (Codex, MEDIUM) caught the earlier
+            # shape: any predicate in the WHERE hides those rows' ids from the loop, so
+            # processed_max stalls behind them and every boot rescans a growing tail —
+            # and on a store whose newest heuristic rows are all polarity 0, non-injected,
+            # or below the floor, the cutoff never advances at all.
+            # LEFT JOIN, not INNER. Council round 3 (Codex, MEDIUM): signals.whisper_log_id
+            # is nullable and declared ON DELETE SET NULL, so whisper_log_cleanup orphans
+            # rows routinely. An INNER JOIN drops those ids before the loop sees them —
+            # the same cutoff stall in a third disguise. Missing provenance is ineligible,
+            # but it is ineligible IN PYTHON, after its id has advanced the high-water mark.
+            rows = conn.execute(
+                """
+                SELECT s.id, s.whisper_log_id, s.node_id, s.polarity, s.evidence,
+                       wl.was_injected, wl.node_id AS event_node_id
+                FROM signals s
+                LEFT JOIN whisper_log wl ON wl.id = s.whisper_log_id
+                WHERE s.id > ?
+                  AND s.source = ?
+                ORDER BY s.id ASC
+                """,
+                (lower_bound, signal_strength.HEURISTIC_SOURCE),
+            ).fetchall()
+            processed_max = lower_bound
+            for row in rows:
+                # Council round 1 (Codex, HIGH): the claim helper inserts the node id it is
+                # GIVEN, checking only that the event was injected — it never asserts the
+                # node belongs to the event. The live path is safe because its query reads
+                # both ids from the same whisper_log row, but here they come from different
+                # tables, so a legacy or hand-repaired signal could reinforce a node the
+                # agent never saw for this event. Checked explicitly.
+                # Recomputed, never read from signals.strength. That column defaults to
+                # 1.0 -- above the floor -- and the ladder migration commits in a separate
+                # transaction, so a stale row written in the window between the two would
+                # otherwise take an irreversible claim. Pure function of stored evidence,
+                # fail-closed: an unknown or malformed match returns UNKNOWN (0.40).
+                strength = signal_strength.strength_from_evidence(
+                    signal_strength.HEURISTIC_SOURCE,
+                    row["polarity"],
+                    row["evidence"],
+                )
+                eligible = (
+                    row["whisper_log_id"] is not None
+                    and row["event_node_id"] is not None  # LEFT JOIN found no parent row
+                    and row["polarity"] == 1
+                    and row["was_injected"] == 1
+                    and row["node_id"] == row["event_node_id"]
+                    and strength >= HEURISTIC_CONFIRM_FLOOR
+                )
+                if eligible and self._claim_confirmed_use(
+                    conn,
+                    row["whisper_log_id"],
+                    row["node_id"],
+                    signal=1,
+                    source="auto_heuristic",
+                    strength=strength,
+                ):
+                    confirmed_node_ids.append(row["node_id"])
+                processed_max = max(processed_max, row["id"])
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                "('heuristic_confirmed_use_version', ?)",
+                (str(HEURISTIC_CONFIRMED_USE_VERSION),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                "('heuristic_confirmed_use_cutoff', ?)",
+                (str(processed_max),),
+            )
+
+        # Isolated per node: the claims are committed, so letting one failure escape
+        # would abandon every later node with its claim taken and nothing to retry it.
+        for node_id in confirmed_node_ids:
+            try:
+                self._record_confirmed_use(node_id)
+            except Exception:
+                logger.exception("confirmed-use backfill failed for node %s", node_id)
+
+        if confirmed_node_ids:
+            logger.info(
+                "Backfilled confirmed use on %d heuristic events above id %d (#272)",
+                len(confirmed_node_ids),
+                lower_bound,
             )
 
     def _migrate_fsrs(self) -> None:
