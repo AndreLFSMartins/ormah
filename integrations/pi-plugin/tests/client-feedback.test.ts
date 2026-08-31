@@ -9,9 +9,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { OrmahConfig } from "../src/config.ts";
-import { OrmahClient } from "../src/client.ts";
-import type { WhisperResponse } from "../src/client.ts";
+import type { OrmahConfig } from "../src/config.js";
+import { OrmahClient } from "../src/client.js";
+import type { WhisperResponse } from "../src/client.js";
 
 const cfg = {
 	baseUrl: "http://127.0.0.1:8787",
