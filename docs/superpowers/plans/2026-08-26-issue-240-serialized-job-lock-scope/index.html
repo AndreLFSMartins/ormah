@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Issue #240 — scope L_mem to the apply step: implementation plan</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">Issue #240 — scope L_mem to the apply step: implementation plan</div>
+  <a href="#background-and-goal">Background and goal</a>
+  <a href="#global-constraints">Global constraints</a>
+  <a href="#task-order">Task order and dependencies</a>
+  <a href="#task-1-restore-epoch">Task 1: Restore epoch and the restore-aware job decorator</a>
+  <a href="#task-2-lock-probe">Task 2: LockProbe — the depth-0 acquisition counter</a>
+  <a href="#task-3-decay-manager">Task 3: run_decay — per-node apply step and tier revalidation</a>
+  <a href="#task-4-importance-and-cluster">Task 4: run_importance_scoring and run_auto_cluster</a>
+  <a href="#task-5-auto-linker">Task 5: run_auto_linker — the 25-minute symptom</a>
+  <a href="#task-6-conflict-detector">Task 6: run_conflict_detection</a>
+  <a href="#task-7-duplicate-merger">Task 7: run_duplicate_detection</a>
+  <a href="#task-8-consolidator">Task 8: run_consolidation</a>
+  <a href="#task-9-ingest-split">Task 9: split ingest_conversation extract from apply</a>
+  <a href="#task-10-retire">Task 10: retire serialized_memory_job, close the lock-order net, run the full suite</a>
+  <a href="#task-11-revalidation">Task 11: pay the revalidation debt in the three remaining jobs</a>
+  <a href="#what-must-not-get-lost">What must not get lost when the PR is opened</a>
+  <a href="#execution-status">Execution status</a>
+</nav>
+<main>
+<article>
+  <h1><em>Issue #240 —</em> scope <code>L_mem</code> to the apply step: implementation plan</h1>
+
+  <div class="eyebrow">Overview</div>
+  <div class="statement">Background jobs stop holding <code>L_mem</code> for a whole run; they hold it only around each apply step, guarded by a restore epoch that aborts the run if a full graph restore lands mid-run.</div>
+
+  <section>
+    <h2 id="background-and-goal">Background and goal</h2>
+    <p><strong>Spec:</strong> <code>docs/superpowers/specs/2026-08-26-issue-240-serialized-job-lock-scope-design.md</code> (read sections 2, 3, and 5 before Task 1).</p>
+
+    <p><strong>Architecture:</strong> <code>MemoryEngine</code> gains a monotonic <code>_restore_epoch</code>, bumped inside <code>reload_restored_graph</code> (already exclusive under <code>L_mem</code>), and a <code>memory_operation_at(epoch)</code> context manager that takes <code>L_mem</code> and raises <code>RestoredUnderfoot</code> if the epoch moved. <code>background/memory_lock.py</code> loses <code>serialized_memory_job</code> and gains <code>RestoredUnderfoot</code> plus <code>restore_aware_job</code>, a decorator that reads the epoch on entry, passes it to the job as its second positional argument, and swallows <code>RestoredUnderfoot</code> so the run ends cleanly instead of raising into APScheduler. Each of the seven jobs wraps its own apply steps.</p>
+
+    <p><strong>Tech Stack:</strong> Python 3.11+, pytest (<code>asyncio_mode = auto</code>), <code>threading.RLock</code>, SQLite via <code>ormah.index.db.Database</code>.</p>
+  </section>
+
+  <section>
+    <h2 id="global-constraints">Global constraints</h2>
+
+    <ul>
+      <li><strong>Island:</strong> work happens in <code>/Users/andre/Documents/GitHub/Tools/ormah-wt-240</code> on branch <code>fix/240-serialized-job-lock-scope</code>, cut from <code>upstream/main</code>. Never <code>cd</code> elsewhere.</li>
+
+      <li><strong>Planning artifacts:</strong> the spec and this plan live on <code>local-main</code> in the main checkout, never on the island. The <code>pre-push</code> hook is fail-closed and <code>^docs/superpowers/</code> is in its <code>PROTECTED</code> allowlist.</li>
+
+      <li><strong>Acquisition order is always <code>L_mem</code> → <code>L_db</code>.</strong> No apply step may take <code>L_mem</code> inside an open <code>db.transaction()</code>; that inversion is what #207 fixed. Task 10 adds the net that keeps it closed.</li>
+
+      <li><strong>Abort, do not skip.</strong> On epoch change the whole snapshot is stale: let <code>RestoredUnderfoot</code> propagate out of the job body. Never catch it per-item.</li>
+
+      <li><strong><code>index_updater</code> and the <code>FileStore</code> scan are out of scope</strong> (spec §4). Do not touch <code>src/ormah/index/builder.py</code>.</li>
+
+      <li><strong>No new <code>try/except Exception</code></strong> around an apply step that would swallow <code>RestoredUnderfoot</code>. Several jobs already wrap their whole body in <code>except Exception</code> — Task 1 makes <code>RestoredUnderfoot</code> survive that by having <code>restore_aware_job</code> handle it outside, so each job must re-raise it from any inner handler it passes through.</li>
+
+      <li><strong>Verification gates</strong> (all three load-bearing):
+        <pre><code>env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"
+#   printed path MUST contain ormah-wt-240/
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest tests/ -q > out.txt 2>&1
+echo "PYTEST_EXIT=$?" >> out.txt</code></pre>
+        Every task's "run the tests" step means the middle command, narrowed to the task's test file. The full suite runs in Task 10.
+      </li>
+
+      <li><strong><code>make server</code> is forbidden</strong> — the dev server is launchd-managed.</li>
+
+      <li><strong>Lint:</strong> <code>ruff check src/ tests/</code>, <code>line-length = 100</code>, <code>target-version = py311</code>.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2 id="task-order">Task order and dependencies</h2>
+
+    <table class="tasks">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>File</th>
+          <th>Deliverable</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td><code>01-engine-epoch.md</code></td>
+          <td><code>RestoredUnderfoot</code>, <code>restore_aware_job</code>, <code>restore_epoch</code>, <code>memory_operation_at</code>, epoch bump</td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td><code>02-lock-probe.md</code></td>
+          <td><code>tests/test_background/lock_probe.py</code> — depth-0 acquisition counter</td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td><code>03-decay-manager.md</code></td>
+          <td><code>run_decay</code> per-node apply + tier revalidation (#257's canary)</td>
+        </tr>
+        <tr>
+          <td>4</td>
+          <td><code>04-importance-and-cluster.md</code></td>
+          <td><code>run_importance_scoring</code>, <code>run_auto_cluster</code></td>
+        </tr>
+        <tr>
+          <td>5</td>
+          <td><code>05-auto-linker.md</code></td>
+          <td><code>run_auto_linker</code> + the foreground-progress test</td>
+        </tr>
+        <tr>
+          <td>6</td>
+          <td><code>06-conflict-detector.md</code></td>
+          <td><code>run_conflict_detection</code></td>
+        </tr>
+        <tr>
+          <td>7</td>
+          <td><code>07-duplicate-merger.md</code></td>
+          <td><code>run_duplicate_detection</code></td>
+        </tr>
+        <tr>
+          <td>8</td>
+          <td><code>08-consolidator.md</code></td>
+          <td><code>run_consolidation</code></td>
+        </tr>
+        <tr>
+          <td>9</td>
+          <td><code>09-ingest-split.md</code></td>
+          <td><code>ingest_conversation</code> extract/apply split + dedup revalidation</td>
+        </tr>
+        <tr>
+          <td>10</td>
+          <td><code>10-retire-and-net.md</code></td>
+          <td>Delete <code>serialized_memory_job</code>, lock-order net, restore-abort integration test, full suite</td>
+        </tr>
+        <tr>
+          <td>11</td>
+          <td><code>11-pay-remaining-revalidation-debts.md</code></td>
+          <td>Revalidate snapshotted state in consolidator, auto_cluster, duplicate_merger</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Tasks 3–8 are independent of each other once Tasks 1 and 2 land. Task 9 is independent of 3–8. Task 10 deletes the decorator, so every job must already be converted before it runs.</p>
+
+    <p>Task 11 was added after the final whole-branch review, which found that the revalidation debt spec §5 named for decay (and Task 3 paid) exists unpaid in three other jobs. The decision was to pay all three rather than document them as accepted windows.</p>
+  </section>
+
+  <section>
+    <h2 id="task-1-restore-epoch">Task 1: Restore epoch and the restore-aware job decorator</h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p><code>RestoredUnderfoot</code>, <code>restore_aware_job</code>, <code>restore_epoch</code>, <code>memory_operation_at</code>, epoch bump</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Modify: <code>src/ormah/background/memory_lock.py</code> (whole file replaced — it is 14 lines today)</li>
+      <li>Modify: <code>src/ormah/engine/memory_engine.py</code> — <code>__init__</code> (~:103), <code>memory_operation</code> (:549), <code>reload_restored_graph</code> (:1329)</li>
+      <li>Test: <code>tests/test_background/test_memory_lock.py</code> (create)</li>
+    </ul>
+
+    <p><strong>Key interfaces:</strong> <code>ormah.background.memory_lock.RestoredUnderfoot</code>, <code>ormah.background.memory_lock.restore_aware_job(job)</code>, <code>MemoryEngine.restore_epoch</code>, <code>MemoryEngine.memory_operation_at(epoch: int)</code>.</p>
+
+    <p>Requires import of <code>ormah.background.memory_lock</code> from <code>memory_engine.py</code>. This is verified during planning: <code>memory_lock.py</code> imports nothing from <code>ormah</code>, <code>background/__init__.py</code> is empty, and every existing <code>memory_engine → background</code> import is inside a function body. No cycle.</p>
+  </section>
+
+  <section>
+    <h2 id="task-2-lock-probe">Task 2: <code>LockProbe</code> — the depth-0 acquisition counter</h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p>Depth-0 acquisition counter for testing</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Create: <code>tests/test_background/lock_probe.py</code></li>
+      <li>Test: <code>tests/test_background/test_lock_probe.py</code> (create)</li>
+    </ul>
+
+    <p><strong>Key interfaces:</strong> <code>LockProbe(real_lock)</code>, <code>install_probe(engine) → LockProbe</code>.</p>
+
+    <p><strong>Why depth-0:</strong> <code>L_mem</code> is an <code>RLock</code>. A job that takes it and then calls <code>engine.remember()</code> — itself <code>@_serialized_memory_operation</code> — re-enters the same lock. Counting raw <code>__enter__</code> calls yields the wrong number, hiding the bug. Only a 0→1 transition is a real acquisition.</p>
+  </section>
+
+  <section>
+    <h2 id="task-3-decay-manager">Task 3: <code>run_decay</code> — per-node apply step and tier revalidation</h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p>Per-node apply step with tier revalidation</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Modify: <code>src/ormah/background/decay_manager.py</code></li>
+      <li>Test: <code>tests/test_background/test_decay_manager.py</code> (append)</li>
+    </ul>
+
+    <p><strong>Key pattern:</strong> Whole-run exclusion was the only thing stopping decay from demoting a node promoted after decay snapshotted it. This task closes that window by re-reading the row inside the apply step. This is the debt this change creates (spec §5), and it also keeps PR #257's promotion behaviour correct.</p>
+
+    <p><strong>Important:</strong> <code>RestoredUnderfoot</code> must escape the job's <code>except Exception</code>. Add explicit re-raise before it.</p>
+  </section>
+
+  <section>
+    <h2 id="task-4-importance-and-cluster">Task 4: <code>run_importance_scoring</code> and <code>run_auto_cluster</code></h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p>Per-item apply steps for both jobs</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Modify: <code>src/ormah/background/importance_scorer.py</code></li>
+      <li>Modify: <code>src/ormah/background/auto_cluster.py</code></li>
+      <li>Test: <code>tests/test_background/test_importance_scorer.py</code> (append)</li>
+      <li>Test: <code>tests/test_background/test_auto_cluster.py</code> (create)</li>
+    </ul>
+
+    <p><strong>Why these two matter separately:</strong> Neither calls an LLM. Their bug is pure whole-run retention, and it is the one that reaches a default install with <code>llm_provider=none</code>. A test watching only the LLM would report both green while the bug is untouched.</p>
+
+    <p><strong>Important:</strong> Both bodies wrapped in <code>try/except Exception</code>. <code>auto_cluster</code> needs the re-raise; <code>importance_scorer</code> does not.</p>
+  </section>
+
+  <section>
+    <h2 id="task-5-auto-linker">Task 5: <code>run_auto_linker</code> — the 25-minute symptom</h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p><code>run_auto_linker</code> that releases <code>L_mem</code> across the LLM call</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Modify: <code>src/ormah/background/auto_linker.py</code></li>
+      <li>Test: <code>tests/test_background/test_auto_linker.py</code> (append)</li>
+    </ul>
+
+    <p><strong>What the tests measure:</strong> The measured symptom is temporal; the cause is structural.</p>
+
+    <ol>
+      <li><strong>The lock is not held across the LLM call.</strong> With 3 pairs, today the fake LLM is called 3 times, each recording <code>lock_held=True</code>, on 1 depth-0 acquisition. After: 3 calls with <code>lock_held=False</code>, and one acquisition per applied edge.</li>
+
+      <li><strong>Foreground progress:</strong> The fake LLM blocks; a foreground thread runs <code>engine.remember()</code> and must finish while the job is parked in the LLM. Today it hangs; after it passes deterministically.</li>
+    </ol>
+
+    <p><code>run_auto_linker</code> wraps its body in <code>try/except Exception</code> — add the re-raise.</p>
+  </section>
+
+  <section>
+    <h2 id="task-6-conflict-detector">Task 6: <code>run_conflict_detection</code></h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p>Per-edge and per-node apply steps</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Modify: <code>src/ormah/background/conflict_detector.py</code></li>
+      <li>Test: <code>tests/test_background/test_conflict_detector.py</code> (append)</li>
+    </ul>
+
+    <p><strong>Shape of this job:</strong> Candidate discovery is read-only and stays unlocked. Two write regions separated by the LLM loop: per-pair edge insert, then after the loop, the markdown flush over <code>dirty_nodes</code>. Both get their own <code>memory_operation_at(epoch)</code>. The markdown flush takes one acquisition per node, not one for the whole dict.</p>
+
+    <p><strong>Important:</strong> The body is wrapped in <code>try/except Exception</code> — add the re-raise. The inner <code>try/except Exception</code> catches per-node markdown failures; it must not swallow <code>RestoredUnderfoot</code>, so the guard goes outside that try.</p>
+  </section>
+
+  <section>
+    <h2 id="task-7-duplicate-merger">Task 7: <code>run_duplicate_detection</code></h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p>Per-merge and per-proposal apply steps</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Modify: <code>src/ormah/background/duplicate_merger.py</code></li>
+      <li>Test: <code>tests/test_background/test_duplicate_merger.py</code> (append)</li>
+    </ul>
+
+    <p><strong>Shape of this job:</strong> Two write regions per pair, mutually exclusive by score: auto-merge (<code>engine.execute_merge(...)</code>) and proposal insert. The guard must wrap auto-merge anyway — the decorator gives per-call atomicity, not the epoch check, and the <code>RLock</code> makes nesting free.</p>
+
+    <p><strong>Important:</strong> The <code>try/except Exception</code> catching auto-merge failures must not swallow <code>RestoredUnderfoot</code> — put the guard outside it. The outer body-wide <code>try/except Exception</code> gets the re-raise.</p>
+  </section>
+
+  <section>
+    <h2 id="task-8-consolidator">Task 8: <code>run_consolidation</code></h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p>One cluster's consolidation as a single atomic apply step</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Modify: <code>src/ormah/background/consolidator.py</code></li>
+      <li>Modify: <code>src/ormah/engine/memory_engine.py</code></li>
+      <li>Test: <code>tests/test_background/test_consolidator.py</code> (append)</li>
+    </ul>
+
+    <p><strong>Shape of this job:</strong> <code>_apply_consolidation</code> is one logical unit — new node, identity edge transfer, <code>derived_from</code> edges, demote-to-archival — spread across several already-per-call-locked engine methods. Wrap the whole function body in one <code>memory_operation_at(epoch)</code> when a job epoch is supplied. One cluster's consolidation must be atomic with respect to a restore, not split across acquisitions.</p>
+
+    <p><strong>Important:</strong> <code>run_consolidation</code>'s per-cluster loop wraps each <code>_consolidate_cluster</code> call in <code>try/except Exception</code> to keep one bad cluster from aborting others — that handler must not swallow <code>RestoredUnderfoot</code>, since an abort means the whole run's candidate list is stale.</p>
+  </section>
+
+  <section>
+    <h2 id="task-9-ingest-split">Task 9: split <code>ingest_conversation</code> extract from apply</h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p>Unlocked extraction with revalidated dedup</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Modify: <code>src/ormah/engine/memory_engine.py</code></li>
+      <li>Test: <code>tests/test_engine/test_ingest.py</code> (append)</li>
+    </ul>
+
+    <p><strong>Why this one is different:</strong> Not a scheduled background job — it is called synchronously from the API/CLI. Uses <code>MemoryEngine.memory_operation()</code> (already exists), not <code>memory_operation_at</code>. The fix is narrower: stop locking the extraction (the LLM call) while still locking each apply correctly.</p>
+
+    <p><strong>The debt this creates:</strong> <code>_is_duplicate_memory</code> reads outside the lock now. Two concurrent <code>ingest_conversation</code> calls extracting overlapping content can both read "not a duplicate" before either writes. Revalidate inside the same acquisition that calls <code>remember</code>.</p>
+  </section>
+
+  <section>
+    <h2 id="task-10-retire">Task 10: retire <code>serialized_memory_job</code>, close the lock-order net, run the full suite</h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p>Delete decorator, verify lock order, integration test, full suite pass</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Modify: <code>src/ormah/background/memory_lock.py</code> — delete <code>serialized_memory_job</code></li>
+      <li>Modify: <code>tests/test_index/test_builder.py</code> — update docstrings</li>
+      <li>Test: <code>tests/test_index/test_builder.py</code> (append the lock-order net)</li>
+      <li>Test: <code>tests/test_engine/test_memory_engine.py</code> (append the restore-abort integration test)</li>
+    </ul>
+
+    <p><strong>The three things this task proves:</strong></p>
+
+    <ol>
+      <li><code>serialized_memory_job</code> has no remaining callers — deletion + full suite is the proof.</li>
+      <li>No apply step across the seven jobs acquires <code>L_mem</code> inside an open <code>db.transaction()</code> — reuses <code>test_index/test_builder.py</code>'s existing <code>OrderProbe</code> pattern, extended to instrument <code>L_mem</code> while every job runs.</li>
+      <li>An abort mid-run writes nothing after the epoch bump, end to end — exercised through the real scheduler entry points.</li>
+    </ol>
+
+    <p><strong>Important:</strong> Requires Tasks 1–9 all complete. This task deletes the decorator every earlier task stopped using.</p>
+  </section>
+
+  <section>
+    <h2 id="task-11-revalidation">Task 11: pay the revalidation debt in the three remaining jobs</h2>
+
+    <div class="eyebrow">Deliverables</div>
+    <p>Revalidation in consolidator, auto_cluster, duplicate_merger</p>
+
+    <p><strong>Files:</strong></p>
+    <ul>
+      <li>Modify: <code>src/ormah/background/consolidator.py</code> — <code>_apply_consolidation</code>'s demote loop</li>
+      <li>Modify: <code>src/ormah/background/auto_cluster.py</code> — the per-node apply step</li>
+      <li>Modify: <code>src/ormah/background/duplicate_merger.py</code> — the auto-merge apply step</li>
+      <li>Test: append to all three test files</li>
+    </ul>
+
+    <p><strong>Why this exists:</strong> Spec §5 named decay's tier revalidation as a debt created by removing whole-run exclusion. Task 3 paid it. The final whole-branch review found the identical shape unguarded in three other jobs. Each needs the same treatment: inside the apply step, re-read what the write depends on; if it changed, skip this item and let the next run reprocess it.</p>
+
+    <p><strong>The three windows:</strong></p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Job</th>
+          <th>What is stale</th>
+          <th>Concrete failure</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Consolidator</td>
+          <td>the cluster's <code>node_ids</code>, snapshotted before the LLM call</td>
+          <td>node N is snapshotted as <code>working</code>; the user promotes it to <code>core</code> during the LLM call; the apply step demotes it to <code>archival</code>, silently undoing the promotion</td>
+        </tr>
+        <tr>
+          <td>Auto-cluster</td>
+          <td>"this node has no space", from the candidate query</td>
+          <td>user assigns a space between the query and the apply step; the apply step overwrites it</td>
+        </tr>
+        <tr>
+          <td>Duplicate merger</td>
+          <td>both nodes' <code>content</code>, which the LLM wrote <code>merged_content</code> from</td>
+          <td>user edits the kept node during the LLM call; <code>execute_merge</code> overwrites it with merged text derived from the pre-edit content</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p><strong>Important:</strong> Skip the item, do not abort the run. One node changing invalidates that node, not the whole run. Requires Tasks 1–10 all complete and committed.</p>
+  </section>
+
+  <section>
+    <h2 id="what-must-not-get-lost">What must not get lost when the PR is opened</h2>
+
+    <p>Both come from the spec and belong in the <strong>PR body</strong>:</p>
+
+    <ol>
+      <li><strong>This PR does not fix the default install.</strong> The <code>index_updater</code> scan (~495 ms every 60 s, 34.5 s cold, no LLM involved) is deliberately out of scope. <strong>#240 stays partially open</strong> on that point.</li>
+
+      <li><strong>Findings 2 and 3 need their own issues:</strong>
+        <ul>
+          <li>Task pause does not survive restart (missing APScheduler jobstore)</li>
+          <li><code>SIGTERM</code> ignored while holding <code>L_mem</code> (no cooperative cancellation)</li>
+        </ul>
+        Neither is opened yet.
+      </li>
+
+      <li>Commenting on <strong>#257</strong> or <strong>#240</strong> about the interaction with <code>test_recall_concurrency</code> requires <strong>André's explicit confirmation before posting</strong> (spec §6).</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="execution-status">Execution status</h2>
+
+    <p>This plan has been fully executed on branch <code>fix/240-serialized-job-lock-scope</code> with 16 commits and 1983 tests passing. Task 11 was added after the final whole-branch review. Four pre-existing environmental failures unrelated to the change remain.</p>
+  </section>
+</article>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:8e565413f3a5b7121a039fd92d96bd709a06430b3f21698022184cce1fb69a94 -->

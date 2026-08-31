@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Durable Reinforcement After the Confirmed-Use Claim</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">Durable Reinforcement After the Confirmed-Use Claim</div>
+  <a href="#defect">The defect</a>
+  <a href="#verified">What already holds, and was verified rather than assumed</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#half-b" class="lvl-3">Half (b): the database becomes authoritative, and the retry becomes idempotent</a>
+  <a href="#half-a" class="lvl-3">Half (a): the sweeper</a>
+  <a href="#schema-migration" class="lvl-3">Schema migration, and the legacy rows</a>
+  <a href="#testing">Testing</a>
+  <a href="#amendments">Amendments to the #272 plan</a>
+  <a href="#out-of-scope">Out of scope</a>
+</nav>
+<main>
+<div class="eyebrow">Issue #220 · Lifecycle durability</div>
+
+<h1><em>Durable</em> Reinforcement After the Confirmed-Use Claim</h1>
+
+<div class="meta">
+  <span>2026-08-28</span>
+  <span>Spec & Design</span>
+  <span>Task 5 of <a href="../../plans/2026-08-27-issue-272-heuristic-confirmed-use/">#272 plan</a></span>
+</div>
+
+<div class="statement">
+  Reinforcement today fails permanently when the record-confirmed-use mutator encounters a transient error. This design introduces state tracking for claims and convergence logic so the retry is idempotent and survives filesystem or database transience.
+</div>
+
+<section>
+  <h2 id="defect">The defect</h2>
+
+  <p><code>_claim_confirmed_use</code> takes an at-most-once latch <strong>inside the caller's transaction</strong>. That transaction commits. Only afterwards does <code>_record_confirmed_use</code> run, outside the transaction, and every call site wraps it in a bare <code>except</code> that logs and swallows:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Call site</th>
+        <th>Address on the base</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>recall_node</code></td>
+        <td><code>src/ormah/engine/memory_engine.py:855</code></td>
+      </tr>
+      <tr>
+        <td><code>submit_feedback</code></td>
+        <td><code>src/ormah/engine/memory_engine.py:2805</code></td>
+      </tr>
+      <tr>
+        <td>session watcher, judge block</td>
+        <td><code>src/ormah/background/session_watcher.py:625</code></td>
+      </tr>
+      <tr>
+        <td>session watcher, heuristic block</td>
+        <td>new, created by Task 2 of #272</td>
+      </tr>
+      <tr>
+        <td>boot backfill</td>
+        <td>new, created by Task 4 of #272</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>The claim is a durable monotonic latch with no undo. Nothing retries it. <strong>One transient filesystem failure defeats the reinforcement permanently, for that node.</strong> Commit <code>759f209</code> (<em>fix(lifecycle): reinforcement survives zero stability and mutator failure</em>) already answered the #220 council on this surface by isolating the exception better — not by making the promise durable. This design closes it.</p>
+
+  <p>The defect has two halves, and both are in scope:</p>
+
+  <ul>
+    <li><strong>(a) Total loss</strong> — the mutator raises before writing anything. The claim says "reinforced", the node was never touched.</li>
+    <li><strong>(b) Half-applied</strong> — inside <code>_record_confirmed_use</code>, <code>file_store.save(node)</code> writes the markdown and only <em>then</em> does <code>db.transaction()</code> open for the <code>UPDATE nodes</code>. If the save succeeds and the UPDATE fails, markdown and database diverge, and a naive retry re-increments <code>access_count</code> in the markdown on top of an increment that already landed.</li>
+  </ul>
+</section>
+
+<section>
+  <h2 id="verified">What already holds, and was verified rather than assumed</h2>
+
+  <ul>
+    <li><code>FileStore</code> is constructed with the engine's <strong>own</strong> <code>_memory_operation_lock</code> (<code>memory_engine.py:109</code>, <code>:1424</code>), and that lock is a <code>threading.RLock</code>. Inside <code>_record_confirmed_use</code> the decorator already holds it, so a <code>file_store</code> call made from within <code>db.transaction()</code> re-enters a lock the thread already owns — it acquires nothing new and cannot invert the memory→db order.</li>
+    <li><code>Database.transaction</code> (<code>src/ormah/index/db.py:68-82</code>) is reentrant per thread and issues <code>ROLLBACK</code> only at depth 1.</li>
+    <li><code>FileStore.save</code> is atomic on disk: <code>mkstemp</code> → <code>os.write</code> → <code>os.fsync</code> → <code>os.replace</code>, with the temp file unlinked on any <code>BaseException</code>. The markdown is never left partial.</li>
+    <li><code>confirmed_use_claims</code> is <code>(whisper_log_id, node_id, claimed_at)</code> with a composite primary key and <code>ON DELETE CASCADE</code> on <code>whisper_log_id</code> (<code>src/ormah/index/schema.sql:243-248</code>). <strong>On the base it carries no state column</strong> — which is exactly why "claimed" and "applied" are today the same fact, and why the legacy rows cannot be classified after the event.</li>
+    <li><code>whisper_log_cleanup</code> deletes only rows with <code>was_injected = 0</code>, while <code>_claim_confirmed_use</code> inserts only for <code>was_injected = 1</code>. The two sets are disjoint, so the <code>ON DELETE CASCADE</code> cannot silently eat a pending claim. This was checked because it would otherwise have been a hole in the retry.</li>
+  </ul>
+</section>
+
+<section>
+  <h2 id="architecture">Architecture</h2>
+
+  <section>
+    <h3 id="half-b">Half (b): the database becomes authoritative, and the retry becomes idempotent</h3>
+
+    <div class="callout">
+      <strong>This is not atomicity, and the plan must not call it that.</strong> <code>FileStore.save</code> performs an irreversible <code>os.replace</code>, and <code>Database.transaction</code> issues its <code>COMMIT</code> <em>after</em> the body returns (<code>index/db.py:68-82</code>). No ordering inside that body can enrol the filesystem in the transaction: a <code>COMMIT</code> that fails — disk full, <code>SQLITE_BUSY</code>, I/O error — leaves the markdown advanced while the <code>nodes</code> row and the claim roll back.
+    </div>
+
+    <p>What closes it is <strong>convergence, not atomicity</strong>: the mutator computes the new lifecycle values from the <code>nodes</code> row, inside the transaction, instead of from the markdown it loaded.</p>
+
+    <figure>
+      <figcaption>Convergent update: read from database, compute, write both stores within transaction</figcaption>
+      <pre><code>with self.db.transaction() as conn:
+    conn.execute(
+        "UPDATE confirmed_use_claims SET state = 'applied', reinforced_at = datetime('now') "
+        "WHERE whisper_log_id = ? AND node_id = ? AND state = 'pending'",
+        (whisper_log_id, node_id),
+    )
+    if conn.execute("SELECT changes()").fetchone()[0] != 1:
+        return
+    row = conn.execute(
+        "SELECT access_count, last_accessed, stability, last_review FROM nodes WHERE id = ?",
+        (node_id,),
+    ).fetchone()
+    # ... compute the reinforced values from `row`, never from the loaded node ...
+    conn.execute("UPDATE nodes SET ... WHERE id = ?", ...)
+    node.access_count, node.last_accessed, node.stability, node.last_review = computed
+    self.file_store.save(node)</code></pre>
+    </figure>
+
+    <p><strong>Why this converges.</strong> Say the database holds <code>access_count = v</code>. A run saves the markdown at <code>v+1</code>, then its <code>COMMIT</code> fails: markdown <code>v+1</code>, database <code>v</code>, claim back to <code>pending</code>. The retry reads the database — still <code>v</code> — computes <code>v+1</code>, and writes <strong>both</strong> to <code>v+1</code>. The phantom markdown increment is overwritten rather than compounded. One event produces exactly one increment, however many times the write is retried.</p>
+
+    <p>The markdown is a projection of the lifecycle state, not a second source of it. This is already true in practice: <code>decay_manager</code> and <code>importance_scorer</code> read the <code>nodes</code> row, never the file.</p>
+
+    <ul>
+      <li>If <code>save</code> raises, the rollback undoes both updates — the claim returns to <code>pending</code> and is retried.</li>
+      <li>If either update raises, the save never happens.</li>
+      <li>The <code>changes() != 1</code> guard makes the mutator at-most-once against concurrent runners, in the same shape <code>_claim_confirmed_use</code> already uses.</li>
+    </ul>
+
+    <p><strong>Signature.</strong> <code>_record_confirmed_use(self, node_id, *, whisper_log_id: int)</code> — keyword-only and <strong>required, with no default</strong>, for the reason the #272 overview gives for <code>strength</code> on <code>_claim_confirmed_use</code>: a default would let a future caller omit it and lose durability in silence. The type is <code>int</code>, not <code>int | None</code>: every reinforcement descends from a claim, and <code>_claim_confirmed_use</code> returns <code>False</code> when the id is <code>None</code>, so no call site can arrive here without one.</p>
+
+    <p><strong>A missing node is a terminal state, and says so.</strong> Today <code>if node is None: return</code> returns without raising. With the claim carrying state, that would leave it <code>pending</code> forever and the sweeper retrying a node that cannot come back. The claim moves to <code>orphaned</code> — deliberately <strong>not</strong> <code>applied</code>, because nothing was applied, and calling it applied is the same lie the migration finding below is about.</p>
+
+    <p><strong>What remains, stated precisely.</strong> The markdown can still be transiently ahead of the database between a successful <code>os.replace</code> and a failed or interrupted <code>COMMIT</code>. That state is <em>recoverable</em>, not permanent: the next run converges both stores. The residual exposure is a window in which a reader of the markdown file — not of the <code>nodes</code> row — sees a lifecycle value one step ahead. No subsystem reads the file for lifecycle, so nothing consumes it today.</p>
+  </section>
+
+  <section>
+    <h3 id="half-a">Half (a): the sweeper</h3>
+
+    <p>New module <code>src/ormah/background/reinforcement_retry.py</code>, exposing <code>run_reinforcement_retry(engine)</code>, following <code>run_decay</code>'s shape — an outer <code>try/except</code> so a failure never escapes into the scheduler:</p>
+
+    <ul>
+      <li>Select claims where <code>state = 'pending'</code> and <code>claimed_at</code> is older than a <strong>5-minute grace margin</strong>, so the sweeper never races a reinforcement that is still in flight — the same interval <code>session_watcher_reconcile_interval_minutes</code> already uses for the equivalent reason. <code>legacy_unknown</code> and <code>orphaned</code> are terminal and never selected.</li>
+      <li><strong>200 rows per run.</strong> Deliberately smaller than <code>whisper_log_cleanup_batch_size</code> (1000), because every row here does file I/O under the memory lock while that job is pure SQL.</li>
+      <li>For each row, call <code>_record_confirmed_use(node_id, whisper_log_id=...)</code> with the exception isolated per row, so one bad node does not abandon the rest of the batch.</li>
+      <li>The job is <strong>not LLM-gated</strong>, so it survives <code>ORMAH_LLM_PROVIDER=none</code> — unlike the four sleep-cycle jobs that silently return <code>{"skipped": "llm_disabled"}</code>.</li>
+    </ul>
+
+    <p>Registration follows the existing pattern exactly: <code>scheduler.add_job</code> with <code>minutes=s.reinforcement_retry_interval_minutes</code>, an entry in <code>routes_admin._TASK_RUNNERS</code>, <code>_TASK_DESCRIPTIONS</code> and <code>_SLEEP_CYCLE_ORDER</code>, and the setting added to <code>config.py</code> under the <code>_interval_minutes_positive</code> validator (<code>&gt;= 1</code>).</p>
+  </section>
+
+  <section>
+    <h3 id="schema-migration">Schema migration, and the legacy rows</h3>
+
+    <p><code>confirmed_use_claims</code> gains two columns: <code>reinforced_at TEXT</code>, and</p>
+
+    <pre><code>state TEXT NOT NULL DEFAULT 'pending'
+    CHECK (state IN ('pending', 'applied', 'legacy_unknown', 'orphaned'))</code></pre>
+
+    <p>plus a partial index on <code>state = 'pending'</code>, which is the only set the sweeper selects.</p>
+
+    <p><strong>The pre-existing rows become <code>legacy_unknown</code>, never <code>applied</code>.</strong> The first draft of this design stamped them <code>reinforced_at = claimed_at</code> on the reasoning that "every claim in the store was already reinforced". Codex refuted that in round 1 (HIGH, confidence 0.99) and was right: the premise of this whole task is that some claims committed and then lost their reinforcement. Those are precisely the rows the defect produced, they are indistinguishable from the successes under the old schema, and stamping them <code>applied</code> would hide the data loss the task exists to repair — permanently.</p>
+
+    <p>This is not hypothetical. <code>confirmed_use_claims</code> is present in <code>upstream/main</code> and the package has published releases (PyPI, latest 0.14.11), so real stores carry legacy claims of unknown outcome.</p>
+
+    <p><code>legacy_unknown</code> is terminal for the sweeper — it does not re-reinforce them, because the overwhelming majority <em>were</em> applied and re-running them would be mass over-reinforcement of a latch whose entire purpose is at-most-once. What changes is that the unknown stays <strong>visible and countable</strong> instead of being overwritten with a false success. The migration logs how many rows it marked, so the size of the historical gap is a measurement rather than a guess, and deciding what to do about them is a separate question this task deliberately does not answer.</p>
+  </section>
+</section>
+
+<section>
+  <h2 id="testing">Testing</h2>
+
+  <p>Test-driven, each test observed failing before its implementation:</p>
+
+  <ol>
+    <li><strong>Mutator failure leaves no residue</strong> — patch <code>file_store.save</code> to raise; assert the claim is still <code>pending</code>, the <code>nodes</code> row is unchanged, and the markdown is unchanged.</li>
+    <li><strong>A failed COMMIT does not inflate the counter</strong> — patch the connection so <code>COMMIT</code> raises after the save; the markdown ends ahead, the claim returns to <code>pending</code>, and the retry converges both stores to exactly one increment. This is the test the first draft was missing, and it is the one that proves the convergence claim.</li>
+    <li><strong>The sweeper reinforces a pending claim</strong> — seed an old <code>pending</code> claim; after the job, the node is reinforced and the claim is <code>applied</code>.</li>
+    <li><strong>The sweeper is at-most-once</strong> — running it twice changes nothing the second time.</li>
+    <li><strong>The sweeper skips the grace margin</strong> — a claim taken seconds ago is not swept.</li>
+    <li><strong>One raising node does not abandon the batch</strong> — an injected failure on the first row still leaves the second repaired.</li>
+    <li><strong>A missing node ends <code>orphaned</code></strong> — a claim for a deleted node is terminal and not picked up again, and its state is <code>orphaned</code>, not <code>applied</code>.</li>
+    <li><strong>The migration marks legacy rows <code>legacy_unknown</code></strong> — pre-existing claims are neither swept nor recorded as successes, and the count is logged.</li>
+    <li><strong>The happy path agrees</strong> — claim <code>applied</code>, <code>nodes</code> row and markdown all carry the same values.</li>
+  </ol>
+</section>
+
+<section>
+  <h2 id="amendments">Amendments to the #272 plan</h2>
+
+  <p>Two edits to <code>00-overview.md</code>, both narrow:</p>
+
+  <ol>
+    <li>The global constraint <em>"Never modify <code>_record_confirmed_use</code>'s body, and never call it inside an open transaction"</em> is rescoped to <strong>Tasks 1–4</strong>, with a note recording why Task 5 may reorder the body: the shared <code>RLock</code> makes the file-store call inside the transaction a re-entry, not an acquisition, so the memory→db order the constraint protects is preserved. The constraint remains correct and unchanged for every call site that does not already hold the memory lock.</li>
+    <li>The task order table gains Task 5, depending on Tasks 2, 3 and 4 — it adjusts every call site of <code>_record_confirmed_use</code>, including the two that Tasks 2 and 4 create.</li>
+  </ol>
+
+  <p>Rule 2 of <code>04-backfill.md</code> (<em>"Reinforcement runs after the transaction commits"</em>) is untouched: the backfill still calls the mutator outside its own transaction. What changes is what happens <strong>inside</strong> the mutator.</p>
+</section>
+
+<section>
+  <h2 id="out-of-scope">Out of scope</h2>
+
+  <ul>
+    <li>Reopening how eligibility is decided. <code>_claim_confirmed_use</code>'s deliberate independence from <code>affinity</code> and <code>signals</code> stands; nothing here derives state from those tables.</li>
+    <li>The <code>00-overview.md</code> line-count overrun — 121 lines before these amendments, 128 after, against a 100-line rule. Pre-existing and made worse here; flagged, not fixed, since it is not what this task is for.</li>
+    <li>What to do about the <code>legacy_unknown</code> rows. This design makes the historical gap visible and measurable; closing it needs evidence that does not exist yet, and belongs to its own issue.</li>
+  </ul>
+</section>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:54a083ffce93d04ee950a02cca05919c93feec5d9be4ac1377a29d78dc89e214 -->

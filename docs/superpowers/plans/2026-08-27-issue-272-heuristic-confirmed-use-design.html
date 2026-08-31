@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admit auto_heuristic to Confirmed Use — Design</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">Admit auto_heuristic to Confirmed Use — Design</div>
+  <a href="#problem">The problem</a>
+  <a href="#minimal-fix">Why the issue's own "minimal fix" does not work</a>
+  <a href="#decisions">Key decisions</a>
+  <a href="#feedback-no-special-case" class="lvl-3">Why submit_feedback needs no special case</a>
+  <a href="#changes">Implementation changes</a>
+  <a href="#changes-memory-engine" class="lvl-3">memory_engine.py</a>
+  <a href="#changes-session-watcher" class="lvl-3">session_watcher.py</a>
+  <a href="#changes-backfill" class="lvl-3">Backfill — _migrate_heuristic_confirmed_use</a>
+  <a href="#verification">Test verification</a>
+  <a href="#out-of-scope">Out of scope</a>
+  <a href="#where-work-happens">Where the work happens</a>
+  <a href="#merge-down-risk" class="lvl-3">A merge-down risk that does not exist in this PR</a>
+</nav>
+<main>
+<div class="eyebrow">[ SPEC ]</div>
+
+<p class="meta">
+  <strong>Issue:</strong> <a href="https://github.com/r-spade/ormah/issues/272">#272</a> ·
+  <strong>Depends on:</strong> <a href="https://github.com/r-spade/ormah/issues/218">#218</a> (PR <a href="https://github.com/r-spade/ormah/pull/273">#273</a>, still open) ·
+  <strong>Date:</strong> 2026-08-27
+</p>
+
+<div class="callout warn">
+  <span class="label">Branch warning</span>
+  Every address in this document was read from <code>fix/218-signal-strength-ladder</code> (<code>40d8ff0</code>), not from <code>local-main</code>. This is not a formality — <code>local-main</code> is 841 commits ahead of <code>upstream/main</code>, and against the branch this work builds on, <code>session_watcher.py</code> differs by <strong>1581 lines</strong> and <code>memory_engine.py</code> by <strong>1557 lines</strong>. Every line number cited here for <code>local-main</code> is wrong by construction.
+</div>
+
+<h2 id="problem">The <em>problem</em> <a class="backlink" href="#problem">↑</a></h2>
+
+<p><code>_record_whisper_usage_signals</code> writes a positive signal and an affinity row for a heuristic hit and stops. Only the LLM-judge block takes the confirmed-use claim (<code>session_watcher.py:603</code>). Because a heuristic hit also <em>suppresses</em> the judge (<code>session_watcher.py:505</code>), the most confident detector is the only one whose positive verdict cannot advance a memory's lifecycle — and it blocks the one path that would.</p>
+
+<p>Measured on a live store: <strong>0 of 1,629</strong> positive heuristic pairs took a claim. The heuristic carries 81% of all positive volume.</p>
+
+<p><code>_record_confirmed_use</code> is the only <code>archival → working</code> transition in the codebase, so this is the difference between a memory being reinforced and being buried.</p>
+
+<h2 id="minimal-fix">Why the issue's own "minimal fix" does not work <a class="backlink" href="#minimal-fix">↑</a></h2>
+
+<p>The issue proposes calling <code>_claim_confirmed_use</code> in the heuristic block. That call returns <code>False</code> in silence: <code>_CONFIRMED_USE_SOURCES</code> (<code>memory_engine.py:57</code>) omits <code>auto_heuristic</code>, and the gate at <code>memory_engine.py:2764</code> is fail-closed on source.</p>
+
+<p>The omission is <strong>deliberate</strong>, not an oversight. The #220 design states it in terms of its own successor: <em>"<code>auto_heuristic</code> stays excluded until #218 provides signal calibration."</em> Its contract 12 pins the exclusion (<code>test_session_watcher.py:2405-2441</code>).</p>
+
+<p>Issue <a href="https://github.com/r-spade/ormah/issues/218">#218</a> has now delivered that calibration. <code>signal_strength.py</code> gives each heuristic match kind a disjoint band: <code>node_id</code> 0.98, <code>title</code> 0.94, <code>sentence</code> 0.92, <code>token_overlap</code> 0.40–0.78 (asymptotic, supremum unreachable in practice). The precondition is met, so the exclusion can be lifted — but on the terms #218 established, not unconditionally.</p>
+
+<p class="statement">This design does not land before <a href="https://github.com/r-spade/ormah/pull/273">#273</a> does. The island is cut from <code>fix/218-signal-strength-ladder</code>; see <a href="#where-work-happens">§7</a>.</p>
+
+<h2 id="decisions">Key <em>decisions</em> <a class="backlink" href="#decisions">↑</a></h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Decision</th>
+      <th>Rationale</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>D1</strong></td>
+      <td>Admit <code>auto_heuristic</code>, gated on <code>strength >= 0.80</code></td>
+      <td>0.80 is the <code>implicit</code> rung. It admits the three verbatim match kinds and excludes <code>token_overlap</code> <em>by construction</em> — that band's supremum is 0.78 — so no second, categorical allowlist is needed. The ordinal ladder #218 built is reused as the gate rather than duplicated.</td>
+    </tr>
+    <tr>
+      <td><strong>D2</strong></td>
+      <td>The floor lives inside <code>_claim_confirmed_use</code>, not in its callers</td>
+      <td>The function's own docstring states the principle: enforced centrally <em>"so a future fourth caller cannot reopen the hole."</em></td>
+    </tr>
+    <tr>
+      <td><strong>D3</strong></td>
+      <td>The judge is suppressed only when the event is (or is about to be) confirmed</td>
+      <td>A weak <code>token_overlap</code> hit is <code>referenced = True</code> but confirms nothing. Today it is <em>also</em> denied the judge — leaving it with no confirmation route at all. That is the 1,587-row majority of the defect.</td>
+    </tr>
+    <tr>
+      <td><strong>D4</strong></td>
+      <td>Backfill historical rows</td>
+      <td>The defect already ran in production. Code alone fixes only future whispers; the exact-match rows already written would stay unclaimed forever, because the gate runs at write time.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="feedback-no-special-case">Why <code>submit_feedback</code> needs no special case <a class="backlink" href="#feedback-no-special-case">↑</a></h3>
+
+<p><code>submit_feedback(+1, auto_heuristic)</code> computes its strength through <code>signal_strength.feedback_strength("auto_heuristic", 1)</code>, and <code>_FEEDBACK_LADDER</code> maps that source to <code>UNKNOWN</code> (0.40) — below the floor, always. Contract 9 (<code>test_confirmed_use_contract.py:247</code>) therefore keeps passing unchanged; only its docstring, which says "excluded pending #218", needs correcting. This is a property of the ladder, not a coincidence: a <code>submit_feedback</code> call carries no evidence of a verbatim match, so it cannot earn a verbatim rung.</p>
+
+<h2 id="changes">Implementation <em>changes</em> <a class="backlink" href="#changes">↑</a></h2>
+
+<h3 id="changes-memory-engine"><code>memory_engine.py</code> <a class="backlink" href="#changes-memory-engine">↑</a></h3>
+
+<ul>
+  <li><code>:57</code> — <code>_CONFIRMED_USE_SOURCES</code> gains <code>"auto_heuristic"</code>.</li>
+  <li>New module constant <code>HEURISTIC_CONFIRM_FLOOR = signal_strength.IMPLICIT</code> (0.80). Defined by reference to the ladder, so the two cannot drift apart silently.</li>
+  <li><code>:2722</code> — <code>_claim_confirmed_use</code> gains a keyword-only <code>strength: float</code> parameter. The fail-closed guard at <code>:2764</code> gains one clause, applied to <code>auto_heuristic</code> only:
+    <pre><code>if whisper_log_id is None or signal != 1 or source not in _CONFIRMED_USE_SOURCES:
+    return False
+if source == "auto_heuristic" and strength < HEURISTIC_CONFIRM_FLOOR:
+    return False</code></pre>
+    The source is a literal here, matching <code>_CONFIRMED_USE_SOURCES</code> two lines above it. <code>_HEURISTIC_AFFINITY_SOURCE</code> is <code>session_watcher</code>'s constant (<code>:43</code>) and <code>memory_engine</code> does not import it; reaching for it would invert the dependency — the engine does not know about the watcher.</li>
+  <li>Scoped to one source deliberately: <code>explicit</code> (1.00) and <code>implicit</code> (0.80) clear the floor anyway, but <code>auto_llm_judge</code>'s band floor is 0.82 and an unqualified judge row is polarity 0 — already rejected by <code>signal != 1</code>. Applying the floor to every source would add a second gate on paths that do not need one, and would couple the judge's band to a constant it does not own.</li>
+  <li><code>:2812</code> — <code>_submit_feedback_locked</code> passes the strength it already computes at <code>:2895</code> to the claim. The only change is hoisting that call above the claim; the value is identical.</li>
+  <li><code>:2121</code> — <code>_record_confirmed_use</code> is <strong>untouched</strong>.</li>
+</ul>
+
+<h3 id="changes-session-watcher"><code>session_watcher.py</code> <a class="backlink" href="#changes-session-watcher">↑</a></h3>
+
+<ul>
+  <li><code>:439-457</code> — the row query gains an <code>EXISTS</code> subquery, <code>already_confirmed</code>, over <code>confirmed_use_claims</code> for the <code>(whisper_log_id, node_id)</code> pair.</li>
+  <li><code>:486-506</code> — the loop tracks whether this event confirms:
+    <pre><code>if not has_heuristic:
+    referenced, strength, evidence = _node_usage_evidence(row, response)
+    ...
+    confirms = referenced and strength >= HEURISTIC_CONFIRM_FLOOR
+else:
+    confirms = False
+if llm_judge_enabled and not has_llm_judge and not (confirms or row["already_confirmed"]):
+    llm_groups.setdefault((prompt_text, response), []).append(row)</code></pre>
+    <code>already_confirmed</code> is what makes the re-ingest path correct: on a second pass <code>has_heuristic</code> is true, the local strength is not in scope, and the claim table is the only authority on whether the event already confirmed. It also closes the cross-caller case <code>has_llm_judge</code> is structurally blind to — a positive <code>submit_feedback</code> through MCP — which is the same blindness #220's contract 13a documents.</li>
+  <li><code>:508-529</code> — inside the existing transaction, a positive heuristic record takes the claim after <code>_insert_affinity</code>, collecting confirmed node ids:
+    <pre><code>if record["polarity"] == 1:
+    _insert_affinity(conn, row, signal=1, source=_HEURISTIC_AFFINITY_SOURCE, confirmed_at=now_iso)
+    if engine._claim_confirmed_use(
+        conn, row["id"], row["node_id"],
+        signal=1, source=_HEURISTIC_AFFINITY_SOURCE, strength=record["strength"],
+    ):
+        heuristic_confirmed_ids.append(row["node_id"])</code></pre>
+    Ordering is load-bearing and already documented at <code>:598-602</code>: <code>_insert_affinity</code> must precede the claim, because the claim helper reads <code>changes()</code> and nothing may sit between its INSERT and that read.</li>
+  <li>A reinforcement loop for <code>heuristic_confirmed_ids</code> runs <strong>after</strong> that transaction closes and <strong>before</strong> the <code>if not llm_groups: return recorded</code> early return at <code>:531</code>. It must be its own loop, not the judge's at <code>:623</code>: that early return means the judge's loop never runs when there is nothing to judge — which, after <a href="#decisions">D3</a>, is the common case for a confirming heuristic hit. Per-node <code>try/except</code>, logged and never raised, matching <code>:623-627</code>.</li>
+</ul>
+
+<h3 id="changes-backfill">Backfill — <code>_migrate_heuristic_confirmed_use</code> <a class="backlink" href="#changes-backfill">↑</a></h3>
+
+<p>Called from <code>_open_or_create</code> immediately after <code>_migrate_signal_strength()</code> (<code>memory_engine.py:167</code>), whose incremental-cutoff pattern it copies: a <code>meta</code> version key plus a <code>signals.id</code> cutoff, rescanning on every boot rather than stamping once. The #218 migration documents why — an old binary (a rollback, or the second unmanaged process of #238) can write pre-fix rows <em>after</em> a one-time stamp is set, and those rows would stay unclaimed forever on a table the stamp calls migrated.</p>
+
+<p><strong>Ordering is a correctness requirement, not tidiness:</strong> this migration reads <code>signals.strength</code>, and <code>_migrate_signal_strength</code> is what normalises that column onto the ladder. Running before it would read pre-ladder values against a ladder-derived floor.</p>
+
+<p>Selection: <code>signals</code> rows where <code>source = 'transcript_watcher_heuristic'</code>, <code>polarity = 1</code>, <code>strength >= HEURISTIC_CONFIRM_FLOOR</code>, <code>id > cutoff</code>, joined to <code>whisper_log</code> on <code>was_injected = 1</code>, with no existing claim.</p>
+
+<p>Structure mirrors <a href="#changes-session-watcher">§4.2</a>: claims inside one transaction, reinforcement in a per-node <code>try/except</code> loop after it commits. The lock-ordering rule from #220 §4.3 applies unchanged — <code>_record_confirmed_use</code> does file I/O and must never run inside an open transaction.</p>
+
+<p>Expected volume on the measured store: <strong>42 pairs</strong> (29 <code>node_id</code>, 13 <code>sentence</code>, 0 <code>title</code>) out of 1,629. The 1,587 <code>token_overlap</code> rows are correctly left alone by <a href="#decisions">D1</a>.</p>
+
+<h2 id="verification">Test <em>verification</em> <a class="backlink" href="#verification">↑</a></h2>
+
+<p class="statement">Every test below is written before its implementation and must fail first.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Case</th>
+      <th>Description</th>
+      <th>Expected</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>1</strong></td>
+      <td>Watcher, heuristic <code>node_id</code> match, judge disabled</td>
+      <td>claims; lifecycle advances. <strong>This is the issue's acceptance criterion and fails on a clean base.</strong></td>
+    </tr>
+    <tr>
+      <td><strong>2</strong></td>
+      <td>Watcher, heuristic <code>title</code> / <code>sentence</code> match</td>
+      <td>claims (parametrized with 1)</td>
+    </tr>
+    <tr>
+      <td><strong>3</strong></td>
+      <td>Watcher, heuristic <code>token_overlap</code> match</td>
+      <td>does <strong>not</strong> claim, <strong>and is queued for the judge</strong></td>
+    </tr>
+    <tr>
+      <td><strong>4</strong></td>
+      <td>Watcher, heuristic exact match, judge enabled</td>
+      <td>claims, and the event is <strong>not</strong> queued for the judge</td>
+    </tr>
+    <tr>
+      <td><strong>5</strong></td>
+      <td>Floor boundary: <code>strength</code> exactly 0.80 vs 0.79</td>
+      <td>claims / does not</td>
+    </tr>
+    <tr>
+      <td><strong>6</strong></td>
+      <td><code>token_overlap_strength(r)</code> across the observed range and beyond</td>
+      <td>always <code>< 0.80</code> — pins <a href="#decisions">D1</a>'s by-construction property. Computed: r=7.583 (the observed max) → 0.779681; r=37 (where float64 reaches the supremum) → 0.780000. No reachable ratio clears the floor.</td>
+    </tr>
+    <tr>
+      <td><strong>7</strong></td>
+      <td>Same transcript ingested twice</td>
+      <td>claims <strong>once</strong> (<code>already_confirmed</code> suppresses the second)</td>
+    </tr>
+    <tr>
+      <td><strong>8</strong></td>
+      <td>Prior <code>submit_feedback(+1, implicit)</code>, then heuristic exact match on that event</td>
+      <td>claims once; the judge is not queued</td>
+    </tr>
+    <tr>
+      <td><strong>9</strong></td>
+      <td>Contract 9 (<code>submit_feedback(+1, auto_heuristic)</code>)</td>
+      <td>unchanged — still does not confirm (<a href="#feedback-no-special-case">§3.1</a>)</td>
+    </tr>
+    <tr>
+      <td><strong>10</strong></td>
+      <td>Contract 12 (<code>test_session_watcher.py:2405</code>)</td>
+      <td><strong>rewritten, not deleted</strong>: exact match now confirms; <code>token_overlap</code> does not</td>
+    </tr>
+    <tr>
+      <td><strong>11</strong></td>
+      <td>Watcher batch where node 1's mutator raises <code>ZeroDivisionError</code></td>
+      <td>node 2 still reinforced; <code>recorded</code> unaffected</td>
+    </tr>
+    <tr>
+      <td><strong>12</strong></td>
+      <td>Backfill: run twice</td>
+      <td>second run claims nothing, reinforces nothing</td>
+    </tr>
+    <tr>
+      <td><strong>13</strong></td>
+      <td>Backfill: cutoff advances to highest processed id, not <code>MAX(id)</code></td>
+      <td>pinned as in #218</td>
+    </tr>
+    <tr>
+      <td><strong>14</strong></td>
+      <td>Backfill: one node's mutator raises</td>
+      <td>remaining nodes still reinforced</td>
+    </tr>
+    <tr>
+      <td><strong>15</strong></td>
+      <td>Backfill: <code>strength</code> below floor / <code>was_injected = 0</code> / claim exists</td>
+      <td>skipped in each case</td>
+    </tr>
+    <tr>
+      <td><strong>16</strong></td>
+      <td>Backfill: signal whose <code>node_id</code> differs from its event's <code>node_id</code></td>
+      <td>no claim, no reinforcement</td>
+    </tr>
+    <tr>
+      <td><strong>17</strong></td>
+      <td>Backfill: ineligible trailing rows (polarity 0, non-injected)</td>
+      <td>cutoff still clears them</td>
+    </tr>
+    <tr>
+      <td><strong>18</strong></td>
+      <td>Backfill reached through <code>startup()</code>, ladder-first</td>
+      <td>a stale <code>DEFAULT 1.0</code> <code>token_overlap</code> row does <strong>not</strong> claim; a stale 0.50 <code>node_id</code> row does</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Cases 16–18 came from the Dev Council (2026-08-27) and each pins a defect the first draft had:</p>
+
+<ul>
+  <li><strong>16</strong> — <code>_claim_confirmed_use</code> inserts the node id it is <em>handed</em>, verifying only <code>was_injected</code>; it never asserts the node belongs to the event. The live path is safe because its query reads both ids from one <code>whisper_log</code> row, but the backfill reads them from different tables.</li>
+  <li><strong>17</strong> — any eligibility predicate left in the <code>WHERE</code> hides those rows' ids from the loop, so the cutoff stalls behind them and every boot rescans a growing tail.</li>
+  <li><strong>18</strong> — the sharpest one: <code>signals.strength</code> is <code>REAL NOT NULL DEFAULT 1.0</code> (<code>schema.sql:174</code>), so every pre-ladder row sits <strong>above</strong> the 0.80 floor. Ordering this migration after <code>_migrate_signal_strength</code> is therefore a safety requirement — running it first would confirm every stale positive heuristic row in the store, and the claim is a monotonic latch with no undo.</li>
+</ul>
+
+<p class="statement">Gate: the failing-test baseline is measured <strong>once in the worktree at the start</strong> and is shared input to every task. "Tests pass" means no test ID outside that list fails. <code>make lint</code> before each commit.</p>
+
+<h2 id="out-of-scope">Out of <em>scope</em> <a class="backlink" href="#out-of-scope">↑</a></h2>
+
+<p>The affinity boost's unweighted mean (#246) · the <code>submit_feedback</code> fallback window (#242) · the reinforcement formula (#221) · any change to the ladder's bands or to <code>_record_confirmed_use</code>'s body · promoting <code>token_overlap</code> to a confirming channel by any other route.</p>
+
+<h2 id="where-work-happens">Where the work <em>happens</em> <a class="backlink" href="#where-work-happens">↑</a></h2>
+
+<p>Per <code>FORK-WORKFLOW.md</code>:</p>
+
+<ul>
+  <li>Worktree at <code>../ormah-wt-272</code> on <code>fix/272-heuristic-confirmed-use</code>, cut from <strong><code>fix/218-signal-strength-ladder</code></strong> — <em>not</em> <code>upstream/main</code>, which lacks <code>signal_strength.py</code> entirely (verified: <code>git cat-file -e upstream/main:src/ormah/signal_strength.py</code> fails).</li>
+  <li>Never <code>git checkout</code> a contribution branch inside <code>Tools/ormah</code> — launchd <code>com.ormah.server.dev</code> serves that directory.</li>
+  <li>Push to <code>fork</code>, never <code>upstream</code>.</li>
+  <li><strong>The PR declares its dependency on <a href="https://github.com/r-spade/ormah/pull/273">#273</a> in the body.</strong> While #273 is open, this PR's diff carries #218's commits; once #273 merges, rebase the island onto <code>upstream/main</code> so the diff reduces to this change alone.</li>
+</ul>
+
+<h3 id="merge-down-risk">A merge-down risk that does not exist in this PR <a class="backlink" href="#merge-down-risk">↑</a></h3>
+
+<div class="callout warn">
+  <span class="label">Critical merge risk</span>
+  Council round 1 raised archival resurrection and, on round 2, withdrew it for this base — correctly. On <code>fix/218-signal-strength-ladder</code>, <code>_record_confirmed_use</code> (<code>:2121</code>) mutates only <code>stability</code>, <code>last_review</code>, <code>last_accessed</code> and <code>access_count</code>; there is no <code>TierManager.promote</code>, no <code>tier</code> assignment, and <code>archived_at</code> does not exist upstream at all.
+
+  <strong>On <code>local-main</code> it is a different function.</strong> At <code>:2884</code> it promotes <code>archival → working</code> through <code>TierManager.promote</code> and clears <code>archived_at</code> — the code's own comment says "local-main only (#28)". So when this work merges down into the branch the Beta actually runs, the boot backfill will <strong>resurrect archived nodes in bulk on the next restart</strong>, stamping decades-old use as <code>now</code>.
+
+  That is out of scope for this PR and must not be designed around here. It is recorded so the merge-down is a decision rather than a surprise: before merging into <code>local-main</code>, decide whether the backfill should skip <code>tier = archival</code>, and remember that the daemon restarts under launchd <code>KeepAlive</code>, so the migration runs the moment the branch goes live.
+</div>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:a8a1eb28d38af41e29e2c03156a0b5ac3067e93f68ade9fa4542aa8c742e4aba -->

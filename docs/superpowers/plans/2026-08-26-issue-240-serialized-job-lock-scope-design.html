@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Issue #240 — Scope L_mem to the apply step, not the whole run</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">Issue #240 — Scope L_mem to the apply step, not the whole run</div>
+  <a href="#problem">1. Problem</a>
+  <a href="#premise-corrections" class="lvl-3">Premise corrections made during design</a>
+  <a href="#the-invariant">2. The invariant, restated</a>
+  <a href="#the-caveat" class="lvl-3">The caveat that shapes the mechanism</a>
+  <a href="#mechanism">3. Mechanism</a>
+  <a href="#convention-completed" class="lvl-3">Convention this completes</a>
+  <a href="#scope">4. Scope</a>
+  <a href="#scope-in" class="lvl-3">In</a>
+  <a href="#scope-out" class="lvl-3">Out — each with a reason, not an omission</a>
+  <a href="#per-file-changes">5. Per-file changes</a>
+  <a href="#memory-lock-py" class="lvl-3">src/ormah/background/memory_lock.py</a>
+  <a href="#memory-engine-py" class="lvl-3">src/ormah/engine/memory_engine.py</a>
+  <a href="#the-seven-jobs" class="lvl-3">The seven jobs</a>
+  <a href="#interaction-with-pr-257">6. Interaction with PR #257 (#223)</a>
+  <a href="#testing">7. Testing</a>
+  <a href="#verification-command" class="lvl-3">Verification command</a>
+  <a href="#issue-questions">8. The issue's four questions, answered</a>
+  <a href="#assumptions">9. What stays assumed or inferred</a>
+</nav>
+<main>
+<div class="doc-title"><em>Scope</em> `L_mem` to the apply step, not the whole run</div>
+
+<div class="eyebrow">Issue #240 — serialized job lock scope</div>
+<div class="meta">2026-08-26 · Design approved, ready for planning</div>
+
+<p class="statement">The <code>@serialized_memory_job</code> decorator holds the global memory lock for an entire background job run, making the write side unresponsive for up to 30 minutes. This design replaces whole-run exclusion with per-apply-step epoch-guarded acquisition, dropping hold time from the run's duration to milliseconds while preserving the invariant it protects: no mutation may interleave with a full graph restore.</p>
+
+---
+
+<h2 id="problem">1. Problem</h2>
+
+<p><code>@serialized_memory_job</code> holds <code>L_mem</code> (the global <code>MemoryEngine._memory_operation_lock</code>) for the entire duration of a background job. The same <code>RLock</code> guards every foreground mutator and every <code>FileStore</code> call, so one long maintenance run makes the whole write side unanswerable.</p>
+
+<p>Measured on a single local install (2026-08-18, <code>llm_provider=ollama</code>):</p>
+
+<table class="styled-table">
+  <thead>
+    <tr>
+      <th>Observation</th>
+      <th>Value</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Real <code>POST /agent/remember</code>, parked behind a 30 min 43 s <code>auto_linker</code> run</td>
+      <td><strong>1 503 509 ms</strong> (25 min 3 s)</td>
+    </tr>
+    <tr>
+      <td>Synthetic <code>POST /agent/connect</code> probe</td>
+      <td><code>http=000</code> after 600 s — no server response at all</td>
+    </tr>
+    <tr>
+      <td><code>index_updater</code> (60 s interval)</td>
+      <td><strong>184 consecutive</strong> <code>maximum number of running instances reached</code></td>
+    </tr>
+    <tr>
+      <td><code>index_updater</code> cold scan, 3 303 node files, <code>llm_provider=none</code></td>
+      <td><strong>34 531,9 ms</strong>; steady incremental <strong>494,8 ms</strong> every 60 s</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The last row matters most for shipped defaults: a default install carries a smaller version of the same contention with no LLM involved at all, scaling with file count.</p>
+
+<h3 id="premise-corrections">Premise corrections made during design</h3>
+
+<p>Three claims inherited from the issue did not survive verification. They are recorded because two of them changed the plan.</p>
+
+<ol>
+  <li><strong><code>delete_node_guarded</code> does not exist.</strong> The issue names "the <code>delete_node_guarded</code>-style in-transaction guard pattern" as existing precedent. <code>grep -rn "guarded" src/</code> returns zero matches in <code>src/</code>. The pattern is <em>proposed</em>, not established. <strong>(verified)</strong></li>
+  <li><strong>#223 is no longer un-PR'd.</strong> The issue (2026-08-18) argued urgency from "#223 is the only one of the four without a PR yet". PR <strong>#257</strong> is open, <code>MERGEABLE</code>, <code>REVIEW_REQUIRED</code>, and carries <code>tests/test_engine/test_recall_concurrency.py</code>, whose docstring names the global lock as its correctness proof. The coupling moved from a spec sentence into a test. <strong>(verified)</strong></li>
+  <li><strong><code>L_db</code> is also a global mutex.</strong> <code>Database.transaction()</code> (<code>index/db.py:62-81</code>) holds a global <code>RLock</code> for the whole transaction, and nobody complains about it. Global exclusion is therefore not the disease. <strong>Unbounded hold duration under exclusion is.</strong> <strong>(verified)</strong></li>
+</ol>
+
+---
+
+<h2 id="the-invariant">2. The invariant, restated</h2>
+
+<p><code>L_mem</code> protects exactly one thing, and its own docstring says which: <em>"Keep a background mutation from overlapping a full graph restore."</em> The destructive window is four lines — <code>backup.py:441-444</code>, <code>rmtree(target)</code> then <code>move(...)</code> per source dir. Outside it, <code>L_mem</code> guards nothing the primitives underneath do not already guard.</p>
+
+<p><strong>Verified:</strong> all seven decorated jobs mutate exclusively through primitives that already lock at the right granularity:</p>
+
+<ul>
+  <li><code>engine.remember/connect/update_node/execute_merge</code> (<code>@_serialized_memory_operation</code>)</li>
+  <li><code>engine.file_store.load/save</code> (<code>@_serialized_store_operation</code>, the <em>same</em> lock)</li>
+  <li><code>engine.db.transaction()</code> (<code>L_db</code> + <code>BEGIN IMMEDIATE</code>)</li>
+</ul>
+
+<p>So <code>@serialized_memory_job</code> contributes <strong>no per-operation atomicity</strong>. It contributes exactly one thing — whole-run atomicity relative to a restore — and pays for it with unbounded write starvation.</p>
+
+<p>That decomposes into two guarantees:</p>
+
+<p><strong>(i) No mutation interleaves with the file swap itself.</strong> Survives for free under this design: the swap runs under exclusive <code>memory_operation()</code>, and every job <code>file_store.save()</code> takes <code>L_mem</code> per call. A write lands wholly before or wholly after the swap.</p>
+
+<p><strong>(ii) No stale result is applied.</strong> A job that computed "link X to Y" against the pre-restore graph must not apply it after the swap. <em>This</em> is what whole-run exclusion buys today, and what the epoch replaces.</p>
+
+<h3 id="the-caveat">The caveat that shapes the mechanism</h3>
+
+<p>Guarantee (i) is <strong>not</strong> entirely free. <code>engine.db.transaction()</code> takes <code>L_db</code>, <strong>not</strong> <code>L_mem</code>, so a DB-only job write does not block during the swap. Worse, a write landing between the end of the swap and <code>reload_restored_graph</code>'s <code>rebuild_index()</code> is <strong>silently overwritten</strong> by the rebuild — not corrupted, lost. Whole-run exclusion prevents even that today.</p>
+
+<p>Therefore the epoch check cannot be a loose <code>if</code> before the mutation. <strong>The check and the mutation must be atomic with respect to the restore.</strong></p>
+
+---
+
+<h2 id="mechanism">3. Mechanism</h2>
+
+<p>Each job reads the epoch on entry and wraps <strong>every apply step</strong> — including DB-only ones — in epoch-guarded acquisition. Hold time drops from the run's duration to milliseconds.</p>
+
+<pre><code class="language-python">class MemoryEngine:
+    _restore_epoch: int                     # bumped in reload_restored_graph
+
+    @contextmanager
+    def memory_operation_at(self, epoch):   # replaces the job decorator
+        with self._memory_operation_lock:   # same L_mem, now per apply step
+            if self._restore_epoch != epoch:
+                raise RestoredUnderfoot     # snapshot is stale: abort the run
+            yield</code></pre>
+
+<p><strong>Acquisition order stays <code>L_mem → L_db</code></strong>, identical to every other path, consistent with issue #207's fix and with the hierarchy issue #211 wants documented.</p>
+
+<p><strong>On epoch change, abort the run — do not skip the item.</strong> If the epoch moved, the job's entire snapshot is stale, not one row of it. The job returns on its next interval.</p>
+
+<p><strong>The epoch bump is atomic for free:</strong> <code>reload_restored_graph</code> is already <code>@_serialized_memory_operation</code>, so incrementing there happens under exclusive <code>L_mem</code>.</p>
+
+<h3 id="convention-completed">Convention this completes</h3>
+
+<p><code>importance_scorer._commit_updates_chunked</code> already carries this philosophy for <code>L_db</code>, and says so: <em>"Apply updates in bounded write transactions so a full-store batch never holds the write lock long enough to stall foreground writes."</em> That care is <strong>entirely defeated</strong> by the <code>@serialized_memory_job</code> on line 44 of the same file. This design does not introduce a new philosophy; it finishes one that is already here, half-applied.</p>
+
+---
+
+<h2 id="scope">4. Scope</h2>
+
+<h3 id="scope-in">In</h3>
+
+<ul>
+  <li>The seven jobs lose <code>@serialized_memory_job</code> and gain per-apply-step epoch-guarded acquisition.</li>
+  <li><code>run_decay</code> revalidates tier inside its own apply step (debt this change itself creates — see <a href="#per-file-changes">§5</a>).</li>
+  <li><code>ingest_conversation</code> splits extract (unlocked) from apply (short lock), with dedup revalidation.</li>
+</ul>
+
+<h3 id="scope-out">Out — each with a reason, not an omission</h3>
+
+<div class="callout">
+  <p><strong><code>index_updater</code> / the <code>FileStore</code> scan.</strong> It is the highest-risk item: issue #207's fix deliberately hoisted that scan above the write transaction for lock-order reasons (<code>index/builder.py:79-81</code>). Touching it requires changing <code>FileStore</code> locking, which is shared with all eleven engine mutators, and reopens the lock-order question #207 closed. It deserves its own issue and its own lock-order review, not a ride on a job-semantics change.</p>
+  <p><strong>Consequence, stated plainly:</strong> this PR does not fix the default-install baseline (~495 ms every 60 s, 34.5 s cold). Issue #240 stays partially open on that point.</p>
+</div>
+
+<div class="callout">
+  <p><strong>Finding 2 — task pause does not survive restart.</strong> Root cause is a missing APScheduler jobstore (<code>background/scheduler.py:26</code> uses the default <code>MemoryJobStore</code>; <code>routes_admin.py:199</code> derives <code>paused</code> from <code>job.next_run_time</code>). Different cause, own issue.</p>
+</div>
+
+<div class="callout">
+  <p><strong>Finding 3 — <code>SIGTERM</code> ignored while holding <code>L_mem</code>.</strong> Root cause is absent cooperative cancellation. Different cause, own issue. This design shortens the window but does not add cancellation.</p>
+</div>
+
+<div class="callout">
+  <p><strong>Issue #238 (cross-process exclusion).</strong> Deferred. This design is intra-process and forecloses nothing for it. <strong>Noted (verified):</strong> <code>cli.py:503</code> restores via <code>_backup_service().restore(...)</code> with no <code>memory_operation()</code> guard at all — a separate OS process, where an in-process <code>RLock</code> could not help anyway. The invariant is enforced only on the server-side cloud restore path (<code>protection.py:1831</code>). This design does not change that, and must not claim to.</p>
+</div>
+
+---
+
+<h2 id="per-file-changes">5. Per-file changes</h2>
+
+<h3 id="memory-lock-py"><code>src/ormah/background/memory_lock.py</code></h3>
+
+<p>Same purpose, new contents. <code>serialized_memory_job</code> is removed. Two things take its place:</p>
+
+<ul>
+  <li><strong><code>RestoredUnderfoot(Exception)</code></strong> — defined <strong>here</strong>, and imported by <code>memory_engine.py</code>, keeping the dependency direction the codebase already has (<code>background</code> owns the job-side vocabulary; the engine raises it). No new import cycle: <code>memory_engine</code> does not otherwise import from <code>background</code>, so this must be verified during implementation and, if it would cycle, the exception moves to <code>memory_engine.py</code> and <code>memory_lock.py</code> imports it instead.</li>
+  <li><strong><code>restore_aware_job(job)</code></strong> — a decorator that reads <code>engine.restore_epoch</code> on entry, passes it to the job, and catches <code>RestoredUnderfoot</code> to end the run cleanly (logged, not raised into APScheduler). Jobs therefore keep a decorator; what changes is that it no longer <em>holds</em> anything — it only supplies the epoch and defines abort behaviour.</li>
+</ul>
+
+<p>The module docstring states what the lock actually guarantees instead of implying whole-run coverage.</p>
+
+<h3 id="memory-engine-py"><code>src/ormah/engine/memory_engine.py</code></h3>
+
+<p>Three additions, one removal:</p>
+
+<ul>
+  <li><code>_restore_epoch: int</code> in <code>__init__</code>, beside the lock (~:103).</li>
+  <li><code>memory_operation_at(epoch)</code>, sibling of <code>memory_operation()</code> (:549).</li>
+  <li>epoch increment in <code>reload_restored_graph</code> (:1329).</li>
+  <li>remove <code>@_serialized_memory_operation</code> from <code>ingest_conversation</code> (:2404). Nothing else there changes: <code>_extract_memories_llm</code> (:2425) becomes unlocked, and <code>self.remember(req, ...)</code> (:2478) is <strong>already</strong> <code>@_serialized_memory_operation</code>, locking per node. The debt created is dedup — <code>_is_duplicate_memory</code> is now read outside the lock, so two concurrent ingests can both pass. Revalidated inside the apply step.</li>
+</ul>
+
+<h3 id="the-seven-jobs">The seven jobs</h3>
+
+<p>Each drops the decorator and wraps its apply steps:</p>
+
+<table class="styled-table">
+  <thead>
+    <tr>
+      <th>Job</th>
+      <th>Apply point</th>
+      <th>Acquisitions per run</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>auto_linker</code></td>
+      <td>:286-310 (transaction + <code>file_store.save</code>)</td>
+      <td>one per pair</td>
+    </tr>
+    <tr>
+      <td><code>conflict_detector</code></td>
+      <td>:246-286</td>
+      <td>one per pair</td>
+    </tr>
+    <tr>
+      <td><code>consolidator</code></td>
+      <td>:136-177</td>
+      <td>one per cluster</td>
+    </tr>
+    <tr>
+      <td><code>duplicate_merger</code></td>
+      <td>:341, :372-374</td>
+      <td>one per pair</td>
+    </tr>
+    <tr>
+      <td><code>importance_scorer</code></td>
+      <td><code>file_store.save</code> at :130-134 + each <code>_commit_updates_chunked</code> chunk</td>
+      <td>one per node + one per chunk</td>
+    </tr>
+    <tr>
+      <td><code>auto_cluster</code></td>
+      <td><code>save</code> at :49-53 + each chunk at :60</td>
+      <td>one per node + one per chunk</td>
+    </tr>
+    <tr>
+      <td><code>decay_manager</code></td>
+      <td>:78</td>
+      <td>one per demoted node</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><strong>The decay tier revalidation lives entirely inside <code>decay_manager.py</code></strong> — deliberately. Inside the <code>memory_operation_at(epoch)</code> wrapping line 78, re-read the node's <code>tier</code>/<code>stability</code>/<code>last_accessed</code> and recompute retrievability; skip if it no longer qualifies.</p>
+
+<p>Two reasons for that placement: it changes no engine API, and <code>decay_manager.py</code> is a file <strong>PR #257 does not touch</strong> (#257 touches <code>tests/test_background/test_decay_manager.py</code>, not the module). So the piece that resolves the collision with #257 is precisely the piece that does not conflict with it. Merge conflicts stay confined to <code>memory_engine.py</code> and <code>consolidator.py</code>, and are mechanical.</p>
+
+---
+
+<h2 id="interaction-with-pr-257">6. Interaction with PR #257 (#223)</h2>
+
+<p>Removing whole-run exclusion from <code>run_decay</code> opens a <strong>third outcome</strong> that PR #257's <code>test_recall_concurrency.py</code> does not admit: decay snapshots <code>tier='working'</code> (:34-37), a promotion lands, and decay demotes to <code>archival</code> anyway via <code>update_node</code> (:78). That test asserts <code>final.tier is Tier.working</code>. It would <strong>fail</strong>.</p>
+
+<p>That is good news — the test is this change's canary. The problem is sequencing: the test lives on another open PR, so it does <strong>not exist</strong> on this island (cut from <code>upstream/main</code>, per FORK-WORKFLOW rule 2).</p>
+
+<div class="callout">
+  <p><strong>Decision: independent, then notify.</strong> This island writes its own decay-revalidation test against <code>upstream/main</code> and does not depend on PR #257. The two PRs merge in any order. After the work exists, comment on #257 and/or #240 explaining that <code>test_recall_concurrency</code>'s concurrency proof should be re-anchored on the in-transaction revalidation rather than on the global lock — and that with this PR its assertions remain valid.</p>
+  <p><strong>Any such comment is confirmed with André before posting.</strong></p>
+</div>
+
+---
+
+<h2 id="testing">7. Testing</h2>
+
+<p>The measured symptom is temporal; the cause is structural. Asserting "the write returned in under X ms" would be flaky and would measure the machine. Asserting "the lock is not held across the LLM call" measures the bug.</p>
+
+<p>Instrumentation reuses the <code>OrderProbe</code> pattern already in <code>tests/test_index/test_builder.py:107-152</code>. Entries are counted <strong>at depth 0</strong> — <code>L_mem</code> is an <code>RLock</code>, so counting raw <code>__enter__</code> calls yields the wrong number.</p>
+
+<ol>
+  <li>
+    <p><strong>LLM-under-lock regression (the four LLM jobs).</strong> A <code>LockProbe</code> plus a fake LLM recording <code>lock_held_at_call</code>.</p>
+    <p><em>Worked example — <code>auto_linker</code>, 3 pairs:</em> today the fake LLM is called 3 times, all recording <code>lock_held=True</code>, with 1 depth-0 acquisition. After the fix: 3 calls with <code>lock_held=False</code>, 3 acquisitions. <code>assert not any(c.lock_held for c in calls)</code> <strong>fails today, passes after</strong> — it is the bug, literally.</p>
+  </li>
+  <li>
+    <p><strong>Foreground progress (the 25-minute symptom).</strong> A <code>sleep(2)</code>-based fake LLM with a "write completes in <0.5 s" assertion was <strong>considered and rejected: it would not catch the bug reliably</strong> — a timing race, green or red by machine load, and an intermittent failure is worse than no test. Replaced with <code>threading.Event</code>: the fake LLM <strong>blocks</strong>; a foreground thread runs <code>engine.remember()</code> and must complete <em>while</em> the job is parked there; only then is the event released. No sleeps, no margin, deterministic. Today it hangs to test timeout; after, it passes.</p>
+  </li>
+  <li>
+    <p><strong>Long holds without an LLM (<code>decay_manager</code>, <code>importance_scorer</code>, <code>auto_cluster</code>).</strong> For these three the bug is not "LLM under lock" — it is whole-run retention with no LLM at all, and it is what reaches the <strong>default install</strong>. Assertion is the depth-0 acquisition count: <code>== 1</code> today for any item count, proportional to items after. A test that only watched the LLM would report these three green without touching their bug.</p>
+  </li>
+  <li>
+    <p><strong>Restore epoch (#210 acceptance criterion).</strong> Job running, epoch bumped mid-run via the same hook, assert the job raises <code>RestoredUnderfoot</code> <strong>and that no edge or file was written after the bump</strong>. The second half is the requirement: aborting without having dirtied anything, not merely aborting.</p>
+  </li>
+  <li>
+    <p><strong>Decay tier revalidation — #257's canary, written on this island.</strong> Node qualifies as a decay candidate at snapshot; between snapshot and apply it is promoted to <code>working</code> with a fresh <code>last_accessed</code>; assert it is <strong>not</strong> demoted.</p>
+  </li>
+  <li>
+    <p><strong>Ingest dedup revalidation.</strong> Two concurrent ingests of the same content; assert one node.</p>
+  </li>
+  <li>
+    <p><strong>Lock-order preservation.</strong> Reuse the existing <code>OrderProbe</code> to assert no new apply step acquires <code>L_mem</code> inside a <code>db.transaction()</code> — the inversion that caused #207. This test is not about #240; it is the net that stops #240's fix from reopening #207.</p>
+  </li>
+</ol>
+
+<h3 id="verification-command">Verification command</h3>
+
+<p>All three FORK-WORKFLOW gates are load-bearing (island venv, clean <code>PYTHONPATH</code>, clean <code>HOME</code>). Without them the number is not ours.</p>
+
+<pre><code class="language-bash">env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"
+#   printed path MUST contain ormah-wt-240/
+env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest tests/ -q > out.txt 2>&1
+echo "PYTEST_EXIT=$?" >> out.txt</code></pre>
+
+---
+
+<h2 id="issue-questions">8. The issue's four questions, answered</h2>
+
+<ol>
+  <li>
+    <p><strong>Shared/exclusive guard, or a wall-clock ceiling?</strong> <em>Neither.</em> Hold-duration reduction. A shared/exclusive guard is the correct end state but converts a starvation bug into a distributed lost-update audit whose failures are silent (<code>stability</code>, <code>access_count</code>), and it breaks #257's test, which is open now. A ceiling does not fix anything: 60 s of unanswerable writes is still the bug, and <code>index_updater</code>'s 34.5 s cold scan passes under any sane ceiling.</p>
+  </li>
+  <li>
+    <p><strong>Does this block #223?</strong> No. This design preserves every per-operation guarantee verbatim, and adds the revalidation that protects #223 from a <em>future</em> lock change. See <a href="#interaction-with-pr-257">§6</a>.</p>
+  </li>
+  <li>
+    <p><strong>Does #211 close with this?</strong> <strong>No.</strong> This design keeps the <code>L_mem → L_db</code> hierarchy and makes it <em>more</em> important, because jobs now acquire and release repeatedly. Issue #211 stays open.</p>
+  </li>
+  <li>
+    <p><strong>Is #238 in scope?</strong> Deferred, and nothing here forecloses it. See <a href="#scope-out">§4</a>.</p>
+  </li>
+</ol>
+
+---
+
+<h2 id="assumptions">9. What stays assumed or inferred</h2>
+
+<ul>
+  <li><strong>(inferred)</strong> That one acquisition per pair/cluster/node is short enough. It is short because no LLM call is inside it, but no measurement was taken on the fixed code. The tests assert <em>structure</em> (lock not held across the LLM call), not latency. A latency claim requires re-running the original probe against the fix, which is not part of this spec.</li>
+  <li><strong>(assumed)</strong> That aborting a run on epoch change is acceptable operationally — the job simply returns at its next interval. Not validated against a maintainer preference; the four issue questions have had no reply since 2026-08-18.</li>
+  <li><strong>(verified, and a limit on what may be claimed)</strong> The restore invariant is enforced only on the server-side cloud restore path. <code>cli.py:503</code> bypasses it entirely, in a separate process. This design neither fixes nor worsens that; it is issue #238's ground.</li>
+  <li><strong>(inferred)</strong> Merge conflicts with PR #257 are "mechanical". Based on the file-overlap set (<code>memory_engine.py</code>, <code>consolidator.py</code>), not on an attempted merge.</li>
+</ul>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:c6b858c156c4c0509e41be146c8ec5c58840b4f83e9b022bf7d7068ba28ac927 -->

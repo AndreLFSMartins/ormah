@@ -140,329 +140,48 @@ summary:hover{color:var(--accent)}
 <nav class="toc">
   <div class="eyebrow">[ PLAN ]</div>
   <div class="doc-title">Heuristic Confirmed Use Implementation Plan</div>
-  <a href="#architecture">Architecture</a>
-  <a href="#tech-stack">Tech Stack</a>
+  <a href="#overview">Overview</a>
+  <a href="#architecture" class="lvl-3">Architecture</a>
+  <a href="#stack" class="lvl-3">Tech Stack</a>
   <a href="#global-constraints">Global Constraints</a>
-  <a href="#task-order">Task Order and Dependencies</a>
   <a href="#shared-interfaces">Shared Interfaces</a>
-  <a href="#task-0-worktree-and-baseline">Task 0: Worktree and Baseline</a>
+  <a href="#task-order">Task Order and Dependencies</a>
+  <a href="#task-0-worktree">Task 0: Worktree and Baseline</a>
   <a href="#task-1-evidence-floor">Task 1: The Evidence Floor in _claim_confirmed_use</a>
   <a href="#task-1-background" class="lvl-3">Background</a>
   <a href="#task-1-contract-9" class="lvl-3">Why contract 9 still passes</a>
-  <a href="#task-2-heuristic-claims">Task 2: The Heuristic Block Claims and Reinforces</a>
+  <a href="#task-1-summary" class="lvl-3">Summary</a>
+  <a href="#task-2-heuristic-block">Task 2: The Heuristic Block Claims and Reinforces</a>
   <a href="#task-2-background" class="lvl-3">Background</a>
-  <a href="#task-2-affinity-row" class="lvl-3">The affinity row this block writes is settled in Task 3</a>
+  <a href="#task-2-key-rules" class="lvl-3">Two ordering rules — both load-bearing</a>
+  <a href="#task-2-reinforce-location" class="lvl-3">Why its OWN reinforcement loop</a>
+  <a href="#task-2-summary" class="lvl-3">Summary</a>
   <a href="#task-3-judge-suppression">Task 3: Re-anchor the Judge's Suppression on Confirmation</a>
-  <a href="#task-3-problem" class="lvl-3">The problem</a>
-  <a href="#task-3-why-confirmed-claims" class="lvl-3">Why confirmed_use_claims, not just the strength</a>
+  <a href="#task-3-background" class="lvl-3">Background</a>
+  <a href="#task-3-regression" class="lvl-3">The regression this task creates</a>
+  <a href="#task-3-judge-setup" class="lvl-3">Judge preamble is mandatory</a>
+  <a href="#task-3-summary" class="lvl-3">Summary</a>
   <a href="#task-4-backfill">Task 4: Backfill the Rows the Defect Already Wrote</a>
   <a href="#task-4-background" class="lvl-3">Background</a>
-  <a href="#task-4-two-rules" class="lvl-3">Two rules this migration must not break</a>
-  <a href="#task-4-why-rescan" class="lvl-3">Why a rescan, not a one-time stamp</a>
+  <a href="#task-4-key-rules" class="lvl-3">Two rules this migration must not break</a>
+  <a href="#task-4-why-rescan" class="lvl-3">Why rescan, not one-time stamp</a>
+  <a href="#task-4-summary" class="lvl-3">Summary</a>
   <a href="#task-5-durable-reinforcement">Task 5: Durable Reinforcement After the Claim (#220 debt)</a>
   <a href="#task-5-background" class="lvl-3">Background</a>
   <a href="#task-5-convergence" class="lvl-3">This is convergence, not atomicity</a>
-  <a href="#task-5-schema-changes" class="lvl-3">Schema changes</a>
-  <a href="#task-5-sweep-backoff" class="lvl-3">Why last_attempt_at stops batch starvation</a>
-  <a href="#task-5-call-sites" class="lvl-3">Call sites to update</a>
-  <a href="#task-5-sweeper" class="lvl-3">The reinforcement_retry sweeper</a>
-  <a href="#task-5-grace-margin" class="lvl-3">Why the 5-minute grace margin</a>
+  <a href="#task-5-why-this-task-may-reorder" class="lvl-3">Why this task may reorder mutator, Tasks 1–4 may not</a>
+  <a href="#task-5-summary" class="lvl-3">Summary</a>
+  <a href="#deferred-findings">Deferred Findings</a>
+  <a href="#deferred-decisions" class="lvl-3">The two that are decisions, not cleanup</a>
+  <a href="#deferred-cheap" class="lvl-3">Cheap, only deferred because review had closed</a>
+  <a href="#deferred-highest-gap" class="lvl-3">The one gap final review rated highest</a>
+  <a href="#deferred-assumed" class="lvl-3">Related, still assumed not measured</a>
 </nav>
 <main>
-<div class="doc-title">
-  <h1><em>Heuristic Confirmed Use Implementation Plan</em></h1>
-</div>
+<div class="eyebrow">Implementation Plan</div>
+<h2 id="overview">Overview</h2>
 
-<div class="eyebrow">Overview</div>
-<p>Let a heuristic whisper reference reinforce a memory when its evidence is verbatim, so the detector carrying 81% of positive volume stops being a lifecycle dead end.</p>
-
-<p class="statement">The heuristic commit block wrote a signal and an affinity row and stopped—0 of 1,629 positive heuristic pairs ever took a claim. This plan gates the claim on an evidence floor of 0.80 (the implicit rung of the signal-strength ladder), admits <code>auto_heuristic</code> above that threshold, re-anchors the judge's suppression on confirmation rather than any reference, backfills historical rows, and makes the reinforcement durable across transient failures.</p>
-
-<h2 id="architecture">Architecture</h2>
-<p><code>_claim_confirmed_use</code> admits <code>auto_heuristic</code> gated on an evidence floor of 0.80 — the <em>implicit</em> rung of the #218 ordinal ladder. Verbatim matches (<code>node_id</code> 0.98, <code>title</code> 0.94, <code>sentence</code> 0.92) clear it; <code>token_overlap</code> cannot, its band's supremum being 0.78. The judge's suppression is re-anchored on <em>confirmation</em> rather than any reference, so weak hits keep the only route that can still confirm them. A boot migration backfills rows the defect already wrote.</p>
-
-<h2 id="tech-stack">Tech Stack</h2>
-<p>Python 3.11+, SQLite, pytest (<code>asyncio_mode = auto</code>), ruff (line-length 100).</p>
-
-<p class="statement">Spec: <a href="../../specs/2026-08-27-issue-272-heuristic-confirmed-use-design.md">2026-08-27-issue-272-heuristic-confirmed-use-design.md</a></p>
-
-<h2 id="global-constraints">Global Constraints</h2>
-
-<div class="callout warn">
-  <strong>BASE IS <code>fix/218-signal-strength-ladder</code>, NEVER <code>local-main</code>.</strong> The base differs by 1581 lines in <code>session_watcher.py</code> and 1557 in <code>memory_engine.py</code>, so every <code>local-main</code> line number is wrong by construction. Read addresses with <code>git show</code> from the worktree.
-</div>
-
-<ul>
-  <li><strong>Worktree:</strong> <code>../ormah-wt-272</code>, branch <code>fix/272-heuristic-confirmed-use</code>, cut from <code>fix/218-signal-strength-ladder</code> — <em>not</em> <code>upstream/main</code>, which has no <code>src/ormah/signal_strength.py</code> at all. Never <code>git checkout</code> a contribution branch inside <code>Tools/ormah</code>.</li>
-  <li><strong>TDD is mandatory:</strong> write the failing test and run it to observe the failure <em>before</em> any implementation. A test that passes on first run is a plan defect.</li>
-  <li><strong>Never pipe <code>pytest</code> into <code>tail</code>:</strong> a pipeline's status is the LAST command's. Use <code>python -m pytest tests/ -q > /tmp/ormah-272-run.txt 2>&1; RC=$?</code> and check <code>$RC</code>.</li>
-  <li><strong>Never decide eligibility from <code>signals.strength</code>.</strong> That column defaults to 1.0—above the floor—so stale rows read as confirmable. Recompute with <code>signal_strength.strength_from_evidence(source, polarity, evidence)</code>, which is fail-closed (unknown match → 0.40; polarity 0 → 0.0).</li>
-  <li><strong>Tasks 1–4: never modify <code>_record_confirmed_use</code>'s body.</strong> Task 5 reorders that body only, and only that body.</li>
-</ul>
-
-<h2 id="task-order">Task Order and Dependencies</h2>
-
-<table>
-  <thead>
-    <tr>
-      <th>Task</th>
-      <th>File</th>
-      <th>Deliverable</th>
-      <th>Depends on</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>0</td>
-      <td>below</td>
-      <td>Worktree + measured baseline</td>
-      <td>—</td>
-    </tr>
-    <tr>
-      <td>1</td>
-      <td>01-claim-floor.md</td>
-      <td><code>_claim_confirmed_use</code> takes <code>strength</code>, gates <code>auto_heuristic</code></td>
-      <td>0</td>
-    </tr>
-    <tr>
-      <td>2</td>
-      <td>02-watcher-claim.md</td>
-      <td>Heuristic block claims and reinforces</td>
-      <td>1</td>
-    </tr>
-    <tr>
-      <td>3</td>
-      <td>03-judge-suppression.md</td>
-      <td>Judge suppression re-anchored on confirmation</td>
-      <td>2</td>
-    </tr>
-    <tr>
-      <td>4</td>
-      <td>04-backfill.md</td>
-      <td>Boot migration backfills historical rows</td>
-      <td>1</td>
-    </tr>
-    <tr>
-      <td>5</td>
-      <td>05-durable-reinforcement.md</td>
-      <td>Reinforcement survives a failed write (#220 debt)</td>
-      <td>2, 3, 4</td>
-    </tr>
-  </tbody>
-</table>
-
-<p>Tasks 1→2→3 are strictly sequential. Task 4 needs only Task 1 and may run in parallel with 2 and 3. Task 5 is last: it changes <code>_record_confirmed_use</code>'s signature and must see every call site.</p>
-
-<h2 id="shared-interfaces">Shared Interfaces</h2>
-
-<p>Defined in Task 1, consumed by Tasks 2, 3 and 4:</p>
-
-<div class="statement">
-  <code class="highlight">HEURISTIC_CONFIRM_FLOOR: float  # = signal_strength.IMPLICIT == 0.80</code>
-  <br><br>
-  <code class="highlight">def _claim_confirmed_use(self, conn, whisper_log_id: int | None, node_id: str, *, signal: int, source: str, strength: float) -> bool: ...</code>
-</div>
-
-<p><code>strength</code> is keyword-only and <em>required</em> — no default. A default would let a future caller omit it and inherit a value nobody chose.</p>
-
-<hr>
-
-<h2 id="task-0-worktree-and-baseline">Task 0: Worktree and Baseline</h2>
-
-<p class="statement">Create the island and verify its base, install and measure the baseline, confirm the two pinning tests are currently green.</p>
-
-<div class="statement">
-  <code class="highlight">cd /Users/andre/Documents/GitHub/Tools/ormah</code><br>
-  <code class="highlight">git worktree add -b fix/272-heuristic-confirmed-use ../ormah-wt-272 fix/218-signal-strength-ladder</code><br>
-  <code class="highlight">cd ../ormah-wt-272</code><br>
-  <code class="highlight">test -f src/ormah/signal_strength.py && echo "BASE OK" || echo "WRONG BASE"</code>
-</div>
-
-<h2 id="task-1-evidence-floor">Task 1: The Evidence Floor in <code>_claim_confirmed_use</code></h2>
-
-<div class="eyebrow">Depends on Task 0</div>
-
-<h3 id="task-1-background">Background</h3>
-
-<p><code>_CONFIRMED_USE_SOURCES</code> omitted <code>auto_heuristic</code> deliberately—the #220 design conditioned admission on "#218 providing signal calibration". #218 has landed that calibration, so admission is now correct, but only above a floor. Without the floor, <code>token_overlap</code> (97.4% of heuristic hits, and the least precise kind) would gain the same lifecycle power as a verbatim <code>node_id</code> match.</p>
-
-<h3 id="task-1-contract-9">Why contract 9 still passes</h3>
-
-<p><code>test_auto_heuristic_positive_does_not_confirm</code> calls <code>submit_feedback(..., source="auto_heuristic")</code>, whose strength comes from <code>signal_strength.feedback_strength</code>, and <code>_FEEDBACK_LADDER</code> maps <code>auto_heuristic</code> to <code>UNKNOWN</code> (0.40)—below the floor, always. The test keeps passing without a special case. Only its docstring is stale.</p>
-
-<div class="statement">Add the constant and admit the source in <code>src/ormah/engine/memory_engine.py</code>:</div>
-
-<div class="statement">
-  <code class="highlight">HEURISTIC_CONFIRM_FLOOR = signal_strength.IMPLICIT</code><br>
-  <br>
-  <code class="highlight">_CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge", "auto_heuristic"})</code>
-</div>
-
-<p>Gate the claim with the floor on <code>auto_heuristic</code> only—explicit (1.00) and the judge (≥0.82) clear it anyway, and applying it to them would add a second gate on paths that do not need one.</p>
-
-<h2 id="task-2-heuristic-claims">Task 2: The Heuristic Block Claims and Reinforces</h2>
-
-<div class="eyebrow">Depends on Task 1</div>
-
-<h3 id="task-2-background">Background</h3>
-
-<p>The heuristic commit block wrote a signal and an affinity row, then stopped. This is the change the issue is about: <strong>0 of 1,629</strong> positive heuristic pairs ever took a claim.</p>
-
-<h3 id="task-2-affinity-row">The affinity row this block writes is settled in Task 3</h3>
-
-<p>This block writes <code>_insert_affinity(signal=1, ...)</code> for every positive hit—the floor gates the <em>claim</em>, not the affinity row—so a <code>token_overlap</code> hit still records a <code>+1</code> here. That is deliberate and unchanged. It only becomes a problem once Task 3 starts sending those weak hits to the judge.</p>
-
-<div class="statement">Insert the claim inside the heuristic transaction, after <code>_insert_affinity</code> and before the early return at <code>if not llm_groups:</code>. Reinforce in its own post-commit loop, isolated per node.</div>
-
-<p>The judge's loop lives at line 623, but the early return at 531 means the judge's loop never runs when there is nothing to judge—which, since a confirming heuristic hit now suppresses the judge, is exactly the case this loop exists for.</p>
-
-<h2 id="task-3-judge-suppression">Task 3: Re-anchor the Judge's Suppression on Confirmation</h2>
-
-<div class="eyebrow">Depends on Task 2</div>
-
-<h3 id="task-3-problem">The problem</h3>
-
-<p>Line 505 reads: <code>if llm_judge_enabled and not has_llm_judge and not referenced:</code></p>
-
-<p><code>not referenced</code> means <em>any</em> heuristic hit suppresses the judge—including a weak <code>token_overlap</code> hit that, after Task 1, confirms nothing. That hit is then left with <strong>no confirmation route at all</strong>: too weak to claim, and denied the one detector that could still judge it. That is 1,587 of the 1,629 rows.</p>
-
-<p>The condition should be "this event is already settled", not "the heuristic saw something".</p>
-
-<h3 id="task-3-why-confirmed-claims">Why <code>confirmed_use_claims</code>, not just the strength</h3>
-
-<ul>
-  <li><strong>First pass:</strong> the strength is in hand from <code>_node_usage_evidence</code>, and the claim has not been taken yet.</li>
-  <li><strong>Re-ingest:</strong> the strength is not in scope at all. The row query returns only <code>heuristic_polarity</code>.</li>
-  <li><strong>MCP feedback:</strong> a positive <code>submit_feedback</code> submitted through MCP. <code>has_llm_judge</code> is structurally blind to that.</li>
-</ul>
-
-<div class="callout warn">
-  <strong>The regression this task creates and must therefore close:</strong> Sending weak hits to the judge is the point of this task—and it also makes a latent contradiction reachable for the first time. Task 2 writes <code>_insert_affinity(signal=1)</code> for every positive hit, token_overlap included. <code>affinity</code> carries a unique index and <code>_insert_affinity</code> uses <code>ON CONFLICT DO NOTHING</code>, so if the judge answers <code>irrelevant</code> for that same event, its <code>-1</code> row is silently discarded. Task 3 Step 5 closes this by letting the judge overwrite an <code>auto_heuristic</code> affinity row.
-</div>
-
-<h2 id="task-4-backfill">Task 4: Backfill the Rows the Defect Already Wrote</h2>
-
-<div class="eyebrow">Depends on Task 1 · May run in parallel with Tasks 2 and 3</div>
-
-<h3 id="task-4-background">Background</h3>
-
-<p>The defect already ran in production. Tasks 1–3 fix future whispers; the exact-match rows already in <code>signals</code> would stay unclaimed forever, because the gate runs at write time. Expected volume on the measured store (2026-08-26): <strong>42 pairs</strong>—29 <code>node_id</code>, 13 <code>sentence</code>, 0 <code>title</code>—out of 1,629. The 1,587 <code>token_overlap</code> rows are correctly left alone.</p>
-
-<h3 id="task-4-two-rules">Two rules this migration must not break</h3>
-
-<ol>
-  <li><strong>Eligibility is recomputed from <code>evidence</code>, never read from <code>signals.strength</code>.</strong> That column defaults to 1.0—above the floor—so trusting it would confirm every stale positive heuristic row, including the 1,587 <code>token_overlap</code> ones. Use <code>signal_strength.strength_from_evidence(source, polarity, evidence)</code>, which is a pure function and fail-closed (unknown match → 0.40; polarity 0 → 0.0).</li>
-  <li><strong>Reinforcement runs after the transaction commits.</strong> <code>_record_confirmed_use</code> does file I/O; calling it inside would take <code>db_lock</code> before <code>memory_lock</code> (#220 §4.3).</li>
-</ol>
-
-<h3 id="task-4-why-rescan">Why a rescan, not a one-time stamp</h3>
-
-<p>A one-time stamp cannot repair what an OLD binary writes AFTER the stamp is set—a rollback then re-upgrade, or the second unmanaged server process of #238. Those rows would stay unclaimed forever.</p>
-
-<div class="statement">Add <code>_migrate_heuristic_confirmed_use()</code> method after <code>_migrate_signal_strength</code> ends, and call it at boot in <code>startup()</code>, immediately after the ladder migration—as defence in depth, not as the safety mechanism.</div>
-
-<h2 id="task-5-durable-reinforcement">Task 5: Durable Reinforcement After the Claim (#220 debt)</h2>
-
-<div class="eyebrow">Depends on Tasks 2, 3, and 4</div>
-
-<h3 id="task-5-background">Background</h3>
-
-<p><code>_claim_confirmed_use</code> takes the at-most-once latch <em>inside</em> the caller's transaction; that transaction commits; only afterwards does <code>_record_confirmed_use</code> run, exception isolated. The claim is a monotonic latch with no undo, so nothing retries. One transient filesystem failure defeats the reinforcement permanently for that node.</p>
-
-<p>The defect predates #272—it arrived with the #220 lifecycle family. Task 5 makes the promise durable by adding a <code>state</code> column to track the claim's outcome and a <code>reinforcement_retry</code> sweeper to repair claims left unapplied.</p>
-
-<div class="callout">
-  <strong>Council round 1 refuted the earlier atomic framing (run <code>98918652-c2f6a005-fc06a07a</code>).</strong> <code>os.replace</code> is irreversible and <code>COMMIT</code> runs after the body, so a failed commit leaves the markdown advanced while the row rolls back. No ordering can enrol a filesystem in a SQLite transaction. What makes it safe is where the new values come from: two sources, both pinned.
-</div>
-
-<h3 id="task-5-convergence">This is convergence, not atomicity</h3>
-
-<ul>
-  <li><strong>The counters come from the <code>nodes</code> row,</strong> read inside the transaction, instead of from the markdown. <code>access_count</code> is therefore <code>row["access_count"] + 1</code> on every attempt, so a retry recomputes the same target and overwrites the phantom instead of compounding it.</li>
-  <li><strong>The clock comes from the claim's <code>claimed_at</code>,</strong> never from <code>datetime.now()</code>. Council round 1 (Cursor, MEDIUM) caught that the counter alone is not enough: <code>stability</code>, <code>last_review</code> and <code>last_accessed</code> are all functions of when the write runs. Sourcing the clock from <code>claimed_at</code> makes the whole target a pure function of the claim. A late retry stamping <code>datetime.now()</code> would also credit the memory with recency it never earned—the use happened at <code>claimed_at</code>; that is what gets recorded.</li>
-</ul>
-
-<h3 id="task-5-schema-changes">Schema changes</h3>
-
-<p><code>confirmed_use_claims</code> gains three columns:</p>
-
-<table>
-  <thead>
-    <tr>
-      <th>Column</th>
-      <th>Meaning</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><code>state</code></td>
-      <td>pending (sweeper retries), applied (done), legacy_unknown (pre-#272), orphaned (node gone)</td>
-    </tr>
-    <tr>
-      <td><code>reinforced_at</code></td>
-      <td>When the write landed (separate from claimed_at, which is when the use happened)</td>
-    </tr>
-    <tr>
-      <td><code>last_attempt_at</code></td>
-      <td>When the sweeper last tried this claim; ineligible until backoff expires</td>
-    </tr>
-  </tbody>
-</table>
-
-<div class="callout warn">
-  <strong>The DEFAULT is terminal, deliberately.</strong> A pre-#272 binary inserts without naming <code>state</code>, so it takes the column default. That binary's mutator never marks anything applied, so a 'pending' default would leave the row eligible forever and the sweeper would re-reinforce it every hour, compounding the reinforcement the old binary already performed. Two binaries on one store is not hypothetical—see issue #238 in CLAUDE.md. Only the new code inserts 'pending' explicitly.
-</div>
-
-<h3 id="task-5-sweep-backoff">Why <code>last_attempt_at</code> stops batch starvation</h3>
-
-<p>With <code>ORDER BY claimed_at ASC LIMIT N</code> and no record of attempts, N permanently-failing claims fill every batch forever and a claim taken today is never tried at all—the sweeper reports itself healthy while the feature is dead for every new claim. An attempted row steps out of the eligible set until the backoff expires, so the next run reaches past the wall.</p>
-
-<h3 id="task-5-call-sites">Call sites to update</h3>
-
-<p>Five sites exist after Tasks 2 and 4:</p>
-
-<table>
-  <thead>
-    <tr>
-      <th>Site</th>
-      <th>Change</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><code>memory_engine.py:855</code> — recall_node</td>
-      <td>Pass the resolved <code>whisper_log_id</code></td>
-    </tr>
-    <tr>
-      <td><code>memory_engine.py:2805</code> — submit_feedback</td>
-      <td>Pass the resolved <code>whisper_log_id</code> from the locked helper</td>
-    </tr>
-    <tr>
-      <td><code>session_watcher.py:610</code> — heuristic block (Task 2)</td>
-      <td>Store the pair <code>(row["id"], row["node_id"])</code> and loop with both</td>
-    </tr>
-    <tr>
-      <td><code>session_watcher.py:623</code> — judge block</td>
-      <td>Loop with the pair <code>(row["id"], row["node_id"])</code></td>
-    </tr>
-    <tr>
-      <td><code>memory_engine.py</code> — boot backfill (Task 4)</td>
-      <td>Pass the <code>whisper_log_id</code> of the signal row</td>
-    </tr>
-  </tbody>
-</table>
-
-<h3 id="task-5-sweeper">The <code>reinforcement_retry</code> sweeper</h3>
-
-<p>Runs as a sleep-cycle job, selecting pending claims past a 5-minute grace margin. Stamps <code>last_attempt_at</code> before the loop (committed separately) so attempted rows step out until backoff expires. Isolated per node so one failure does not abandon the batch. Logs the repair rate.</p>
-
-<div class="statement">Create <code>src/ormah/background/reinforcement_retry.py</code> with the sweeper function and batch/backoff constants. Register it in the scheduler, config settings, and admin routes.</div>
-
-<h3 id="task-5-grace-margin">Why the 5-minute grace margin</h3>
-
-<p>A claim taken seconds ago may still have its reinforcement in flight—the mutator runs after the claiming transaction commits. Matches the interval <code>session_watcher_reconcile_interval_minutes</code> uses for the same reason.</p>
-
-<hr>
+<p class="statement">Let a heuristic whisper reference reinforce a memory when its evidence is verbatim, so the detector carrying 81% of positive volume stops being a lifecycle dead end.</p>
 
 <div class="metrics">
   <div class="metric">
@@ -470,14 +189,343 @@ summary:hover{color:var(--accent)}
     <div class="label">implementation tasks</div>
   </div>
   <div class="metric">
-    <div class="big">3</div>
-    <div class="label">sequential chains</div>
+    <div class="big">1,629</div>
+    <div class="label">positive heuristic pairs</div>
   </div>
   <div class="metric">
-    <div class="big">1</div>
-    <div class="label">parallel stream</div>
+    <div class="big">42</div>
+    <div class="label">eligible rows to backfill</div>
   </div>
 </div>
+
+<h3 id="architecture">Architecture</h3>
+
+<p><code>_claim_confirmed_use</code> admits <code>auto_heuristic</code> gated on an evidence floor of 0.80 — the <em>implicit</em> rung of the #218 ordinal ladder. Verbatim matches (<code>node_id</code> 0.98, <code>title</code> 0.94, <code>sentence</code> 0.92) clear it; <code>token_overlap</code> cannot, its band's supremum being 0.78. The judge's suppression is re-anchored on <em>confirmation</em> rather than any reference, so weak hits keep the only route that can still confirm them. A boot migration backfills rows the defect already wrote.</p>
+
+<h3 id="stack">Tech Stack</h3>
+
+<p>Python 3.11+, SQLite, pytest (<code>asyncio_mode = auto</code>), ruff (line-length 100). Spec: <code>docs/superpowers/specs/2026-08-27-issue-272-heuristic-confirmed-use-design.md</code></p>
+
+<h2 id="global-constraints">Global Constraints</h2>
+
+<ul>
+  <li><strong>BASE IS <code>fix/218-signal-strength-ladder</code></strong>, never <code>local-main</code>.</li>
+  <li><strong>Worktree:</strong> <code>../ormah-wt-272</code>, cut from <code>fix/218-signal-strength-ladder</code> — never <code>upstream/main</code>.</li>
+  <li><strong>TDD is mandatory:</strong> write the failing test before any implementation.</li>
+  <li>The floor is <code>HEURISTIC_CONFIRM_FLOOR = signal_strength.IMPLICIT</code> (0.80), defined by reference to the ladder.</li>
+  <li>Never decide eligibility from <code>signals.strength</code> — recompute with <code>signal_strength.strength_from_evidence()</code>.</li>
+  <li><strong>Tasks 1–4: never modify <code>_record_confirmed_use</code>'s body</strong> — Task 5 reorders it.</li>
+  <li>A fixture's prose is not evidence. Before relying on a fixture, execute the classifying function.</li>
+  <li><strong>Every <code>file:line</code> is measured against the BASE.</strong> Locate edits by content, not line number.</li>
+</ul>
+
+<h2 id="shared-interfaces">Shared Interfaces</h2>
+
+<figure>
+  <figcaption>New constant and method signature</figcaption>
+  <pre><code class="language-python">HEURISTIC_CONFIRM_FLOOR: float  # = signal_strength.IMPLICIT == 0.80
+
+def _claim_confirmed_use(
+    self, conn, whisper_log_id: int | None, node_id: str,
+    *, signal: int, source: str, strength: float,
+) -> bool: ...</code></pre>
+</figure>
+
+<p><code>strength</code> is keyword-only and <strong>required</strong> — no default.</p>
+
+<h2 id="task-order">Task Order and Dependencies</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Task</th>
+      <th>Deliverable</th>
+      <th>Depends on</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>0</td>
+      <td>Worktree + baseline</td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><a href="#task-1-evidence-floor">1</a></td>
+      <td><code>_claim_confirmed_use</code> takes <code>strength</code>, gates <code>auto_heuristic</code></td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td><a href="#task-2-heuristic-block">2</a></td>
+      <td>Heuristic block claims and reinforces</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td><a href="#task-3-judge-suppression">3</a></td>
+      <td>Judge suppression re-anchored on confirmation</td>
+      <td>2</td>
+    </tr>
+    <tr>
+      <td><a href="#task-4-backfill">4</a></td>
+      <td>Boot migration backfills historical rows</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td><a href="#task-5-durable-reinforcement">5</a></td>
+      <td>Reinforcement survives failed write</td>
+      <td>2, 3, 4</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Tasks 1→2→3 are strictly sequential. Task 4 needs only Task 1, may run parallel with 2–3. Task 5 is last.</p>
+
+<h2 id="task-0-worktree">Task 0: Worktree and Baseline</h2>
+
+<div class="callout">
+  <p><strong>Step 1: Create the island</strong></p>
+  <pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git worktree add -b fix/272-heuristic-confirmed-use ../ormah-wt-272 fix/218-signal-strength-ladder
+cd ../ormah-wt-272
+test -f src/ormah/signal_strength.py && echo "BASE OK" || echo "WRONG BASE"</code></pre>
+</div>
+
+<div class="callout">
+  <p><strong>Step 2: Measure the baseline</strong> — record failing test IDs shared by every later task.</p>
+</div>
+
+<div class="callout">
+  <p><strong>Step 3: Confirm pinning tests are GREEN</strong></p>
+</div>
+
+<h2 id="task-1-evidence-floor">Task 1: The Evidence Floor in <code>_claim_confirmed_use</code></h2>
+
+<h3 id="task-1-background">Background</h3>
+
+<p><code>_CONFIRMED_USE_SOURCES</code> omitted <code>auto_heuristic</code> pending #218 signal calibration, which has landed. Admission is now correct, but only above a floor. Without the floor, <code>token_overlap</code> (97.4% of heuristic hits) would gain the same lifecycle power as a verbatim <code>node_id</code> match.</p>
+
+<h3 id="task-1-contract-9">Why contract 9 still passes</h3>
+
+<p><code>test_auto_heuristic_positive_does_not_confirm</code> uses <code>submit_feedback(..., source="auto_heuristic")</code>, whose strength is <code>UNKNOWN</code> (0.40) — below the floor. The test stays green. <strong>Do not weaken or delete this test.</strong></p>
+
+<h3 id="task-1-summary">Summary</h3>
+
+<p>Add the constant, extend the signature with keyword-only <code>strength: float</code>, gate the claim on floor for <code>auto_heuristic</code> only. Fix stale docstring on contract 9. Fix three call sites to pass strength.</p>
+
+<h2 id="task-2-heuristic-block">Task 2: The Heuristic Block Claims and Reinforces</h2>
+
+<h3 id="task-2-background">Background</h3>
+
+<p>The heuristic commit block writes signal and affinity, then stops: <strong>0 of 1,629</strong> positive heuristic pairs ever took a claim.</p>
+
+<h3 id="task-2-key-rules">Two ordering rules — both load-bearing</h3>
+
+<ol>
+  <li><strong><code>_insert_affinity</code> runs BEFORE the claim.</strong> Helper reads <code>changes()</code>, nothing may sit between INSERT and read.</li>
+  <li><strong>Reinforcement runs AFTER transaction closes.</strong> <code>_record_confirmed_use</code> does file I/O; calling it inside inverts lock order.</li>
+</ol>
+
+<h3 id="task-2-reinforce-location">Why its OWN reinforcement loop</h3>
+
+<p>The judge's loop at <code>:623</code> sits after <code>:531</code> early return. After Task 3, a confirming heuristic hit produces no <code>llm_groups</code> — reusing that loop would skip reinforcement precisely when it matters. The new loop must sit <strong>between the heuristic transaction and the early return.</strong></p>
+
+<h3 id="task-2-summary">Summary</h3>
+
+<p>Inside transaction, after affinity, take claim for positive hits. After transaction, before early return, reinforce in isolated loop. Rewrite contract 12: the floor, not the source, is the gate.</p>
+
+<h2 id="task-3-judge-suppression">Task 3: Re-anchor the Judge's Suppression on Confirmation</h2>
+
+<h3 id="task-3-background">Background</h3>
+
+<p><code>not referenced</code> suppresses judge for ANY heuristic hit — including weak <code>token_overlap</code> that confirms nothing. That hit has no route left: too weak to claim, denied the judge. That is 1,587 of 1,629 rows.</p>
+
+<p>Condition should be "event already settled", not "heuristic saw something".</p>
+
+<h3 id="task-3-regression">The regression this task creates</h3>
+
+<p>Sending weak hits to judge makes a latent contradiction reachable. Task 2 writes <code>_insert_affinity(signal=1)</code> for EVERY positive hit. <code>affinity</code> is unique per (node, event), uses <code>ON CONFLICT DO NOTHING</code>. If judge answers <code>irrelevant</code>, its <code>-1</code> is silently discarded — signals records negative verdict, retrieval keeps consuming the <code>+1</code>.</p>
+
+<p>Task 3 closes this: scoped UPDATE lets judge outrank heuristic affinity, following <code>_submit_feedback_locked</code> pattern.</p>
+
+<h3 id="task-3-judge-setup">Judge preamble is mandatory</h3>
+
+<p>Judge doesn't run unless both flags on. Every test must carry:</p>
+
+<figure>
+  <pre><code>engine.settings.llm_provider = "ollama"
+engine.settings.feedback_llm_judge_enabled = True</code></pre>
+</figure>
+
+<h3 id="task-3-summary">Summary</h3>
+
+<p>Add <code>already_confirmed</code> to row query via EXISTS subquery. Re-anchor suppression on <code>settled = confirms or bool(row["already_confirmed"])</code>. Judge verdict overwrites only heuristic affinity. Import floor from memory_engine.</p>
+
+<h2 id="task-4-backfill">Task 4: Backfill the Rows the Defect Already Wrote</h2>
+
+<h3 id="task-4-background">Background</h3>
+
+<p>Defect already ran in production. Tasks 1–3 fix future whispers; exact-match rows already in <code>signals</code> stay unclaimed forever (gate runs at write time). Expected volume 2026-08-26: <strong>42 pairs</strong> (29 <code>node_id</code>, 13 <code>sentence</code>, 0 <code>title</code>) of 1,629. The 1,587 <code>token_overlap</code> rows correct skipped.</p>
+
+<h3 id="task-4-key-rules">Two rules this migration must not break</h3>
+
+<ol>
+  <li><strong>Recompute from <code>evidence</code>, never read <code>signals.strength</code>.</strong> Column defaults 1.0 (above floor), so pre-ladder rows read as confirmable. Second process writes stale rows in window between ladder and backfill commits. Recomputing makes column irrelevant.</li>
+  <li><strong>Reinforcement runs after transaction commits.</strong> File I/O inverts lock order.</li>
+</ol>
+
+<h3 id="task-4-why-rescan">Why rescan, not one-time stamp</h3>
+
+<p>Old binary writes pre-fix rows AFTER stamp is set (rollback, re-upgrade, or #238's second process). Stamp calls them migrated forever.</p>
+
+<h3 id="task-4-summary">Summary</h3>
+
+<p>Add version constant. Write <code>_migrate_heuristic_confirmed_use</code> that rescans rows above cutoff, recomputes strength from evidence in Python, applies every eligibility test in Python, reinforces eligible rows in isolated loop. Call at boot after ladder as defence-in-depth.</p>
+
+<h2 id="task-5-durable-reinforcement">Task 5: Durable Reinforcement After the Claim (#220 debt)</h2>
+
+<h3 id="task-5-background">Background</h3>
+
+<p>Claim takes inside caller's transaction; transaction commits; only then <code>_record_confirmed_use</code> runs, wrapped in bare <code>except</code> that logs and swallows. Claim has no undo, nothing retries. One transient filesystem failure defeats reinforcement permanently.</p>
+
+<p>Defect predates #272 (#220 family). #272 raises stakes: Task 4's backfill runs batch at once.</p>
+
+<h3 id="task-5-convergence">This is convergence, not atomicity</h3>
+
+<p><code>os.replace</code> is irreversible, <code>Database.transaction</code> issues <code>COMMIT</code> after body returns. Failing COMMIT leaves markdown advanced, row and claim rolled back. No ordering enrolls filesystem in SQLite transaction.</p>
+
+<p>What makes it safe: <strong>where new values come from</strong> — two sources pinned:</p>
+
+<ol>
+  <li><strong>Counters from <code>nodes</code> row</strong>, not markdown increment. <code>access_count = row["access_count"] + 1</code> on every attempt, retry recomputes same target, overwrites phantom instead of compounding.</li>
+  <li><strong>Clock from claim's <code>claimed_at</code></strong>, not <code>datetime.now()</code>. Retry stamping wall-clock feeds different <code>days_since</code>, lands on different FSRS value. Reading from <code>claimed_at</code> makes target pure function of claim.</li>
+</ol>
+
+<p>Point 2 fixes truthfulness bug: <code>last_accessed</code> is decay anchor. Late retry stamping <code>now()</code> credits recency never earned. Use happened at <code>claimed_at</code>; that's what gets recorded.</p>
+
+<h3 id="task-5-why-this-task-may-reorder">Why this task may reorder mutator, Tasks 1–4 may not</h3>
+
+<p><code>FileStore</code> built with engine's <code>_memory_operation_lock</code>, an <code>RLock</code> that <code>@_serialized_memory_operation</code> already holds. Call from inside method's own transaction re-enters rather than taking <code>db_lock</code> first. Callers unchanged: still invoke outside their transaction.</p>
+
+<h3 id="task-5-summary">Summary</h3>
+
+<p>Add <code>state</code>, <code>claimed_at</code>, <code>reinforced_at</code> columns with DEFAULT <code>'legacy_unknown'</code> (terminal). Migration marks pre-existing terminal. Reorder mutator: read row, write file, update database. Create sweeper <code>reinforcement_retry.py</code> rescanning pending claims. Add to scheduler as sleep-cycle job.</p>
+
+<h2 id="deferred-findings">Deferred Findings</h2>
+
+<p>Survived review but NOT fixed before merge. Each raised by per-task reviewer or final whole-branch review. Line numbers measured against <code>fix/272-heuristic-confirmed-use</code> at <code>e975a90</code>, not <code>local-main</code> or <code>upstream/main</code>. Code doesn't exist upstream yet.</p>
+
+<h3 id="deferred-decisions">The two that are decisions, not cleanup</h3>
+
+<h4 id="m6-unbounded-backfill">M6 — boot backfill unbounded where sweeper is batched</h4>
+
+<p><code>memory_engine.py:277</code> — <code>_migrate_heuristic_confirmed_use</code> does <code>.fetchall()</code> with no <code>LIMIT</code>. Sweeper caps at <code>_BATCH_SIZE = 200</code>.</p>
+
+<div class="callout warn">
+  <p><strong>Triage: deferred.</strong> Matches <code>_migrate_signal_strength</code>, equally unbounded — house style, not new hazard. Volume is 42 rows on 2026-08-26 store. Paginating boot migration is riskiest change on branch: runs before server, touches every PyPI store.</p>
+</div>
+
+<p><strong>Revisit if:</strong> eligible-row count grows past low hundreds, or first-boot upgrade time becomes complaint.</p>
+
+<h4 id="m8-sweeper-status">M8 — failing sweeper reports green in admin job status</h4>
+
+<p><code>reinforcement_retry.py:99</code> — top-level <code>except Exception</code> swallows everything. <code>tracked()</code> never calls <code>record_failure</code>, job shows healthy no matter how consistently it fails.</p>
+
+<div class="callout warn">
+  <p><strong>Triage: deferred.</strong> <code>decay_manager.py:85</code> and <code>auto_cluster.py:68</code> do same. Fixing only this leaves one job reporting failure, two green — misleads. Correct fix is all three, different scope.</p>
+</div>
+
+<p>NOT cosmetic: durability is the one thing #272 adds that must not fail silently. Strongest follow-up candidate of the eleven.</p>
+
+<h3 id="deferred-cheap">Cheap, only deferred because review had closed</h3>
+
+<p>Comment, one-line guard, log line, or missing assertion. None justified reopening review; safe to fold into next change touching file.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Ref</th>
+      <th>Where</th>
+      <th>What</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>M2</td>
+      <td><code>memory_engine.py:2300</code> and <code>00-overview.md:57</code></td>
+      <td>Cite <code>FileStore</code> RLock at :<code>109</code>. Decorator; constructions at :120, :1564. Claim correct, addresses stale.</td>
+    </tr>
+    <tr>
+      <td>M3</td>
+      <td><code>test_session_watcher.py:2495</code>, :2578</td>
+      <td>Two tests share prompt, response, node, patch, four assertions. Only evidence and count differ. One test loses nothing.</td>
+    </tr>
+    <tr>
+      <td>M4</td>
+      <td><code>index/db.py:225</code></td>
+      <td>CREATE INDEX IF NOT EXISTS unconditional. Three ALTER TABLE above guarded. Unreachable today, proven to raise if table dropped.</td>
+    </tr>
+    <tr>
+      <td>M5</td>
+      <td><code>test_confirmed_use_contract.py:1186</code></td>
+      <td>test_backfill_isolates asserts node 2 got backfill, not that node 1's claim left sweepable.</td>
+    </tr>
+    <tr>
+      <td>M7</td>
+      <td><code>memory_engine.py:2316</code></td>
+      <td>Mutator silent when SELECT changes() != 1. One logger.debug naming ids helps first production debug.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h4 id="deferred-carried">Carried from per-task reviews</h4>
+
+<table>
+  <thead>
+    <tr>
+      <th>Ref</th>
+      <th>Where</th>
+      <th>What</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>C1</td>
+      <td><code>test_engine/test_signal_strength.py:8-9</code></td>
+      <td>Imports signal_strength twice — plain and ss. Plan tests use plain; older use ss. Deliberate, ruff-clean. Collapse to ss if touched.</td>
+    </tr>
+    <tr>
+      <td>C2</td>
+      <td><code>test_confirmed_use_contract.py:911</code>, :938</td>
+      <td>Two tests stay green if backfill guard removed because _claim_confirmed_use independently rechecks both floor and was_injected. Defence-in-depth real, production protected; tests don't pin layer they name.</td>
+    </tr>
+    <tr>
+      <td>C3</td>
+      <td><code>session_watcher.py:457</code></td>
+      <td>already_confirmed EXISTS doesn't filter state, so orphaned/legacy_unknown also suppress judge. Believed correct under at-most-once, no test states intent. Future change can't distinguish deliberate from oversight.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 id="deferred-highest-gap">The one gap final review rated highest</h3>
+
+<h4 id="g1-sweeper-filter">G1 — nothing pins sweeper's <code>WHERE state = 'pending'</code></h4>
+
+<p><code>reinforcement_retry.py:51</code></p>
+
+<p>Removing filter NOT caught by any test: test_sweeper_never_touches_terminal_claims stays green because mutator's own AND state = 'pending' is independent guard. Cost of losing it: batch starvation — terminal rows fill 200-row batch, crowd out pending. That's precisely the failure test_a_wall_of_failing_claims_does_not_starve_the_newest exists to prevent, through door test doesn't watch.</p>
+
+<div class="callout warn">
+  <p>Of everything here, this one whose absence could silently degrade feature while suite stays green.</p>
+</div>
+
+<h3 id="deferred-assumed">Related, still assumed not measured</h3>
+
+<p>Recorded so not mistaken for verified:</p>
+
+<ul>
+  <li><strong>The two-binary (#238) rollback end-to-end.</strong> Load-bearing half IS verified by execution — old-shaped INSERT omitting state lands legacy_unknown, terminal for both sweeper and mutator. Rest (old binary's migration doesn't drop/rewrite columns) inferred from reading; no actual pre-#272 binary run against migrated store.</li>
+  <li><strong>Every production-volume figure</strong> in docstrings (1,629 positive pairs, 97.4% token_overlap, 1,587 of 1,629, 42 pairs, max ratio 7.583) describes live store sampled 2026-08-26, not re-derivable from diff. No code depends — executable pin is OVERLAP_FLOOR + OVERLAP_SPAN = 0.78 < HEURISTIC_CONFIRM_FLOOR = 0.80, verified.</li>
+  <li><strong>First-boot cost of unbounded backfill on large store</strong> (M6). Never measured.</li>
+</ul>
   <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
   <div class="signature">
     <div class="name">rich-doc</div>
@@ -486,4 +534,4 @@ summary:hover{color:var(--accent)}
 </main>
 </body>
 </html>
-<!-- rich-doc-src-sha256:a7d9049bf80e18083ba26561b94853d7b5e101f45266cf3a5f60673f6c4a6a77 -->
+<!-- rich-doc-src-sha256:7adc28b56d4f0670bb0c1d06ad1250d818cceef01675e8df7dd365a795a2ea34 -->
