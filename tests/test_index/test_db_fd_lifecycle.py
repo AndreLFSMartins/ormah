@@ -47,3 +47,28 @@ def test_close_releases_the_database_for_gc(tmp_path):
     gc.collect()
 
     assert ref() is None
+
+
+def test_retire_connection_is_reentrant_under_the_conns_lock(tmp_path):
+    """A finalizer can fire while the same thread already holds the registry lock.
+
+    CPython runs weakref callbacks from the generational GC, which triggers on
+    allocation — including an allocation inside `_new_connection`'s own critical
+    section. If a dead thread is collected right there, `_retire_connection` re-enters
+    the lock on the very thread that holds it. With a plain Lock that is a hard deadlock,
+    and it does not end with the test: the finalizers still registered run at interpreter
+    exit and hang there too.
+
+    Probed non-blockingly rather than by actually deadlocking, precisely because a real
+    deadlock here takes the whole test process down with it.
+    """
+    db = Database(tmp_path / "t.db")
+    conn = db.conn
+
+    with db._conns_lock:
+        reentrant = db._conns_lock.acquire(blocking=False)
+        if reentrant:
+            db._conns_lock.release()
+            db._retire_connection(conn)  # the real callback path, now provably safe
+
+    assert reentrant, "_retire_connection would deadlock: _conns_lock is not re-entrant"
