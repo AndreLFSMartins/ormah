@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import threading
+import weakref
 
 from ormah.index.db import Database
 
@@ -27,3 +28,22 @@ def test_ephemeral_thread_connection_is_retired(tmp_path):
     gc.collect()  # run the weakref finalizers for the now-dead threads
 
     assert len(db._all_conns) <= baseline
+
+
+def test_close_releases_the_database_for_gc(tmp_path):
+    """close() must detach the per-thread finalizers.
+
+    A finalizer holds strong refs to its callback and args, so a bound
+    `_retire_connection` pins the whole Database until the OWNING thread dies. On a
+    long-lived thread (the main thread, a pool worker) that is never — every closed
+    temporary Database would stay resident for the process lifetime.
+    """
+    db = Database(tmp_path / "t.db")
+    db.init_schema()  # opens a connection on this (long-lived) thread
+    db.close()
+
+    ref = weakref.ref(db)
+    del db
+    gc.collect()
+
+    assert ref() is None
