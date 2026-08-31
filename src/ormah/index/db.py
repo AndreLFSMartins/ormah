@@ -23,7 +23,9 @@ class Database:
         self._local = threading.local()
         self._all_conns: list[sqlite3.Connection] = []
         self._finalizers: list[weakref.finalize] = []
-        self._conns_lock = threading.Lock()
+        # Re-entrant: the GC can fire a connection finalizer while this very thread is
+        # inside a section that already holds it — see _retire_connection.
+        self._conns_lock = threading.RLock()
         self._lock = threading.RLock()  # serializes write transactions across threads
 
     def _new_connection(self) -> sqlite3.Connection:
