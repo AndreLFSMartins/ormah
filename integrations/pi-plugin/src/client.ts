@@ -193,15 +193,21 @@ export class OrmahClient {
 		});
 	}
 
-	/** POST /agent/feedback — record a relevance signal. */
+	/** POST /agent/feedback — record a relevance signal.
+	 *  whisper_log_id is forwarded only when present, mirroring
+	 *  mcp_adapter.py submit_feedback: omitting it falls back to the
+	 *  legacy latest-event attribution on servers that support it. */
 	async submitFeedback(
 		nodeId: string,
 		signal: 1 | -1,
 		source: "explicit" | "implicit" = "explicit",
+		whisperLogId?: number,
 	): Promise<WhisperResponse> {
+		const body: Record<string, unknown> = { node_id: nodeId, signal, source };
+		if (whisperLogId !== undefined) body.whisper_log_id = whisperLogId;
 		return this.req("/agent/feedback", {
 			method: "POST",
-			body: JSON.stringify({ node_id: nodeId, signal, source }),
+			body: JSON.stringify(body),
 		});
 	}
 
