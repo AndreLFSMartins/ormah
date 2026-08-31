@@ -42,7 +42,7 @@ the names as they are.
    - **`.gitignore` decides what enters a commit.** `CLAUDE.md`, `INSTRUCTIONS.md`,
      `SESSION_LOG.md` and `.council/` are **untracked**: no git backup, and a `git clean -x`
      erases them.
-   - **`.git/hooks/pre-push` decides what ships.** `FORK-WORKFLOW.md`, `graphify-out/` and the
+   - **`.git/hooks/pre-push` decides what ships.** `FORK-WORKFLOW.md` and the
      decision history under `docs/` *are* versioned on `local-main` (history a `git clean -x`
      can erase is not history), and the hook is what keeps them out of a PR: fail-closed, it
      rejects any push whose three-dot diff against `upstream/main` touches a path in its

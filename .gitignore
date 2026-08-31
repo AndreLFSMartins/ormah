@@ -92,28 +92,6 @@ CLAUDE.md
 .understand-anything/
 .vite/
 docs/handoffs/
-# graphify-out/ is versioned here (fork/local-main only — Recipe A in
-# FORK-WORKFLOW.md keeps it out of upstream PRs by branch discipline, not by
-# gitignore). Overrides the machine-wide default in ~/.config/git/ignore and
-# this repo's own .git/info/exclude, both of which still ignore it globally.
-# Anchored to the repo root only — per-subfolder graphify-out/ dirs (e.g. from
-# a multi-subfolder `graphify extract`) stay ignored as merge intermediates by
-# the unanchored rules in ~/.config/git/ignore and .git/info/exclude. Do NOT add
-# a bare `graphify-out/` here to enforce that: unanchored and later in the file,
-# it would also re-ignore the root tree this negation exists to version.
-!/graphify-out/
-/graphify-out/cost.json
-# Regenerable scratch inside graphify-out/ — never worth versioning.
-# (gitignore has no inline-comment syntax: a trailing "# ..." is part of the
-# pattern, not a comment — each rule gets its own comment line above it.)
-# AST extraction cache, rebuilt by any `graphify extract`:
-/graphify-out/cache/
-# Dated backups written by cluster-only/label before overwrite:
-/graphify-out/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
-# Machine-local interpreter path, breaks on another machine/CI:
-/graphify-out/.graphify_python
-# Intermediate; the full skill pipeline (Step 9) deletes it itself:
-/graphify-out/.graphify_analysis.json
 # Local-only: codebase-memory-mcp team graph artifact (regenerable by re-indexing)
 .codebase-memory/
 Music/
@@ -155,8 +133,8 @@ Music/
 .council/.*-stderr.log
 # <<< dev-council ephemerals <<<
 
-# Nothing below this point. A bare `graphify-out/` or `docs/superpowers/` added
-# here would silently override the rules above — a later rule wins, so it would
-# re-ignore both deliberately-versioned trees and make new files vanish from
-# `git status` without any error. Both already have their entry above; add new
-# exclusions next to the tree they belong to, not at the end of the file.
+# Nothing below this point. A bare `docs/superpowers/` added here would silently
+# override the rules above — a later rule wins, so it would re-ignore that
+# deliberately-versioned tree and make new files vanish from `git status`
+# without any error. It already has its entry above; add new exclusions next to
+# the tree they belong to, not at the end of the file.
