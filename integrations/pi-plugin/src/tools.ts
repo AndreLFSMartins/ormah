@@ -241,7 +241,7 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 		name: "ormah_submit_feedback",
 		label: "Ormah Feedback",
 		description:
-			"Record relevance feedback on an Ormah memory. Use source='implicit' (signal=1 useful / -1 not relevant) when you can judge from context; only use source='explicit' when you genuinely cannot tell. Improves future whisper ranking.",
+			"Record relevance feedback on an Ormah memory. Use source='implicit' (signal=1 useful / -1 not relevant) when you can judge from context; only use source='explicit' when you genuinely cannot tell. If the surfaced memory includes whisper_log_id, always include it so feedback is attached to that exact whisper or recall event; omitting it uses a legacy latest-event fallback. Improves future whisper ranking.",
 		promptSnippet: "Record relevance feedback on an Ormah memory",
 		parameters: Type.Object({
 			node_id: Type.String({
@@ -255,6 +255,12 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 					"'explicit' = user answered; 'implicit' = inferred from context.",
 				default: "explicit",
 			}),
+			whisper_log_id: Type.Optional(
+				Type.Integer({
+					description:
+						"Exact whisper_log event ID shown next to surfaced memories. Pass it whenever present; omit only for older outputs that do not include it.",
+				}),
+			),
 		}),
 		async execute(_id, params) {
 			try {
@@ -262,6 +268,7 @@ export function registerTools(pi: ExtensionAPI, tctx: ToolCtx): void {
 					params.node_id,
 					params.signal as 1 | -1,
 					params.source as "explicit" | "implicit",
+					params.whisper_log_id as number | undefined,
 				);
 				return textResult(resp.text);
 			} catch (e) {
