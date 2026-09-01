@@ -10,24 +10,27 @@ from ormah.index.db import Database
 
 def test_ephemeral_thread_connection_is_retired(tmp_path):
     db = Database(tmp_path / "t.db")
-    db.init_schema()  # opens the main-thread connection
-    baseline = len(db._all_conns)
+    try:
+        db.init_schema()  # opens the main-thread connection
+        baseline = len(db._all_conns)
 
-    def worker():
-        db.conn.execute("SELECT 1").fetchone()  # forces a new per-thread connection
+        def worker():
+            db.conn.execute("SELECT 1").fetchone()  # forces a new per-thread connection
 
-    threads = [threading.Thread(target=worker) for _ in range(20)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+        threads = [threading.Thread(target=worker) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
-    # `t` still holds a strong ref to the last thread after the loop above (the loop
-    # variable outlives the loop) — drop it explicitly, or that one thread never dies.
-    del threads, t
-    gc.collect()  # run the weakref finalizers for the now-dead threads
+        # `t` still holds a strong ref to the last thread after the loop above (the loop
+        # variable outlives the loop) — drop it explicitly, or that one thread never dies.
+        del threads, t
+        gc.collect()  # run the weakref finalizers for the now-dead threads
 
-    assert len(db._all_conns) <= baseline
+        assert len(db._all_conns) <= baseline
+    finally:
+        db.close()
 
 
 def test_close_releases_the_database_for_gc(tmp_path):
@@ -63,12 +66,15 @@ def test_retire_connection_is_reentrant_under_the_conns_lock(tmp_path):
     deadlock here takes the whole test process down with it.
     """
     db = Database(tmp_path / "t.db")
-    conn = db.conn
+    try:
+        conn = db.conn
 
-    with db._conns_lock:
-        reentrant = db._conns_lock.acquire(blocking=False)
-        if reentrant:
-            db._conns_lock.release()
-            db._retire_connection(conn)  # the real callback path, now provably safe
+        with db._conns_lock:
+            reentrant = db._conns_lock.acquire(blocking=False)
+            if reentrant:
+                db._conns_lock.release()
+                db._retire_connection(conn)  # the real callback path, now provably safe
 
-    assert reentrant, "_retire_connection would deadlock: _conns_lock is not re-entrant"
+        assert reentrant, "_retire_connection would deadlock: _conns_lock is not re-entrant"
+    finally:
+        db.close()
