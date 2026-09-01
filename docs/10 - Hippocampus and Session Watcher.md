@@ -49,10 +49,34 @@ The session watcher ingests normalized agent transcript JSONL files.
 
 ### Startup conditions
 
-It only starts when:
+**Changed by ADR-0004 (spool + `/ingest/nudge`), which is local-main only.** Upstream,
+`start_session_watcher` returns `[]` outright when the flag is off
+(`background/session_watcher.py`, the `if not s.session_watcher_enabled: return []` guard) and the
+description below holds as written. On this branch it does not.
 
-- `session_watcher_enabled == True`
-- at least one effective watch dir exists
+Here the flag gates **discovery only**. Its single functional read is
+`background/session_watcher.py:865`, and all it feeds is each root's `discover` flag, which turns
+on three producers:
+
+- the watchdog `Observer`
+- the discovery sweep at startup
+- the periodic `session_reconcile` job
+
+The **ingest worker is always on**: `start_session_watcher` calls `handler.start_drain()`
+unconditionally (marked `# the always-on worker`), `main.py` invokes it without consulting the
+flag, and `POST /ingest/nudge` — what the plugin's `SessionEnd`/`PreCompact` hooks call — never
+reads it either. So with `session_watcher_enabled = False` the watcher still ingests, and that is
+deliberate: per ADR-0004, "a spool entry exists only because the user's own hook created it". The
+flag means *do not go looking through my transcripts on your own*, not *do not ingest*.
+
+To tell them apart in the log, look for `Ingest worker started on <root> (observer=False)` together
+with no `Session reconcile job registered` line — that pair is the flag working, not failing. There
+is no knob that stops ingestion; only removing the hooks does.
+
+It starts when:
+
+- at least one effective watch dir exists (upstream additionally requires
+  `session_watcher_enabled == True`)
 
 Current defaults:
 
