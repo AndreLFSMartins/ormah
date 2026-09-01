@@ -1560,6 +1560,32 @@ class MemoryEngine:
         ).fetchall()
         original_edges = [dict(r) for r in edge_rows]
 
+        # Second discovery route for the supersession redirect below, because the
+        # first one reads the index while the promotion gate reads the file, and the
+        # two can diverge: _mark_superseded saves the markdown first and writes the row
+        # second, so a crash in between leaves a marker only in the file. The
+        # consolidator writes the derived_from edge BEFORE calling _mark_superseded, so
+        # inside that window the edge is already there and names the source.
+        #
+        # derived_from on its own proves nothing — it is a general relationship, which
+        # is exactly why #223 narrowed the promotion gate off it. The marker in the file
+        # stays the criterion; the edge only says which files are worth opening, which
+        # keeps this bounded to the consolidation cluster instead of scanning the store.
+        # Read before the transaction: file I/O must not run holding the write lock.
+        marked_in_markdown: set[str] = set()
+        for edge in original_edges:
+            if edge["edge_type"] != EdgeType.derived_from.value:
+                continue
+            if edge["source_id"] != removed.id:
+                continue
+            # Full-id check: FileStore resolves ids through an eight-character filename
+            # prefix and can hand back an unrelated colliding node (#280).
+            candidate = self.file_store.load(edge["target_id"])
+            if candidate is None or candidate.id != edge["target_id"]:
+                continue
+            if candidate.superseded_by == removed.id:
+                marked_in_markdown.add(candidate.id)
+
         # Capture incoming edges for the kept node that aren't in its markdown.
         # index_single calls _remove_node which wipes ALL edges (including
         # incoming ones like self→kept "defines").  We need to restore these.
@@ -1637,18 +1663,26 @@ class MemoryEngine:
             # and after this merge the keeper is what represents them; left pointing at
             # the soft-deleted node it reads as dangling, and the next confirmed use
             # promotes a source back into the whisper-eligible tier (#223, PR #257).
+            #
+            # Union of both routes: the index, and the files named by the derived_from
+            # edges read above. A source found only by the second route has a row whose
+            # marker never landed, so the per-id UPDATE heals that row as it redirects.
             # The keeper is excluded — its own marker was already cleared above.
-            redirected_sources = [
-                r["id"]
-                for r in conn.execute(
-                    "SELECT id FROM nodes WHERE superseded_by = ? AND id != ?",
-                    (removed.id, kept.id),
-                ).fetchall()
-            ]
-            conn.execute(
-                "UPDATE nodes SET superseded_by = ? WHERE superseded_by = ? AND id != ?",
-                (kept.id, removed.id, kept.id),
+            redirected_sources = sorted(
+                {
+                    r["id"]
+                    for r in conn.execute(
+                        "SELECT id FROM nodes WHERE superseded_by = ?", (removed.id,)
+                    ).fetchall()
+                }
+                | marked_in_markdown
+                - {kept.id}
             )
+            for source_id in redirected_sources:
+                conn.execute(
+                    "UPDATE nodes SET superseded_by = ? WHERE id = ?",
+                    (kept.id, source_id),
+                )
 
             # Clean up auto-linker checked pairs:
             # - removed node: delete all (node is gone)
