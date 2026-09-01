@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -21,7 +22,10 @@ class Database:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._all_conns: list[sqlite3.Connection] = []
-        self._conns_lock = threading.Lock()
+        self._finalizers: list[weakref.finalize] = []
+        # Re-entrant: the GC can fire a connection finalizer while this very thread is
+        # inside a section that already holds it — see _retire_connection.
+        self._conns_lock = threading.RLock()
         self._lock = threading.RLock()  # serializes write transactions across threads
 
     def _new_connection(self) -> sqlite3.Connection:
@@ -46,8 +50,19 @@ class Database:
             conn.enable_load_extension(False)
         except ImportError:
             pass  # sqlite-vec not installed — vector search disabled
+        # Auto-close this connection when its OWNING thread is garbage-collected. Without this,
+        # an ephemeral thread (e.g. a maintenance phase thread) leaks its connection — and its
+        # ~3 WAL fds — for the whole process lifetime, until [Errno 24]. finalize fires at most
+        # once; close() (shutdown) also handles any still-live threads' connections.
+        finalizer = weakref.finalize(threading.current_thread(), self._retire_connection, conn)
         with self._conns_lock:
             self._all_conns.append(conn)
+            # A finalizer keeps its callback and args alive, so this bound `_retire_connection`
+            # pins the Database until the OWNING thread dies — never, on a long-lived one.
+            # close() detaches them; drop the ones that already fired so the list stays bounded
+            # by live threads instead of growing once per thread ever seen.
+            self._finalizers = [f for f in self._finalizers if f.alive]
+            self._finalizers.append(finalizer)
         return conn
 
     @property
@@ -543,12 +558,30 @@ class Database:
         except ImportError:
             pass  # sqlite-vec not available, vector search disabled
 
+    def _retire_connection(self, conn: sqlite3.Connection) -> None:
+        """Drop a dead thread's connection from the registry and close it."""
+        with self._conns_lock:
+            try:
+                self._all_conns.remove(conn)
+            except ValueError:
+                pass  # already retired by close()
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
     def close(self) -> None:
         with self._conns_lock:
-            for conn in self._all_conns:
-                try:
-                    conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            self._all_conns.clear()
+            conns, self._all_conns = self._all_conns, []
+            finalizers, self._finalizers = self._finalizers, []
+        # Detaching drops the finalizer's refs to `self` and to the connection: without it a
+        # closed Database stays resident for as long as the thread that opened a connection on
+        # it lives. Done outside the lock — nothing here needs it.
+        for finalizer in finalizers:
+            finalizer.detach()
+        for conn in conns:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
         self._local = threading.local()
