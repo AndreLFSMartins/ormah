@@ -2400,6 +2400,14 @@ class MemoryEngine:
         if merged_title is not None:
             kept.title = merged_title
 
+        # If the keeper was itself marked superseded by the node it is now absorbing,
+        # the marker has nothing left to point at: redirecting it would write
+        # kept.superseded_by == kept.id, a marker that always resolves live and buries
+        # the node forever. Absorbing the replacement means nothing supersedes it (#223).
+        # Cleared before save/index_single so markdown and the row agree from the start.
+        if kept.superseded_by == removed.id:
+            kept.superseded_by = None
+
         # Snapshot removed node before deletion
         snapshot = removed.model_dump(mode="json")
 
@@ -2480,6 +2488,24 @@ class MemoryEngine:
                         "edge_type": edge["edge_type"],
                     }
                 )
+
+            # Consolidation sources marked superseded_by the removed node must follow
+            # it into the keeper. The marker is what blocks their automatic promotion,
+            # and after this merge the keeper is what represents them; left pointing at
+            # the soft-deleted node it reads as dangling, and the next confirmed use
+            # promotes a source back into the whisper-eligible tier (#223, PR #257).
+            # The keeper is excluded — its own marker was already cleared above.
+            redirected_sources = [
+                r["id"]
+                for r in conn.execute(
+                    "SELECT id FROM nodes WHERE superseded_by = ? AND id != ?",
+                    (removed.id, kept.id),
+                ).fetchall()
+            ]
+            conn.execute(
+                "UPDATE nodes SET superseded_by = ? WHERE superseded_by = ? AND id != ?",
+                (kept.id, removed.id, kept.id),
+            )
 
             # Clean up auto-linker checked pairs:
             # - removed node: delete all (node is gone)
@@ -2575,6 +2601,20 @@ class MemoryEngine:
                 neighbor.connections = new_connections
                 neighbor.touch_updated()
                 self.file_store.save(neighbor)
+
+        # Markdown side of the supersession redirect: the promotion gate reads the
+        # file, so the row alone is not enough. `updated` advances — unlike
+        # _mark_superseded, nothing else in this path stamps it, and the marker feeds
+        # LWW sync: a stale remote copy would otherwise win and restore the dead pointer.
+        for node_id in redirected_sources:
+            source = self.file_store.load(node_id)
+            # Full-id check: FileStore resolves ids through an eight-character filename
+            # prefix and can hand back an unrelated colliding node (#280).
+            if source is None or source.id != node_id:
+                continue
+            source.superseded_by = kept.id
+            source.touch_updated()
+            self.file_store.save(source)
 
         # Also fix the kept node's own connections that pointed to removed
         reload_kept = self.file_store.load(kept.id)
