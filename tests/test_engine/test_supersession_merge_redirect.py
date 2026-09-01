@@ -8,7 +8,8 @@ represents them.  Reported on PR #257 by the maintainer.
 
 from __future__ import annotations
 
-from ormah.models.node import CreateNodeRequest, Tier
+from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, Tier
+from tests.confirmed_use_helpers import reinforce
 
 
 def _live(engine, content: str, title: str) -> str:
@@ -73,7 +74,7 @@ def test_a_redirected_source_still_blocks_promotion(engine):
     into the whisper-eligible tier even though D represents it."""
     a, _b, _c, _d = _consolidation_then_merge(engine)
 
-    engine._record_confirmed_use(a)
+    reinforce(engine, a)
 
     assert engine.file_store.load(a).tier is Tier.archival
 
@@ -111,24 +112,35 @@ def test_the_kept_node_never_supersedes_itself(engine):
     assert engine.file_store.load(marked).superseded_by is None
     assert _sql_marker(engine, marked) is None
 
-    engine._record_confirmed_use(marked)
+    reinforce(engine, marked)
 
     assert engine.file_store.load(marked).tier is Tier.working
 
 
 # --- Where the redirect gets its list of sources -----------------------------
 #
-# The redirect discovers sources with `SELECT id FROM nodes WHERE superseded_by = ?`
-# — it reads the index, not the files.  The three tests below pin what that costs
-# and what it does not, because the markdown file is the authority the promotion
-# gate reads, and the two can diverge: `_mark_superseded` saves the file first and
-# writes the row second, so a crash in between leaves a marker only in markdown.
+# Two routes, because they answer slightly different questions.  Route 1 reads
+# `nodes.superseded_by` out of the index; route 2 opens the files named by the
+# derived_from edges leaving the removed node.  The gate reads the *file*, and the
+# two can diverge: `_mark_superseded` saves the markdown first and writes the row
+# second, so a crash in between leaves a marker only in markdown.  The consolidator
+# writes the derived_from edge before that call, so route 2 covers the window.
 
 
-def _marker_in_markdown_only(engine, content: str, replacement: str) -> str:
+def _marker_in_markdown_only(engine, content: str, replacement: str, *, edge: bool) -> str:
     """A source whose marker reached the file but not the row — the crash window
-    inside _mark_superseded, reproduced by saving without re-indexing."""
+    inside _mark_superseded.  *edge* replays the derived_from link the consolidator
+    writes one line earlier; without it there is nothing pointing at this file."""
     node_id, _ = engine.remember(CreateNodeRequest(content=content))
+    if edge:
+        # Created BEFORE the unindexed save: connect() re-indexes, which would
+        # otherwise hand the row the very marker this fixture must withhold.
+        engine.connect(ConnectRequest(
+            source_id=replacement,
+            target_id=node_id,
+            edge=EdgeType.derived_from,
+            weight=1.0,
+        ))
     node = engine.file_store.load(node_id)
     node.tier = Tier.archival
     node.superseded_by = replacement
@@ -137,67 +149,113 @@ def _marker_in_markdown_only(engine, content: str, replacement: str) -> str:
     return node_id
 
 
-def test_a_marker_that_never_reached_the_index_is_missed(engine):
-    """Characterisation, not an endorsement: the redirect is exactly as
-    index-trusting as the code around it — `execute_merge` already reads the
-    edges it remaps out of SQLite in the same way, so a stale index mis-remaps
-    edges long before it mis-redirects a marker.  Pinning the boundary here means
-    a future change that widens it has to edit this test on purpose."""
-    c = _live(engine, "the consolidation node", "C")
-    orphan = _marker_in_markdown_only(engine, "marked in the file, absent from the row", c)
-    d = _live(
-        engine,
-        "the node C is merged into, deliberately much longer so _pick_keeper keeps it",
-        "D",
-    )
-
-    engine.execute_merge(c, d)
-
-    assert engine.file_store.load(orphan).superseded_by == c, "still pointing at the dead node"
-    assert _sql_marker(engine, orphan) is None
-
-
-def test_the_missed_marker_lets_the_source_promote(engine):
-    """The consequence, spelled out: C is gone, so the stale marker reads as
-    dangling and the self-healing branch lifts the block."""
-    c = _live(engine, "the consolidation node", "C")
-    orphan = _marker_in_markdown_only(engine, "marked in the file, absent from the row", c)
+def _merge_into_d(engine, c: str) -> str:
     d = _live(
         engine,
         "the node C is merged into, deliberately much longer so _pick_keeper keeps it",
         "D",
     )
     engine.execute_merge(c, d)
-
-    engine._record_confirmed_use(orphan)
-
-    assert engine.file_store.load(orphan).tier is Tier.working
+    return d
 
 
-def test_a_reindex_closes_the_gap_before_the_merge(engine):
-    """The divergence is not durable: the index is derived from the files, so
-    re-indexing the source restores the row and the redirect finds it."""
+def test_a_marker_only_in_markdown_is_found_through_the_derived_from_edge(engine):
+    """The crash window inside _mark_superseded, reproduced end to end: the row
+    never got the marker, so route 1 cannot see this source at all."""
     c = _live(engine, "the consolidation node", "C")
-    orphan = _marker_in_markdown_only(engine, "marked in the file, absent from the row", c)
-    engine.builder.index_single(engine.file_store._find_file(orphan))
-    assert _sql_marker(engine, orphan) == c, "precondition: the reindex restored the row"
-    d = _live(
-        engine,
-        "the node C is merged into, deliberately much longer so _pick_keeper keeps it",
-        "D",
-    )
+    orphan = _marker_in_markdown_only(engine, "marked in the file only", c, edge=True)
 
-    engine.execute_merge(c, d)
+    d = _merge_into_d(engine, c)
 
     assert engine.file_store.load(orphan).superseded_by == d
+
+
+def test_the_row_is_healed_while_it_is_redirected(engine):
+    """Route 2 finds a source whose row is still NULL, so the per-id UPDATE has to
+    write the marker rather than merely change it — a `WHERE superseded_by = ?`
+    update would match nothing and leave the row behind the file forever."""
+    c = _live(engine, "the consolidation node", "C")
+    orphan = _marker_in_markdown_only(engine, "marked in the file only", c, edge=True)
+
+    d = _merge_into_d(engine, c)
+
     assert _sql_marker(engine, orphan) == d
 
 
+def test_the_recovered_source_stays_blocked(engine):
+    """The point of covering the window: without route 2 the stale marker reads as
+    dangling once C is gone, and the source promotes back into the whisper tier."""
+    c = _live(engine, "the consolidation node", "C")
+    orphan = _marker_in_markdown_only(engine, "marked in the file only", c, edge=True)
+    _merge_into_d(engine, c)
+
+    reinforce(engine, orphan)
+
+    assert engine.file_store.load(orphan).tier is Tier.archival
+
+
+def test_a_derived_from_target_without_a_marker_is_not_redirected(engine):
+    """derived_from is a general relationship — the same reason #223 refused to gate
+    promotion on it.  Route 2 opens the file to read the marker; the edge only
+    decides which files are worth opening.  Without this, every derived_from target
+    of the removed node would be marked superseded by the keeper."""
+    c = _live(engine, "the consolidation node", "C")
+    plain, _ = engine.remember(CreateNodeRequest(content="derived from C, never superseded"))
+    engine.connect(ConnectRequest(
+        source_id=c, target_id=plain, edge=EdgeType.derived_from, weight=1.0,
+    ))
+
+    _merge_into_d(engine, c)
+
+    assert engine.file_store.load(plain).superseded_by is None
+    assert _sql_marker(engine, plain) is None
+
+
+def test_a_derived_from_target_marked_by_someone_else_is_not_redirected(engine):
+    """Reachable by the edge, but its marker names a different node.  The criterion
+    is the marker's value, not merely that the file carries one."""
+    c = _live(engine, "the consolidation node", "C")
+    other = _live(engine, "an unrelated consolidation node", "other")
+    node_id, _ = engine.remember(CreateNodeRequest(content="derived from C, superseded by other"))
+    node = engine.file_store.load(node_id)
+    node.superseded_by = other
+    engine.builder.index_single(engine.file_store.save(node))
+    # The edge is created LAST: index_single wipes every edge touching this node,
+    # so building it first would leave the node unreachable by route 2 and this
+    # test would pass with the marker check removed.
+    engine.connect(ConnectRequest(
+        source_id=c, target_id=node_id, edge=EdgeType.derived_from, weight=1.0,
+    ))
+    assert engine.db.conn.execute(
+        "SELECT 1 FROM edges WHERE source_id = ? AND target_id = ? AND edge_type = 'derived_from'",
+        (c, node_id),
+    ).fetchone(), "precondition: route 2 can actually reach this node"
+
+    _merge_into_d(engine, c)
+
+    assert engine.file_store.load(node_id).superseded_by == other
+    assert _sql_marker(engine, node_id) == other
+
+
+def test_a_marker_with_neither_a_row_nor_an_edge_is_still_missed(engine):
+    """The residual boundary, pinned on purpose.  Both routes need *some* trace of
+    the source; a marker written outside the consolidator, into the file alone, has
+    none.  Nothing in this repository writes one that way — the consolidator is the
+    only producer, and it always writes the edge first — so closing this last case
+    would cost a full store scan on every merge for a state no code can reach.  A
+    change that widens the redirect has to edit this test on purpose."""
+    c = _live(engine, "the consolidation node", "C")
+    orphan = _marker_in_markdown_only(engine, "no row, no edge", c, edge=False)
+
+    _merge_into_d(engine, c)
+
+    assert engine.file_store.load(orphan).superseded_by == c, "still pointing at the dead node"
+
+
 def test_the_opposite_divergence_heals_instead_of_breaking(engine):
-    """Marker in the row, absent from the file — the mirror image.  SQL discovery
-    finds it, and the markdown pass writes the keeper into the file, so the merge
-    leaves the two agreeing.  This is why the SQL-first read is the safe half of
-    the pair: it over-reaches into repair, never under-reaches into loss."""
+    """Marker in the row, absent from the file — the mirror image.  Route 1 finds
+    it, and the markdown pass writes the keeper into the file, so the merge leaves
+    the two agreeing."""
     c = _live(engine, "the consolidation node", "C")
     node_id, _ = engine.remember(CreateNodeRequest(content="marked in the row, absent from the file"))
     node = engine.file_store.load(node_id)
@@ -207,12 +265,7 @@ def test_the_opposite_divergence_heals_instead_of_breaking(engine):
     engine.db.conn.commit()
     assert engine.file_store.load(node_id).superseded_by is None, "precondition: file has no marker"
 
-    d = _live(
-        engine,
-        "the node C is merged into, deliberately much longer so _pick_keeper keeps it",
-        "D",
-    )
-    engine.execute_merge(c, d)
+    d = _merge_into_d(engine, c)
 
     assert _sql_marker(engine, node_id) == d
     assert engine.file_store.load(node_id).superseded_by == d, "the markdown pass healed the file"
