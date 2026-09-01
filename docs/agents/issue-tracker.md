@@ -22,6 +22,36 @@ correctly inside this clone. If a command ever prompts for the repo, or you are 
 pass `--repo AndreLFSMartins/ormah` explicitly. An issue opened on `r-spade/ormah` is public and
 cannot be quietly undone.
 
+## Provenance: which Base a spec is born from
+
+Every issue here lives on the fork, so *where the issue lives* says nothing about *where the
+work should branch from* — a spec born from an upstream issue and a purely local fix are
+indistinguishable by tracker alone. The `Upstream:` line is what makes that distinction
+machine-readable, and `/wt-start` reads it to suggest the Base (`upstream/main` for an
+upstream contribution, `local-main` for local-only work — see `FORK-WORKFLOW.md`).
+
+**The convention:** an issue whose work originates upstream carries, on its own line in the
+body, a reference to the upstream issue it came from:
+
+```
+Upstream: r-spade/ormah#243
+```
+
+- The ref must be **real** — `r-spade/ormah#243` or the full `https://github.com/r-spade/ormah/issues/243`.
+  `Upstream: none` and `Upstream: n/a` name no ref, so they are read as local.
+- The line goes in the **body**, not in a comment.
+- A second, looser form also counts, so the line is a convention rather than the only channel:
+  a body that uses the word *upstream* **and** links an issue or PR in a repo other than this
+  one reads as upstream provenance. Prose alone, with no ref, never does.
+- `/wt-start` reads the issue's body and, failing that, the body of its **parent** — the native
+  GitHub sub-issue parent (`gh issue view --json parent`), not a `## Parent` line in the text —
+  and never deeper. A ticket linked as a sub-issue of its spec inherits the signal, so the line
+  only has to be written once, on the spec.
+- Absent the line, the suggested Base is `local`. The choice is always confirmed by a human
+  (`requireBaseChoice`), so a missing line costs a correction, never a wrong branch.
+
+Write the line when creating the spec — that is the moment the provenance is known.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
