@@ -3184,10 +3184,20 @@ class MemoryEngine:
             # Merged into #272's transaction: the floor now lifts the LOCAL stability
             # the claim computed, not node.stability, because the nodes row — not the
             # markdown — is the source the retry recomputes from.
+            #
+            # The id is compared in full, not merely tested for None: FileStore resolves
+            # an id through the eight-character prefix in the filename and returns the
+            # first match without re-checking what it loaded (#280), so a deleted
+            # replacement whose prefix collides with an unrelated node comes back as that
+            # node. `is not None` would read that as live and bury this memory forever.
             if node.tier is Tier.archival:
+                replacement = (
+                    self.file_store.load(node.superseded_by)
+                    if node.superseded_by is not None
+                    else None
+                )
                 superseded_by_live = (
-                    node.superseded_by is not None
-                    and self.file_store.load(node.superseded_by) is not None
+                    replacement is not None and replacement.id == node.superseded_by
                 )
                 if not superseded_by_live:
                     stability = lifecycle.promotion_floor(
