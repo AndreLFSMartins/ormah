@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, Tier
+from ormah.models.node import (
+    ConnectRequest,
+    CreateNodeRequest,
+    EdgeType,
+    MemoryNode,
+    NodeType,
+    Tier,
+)
 
 
 def _archive(engine, content: str, superseded_by: str | None = None) -> str:
@@ -98,6 +105,38 @@ def test_a_live_superseded_by_still_blocks_promotion(engine):
     engine._record_confirmed_use(marked)
 
     assert engine.file_store.load(marked).tier is Tier.archival
+
+
+def test_a_prefix_collision_is_not_mistaken_for_a_live_replacement(engine):
+    """`load(marker) is not None` is not the same question as "the replacement exists".
+
+    FileStore._find_file resolves an id through the 8-character prefix in the
+    filename and returns the first match without checking the id it loaded (#280),
+    so a deleted replacement whose prefix collides with an unrelated node comes
+    back as that node.  The marker then reads as live, the block never lifts, and
+    the memory is buried forever — the failure the dangling-marker branch exists
+    to prevent.  The liveness check has to confirm the complete id."""
+    collider = MemoryNode(
+        id="deadbeef-0000-0000-0000-00000000000b",
+        type=NodeType.fact,
+        content="an unrelated node that happens to share the first eight characters",
+    )
+    engine.builder.index_single(engine.file_store.save(collider))
+
+    gone = "deadbeef-0000-0000-0000-00000000000a"
+    collision = engine.file_store.load(gone)
+    assert collision is not None and collision.id != gone, (
+        "precondition: this test needs load() to resolve the prefix to the collider; "
+        "drop this assertion once #280 makes the lookup exact"
+    )
+
+    marked = _archive(engine, "superseded by a node that no longer exists", superseded_by=gone)
+
+    engine._record_confirmed_use(marked)
+
+    after = engine.file_store.load(marked)
+    assert after.tier is Tier.working
+    assert after.superseded_by == gone
 
 
 def test_promotion_is_written_to_the_index_too(engine):
