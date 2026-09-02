@@ -150,3 +150,20 @@ def test_builder_never_takes_file_lock_inside_write_transaction(engine):
     assert engine.builder.incremental_update() == (0, 0)
 
     assert not violations, f"FileStore lock acquired inside db.transaction(): {violations}"
+
+
+def test_reindex_preserves_superseded_by(engine):
+    """INSERT OR REPLACE drops omitted columns to their DEFAULT — the marker must be
+    in the column list, or the consolidator's own update_node wipes it (#223)."""
+    from ormah.models.node import CreateNodeRequest
+
+    node_id, _ = engine.remember(CreateNodeRequest(content="a source about to be superseded"))
+
+    node = engine.file_store.load(node_id)
+    node.superseded_by = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    engine.builder.index_single(engine.file_store.save(node))
+
+    row = engine.db.conn.execute(
+        "SELECT superseded_by FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+    assert row["superseded_by"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

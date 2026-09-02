@@ -136,3 +136,17 @@ def test_the_legacy_flag_is_written_alongside_the_version(engine):
         "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
     ).fetchone()
     assert row is not None and row["value"] == "1"
+
+
+def test_223_does_not_bump_the_lifecycle_model_version(engine):
+    """#223 changes a creation default and adds a column; it does not change the
+    reinforcement model, which is what this version records."""
+    from ormah.models.node import CreateNodeRequest, Tier
+
+    node_id, _ = engine.remember(CreateNodeRequest(content="written under #223"))
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.archival
+    engine.builder.index_single(engine.file_store.save(node))
+    engine._record_confirmed_use(node_id)
+
+    assert engine._lifecycle_model_version() == 2

@@ -74,3 +74,51 @@ def test_deleted_at_omitted_when_none():
     node = MemoryNode(type=NodeType.fact, source="agent:test", content="Live fact.")
     text = serialize_node(node)
     assert "deleted_at" not in text
+
+
+def test_superseded_by_survives_a_markdown_roundtrip():
+    node = MemoryNode(type=NodeType.fact, content="a superseded source")
+    node.superseded_by = "11111111-2222-3333-4444-555555555555"
+
+    parsed = parse_node(serialize_node(node))
+
+    assert parsed.superseded_by == "11111111-2222-3333-4444-555555555555"
+
+
+def test_superseded_by_is_absent_from_frontmatter_when_none():
+    """Without this assertion, writing `superseded_by: null` pollutes every node file."""
+    node = MemoryNode(type=NodeType.fact, content="an ordinary node")
+
+    text = serialize_node(node)
+
+    assert "superseded_by" not in text
+    assert parse_node(text).superseded_by is None
+
+
+def test_a_file_written_before_223_parses_to_none():
+    node = MemoryNode(type=NodeType.fact, content="written by an older build")
+    text = serialize_node(node)
+    assert parse_node(text).superseded_by is None
+
+
+def test_stability_is_not_retroactively_rescaled():
+    """#191 forbids rescaling values that predate the new default."""
+    node = MemoryNode(type=NodeType.fact, content="an old node", stability=1.0)
+    assert parse_node(serialize_node(node)).stability == 1.0
+
+
+def test_a_file_with_no_stability_key_parses_to_one_not_the_new_default():
+    """parse_node's `meta.get("stability", 1.0)` fallback must stay 1.0."""
+    text = (
+        "---\n"
+        "id: 99999999-8888-7777-6666-555555555555\n"
+        "type: fact\n"
+        "tier: working\n"
+        "source: agent:test\n"
+        "created: 2026-01-01T00:00:00Z\n"
+        "updated: 2026-01-01T00:00:00Z\n"
+        "last_accessed: 2026-01-01T00:00:00Z\n"
+        "---\n"
+        "a node from before FSRS\n"
+    )
+    assert parse_node(text).stability == 1.0
