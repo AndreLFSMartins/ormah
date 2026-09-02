@@ -1,12 +1,10 @@
-"""Detect near-duplicate memories and create merge proposals."""
+"""Detect near-duplicate memories and merge the ones that clear the bar (ADR-0006)."""
 
 from __future__ import annotations
 
 import json
 import logging
 import time
-import uuid
-from datetime import datetime, timezone
 
 from ormah.background.memory_lock import RestoredUnderfoot, restore_aware_job
 
@@ -320,12 +318,19 @@ def _find_merge_candidates(
 
 @restore_aware_job
 def run_duplicate_detection(engine, epoch: int) -> dict | None:
-    """Find near-duplicate nodes and create merge proposals.
+    """Find near-duplicate nodes and merge the ones above the auto-merge bar.
 
     Uses a multi-signal approach: embedding similarity (primary),
     title similarity, and token overlap for candidate generation.
     LLM confirmation is mandatory — no merges happen without LLM
     saying ``is_duplicate: true``.
+
+    A confirmed pair whose composite score clears ``auto_merge_threshold``
+    merges by itself; below it, nothing happens to the pair — no merge
+    proposal, no row, no queue (ADR-0006). Barred pairs are reported instead:
+    ``below_threshold`` counts them and ``below_threshold_mean_score`` is their
+    mean composite score (``None`` when none were barred), which is the
+    instrument a recalibration of the bar would start from.
 
     Seeds are delta-selected via a seq watermark (#81): only nodes newer than
     the last successfully-drained seed are scanned each run (bounded by
@@ -370,7 +375,9 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
 
         checked: set[tuple[str, str]] = set()
         window: list[dict] = []          # pending candidate pairs, at most K, across nodes
-        proposals_created = 0
+        merged_pairs = 0
+        below_threshold_pairs = 0
+        below_threshold_score_sum = 0.0
         pairs_attempted = 0
         pairs_evaluated = 0
         cap_hit = False
@@ -379,8 +386,9 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
         barrier_hit = False
 
         def _flush() -> None:
-            """Judge the windowed pairs (one K-chunk) and apply merges/proposals."""
-            nonlocal proposals_created, pairs_attempted, pairs_evaluated
+            """Judge the windowed pairs (one K-chunk) and merge the ones above the bar."""
+            nonlocal merged_pairs, below_threshold_pairs, below_threshold_score_sum
+            nonlocal pairs_attempted, pairs_evaluated
             verdicts = judge_pairs(
                 settings, _LLM_DUP_INSTRUCTIONS, window, _render_dup_pair,
                 judge_single=lambda p: _llm_check_duplicate(settings, p["node"], p["other"]),
@@ -408,72 +416,41 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
                         or conn.execute("SELECT 1 FROM nodes WHERE id = ?",
                                         (pair["other"]["id"],)).fetchone() is None):
                     continue
-                merged_content = llm_result.get("merged_content")
-                merged_title = llm_result.get("merged_title")
-                reason = llm_result.get("reason", "LLM confirmed duplicate")
-                reason += (f" (score={pair['score']:.3f}, embed={pair['embedding_sim']:.2f}, "
-                           f"title={pair['title_sim']:.2f}, token={pair['token_sim']:.2f})")
-                # Auto-merge for high-confidence duplicates
-                merged = False
-                if pair["score"] >= settings.auto_merge_threshold:
-                    with engine.memory_operation_at(epoch):
-                        # Revalidate: merged_content was written by the LLM from the content
-                        # snapshotted before the call. Applying it over an edit made since would
-                        # silently discard that edit. Skip the pair; the next run re-checks it
-                        # against the new content (#240).
-                        fresh = conn.execute(
-                            "SELECT id, content FROM nodes WHERE id IN (?, ?)",
-                            (pair["node"]["id"], pair["other"]["id"]),
-                        ).fetchall()
-                        current = {r["id"]: r["content"] for r in fresh}
-                        if (
-                            current.get(pair["node"]["id"]) != pair["node"]["content"]
-                            or current.get(pair["other"]["id"]) != pair["other"]["content"]
-                        ):
-                            logger.debug(
-                                "Auto-merge skipped %s / %s: content changed since the snapshot",
-                                pair["node"]["id"][:8], pair["other"]["id"][:8])
-                            continue
-                        try:
-                            result = engine.execute_merge(
-                                pair["node"]["id"], pair["other"]["id"],
-                                merged_content=merged_content, merged_title=merged_title)
-                            logger.info("Auto-merged: %s", result)
-                            proposals_created += 1
-                            merged = True
-                        except Exception as e:
-                            logger.warning("Auto-merge failed for %s / %s: %s",
-                                           pair["node"]["id"][:8], pair["other"]["id"][:8], e)
-                    if merged:
-                        continue
-                existing = conn.execute(
-                    "SELECT 1 FROM proposals WHERE type = 'merge' AND status = 'pending' "
-                    "AND (source_nodes LIKE ? OR source_nodes LIKE ?)",
-                    (f"%{pair['node']['id']}%", f"%{pair['other']['id']}%")).fetchone()
-                if existing:
+                # Below the Auto-merge threshold nothing happens to the Pair — no
+                # merge, no Merge proposal, no row (ADR-0006). It is counted so a
+                # future recalibration of the bar starts from measurement.
+                if pair["score"] < settings.auto_merge_threshold:
+                    below_threshold_pairs += 1
+                    below_threshold_score_sum += pair["score"]
                     continue
-                proposed_action = f"Merge two {pair['node']['type']} memories into one"
-                if merged_content is not None:
-                    proposed_action += (
-                        f"\n\nMerged content preview:\n---\n"
-                        f"{merged_title or ''}\n{merged_content}\n---"
-                    )
-
                 with engine.memory_operation_at(epoch):
-                    with engine.db.transaction() as conn_tx:
-                        conn_tx.execute(
-                            "INSERT INTO proposals (id, type, status, source_nodes, "
-                            "proposed_action, reason, created) "
-                            "VALUES (?, 'merge', 'pending', ?, ?, ?, ?)",
-                            (
-                                str(uuid.uuid4()),
-                                json.dumps([pair["node"]["id"], pair["other"]["id"]]),
-                                proposed_action,
-                                reason,
-                                datetime.now(timezone.utc).isoformat(),
-                            ),
-                        )
-                proposals_created += 1
+                    # Revalidate: merged_content was written by the LLM from the content
+                    # snapshotted before the call. Applying it over an edit made since would
+                    # silently discard that edit. Skip the pair; the next run re-checks it
+                    # against the new content (#240).
+                    fresh = conn.execute(
+                        "SELECT id, content FROM nodes WHERE id IN (?, ?)",
+                        (pair["node"]["id"], pair["other"]["id"]),
+                    ).fetchall()
+                    current = {r["id"]: r["content"] for r in fresh}
+                    if (
+                        current.get(pair["node"]["id"]) != pair["node"]["content"]
+                        or current.get(pair["other"]["id"]) != pair["other"]["content"]
+                    ):
+                        logger.debug(
+                            "Auto-merge skipped %s / %s: content changed since the snapshot",
+                            pair["node"]["id"][:8], pair["other"]["id"][:8])
+                        continue
+                    try:
+                        result = engine.execute_merge(
+                            pair["node"]["id"], pair["other"]["id"],
+                            merged_content=llm_result.get("merged_content"),
+                            merged_title=llm_result.get("merged_title"))
+                        logger.info("Auto-merged: %s", result)
+                        merged_pairs += 1
+                    except Exception as e:
+                        logger.warning("Auto-merge failed for %s / %s: %s",
+                                       pair["node"]["id"][:8], pair["other"]["id"][:8], e)
             window.clear()
 
         for node in nodes:
@@ -544,8 +521,7 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
                     cap_hit = True
                     break
                 window.append({"node": node, "other": other, "score": score,
-                               "embedding_sim": embedding_sim, "title_sim": title_sim,
-                               "token_sim": token_sim, "seed_seq": node["seq"]})
+                               "seed_seq": node["seq"]})
                 if len(window) >= k:
                     _flush()
 
@@ -571,7 +547,12 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
             "nodes_scanned": len(nodes),
             "pairs_attempted": pairs_attempted,
             "pairs_evaluated": pairs_evaluated,
-            "proposals_created": proposals_created,
+            "merged": merged_pairs,
+            "below_threshold": below_threshold_pairs,
+            "below_threshold_mean_score": (
+                round(below_threshold_score_sum / below_threshold_pairs, 3)
+                if below_threshold_pairs else None
+            ),
             "cap_hit": cap_hit,
             "duration_s": round(duration, 3),
             "pairs_per_s": round(pairs_evaluated / duration, 2) if duration > 0 else 0.0,

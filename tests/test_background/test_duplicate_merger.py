@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from unittest.mock import patch, MagicMock
+
+import pytest
 
 from ormah.models.node import CreateNodeRequest, NodeType, UpdateNodeRequest
 
@@ -31,6 +34,25 @@ def _reset_adapter():
     reset_adapter()
 
 
+def _table_row_counts(engine) -> dict[str, int]:
+    """Row count of every table in the store — the probe for "no row anywhere"."""
+    names = [r["name"] for r in engine.db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()]
+    counts = {}
+    for name in names:
+        try:
+            counts[name] = engine.db.conn.execute(
+                f'SELECT COUNT(*) AS c FROM "{name}"').fetchone()["c"]
+        except sqlite3.OperationalError:   # fts5 shadow tables that refuse a bare count
+            continue
+    return counts
+
+
+def _proposal_count(engine) -> int:
+    """Rows in `proposals`. ADR-0006: this job files none, ever."""
+    return engine.db.conn.execute("SELECT COUNT(*) AS c FROM proposals").fetchone()["c"]
+
+
 def test_llm_confirms_duplicate_auto_merge(engine):
     """LLM confirms duplicate -> auto-merge with merged content."""
     id_a, id_b = _create_pair(engine)
@@ -49,7 +71,7 @@ def test_llm_confirms_duplicate_auto_merge(engine):
 
     with patch(_LLM_PATCH, return_value=llm_response):
         from ormah.background.duplicate_merger import run_duplicate_detection
-        run_duplicate_detection(engine)
+        stats = run_duplicate_detection(engine)
 
     # One of the two nodes should have been removed; the kept one should
     # have the LLM-generated content.
@@ -57,6 +79,10 @@ def test_llm_confirms_duplicate_auto_merge(engine):
     assert kept is not None
     assert kept.content == "Python is a popular programming language used widely."
     assert kept.title == "Python Programming Language"
+
+    # The merged Pair is reported apart from the barred ones (ADR-0006).
+    assert stats["merged"] == 1
+    assert stats["below_threshold"] == 0
 
 
 def test_llm_rejects_duplicate_no_merge(engine):
@@ -76,11 +102,17 @@ def test_llm_rejects_duplicate_no_merge(engine):
 
     with patch(_LLM_PATCH, return_value=llm_response):
         from ormah.background.duplicate_merger import run_duplicate_detection
-        run_duplicate_detection(engine)
+        stats = run_duplicate_detection(engine)
 
     # Both nodes should still exist
     assert engine.file_store.load(id_a) is not None
     assert engine.file_store.load(id_b) is not None
+
+    # A "not a duplicate" verdict moves neither counter.
+    assert stats["pairs_evaluated"] == 1
+    assert stats["merged"] == 0
+    assert stats["below_threshold"] == 0
+    assert stats["below_threshold_mean_score"] is None
 
 
 def test_llm_unavailable_skips_merge(engine):
@@ -100,10 +132,7 @@ def test_llm_unavailable_skips_merge(engine):
     assert engine.file_store.load(id_b) is not None
 
     # No proposals
-    proposals = engine.db.conn.execute(
-        "SELECT * FROM proposals WHERE type = 'merge' AND status = 'pending'"
-    ).fetchall()
-    assert len(proposals) == 0
+    assert _proposal_count(engine) == 0
 
 
 def test_llm_disabled_skips_detection(engine):
@@ -122,8 +151,13 @@ def test_llm_disabled_skips_detection(engine):
     mock_llm.assert_not_called()
 
 
-def test_merged_content_stored_in_proposal(engine):
-    """For medium-confidence pairs, proposal contains merged content preview."""
+def test_confirmed_duplicate_below_threshold_writes_no_row_anywhere(engine):
+    """ADR-0006: a confirmed duplicate under the Auto-merge threshold does not
+    merge and does not get filed — nothing happens to it, and the run reports it.
+
+    Was ``test_merged_content_stored_in_proposal``: same scenario (a confirmed
+    pair the bar rejects), asserting the new outcome.
+    """
     id_a, id_b = _create_pair(engine)
 
     llm_response = json.dumps({
@@ -133,30 +167,31 @@ def test_merged_content_stored_in_proposal(engine):
         "reason": "Both describe Python as a programming language.",
     })
 
-    # Set threshold high so pair goes to proposal instead of auto-merge
+    # Set threshold high so the pair sits below the bar
     engine.settings.auto_merge_threshold = 0.99
     engine.settings.llm_provider = "ollama"
     _reset_adapter()
 
+    before = _table_row_counts(engine)
     with patch(_LLM_PATCH, return_value=llm_response):
         from ormah.background.duplicate_merger import run_duplicate_detection
-        run_duplicate_detection(engine)
+        stats = run_duplicate_detection(engine)
 
     # Both nodes should still exist (no auto-merge)
     assert engine.file_store.load(id_a) is not None
     assert engine.file_store.load(id_b) is not None
 
-    # A proposal should have been created with merged content preview
-    proposals = engine.db.conn.execute(
-        "SELECT * FROM proposals WHERE type = 'merge' AND status = 'pending'"
-    ).fetchall()
-    assert len(proposals) >= 1
+    assert _proposal_count(engine) == 0
 
-    proposal = proposals[0]
-    assert "Merged content preview:" in proposal["proposed_action"]
-    assert "Python Programming Language" in proposal["proposed_action"]
-    assert "Python is a popular programming language used widely." in proposal["proposed_action"]
-    assert "Both describe Python" in proposal["reason"]
+    # ...and no row anywhere else either. `meta` is the watermark's home, which
+    # this run legitimately advances.
+    after = _table_row_counts(engine)
+    grew = {t: (before.get(t), c) for t, c in after.items()
+            if before.get(t) != c and t != "meta"}
+    assert grew == {}, f"rows appeared outside `meta`: {grew}"
+
+    assert stats["merged"] == 0
+    assert stats["below_threshold"] == 1
 
 
 def test_pairs_evaluated_counts_one_candidate_pair(engine):
@@ -209,14 +244,16 @@ def test_duplicate_prompt_is_composed_from_parts():
     assert dm._LLM_DUP_INSTRUCTIONS == dm._LLM_DUP_INTRO + "\n\n" + dm._LLM_DUP_RULES
 
 
-def test_batched_dedup_creates_proposals(engine):
+def test_batched_dedup_reports_barred_pairs(engine):
+    """Was ``test_batched_dedup_creates_proposals``: same batched run, asserting
+    the new outcome — the confirmed Pairs the bar rejects are counted, not filed."""
     from ormah.background import duplicate_merger as dm
     for _ in range(3):
         engine.remember(CreateNodeRequest(
             content="ormah stores memories in sqlite with fts5", title="ormah storage"))
     engine.settings.llm_provider = "ollama"
     engine.settings.maintenance_pairs_per_call = 2
-    engine.settings.auto_merge_threshold = 2.0     # force proposal path, not auto-merge
+    engine.settings.auto_merge_threshold = 2.0     # every Pair sits below the bar
     _reset_adapter()
 
     def fake_batch(settings, prompt, json_mode=True, **kw):
@@ -231,10 +268,10 @@ def test_batched_dedup_creates_proposals(engine):
             patch("ormah.background.duplicate_merger._llm_check_duplicate", return_value=single):
         stats = dm.run_duplicate_detection(engine)
 
-    n_props = engine.db.conn.execute(
-        "SELECT COUNT(*) FROM proposals WHERE type = 'merge'").fetchone()[0]
-    assert n_props >= 1
+    assert _proposal_count(engine) == 0
     assert stats["pairs_evaluated"] >= 1
+    assert stats["merged"] == 0
+    assert stats["below_threshold"] >= 1
 
 
 def test_batched_dedup_skips_pairs_whose_node_was_merged_away(engine):
@@ -394,11 +431,14 @@ def test_run_does_not_rejudge_pair_below_watermark(engine):
     assert get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY) == max_seq
 
 
-def test_run_creates_proposal_for_delta_pair_and_advances(engine):
+def test_run_bars_delta_pair_and_still_advances(engine):
+    """Was ``test_run_creates_proposal_for_delta_pair_and_advances``: same delta
+    Pair, asserting the new outcome — barred, unfiled, and the Watermark still
+    advances to the last drained seed."""
     from ormah.background.duplicate_merger import run_duplicate_detection
     from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
 
-    engine.settings.auto_merge_threshold = 999.0  # force proposal path, not auto-merge
+    engine.settings.auto_merge_threshold = 999.0  # the Pair sits below the bar
     _make_fact(engine, "Backup time", "Backups run every night at 2am.")
     _make_fact(engine, "Backup schedule", "The backup runs nightly at 2am.")
     max_seq = engine.db.conn.execute("SELECT MAX(seq) m FROM nodes").fetchone()["m"]
@@ -406,12 +446,10 @@ def test_run_creates_proposal_for_delta_pair_and_advances(engine):
     engine.settings.llm_provider = "ollama"
     _reset_adapter()
     with patch(_LLM_PATCH, return_value=_duplicate_response()):
-        run_duplicate_detection(engine)
+        stats = run_duplicate_detection(engine)
 
-    proposals = engine.db.conn.execute(
-        "SELECT 1 FROM proposals WHERE type = 'merge' AND status = 'pending'"
-    ).fetchall()
-    assert len(proposals) >= 1
+    assert _proposal_count(engine) == 0
+    assert stats["below_threshold"] >= 1
     assert get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY) == max_seq
 
 
@@ -516,7 +554,7 @@ def test_dedup_run_judges_pair_already_in_auto_link_checked(engine):
 
     from ormah.background.duplicate_merger import run_duplicate_detection
 
-    engine.settings.auto_merge_threshold = 999.0  # force proposal path
+    engine.settings.auto_merge_threshold = 999.0  # the Pair sits below the bar
     id_a, _ = _make_fact(engine, "Editor choice", "The user edits everything in neovim.")
     id_b, _ = _make_fact(engine, "Editor pick", "The user does all editing in neovim.")
 
@@ -531,12 +569,11 @@ def test_dedup_run_judges_pair_already_in_auto_link_checked(engine):
     engine.settings.llm_provider = "ollama"
     _reset_adapter()
     with patch(_LLM_PATCH, return_value=_duplicate_response()):
-        run_duplicate_detection(engine)
+        stats = run_duplicate_detection(engine)
 
-    proposals = engine.db.conn.execute(
-        "SELECT 1 FROM proposals WHERE type = 'merge' AND status = 'pending'"
-    ).fetchall()
-    assert len(proposals) >= 1
+    # It was judged: the bar barred it, which only a judged Pair can be.
+    assert stats["below_threshold"] >= 1
+    assert _proposal_count(engine) == 0
 
 
 def test_dedup_run_processes_seeds_after_vectorless_barrier(engine):
@@ -545,7 +582,7 @@ def test_dedup_run_processes_seeds_after_vectorless_barrier(engine):
     from ormah.background.duplicate_merger import run_duplicate_detection
     from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
 
-    engine.settings.auto_merge_threshold = 999.0  # force proposal path
+    engine.settings.auto_merge_threshold = 999.0  # the Pair sits below the bar
     barrier_id, barrier_seq = _make_fact(engine, "Vectorless note", "A note whose vector went missing.")
     with engine.db.transaction() as conn:
         conn.execute("DELETE FROM node_vectors WHERE id = ?", (barrier_id,))
@@ -556,12 +593,10 @@ def test_dedup_run_processes_seeds_after_vectorless_barrier(engine):
     engine.settings.llm_provider = "ollama"
     _reset_adapter()
     with patch(_LLM_PATCH, return_value=_duplicate_response()):
-        run_duplicate_detection(engine)
+        stats = run_duplicate_detection(engine)
 
-    proposals = engine.db.conn.execute(
-        "SELECT 1 FROM proposals WHERE type = 'merge' AND status = 'pending'"
-    ).fetchall()
-    assert len(proposals) >= 1, "later seeds past the barrier must still be judged"
+    assert stats["below_threshold"] >= 1, "later seeds past the barrier must still be judged"
+    assert _proposal_count(engine) == 0
 
     wm = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
     assert wm < barrier_seq  # cursor still parked before the barrier
@@ -597,7 +632,7 @@ def test_zero_usable_then_partial_probe_recovers_watermark(engine):
     from ormah.background.duplicate_merger import run_duplicate_detection
     from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
 
-    engine.settings.auto_merge_threshold = 999.0   # proposal path, not auto-merge
+    engine.settings.auto_merge_threshold = 999.0   # below the bar: no merge perturbs the probe
     _make_fact(engine, "Backup time", "Backups run every night at 2am.")
     _make_fact(engine, "Backup schedule", "The backup runs nightly at 2am.")
     _make_fact(engine, "Nightly backup", "Every night, backups run at 2am.")
@@ -638,6 +673,10 @@ def test_zero_usable_then_partial_probe_recovers_watermark(engine):
     assert batch_sizes[:3] == [4, 2, 2]
     assert single.call_count == 1
     assert get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY) == max_seq
+    # Same scenario, new outcome: every recovered verdict is confirmed and every
+    # Pair sits below the bar, so all of them are barred and none is filed.
+    assert stats["below_threshold"] >= 4
+    assert _proposal_count(engine) == 0
 
 
 def test_duplicate_detection_does_not_hold_the_lock_across_the_llm_call(engine):
@@ -670,14 +709,12 @@ def test_duplicate_detection_does_not_hold_the_lock_across_the_llm_call(engine):
 
 def test_duplicate_detection_aborts_when_a_restore_lands_mid_run(engine):
     id_a, id_b = _create_pair(engine)
-    # Force the auto-merge branch so the node-count assertion below actually
-    # proves that path aborted too, not only the (mutually exclusive) proposal path.
+    # The auto-merge branch is the only writing path left (ADR-0006), so the
+    # node-count assertion below is what proves the abort.
     engine.settings.auto_merge_threshold = 0.0
     engine.settings.llm_provider = "ollama"
     _reset_adapter()
 
-    proposals_before = engine.db.conn.execute(
-        "SELECT COUNT(*) AS c FROM proposals").fetchone()["c"]
     nodes_before = engine.db.conn.execute("SELECT COUNT(*) AS c FROM nodes").fetchone()["c"]
     epoch_before = engine.restore_epoch
 
@@ -701,8 +738,6 @@ def test_duplicate_detection_aborts_when_a_restore_lands_mid_run(engine):
     # moved epoch is proof the job actually got there.
     assert engine.restore_epoch > epoch_before, \
         "the fake LLM was never called — the fixture stopped exercising the job"
-    assert engine.db.conn.execute(
-        "SELECT COUNT(*) AS c FROM proposals").fetchone()["c"] == proposals_before
     assert engine.db.conn.execute(
         "SELECT COUNT(*) AS c FROM nodes").fetchone()["c"] == nodes_before
 
@@ -742,3 +777,59 @@ def test_a_node_edited_during_the_llm_call_is_not_merged_over(engine):
     assert "the user rewrote this node" in row["content"], "the stale merged text overwrote a fresh edit"
     assert engine.db.conn.execute(
         "SELECT COUNT(*) AS c FROM nodes").fetchone()["c"] == nodes_before
+
+
+def test_below_threshold_mean_score_reflects_the_pairs_actually_barred(engine):
+    """The reported mean is the mean of the barred Pairs — not of every judged
+    Pair, and not a placeholder.
+
+    Probed without touching the Composite score formula: the same corpus is run
+    three times with only the *verdict* changed. Barring Pair 1 alone yields its
+    score, barring Pair 2 alone yields its score, and barring both must yield
+    exactly the average of the two.
+    """
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, set_watermark
+
+    _make_fact(engine, "Backup time", "Backups run every night at 2am.")
+    _make_fact(engine, "Backup schedule", "The backup runs nightly at 2am.")
+    _make_fact(engine, "Editor choice", "The user edits everything in neovim.")
+    _make_fact(engine, "Editor pick", "The user does all editing in neovim.")
+
+    engine.settings.llm_provider = "ollama"
+    engine.settings.maintenance_pairs_per_call = 1     # K=1: one verdict per Pair
+    engine.settings.duplicate_check_pairs_per_call = 1
+    engine.settings.auto_merge_threshold = 999.0       # every confirmed Pair is barred
+    _reset_adapter()
+
+    def _verdict_for(topics):
+        def check(settings, node_row, other_row):
+            titles = f"{node_row['title']} {other_row['title']}".lower()
+            is_dup = any(t in titles for t in topics)
+            return {"is_duplicate": is_dup, "merged_title": "t",
+                    "merged_content": "c", "reason": "same fact"}
+        return check
+
+    def _run(topics):
+        set_watermark(engine, DUPLICATE_WATERMARK_KEY, 0)
+        with patch("ormah.background.duplicate_merger._llm_check_duplicate",
+                   _verdict_for(topics)):
+            return run_duplicate_detection(engine)
+
+    backups = _run(["backup"])
+    editors = _run(["editor"])
+    both = _run(["backup", "editor"])
+
+    assert backups["below_threshold"] == 1
+    assert editors["below_threshold"] == 1
+    assert both["below_threshold"] == 2
+
+    m_backups = backups["below_threshold_mean_score"]
+    m_editors = editors["below_threshold_mean_score"]
+    assert m_backups != m_editors, "the two Pairs must score differently, or this proves nothing"
+    # abs tolerance: each reported mean is rounded to 3 decimals at the source.
+    assert both["below_threshold_mean_score"] == pytest.approx(
+        (m_backups + m_editors) / 2, abs=1e-3)
+
+    # Nothing was written for any of them.
+    assert _proposal_count(engine) == 0

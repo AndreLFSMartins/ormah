@@ -44,7 +44,7 @@ _TASK_RUNNERS = {
 _TASK_DESCRIPTIONS = {
     "importance_scorer": "Recalculates importance scores for all memories based on connections, access patterns, and usefulness.",
     "index_updater": "Incrementally updates the full-text and vector search indexes with new or modified memories.",
-    "duplicate_merger": "Detects near-duplicate memories and creates merge proposals for review.",
+    "duplicate_merger": "Detects near-duplicate memories and merges the ones that clear the auto-merge threshold. Pairs below it are left alone and only counted in the run's report.",
     "conflict_detector": "Finds contradicting memories and creates conflict proposals for resolution.",
     "auto_linker": "Discovers and creates edges between semantically related memories.",
     "auto_cluster": "Groups memories into clusters based on semantic similarity and tags.",
