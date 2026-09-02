@@ -367,7 +367,7 @@ def get_proposals(request: Request):
 
 @router.post("/proposals/{proposal_id}")
 def resolve_proposal(proposal_id: str, body: ResolveProposalRequest, request: Request):
-    """Approve or reject a proposal. Executes merge on approval."""
+    """Approve or reject a proposal. Creates a contradicts edge on an approved conflict."""
     engine = request.app.state.engine
     from datetime import datetime, timezone
 
@@ -385,33 +385,11 @@ def resolve_proposal(proposal_id: str, body: ResolveProposalRequest, request: Re
             (action, datetime.now(timezone.utc).isoformat(), proposal_id),
         )
 
+    # No merge branch, in either direction: the Duplicate merger auto-merges or does
+    # nothing, so no merge proposal has a producer any more (ADR-0006, #10). The merge
+    # execution routine itself stays — the auto-merge path calls it.
     merge_result = None
     conflict_result = None
-
-    if action == "approved" and proposal["type"] == "merge":
-        try:
-            node_ids = json.loads(proposal["source_nodes"])
-            if len(node_ids) == 2:
-                merge_result = engine.execute_merge(
-                    node_ids[0], node_ids[1], proposal_id=proposal_id
-                )
-        except Exception:
-            logger.exception("Merge failed for proposal %s", proposal_id)
-            merge_result = "Merge failed"
-
-    if action == "rejected" and proposal["type"] == "merge":
-        try:
-            node_ids = json.loads(proposal["source_nodes"])
-            if len(node_ids) == 2:
-                pair = tuple(sorted(node_ids))
-                with engine.db.transaction() as conn:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) "
-                        "VALUES (?, ?, 'not_duplicate', ?)",
-                        (*pair, datetime.now(timezone.utc).isoformat()),
-                    )
-        except Exception:
-            logger.exception("Failed to record not_duplicate for rejected proposal %s", proposal_id)
 
     if action == "approved" and proposal["type"] == "conflict":
         try:
