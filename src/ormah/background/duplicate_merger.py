@@ -316,6 +316,25 @@ def _find_merge_candidates(
     return candidates
 
 
+def _merge_did_not_happen(result: object) -> bool:
+    """True when ``execute_merge`` came back without having merged anything.
+
+    It does not raise when a node's markdown file is gone: it returns
+    ``"Node <id> not found."`` and leaves both index rows in place, so the DB
+    existence pre-check upstream of the call cannot see it either. Above the
+    Auto-merge bar merge is the only outcome (ADR-0006), which makes that return
+    a failure rather than a merge — counting it as one drains a Pair the LLM
+    confirmed and the bar accepted, permanently.
+
+    Keying on the message is only safe while the message is pinned:
+    ``test_missing_node_return_is_the_contract_the_no_op_guard_reads`` calls the
+    real engine and fails here if it is ever reworded.
+    """
+    return (isinstance(result, str)
+            and result.startswith("Node ")
+            and result.rstrip().endswith("not found."))
+
+
 @restore_aware_job
 def run_duplicate_detection(engine, epoch: int) -> dict | None:
     """Find near-duplicate nodes and merge the ones above the auto-merge bar.
@@ -332,11 +351,13 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
     mean composite score (``None`` when none were barred), which is the
     instrument a recalibration of the bar would start from.
 
-    Above the bar merge is the only outcome, so a merge that raises is work the
-    run owes and did not deliver: ``merge_failed`` counts it and its seed parks
-    the watermark, exactly as an unavailable LLM does. Without both, the pair
-    would drain and never be looked at again while the run reported a clean
-    success (council, 2026-09-02).
+    Above the bar merge is the only outcome, so a merge that does not happen is
+    work the run owes and did not deliver: ``merge_failed`` counts it and its
+    seed parks the watermark, exactly as an unavailable LLM does. Without both,
+    the pair would drain and never be looked at again while the run reported a
+    clean success (council, 2026-09-02). That covers ``execute_merge`` raising
+    *and* it returning ``"Node … not found."`` without merging — the second was
+    the silent half, since it read as a successful merge (council, 2026-09-02).
 
     Seeds are delta-selected via a seq watermark (#81): only nodes newer than
     the last successfully-drained seed are scanned each run (bounded by
@@ -449,14 +470,23 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
                             "Auto-merge skipped %s / %s: content changed since the snapshot",
                             pair["node"]["id"][:8], pair["other"]["id"][:8])
                         continue
+                    # Two failure modes, one outcome. execute_merge raises for a
+                    # genuine error, but merely RETURNS "Node … not found." when a
+                    # markdown file is missing — and the silent one is the dangerous
+                    # one, because it looks like a merge.
                     try:
                         result = engine.execute_merge(
                             pair["node"]["id"], pair["other"]["id"],
                             merged_content=llm_result.get("merged_content"),
                             merged_title=llm_result.get("merged_title"))
+                    except Exception as e:
+                        failure = str(e)
+                    else:
+                        failure = result if _merge_did_not_happen(result) else None
+                    if failure is None:
                         logger.info("Auto-merged: %s", result)
                         merged_pairs += 1
-                    except Exception as e:
+                    else:
                         # Above the bar merge is the only outcome (ADR-0006), so a
                         # failure here is a Pair the run owes and did not deliver.
                         # Count it, and park its seed the way an unavailable LLM
@@ -464,7 +494,7 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
                         merge_failed_pairs += 1
                         failed_seed_seqs.add(pair["seed_seq"])
                         logger.warning("Auto-merge failed for %s / %s: %s",
-                                       pair["node"]["id"][:8], pair["other"]["id"][:8], e)
+                                       pair["node"]["id"][:8], pair["other"]["id"][:8], failure)
             window.clear()
 
         for node in nodes:

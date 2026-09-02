@@ -554,6 +554,97 @@ def test_failed_execute_merge_is_counted_and_parks_the_watermark(engine):
     assert wm < pair_seq_a      # the failed Pair's seed is retried next run
 
 
+def test_execute_merge_no_op_is_counted_and_parks_the_watermark(engine):
+    """`execute_merge` does not raise when a node's markdown file is missing:
+    it returns ``"Node <id> not found."`` with both index rows still in place
+    (`memory_engine.py`, the two guards after `file_store.load`). Counting the
+    return as a merge is the same permanent loss a raising merge would be —
+    worse, because it reports `merged` and drains the seed on a Pair the LLM
+    confirmed and the bar accepted.
+
+    The DB pre-check upstream of the call cannot catch it: it reads `nodes`,
+    while the failure is an index/file divergence.
+
+    Worked example, bug present: `execute_merge` returns the string, no
+    exception is raised, `merged_pairs += 1` runs, `failed_seed_seqs` stays
+    empty and the ponytail advances past `pair_seq_a`. So `merged == 1`,
+    `merge_failed == 0`, `wm >= pair_seq_a`, and the second run selects
+    nothing.
+
+    Assertions that fail without the fix: `merge_failed`, `merged`, the parked
+    `wm`, and the second run's `pairs_evaluated`. The two `file_store.load`
+    assertions would pass WITH the bug present — `execute_merge` is patched, so
+    no node is ever consumed either way. They are context, not detection.
+    """
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+    # A clean, candidate-less seed first, so the parked cursor is proven to be
+    # the failing seed rather than "the watermark never moved at all".
+    _, clean_seq = _make_fact(engine, "Lone note", "A singleton note about nothing similar.")
+    id_a, pair_seq_a = _make_fact(engine, "Coffee dose", "The user drinks two espressos daily.")
+    id_b, _ = _make_fact(engine, "Espresso habit", "The user has two espressos every day.")
+
+    llm_response = json.dumps({
+        "is_duplicate": True,
+        "merged_title": "Espresso habit",
+        "merged_content": "The user drinks two espressos every day.",
+        "reason": "Both record the same daily habit.",
+    })
+    engine.settings.auto_merge_threshold = 0.0   # the pair clears the bar
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    # The real return value of the missing-file path, not an invented one — the
+    # test below pins it against the engine itself.
+    no_op = f"Node {id_a} not found."
+
+    with patch(_LLM_PATCH, return_value=llm_response), \
+            patch.object(engine, "execute_merge", return_value=no_op):
+        stats = run_duplicate_detection(engine)
+
+    assert stats["merge_failed"] == 1
+    assert stats["merged"] == 0
+    assert stats["below_threshold"] == 0        # it was above the bar, not barred
+
+    # Nothing was consumed: the merge never ran.
+    assert engine.file_store.load(id_a) is not None
+    assert engine.file_store.load(id_b) is not None
+    assert _proposal_count(engine) == 0         # ADR-0006: no fallback row either
+
+    wm = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
+    assert wm >= clean_seq      # the clean prefix still advances
+    assert wm < pair_seq_a      # the no-op Pair's seed is retried next run
+
+    # The park is only worth anything if the next run really re-checks the Pair.
+    with patch(_LLM_PATCH, return_value=llm_response), \
+            patch.object(engine, "execute_merge", return_value=no_op):
+        second = run_duplicate_detection(engine)
+
+    assert second["pairs_evaluated"] == 1
+    assert second["merge_failed"] == 1
+
+
+def test_missing_node_return_is_the_contract_the_no_op_guard_reads(engine):
+    """Pins the string the guard keys on against the engine that produces it.
+
+    The guard in `duplicate_merger` recognises a failed merge by
+    `execute_merge`'s documented return, so a reworded message would silently
+    turn every no-op back into a counted merge. This test calls the real engine
+    with an id that has no file and asserts the guard still reads it as a
+    failure — it fails loudly at the rename instead.
+    """
+    from ormah.background.duplicate_merger import _merge_did_not_happen
+
+    id_a, _ = _make_fact(engine, "Coffee dose", "The user drinks two espressos daily.")
+    result = engine.execute_merge("00000000-0000-0000-0000-000000000000", id_a)
+
+    assert _merge_did_not_happen(result)
+    # A real merge's confirmation text must NOT trip the guard.
+    id_b, _ = _make_fact(engine, "Espresso habit", "The user has two espressos every day.")
+    assert not _merge_did_not_happen(engine.execute_merge(id_a, id_b))
+
+
 def test_dedup_run_llm_disabled_does_not_advance_watermark(engine):
     """Guard order: `if not settings.llm_enabled: return` fires BEFORE any
     selection or advance."""
