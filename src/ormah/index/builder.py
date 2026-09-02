@@ -344,22 +344,27 @@ class IndexBuilder:
         )
 
     def _invalidate_checked_pairs(self, conn: sqlite3.Connection, node_id: str) -> None:
-        """Drop cached pair verdicts for a node whose content fingerprint changed (#126).
+        """Drop the auto-linker's Pair memo for a node whose fingerprint changed (#126).
 
-        The maintenance jobs skip any pair already recorded BEFORE they look at the edge, so a
-        fresh `seq` alone changes nothing: the node is re-scanned and every one of its pairs is
-        skipped. Doing it here covers every path into the index, including disk edits and sync.
+        The auto_linker skips any Pair already recorded in `auto_link_checked` before it looks
+        at the edge (`auto_linker.py:257`), so a fresh `seq` alone changes nothing for it: the
+        node is re-scanned and every one of its Pairs is skipped. Two other readers consult the
+        same memo and inherit the drop — `_find_conflict_candidates`, and `_find_merge_candidates`
+        under `respect_checked` on the agent path only. Both are the link-verdict-answering-a-
+        different-question bug of `AndreLFSMartins/ormah#6`. Background dedup and conflict runs
+        read no Pair memo at all; they converge by Watermark (ADR-0006).
 
-        The fingerprint bundles title/content/type/space, so when it changes we clear all three
-        checked tables — auto_link, duplicate AND conflict — mirroring the most comprehensive
-        branch of memory_engine.update_node (content/title edit). auto_link/duplicate depend on
-        the embedded text; conflict also depends on type/space. This Beta keeps the three as
-        SEPARATE tables (schema.sql), unlike upstream's single shared table.
+        `auto_link_checked` is the only Pair memo with a reader: `duplicate_checked` and
+        `conflict_checked` never had one (`AndreLFSMartins/ormah#4`), which is why clearing them
+        here bought nothing. Doing it here covers every path into the index, including disk
+        edits and sync.
+
+        The fingerprint bundles title/content/type/space, so it changes on more than an edit to
+        the embedded text; clearing on any of them is the conservative side of that bound.
         """
-        for table in ("auto_link_checked", "duplicate_checked", "conflict_checked"):
-            conn.execute(
-                f"DELETE FROM {table} WHERE node_a = ? OR node_b = ?", (node_id, node_id)
-            )
+        conn.execute(
+            "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?", (node_id, node_id)
+        )
 
     def _index_file_edges(self, path: Path) -> None:
         """Index edges from a markdown file's connections."""
