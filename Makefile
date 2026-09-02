@@ -1,4 +1,4 @@
-.PHONY: help dev server ui-dev ui-build install test restart clean logs smoke release eval
+.PHONY: help dev server ui-dev ui-build install test lint restart clean logs smoke release eval .venv-guard
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -31,11 +31,24 @@ restart: ## Rebuild UI and restart backend (kills existing ormah.main process)
 	python -m ormah.main &
 	@echo "==> Server restarted. Open http://localhost:8787"
 
-test: ## Run the test suite
-	python -m pytest tests/ -v
+# Every gate runs through THIS tree's venv, never the ambient `python`. In a
+# Sibling Worktree the ambient interpreter either dies with ModuleNotFoundError
+# or, worse, imports the Main Checkout's `ormah` and reports a green that says
+# nothing about the code you just changed.
+VENV_BIN := .venv/bin
 
-lint: ## Run ruff linter
-	ruff check src/ tests/
+.venv-guard:
+	@test -x $(VENV_BIN)/python || { \
+	  echo "No .venv in $$(pwd)."; \
+	  echo "Provision it here — do not reach for another tree's interpreter:"; \
+	  echo "    env -u VIRTUAL_ENV -u PYTHONPATH uv sync"; \
+	  exit 1; }
+
+test: .venv-guard ## Run the test suite
+	$(VENV_BIN)/python -m pytest tests/ -v
+
+lint: .venv-guard ## Run ruff linter
+	$(VENV_BIN)/ruff check src/ tests/
 
 # Local eval gate. Bars are set just under the honest baseline measured
 # 2026-07-06 with production-faithful floors (whisper: f1 0.69, suppression
