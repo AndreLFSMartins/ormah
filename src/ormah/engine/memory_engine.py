@@ -1714,8 +1714,6 @@ class MemoryEngine:
                 ),
             )
 
-        self.file_store.soft_delete(removed.id)
-
         # Update markdown files: rewrite connections from removed→kept
         for node_id in affected_node_ids:
             neighbor = self.file_store.load(node_id)
@@ -1752,6 +1750,15 @@ class MemoryEngine:
                 reload_kept.connections = pruned
                 reload_kept.touch_updated()
                 self.file_store.save(reload_kept)
+
+        # Delete the old replacement last. The promotion gate reads superseded_by
+        # from source markdown, not from the index: deleting the removed node before
+        # the redirects above creates a crash window where the row points at the
+        # keeper but the file still points at the now-missing node, so confirmed use
+        # promotes the source even though the keeper represents it. While the
+        # removed node remains live, either the old or new marker safely blocks
+        # promotion.
+        self.file_store.soft_delete(removed.id)
 
         kept_title = kept.title or kept.content[:60]
         removed_title = removed.title or removed.content[:60]
