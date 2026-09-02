@@ -1,6 +1,14 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0006
 ---
+
+> **Superseded 2026-09-02 by [ADR-0006](0006-merge-is-autonomous-or-does-not-happen.md).**
+> Both load-bearing arguments below were falsified by measurement: `duplicate_checked` holds
+> **0 rows** (the 100-rejection ledger is gone) and `proposals` has **0 resolved rows in the
+> store's entire history** against 354 pending — the queue shrank and curation stayed at zero.
+> The human in the loop then stated he will not work it. Merge is now autonomous above the
+> threshold or does not happen. This ADR stays readable as correct reasoning for August's facts.
 
 # Merge stays human-curated: bound the review queue and honor rejections, not autonomous merge
 
