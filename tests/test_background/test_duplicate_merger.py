@@ -507,6 +507,53 @@ def test_run_llm_failure_parks_dedup_watermark_exactly(engine):
     assert wm < pair_seq_a      # cursor parked before the failed seed
 
 
+def test_failed_execute_merge_is_counted_and_parks_the_watermark(engine):
+    """ADR-0006 leaves merge as the only outcome above the bar, so a raising
+    `execute_merge` is the third outcome the retired proposal fallback used to
+    absorb. It must be counted and it must park its seed: otherwise a Pair the
+    LLM confirmed and the bar accepted drains with the watermark and is never
+    looked at again, while the run reports a clean success.
+
+    `merged == 0` and the two surviving nodes hold with the bug present — the
+    assertions that fail without the fix are `merge_failed` and the parked
+    cursor.
+    """
+    from ormah.background.duplicate_merger import run_duplicate_detection
+    from ormah.background.watermark import DUPLICATE_WATERMARK_KEY, get_watermark
+
+    # A clean, candidate-less seed first, so the parked cursor is proven to be
+    # the failing seed rather than "the watermark never moved at all".
+    _, clean_seq = _make_fact(engine, "Lone note", "A singleton note about nothing similar.")
+    id_a, pair_seq_a = _make_fact(engine, "Coffee dose", "The user drinks two espressos daily.")
+    id_b, _ = _make_fact(engine, "Espresso habit", "The user has two espressos every day.")
+
+    llm_response = json.dumps({
+        "is_duplicate": True,
+        "merged_title": "Espresso habit",
+        "merged_content": "The user drinks two espressos every day.",
+        "reason": "Both record the same daily habit.",
+    })
+    engine.settings.auto_merge_threshold = 0.0   # the pair clears the bar
+    engine.settings.llm_provider = "ollama"
+    _reset_adapter()
+
+    with patch(_LLM_PATCH, return_value=llm_response), \
+            patch.object(engine, "execute_merge", side_effect=RuntimeError("disk full")):
+        stats = run_duplicate_detection(engine)
+
+    assert stats["merge_failed"] == 1
+    assert stats["merged"] == 0
+    assert stats["below_threshold"] == 0        # it was above the bar, not barred
+
+    # The merge never happened, so neither node was consumed.
+    assert engine.file_store.load(id_a) is not None
+    assert engine.file_store.load(id_b) is not None
+
+    wm = get_watermark(engine.db.conn, DUPLICATE_WATERMARK_KEY)
+    assert wm >= clean_seq      # the clean prefix still advances
+    assert wm < pair_seq_a      # the failed Pair's seed is retried next run
+
+
 def test_dedup_run_llm_disabled_does_not_advance_watermark(engine):
     """Guard order: `if not settings.llm_enabled: return` fires BEFORE any
     selection or advance."""

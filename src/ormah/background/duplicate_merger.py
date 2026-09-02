@@ -332,6 +332,12 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
     mean composite score (``None`` when none were barred), which is the
     instrument a recalibration of the bar would start from.
 
+    Above the bar merge is the only outcome, so a merge that raises is work the
+    run owes and did not deliver: ``merge_failed`` counts it and its seed parks
+    the watermark, exactly as an unavailable LLM does. Without both, the pair
+    would drain and never be looked at again while the run reported a clean
+    success (council, 2026-09-02).
+
     Seeds are delta-selected via a seq watermark (#81): only nodes newer than
     the last successfully-drained seed are scanned each run (bounded by
     ``duplicate_check_max_nodes_per_run``), so coverage converges instead of
@@ -376,6 +382,7 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
         checked: set[tuple[str, str]] = set()
         window: list[dict] = []          # pending candidate pairs, at most K, across nodes
         merged_pairs = 0
+        merge_failed_pairs = 0
         below_threshold_pairs = 0
         below_threshold_score_sum = 0.0
         pairs_attempted = 0
@@ -387,7 +394,8 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
 
         def _flush() -> None:
             """Judge the windowed pairs (one K-chunk) and merge the ones above the bar."""
-            nonlocal merged_pairs, below_threshold_pairs, below_threshold_score_sum
+            nonlocal merged_pairs, merge_failed_pairs
+            nonlocal below_threshold_pairs, below_threshold_score_sum
             nonlocal pairs_attempted, pairs_evaluated
             verdicts = judge_pairs(
                 settings, _LLM_DUP_INSTRUCTIONS, window, _render_dup_pair,
@@ -449,6 +457,12 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
                         logger.info("Auto-merged: %s", result)
                         merged_pairs += 1
                     except Exception as e:
+                        # Above the bar merge is the only outcome (ADR-0006), so a
+                        # failure here is a Pair the run owes and did not deliver.
+                        # Count it, and park its seed the way an unavailable LLM
+                        # does — draining it would retire the Pair for good.
+                        merge_failed_pairs += 1
+                        failed_seed_seqs.add(pair["seed_seq"])
                         logger.warning("Auto-merge failed for %s / %s: %s",
                                        pair["node"]["id"][:8], pair["other"]["id"][:8], e)
             window.clear()
@@ -548,6 +562,7 @@ def run_duplicate_detection(engine, epoch: int) -> dict | None:
             "pairs_attempted": pairs_attempted,
             "pairs_evaluated": pairs_evaluated,
             "merged": merged_pairs,
+            "merge_failed": merge_failed_pairs,
             "below_threshold": below_threshold_pairs,
             "below_threshold_mean_score": (
                 round(below_threshold_score_sum / below_threshold_pairs, 3)
