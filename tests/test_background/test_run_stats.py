@@ -26,7 +26,8 @@ def test_conflict_detector_stats_shape(engine):
 def test_duplicate_merger_stats_shape(engine):
     engine.settings.llm_provider = "ollama"
     stats = run_duplicate_detection(engine)
-    for key in ("nodes_scanned", "pairs_evaluated", "proposals_created", "duration_s"):
+    for key in ("nodes_scanned", "pairs_evaluated", "merged", "merge_failed",
+                "below_threshold", "below_threshold_mean_score", "duration_s"):
         assert key in stats
 
 
