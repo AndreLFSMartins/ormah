@@ -1,36 +1,5 @@
 .PHONY: help dev server ui-dev ui-build install test lint restart clean logs smoke release eval .venv-guard
 
-help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
-
-install: ## Install Python package in dev mode + UI deps
-	pip install -e ".[dev]"
-	cd ui && npm install
-
-server: ## Start the backend server (auto-reloads on Python changes)
-	python -m ormah.main
-
-ui-dev: ## Start the Vite dev server (hot-reload for UI work)
-	cd ui && npm run dev
-
-ui-build: ## Build the UI into ui/dist/ for production
-	cd ui && npx vite build
-
-dev: ## Start backend + UI dev server together (requires ctrl-c to stop both)
-	@trap 'kill 0' EXIT; \
-	python -m ormah.main & \
-	cd ui && npm run dev
-
-restart: ## Rebuild UI and restart backend (kills existing ormah.main process)
-	@echo "==> Building UI..."
-	cd ui && npx vite build
-	@echo "==> Stopping existing server..."
-	-pkill -f "ormah.main" 2>/dev/null || true
-	@sleep 1
-	@echo "==> Starting server..."
-	python -m ormah.main &
-	@echo "==> Server restarted. Open http://localhost:8787"
-
 # Every gate runs through THIS tree's venv, never the ambient `python`. In a
 # Sibling Worktree the ambient interpreter either dies with ModuleNotFoundError
 # or, worse, imports the Main Checkout's `ormah` and reports a green that says
@@ -43,6 +12,37 @@ VENV_BIN := .venv/bin
 	  echo "Provision it here — do not reach for another tree's interpreter:"; \
 	  echo "    env -u VIRTUAL_ENV -u PYTHONPATH uv sync"; \
 	  exit 1; }
+
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
+
+install: ## Install Python package in dev mode + UI deps
+	pip install -e ".[dev]"
+	cd ui && npm install
+
+server: .venv-guard ## Start the backend server (auto-reloads on Python changes)
+	$(VENV_BIN)/python -m ormah.main
+
+ui-dev: ## Start the Vite dev server (hot-reload for UI work)
+	cd ui && npm run dev
+
+ui-build: ## Build the UI into ui/dist/ for production
+	cd ui && npx vite build
+
+dev: .venv-guard ## Start backend + UI dev server together (requires ctrl-c to stop both)
+	@trap 'kill 0' EXIT; \
+	$(VENV_BIN)/python -m ormah.main & \
+	cd ui && npm run dev
+
+restart: .venv-guard ## Rebuild UI and restart backend (kills existing ormah.main process)
+	@echo "==> Building UI..."
+	cd ui && npx vite build
+	@echo "==> Stopping existing server..."
+	-pkill -f "ormah.main" 2>/dev/null || true
+	@sleep 1
+	@echo "==> Starting server..."
+	$(VENV_BIN)/python -m ormah.main &
+	@echo "==> Server restarted. Open http://localhost:8787"
 
 test: .venv-guard ## Run the test suite
 	$(VENV_BIN)/python -m pytest tests/ -v
