@@ -1688,27 +1688,12 @@ class MemoryEngine:
         self.builder.index_single(path)
         self._index_embedding(node)
 
-        # Invalidate auto-linker/dedup checked pairs if content/title changed.
-        # Conflict semantics also depend on space/type, so invalidate conflict_checked
-        # on those edits too (a space- or type-only edit can flip conflict eligibility).
+        # Drop the auto-linker's Pair memo if content/title changed: that is what the linker
+        # embeds, so its recorded verdicts no longer describe this node.
         if req.content is not None or req.title is not None:
             with self.db.transaction() as conn:
                 conn.execute(
                     "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
-                    (node_id, node_id),
-                )
-                conn.execute(
-                    "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
-                    (node_id, node_id),
-                )
-                conn.execute(
-                    "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
-                    (node_id, node_id),
-                )
-        elif req.space is not None or req.type is not None:
-            with self.db.transaction() as conn:
-                conn.execute(
-                    "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
                     (node_id, node_id),
                 )
 
@@ -1756,14 +1741,6 @@ class MemoryEngine:
                 "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
                 (node_id, node_id),
             )
-            conn.execute(
-                "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
-                (node_id, node_id),
-            )
-            conn.execute(
-                "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
-                (node_id, node_id),
-            )
 
         # Soft-delete from disk (move to deleted/ directory)
         self.file_store.soft_delete(node_id)
@@ -1801,10 +1778,6 @@ class MemoryEngine:
             self.builder._remove_node(node_id)
             conn.execute(
                 "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
-                (node_id, node_id),
-            )
-            conn.execute(
-                "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
                 (node_id, node_id),
             )
             conn.execute(
@@ -2547,25 +2520,9 @@ class MemoryEngine:
                 "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
                 (removed.id, removed.id),
             )
-            conn.execute(
-                "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
-                (removed.id, removed.id),
-            )
-            conn.execute(
-                "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
-                (removed.id, removed.id),
-            )
             if merged_content is not None or merged_title is not None:
                 conn.execute(
                     "DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?",
-                    (kept.id, kept.id),
-                )
-                conn.execute(
-                    "DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?",
-                    (kept.id, kept.id),
-                )
-                conn.execute(
-                    "DELETE FROM conflict_checked WHERE node_a = ? OR node_b = ?",
                     (kept.id, kept.id),
                 )
 
