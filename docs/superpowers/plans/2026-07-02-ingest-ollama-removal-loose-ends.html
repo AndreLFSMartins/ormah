@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ingest / claude_cli — loose ends left by removing Ollama</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <span class="eyebrow">Superpowers plan</span>
+  <h1 class="doc-title">Ingest / <em>claude_cli</em> loose ends</h1>
+  <a href="#tldr">TL;DR — what to do next</a>
+  <a href="#current-state">Current system state</a>
+  <a href="#seams">The two seams</a>
+  <a href="#loose-ends">The loose ends</a>
+  <a class="lvl-3" href="#loose-1">Bin-path robustness</a>
+  <a class="lvl-3" href="#loose-2">Backfill gate</a>
+  <a class="lvl-3" href="#loose-3">is_free label</a>
+  <a class="lvl-3" href="#loose-4">Setup wizard</a>
+  <a href="#separate-decision">Separate decision</a>
+  <a href="#logistics">Logistics</a>
+  <a href="#gotchas">Gotchas</a>
+  <a href="#decisions-locked">Decisions locked</a>
+  <a href="#execution-order">Suggested execution order</a>
+</nav>
+
+<main>
+
+<div class="callout">
+  <span class="label">Handoff doc</span>
+  <p>Self-contained so a fresh conversation can resume cold. Written 2026-07-02.</p>
+  <p><strong>Goal:</strong> finish the migration of ormah's server-side extraction from local Ollama/gemma to headless <code>claude -p</code> (subscription, no paid API). Extraction itself already works; a few spots still assume the old <code>llm_provider</code>/Ollama and need fixing on the upstream branch.</p>
+</div>
+
+<h2 id="tldr">TL;DR — <em>what to do next</em></h2>
+
+<p class="statement">Do all four loose ends + wire the maintenance seam to <code>claude_cli</code> (option A), on the existing draft-PR branch.</p>
+
+<p><strong>Scope locked 2026-07-02 (André):</strong> do <strong>all four</strong> loose ends <strong>+</strong> wire the maintenance seam to <code>claude_cli</code> (option A), on the <strong>existing draft-PR branch</strong> <code>feat/ingest-claude-cli-extraction</code> (no new branch). See <a href="#decisions-locked">"Decisions locked"</a> at the bottom.</p>
+
+<ol>
+  <li>Create a <strong>git worktree</strong> of <code>feat/ingest-claude-cli-extraction</code> (do NOT <code>checkout</code> in the main tree — the dev server runs from <code>local-main</code> and its launchd wrapper refuses other branches). Same draft branch behind PR #79 — fixes go here.</li>
+  <li>Fix <strong><a href="#loose-1">#1 (bin-path robustness)</a></strong> and <strong><a href="#loose-2">#2 (backfill gate)</a></strong> via TDD (details below).</li>
+  <li>Do <strong><a href="#loose-3">#3 (is_free label)</a></strong> and <strong><a href="#loose-4">#4 (setup wizard supports claude_cli)</a></strong> — they are one setup.py pass.</li>
+  <li><strong>Maintenance (option A):</strong> set <code>ORMAH_LLM_PROVIDER=claude_cli</code> so the 4 semantic jobs + judge run again. Zero code — the <code>claude_cli</code> adapter already serves the maintenance <code>llm_generate</code> seam (<a href="../../../src/ormah/background/llm/__init__.py#L42">llm/__init__.py:42</a>). Bounded: intervals pinned to 999999 → only runs in the sleep cycle / button.</li>
+  <li>Merge <code>feat/ingest</code> → <code>local-main</code> (as before), restart the dev server, verify.</li>
+  <li><strong>Do NOT push.</strong> PR #79 / <code>fork/feat</code> stays at <code>1811b2f</code> until André says otherwise.</li>
+</ol>
+
+<h2 id="current-state">Current system state (verified 2026-07-02)</h2>
+
+<ul>
+  <li><strong>Dev server:</strong> launchd label <code>com.ormah.server.dev</code>, <code>KeepAlive=true</code>, wrapper <code>~/.config/ormah/ormah-server-dev</code> → runs <code>.venv/bin/ormah server start</code> from the <strong><code>local-main</code></strong> working tree (wrapper refuses any other branch). Logs: <code>/tmp/ormah-dev.{out,err}</code> and <code>~/.local/share/ormah/logs/ormah.log</code>. Restart: <code>launchctl kickstart -k gui/$(id -u)/com.ormah.server.dev</code> (preserves TCC/Full-Disk-Access — do not launch manually from a terminal).</li>
+  <li><strong>Extraction is LIVE and verified</strong> via <code>claude -p</code> (Haiku): a <code>dry_run</code> POST to <code>/ingest/conversation</code> extracted 1 correct memory in ~3.7s, real <code>claude -p</code> subprocess confirmed, zero error. Byte-cursor advances; no re-extraction loop; no gemma burning GPU.</li>
+  <li><strong>Branches:</strong>
+    <ul>
+      <li><code>local-main</code> @ <code>2888016</code> — Beta integration branch (runs the dev server; <strong>never</strong> goes upstream). Already contains the merged claude_cli ingest feature + all other Beta work (#22/#26/#28/#32/#52/#59/#70…).</li>
+      <li><code>feat/ingest-claude-cli-extraction</code> @ <code>3448f26</code> — <strong>upstream-bound</strong> branch (PR #79). Clean off origin/main. <strong>All fixes below go here.</strong></li>
+      <li><code>fork/feat</code> (PR #79) @ <code>1811b2f</code> — unchanged; commits <code>a39e7b1</code>+<code>3448f26</code> are local-only. <strong>No pushes done.</strong></li>
+      <li><code>feat/ingest-v1-backup</code> — old v1 lineage; holds 6 council fixes. Most are inapplicable to v2 (they patch v1-only mechanisms). The ONLY still-relevant one is <code>e87cc1a</code> = <a href="#loose-2">loose-end #2</a> below.</li>
+    </ul>
+  </li>
+  <li><strong><code>.env</code></strong> (<code>~/.config/ormah/.env</code>) — freshly minimized to 17 deliberate settings. Key values: <code>ORMAH_INGEST_LLM_PROVIDER=claude_cli</code>, <code>ORMAH_INGEST_LLM_MODEL=claude-haiku-4-5-20251001</code>, <code>ORMAH_CLAUDE_CLI_BIN=/Users/andre/.local/bin/claude</code>, <code>ORMAH_LLM_PROVIDER=none</code>, <code>ORMAH_CLAUDE_MAINTENANCE_ENABLED=true</code>, <code>ORMAH_FEEDBACK_LLM_JUDGE_ENABLED=true</code>, <code>ORMAH_DELETION_ENABLED=true</code>, embedding via Ollama <code>bge-m3</code>/dim 1024, <code>session_watcher</code> on, 4 maintenance intervals pinned to <code>999999</code> (no continuous scheduling).</li>
+</ul>
+
+<h2 id="seams">The two seams (mental model — do not confuse)</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Concern</th>
+      <th>Function</th>
+      <th>Setting</th>
+      <th>State</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Extraction (ingest)</strong></td>
+      <td><code>_extract_memories_llm</code> → <code>ingest_llm_generate</code></td>
+      <td><code>ingest_llm_provider</code> = <code>claude_cli</code></td>
+      <td><span class="yes">✅ live (Haiku)</span></td>
+    </tr>
+    <tr>
+      <td>Maintenance jobs + feedback judge</td>
+      <td><code>llm_generate</code></td>
+      <td><code>llm_provider</code> = <code>none</code></td>
+      <td><span class="no">❌ dead (see "separate decision")</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<p>All 5 ingest entry points route to <code>_extract_memories_llm</code>: <code>/ingest/conversation</code> (routes_ingest, used by the whisper-store hook), <code>session_watcher.py:823</code>, <code>hippocampus.py:116</code>, <code>routes_ingest</code> dry_run, and <code>setup.py</code> backfill (POSTs to <code>/ingest/conversation</code>). No extraction path is left on Ollama. <strong>Confirmed by audit.</strong></p>
+
+<h2 id="loose-ends">The loose ends (what "half-done from removing Ollama" means)</h2>
+
+<h3 id="loose-1">#1 — <em>bin-path robustness</em> <span class="chip on">HIGH</span></h3>
+
+<p><strong>File:</strong> <code>src/ormah/background/llm/claude_cli_adapter.py:101</code></p>
+
+<pre><code>self.bin_path = bin_path or shutil.which("claude") or "claude"</code></pre>
+
+<p>Under launchd the PATH is minimal (<code>.venv/bin:/usr/local/bin:/usr/bin:/bin</code>) and does <strong>not</strong> contain <code>claude</code> (it lives at <code>~/.local/bin/claude</code> → <code>~/.local/share/claude/versions/2.1.156</code>, or <code>/opt/homebrew/bin/claude</code>). So <code>shutil.which</code> returns None → falls back to the literal <code>"claude"</code> → <code>FileNotFoundError</code> → <code>status:error</code> → cursor never advances → <strong>silent zero extraction.</strong> Today only the machine-specific <code>ORMAH_CLAUDE_CLI_BIN</code> in <code>.env</code> papers over it.</p>
+
+<p><strong>Fix:</strong> when <code>bin_path</code> is unset and <code>which("claude")</code> fails, search common install locations (<code>~/.local/bin/claude</code>, <code>~/.local/share/claude/versions/*</code> current, <code>/opt/homebrew/bin/claude</code>, <code>$HOME/.claude/local/claude</code>) before giving up; if still not found, log a clear actionable error ("set ORMAH_CLAUDE_CLI_BIN") rather than a bare FileNotFoundError. Keep <code>bin_path</code> (explicit override) as highest priority.</p>
+
+<p><strong>TDD:</strong></p>
+<ul>
+  <li>Test: with <code>bin_path=None</code> and a monkeypatched <code>shutil.which</code> returning None + a fake claude at a known common location, the adapter resolves to that absolute path (not literal <code>"claude"</code>).</li>
+  <li>Test: explicit <code>bin_path=/x/claude</code> still wins over auto-detection.</li>
+  <li>Test: nothing found → clear error/None, not an unhandled exception.</li>
+</ul>
+
+<h3 id="loose-2">#2 — <em>backfill gate honors ingest_llm_provider</em> <span class="chip on">HIGH</span></h3>
+
+<p><strong>File:</strong> <code>src/ormah/setup.py:1212-1213</code></p>
+
+<pre><code>llm_provider = env.get("ORMAH_LLM_PROVIDER", "none")
+if llm_provider == "none":
+    return</code></pre>
+
+<p>With <code>llm_provider=none</code> + <code>ingest_llm_provider=claude_cli</code> (André's exact config), backfill <strong>silently returns early</strong> even though the server extracts fine. Bootstrap is broken.</p>
+
+<p><strong>Fix:</strong> gate on the <em>effective</em> ingest provider (mirror <code>_resolve_ingest_provider</code>):</p>
+
+<pre><code>llm_provider = env.get("ORMAH_LLM_PROVIDER", "none")
+ingest_provider = env.get("ORMAH_INGEST_LLM_PROVIDER", "") or llm_provider
+if ingest_provider == "none":
+    return</code></pre>
+
+<p>(Do <strong>not</strong> copy the v1 <code>_is_extractor_transcript</code> import from <code>e87cc1a</code> — that construct does not exist in v2. Only port the gate lines.)</p>
+
+<p><strong>TDD:</strong></p>
+<ul>
+  <li>Test: <code>backfill_transcripts</code> does NOT early-return when <code>ORMAH_LLM_PROVIDER=none</code> and <code>ORMAH_INGEST_LLM_PROVIDER=claude_cli</code>.</li>
+  <li>Test: still early-returns when both are effectively <code>none</code>.</li>
+</ul>
+
+<h3 id="loose-3">#3 — <em><code>is_free</code> cost label</em> <span class="chip">IN SCOPE — folds into #4</span></h3>
+
+<p><strong>File:</strong> <code>src/ormah/setup.py:1281</code> — <code>is_free = llm_provider == "ollama"</code>. With claude_cli the "free" labelling is wrong (subscription is neither metered-API nor local-free, but it IS zero API cost). Since <a href="#loose-4">#4</a> is a broader setup pass, do it here.</p>
+
+<p><strong>Fix:</strong> <code>is_free = llm_provider in ("ollama", "claude_cli")</code>. Then backfill prints the "no API cost" path (setup.py:1282-1284) for claude_cli instead of running <code>_estimate_cost</code> on a subscription model.</p>
+
+<p><strong>TDD:</strong> with <code>llm_provider=claude_cli</code>, backfill cost display takes the free branch (no <code>_estimate_cost</code> call / no "$" cost line).</p>
+
+<h3 id="loose-4">#4 — <em>setup wizard supports claude_cli</em> <span class="chip">IN SCOPE — upstream completeness</span></h3>
+
+<p><strong>Confirmed by reading <code>configure_llm</code> (setup.py:1063):</strong> it iterates <code>LLM_PROVIDERS</code> (setup.py:78 — litellm×4, ollama, none; <strong>no claude_cli</strong>) and persists <strong>only</strong> the maintenance seam via <code>_enable_llm</code> (<code>ORMAH_LLM_PROVIDER/MODEL</code>, setup.py:1045). It never touches the ingest seam. So a fresh <code>ormah setup</code> cannot enable claude extraction without hand-editing <code>.env</code>.</p>
+
+<p><strong>Fix (three edits, all setup.py):</strong></p>
+<ol>
+  <li>Add a <code>claude_cli</code> entry to <code>LLM_PROVIDERS</code> (setup.py:78) — no api_key_var, like ollama: <code>("Claude subscription (headless CLI — no API key)", "claude_cli", None, "claude-haiku-4-5-20251001")</code>.</li>
+  <li>In <code>configure_llm</code>, add a <code>claude_cli</code> branch (the current <code>else</code> at 1141-1145 handles keyless ollama). It must write <strong>both seams</strong>: ingest (<code>ORMAH_INGEST_LLM_PROVIDER=claude_cli</code>, <code>ORMAH_INGEST_LLM_MODEL</code>, and an absolute <code>ORMAH_CLAUDE_CLI_BIN</code> via <a href="#loose-1">#1</a>'s resolver) <strong>and</strong>, per <a href="#separate-decision">decision A</a>, maintenance (<code>_enable_llm(env, "claude_cli", model)</code>). Add a small <code>_enable_claude_cli(env, model, bin_path)</code> helper rather than overloading <code>_enable_llm</code>.</li>
+  <li>Reuse <a href="#loose-1">#1</a>'s <code>resolve_claude_bin()</code> to fill <code>ORMAH_CLAUDE_CLI_BIN</code> (absolute path required under launchd — this is exactly <a href="#loose-1">loose-end #1</a>; do NOT duplicate the search logic).</li>
+</ol>
+
+<p><strong>TDD:</strong></p>
+<ul>
+  <li>Test: selecting claude_cli in <code>configure_llm</code> (monkeypatched <code>input</code>) writes <code>ORMAH_INGEST_LLM_PROVIDER=claude_cli</code> + model <strong>and</strong> <code>ORMAH_LLM_PROVIDER=claude_cli</code> (<a href="#separate-decision">decision A</a>), plus an absolute <code>ORMAH_CLAUDE_CLI_BIN</code>.</li>
+  <li>Test: <code>LLM_PROVIDERS</code> contains a claude_cli entry with <code>api_key_var=None</code>.</li>
+</ul>
+
+<p><strong>NOT loose ends (audited, leave alone):</strong> the 4 maintenance jobs' <code>if not llm_enabled</code> gates (<code>auto_linker:315</code>, <code>conflict_detector:213</code>, <code>consolidator:181</code>, <code>duplicate_merger:249</code>) and the judge gate (<code>session_watcher:238</code>) are maintenance — correctly on <code>llm_provider</code>. And <code>setup.py:969</code> (<code>ORMAH_LLM_PROVIDER != none</code>) is <strong>API-key import</strong>, irrelevant to subscription.</p>
+
+<h2 id="separate-decision">Separate decision (NOT part of ingest loose ends) — <em>maintenance / sleep cycle</em></h2>
+
+<p>When Ollama was removed, the 4 maintenance jobs <strong>and</strong> the feedback judge were orphaned on <code>llm_generate</code>/<code>llm_provider=none</code> → dead. Consequences:</p>
+
+<ul>
+  <li>The <strong>sleep-cycle button / nightly 01:30 cron</strong> (<code>/admin/tasks/run-all</code>, LaunchAgent <code>me.ormah.sleepcycle</code>) runs the 6 mechanical jobs + <strong>forgetting (deletes memories, deletion=true)</strong> but the 4 semantic jobs (dedup/conflict/auto-link/consolidate) <strong>silently no-op</strong> and report "ok".</li>
+  <li>The <strong>judge</strong> is now flag-ON but inert (needs a live <code>llm_provider</code>).</li>
+  <li>Agent-driven maintenance (<code>claude_maintenance_enabled=true</code> → <code>maintenance_due</code> whisper signal → <code>ormah-maintenance</code> subagent → <code>run_maintenance</code>) <strong>does</strong> work and ran 2026-07-02 12:47; it does NOT depend on <code>llm_provider</code>.</li>
+</ul>
+
+<p><strong>DECIDED 2026-07-02 (André): option A, now, in this same batch.</strong> Set <code>ORMAH_LLM_PROVIDER=claude_cli</code> in <code>.env</code>. Verified zero-code: the maintenance seam <code>llm_generate</code> → <code>_get_or_create_adapter</code> → <code>get_adapter(settings)</code> resolves <code>settings.llm_provider</code>, and <code>get_adapter</code> already builds <code>ClaudeCliAdapter</code> for <code>"claude_cli"</code> (<a href="../../../src/ormah/background/llm/__init__.py#L42-L50">llm/__init__.py:42-50</a>). So the 4 semantic jobs (<code>auto_linker</code>/<code>conflict_detector</code>/<code>consolidator</code>/<code>duplicate_merger</code>) + the feedback judge run again through the same adapter, inheriting the <a href="#loose-1">#1</a> bin-path fix. Model stays independently tunable via <code>ORMAH_LLM_MODEL</code> (default keeps Haiku). Bounded: the 4 intervals are pinned to 999999, so this only fires in the sleep-cycle / button path, not continuously.</p>
+
+<p>Rejected: (B) a dedicated <code>maintenance_llm_provider</code> seam — pointless code; ingest already has its own seam+model and maintenance can differ by model alone. (C) agent-only — leaves the button/cron path silently no-op'ing the semantic jobs, which is the bug André wants fixed.</p>
+
+<p><strong>Deletion (still open, low urgency):</strong> nightly forgetting deletes with <code>deletion=true</code>. Leave ON — it is effectively a no-op today (store <90d young, per the forgetting-staleness audit). Revisit if the store ages past the decay window; not a blocker for this batch.</p>
+
+<p><strong>Verify (A):</strong> after setting the env + restart, trigger the sleep cycle (<code>/admin/tasks/run-all</code> or the button) and confirm the 4 semantic jobs report real work (edges/merges/consolidations > 0), not the old silent "ok" no-op. A single <code>claude -p</code> spawn per candidate pair — watch subprocess count on a large store; if it ever hurts, the agent-driven <code>run_maintenance</code> path remains the primary and this inline path can go back to <code>none</code>.</p>
+
+<h2 id="logistics">Logistics</h2>
+
+<ul>
+  <li><strong>Worktree:</strong> <code>git worktree add ../ormah-ingest feat/ingest-claude-cli-extraction</code> (or use the Agent <code>isolation: worktree</code>). Leaves the <code>local-main</code> tree (serving the live server) untouched.</li>
+  <li><strong>Run tests:</strong> <code>.venv/bin/python -m pytest tests/ -v</code> (fast run excludes <code>integration</code>). Known-noisy: ~8–15 env-leak/fastembed failures are machine-state, not regressions. The <code>@pytest.mark.integration</code> claude tests need the real CLI + login.</li>
+  <li><strong>After fixes:</strong> merge <code>feat/ingest</code> → <code>local-main</code> (<code>git merge --no-ff</code>), then <code>launchctl kickstart -k gui/$(id -u)/com.ormah.server.dev</code>, then re-run the <code>dry_run</code> probe to confirm extraction still works.</li>
+  <li><strong>Verify each fix</strong> with a real check, not just green tests: for <a href="#loose-1">#1</a>, run the adapter under a stripped PATH and confirm it still finds claude; for <a href="#loose-2">#2</a>, run backfill dry logic with the two-provider config and confirm it does not early-return.</li>
+</ul>
+
+<h2 id="gotchas">Gotchas (bit us this session)</h2>
+
+<ul>
+  <li><strong><code>.env</code> format:</strong> the launchd wrapper does <code>export "$line"</code> → <strong>NO inline <code>#</code> comments after a value</strong> (they become part of the value → pydantic ValidationError → launchd crash-loop). Comments only on their own line. Also <code>ormah setup</code> rewrites <code>.env</code> lossily (drops comments/order).</li>
+  <li><strong><code>ORMAH_CLAUDE_CLI_BIN</code> must be absolute</strong> under launchd (this is exactly <a href="#loose-1">loose-end #1</a>).</li>
+  <li><strong>curl is blocked</strong> in the ormah context — use Python <code>urllib</code>.</li>
+  <li><strong>graphify convention:</strong> run <code>graphify query "&lt;q&gt;"</code> before grepping; <code>graphify update .</code> after edits.</li>
+  <li><strong>No <code>--no-verify</code>, no force-push, no push at all</strong> until André signs off.</li>
+</ul>
+
+<h2 id="decisions-locked">Decisions locked (2026-07-02, André)</h2>
+
+<ol>
+  <li><strong>Scope:</strong> all four loose ends (<a href="#loose-1">#1</a> + <a href="#loose-2">#2</a> + <a href="#loose-3">#3</a> + <a href="#loose-4">#4</a>). <a href="#loose-3">#3</a> folds into the <a href="#loose-4">#4</a> setup.py pass.</li>
+  <li><strong>Branch/isolation:</strong> work on the <strong>existing draft-PR branch</strong> <code>feat/ingest-claude-cli-extraction</code> (no new branch) via a git worktree, so the <code>local-main</code> dev server stays untouched.</li>
+  <li><strong>Maintenance provider:</strong> <strong>now, option A</strong> — <code>ORMAH_LLM_PROVIDER=claude_cli</code> (zero code; see the <a href="#separate-decision">"Separate decision"</a> section above, now resolved). Nightly deletion stays ON (no-op today).</li>
+</ol>
+
+<h2 id="execution-order">Suggested execution order (TDD each)</h2>
+
+<ol>
+  <li><strong><a href="#loose-1">#1</a></strong> bin-path resolver → expose reusable <code>resolve_claude_bin()</code> (adapter + wizard both use it).</li>
+  <li><strong><a href="#loose-2">#2</a></strong> backfill gate on effective ingest provider.</li>
+  <li><strong><a href="#loose-4">#4</a> + <a href="#loose-3">#3</a></strong> one setup.py pass: <code>LLM_PROVIDERS</code> entry, <code>configure_llm</code> claude_cli branch writing both seams, <code>is_free</code> includes claude_cli.</li>
+  <li><strong>Maintenance (A):</strong> <code>.env</code> <code>ORMAH_LLM_PROVIDER=claude_cli</code>; no code. Verify via sleep-cycle probe.</li>
+  <li>Merge <code>feat/ingest</code> → <code>local-main</code>, <code>launchctl kickstart -k …</code>, re-run the dry_run + sleep-cycle probes.</li>
+</ol>
+
+<div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+
+<div class="signature">
+  <span class="name">Ingest completion handoff</span>
+  <span class="role">Draft PR #79 scope lock</span>
+</div>
+
+</main>
+
+<!-- rich-doc-src-sha256:4ec42ccaa196fa09ccdfadc0116b1c0cf1755053422cd603722818262815cb36 -->
+</body>
+</html>

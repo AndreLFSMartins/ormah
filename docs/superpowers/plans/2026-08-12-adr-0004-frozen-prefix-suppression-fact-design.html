@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Suppressing selection with a fact, not with the cursor</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ SPEC ]</div>
+  <div class="doc-title">Suppressing selection with a fact, not with the cursor</div>
+  <a href="#problem">The problem, measured 2026-08-12</a>
+  <a href="#mechanism" class="lvl-3">The mechanism is a ratchet</a>
+  <a href="#decision">Decision</a>
+  <a href="#naming" class="lvl-3">Naming: frozen_until, not parked_until</a>
+  <a href="#precedent" class="lvl-3">Precedent and atomic construction</a>
+  <a href="#rejected" class="lvl-3">Considered and rejected</a>
+  <a href="#selection-suppression">Selection suppression</a>
+  <a href="#reconcile" class="lvl-3">reconcile gains a second cheap-skip arm</a>
+  <a href="#enqueue-path" class="lvl-3">_enqueue_path gains the same gate</a>
+  <a href="#invariants" class="lvl-3">Invariants</a>
+  <a href="#tests">Tests</a>
+  <a href="#verification">Verification in production</a>
+  <a href="#residual-risks">Residual risks</a>
+</nav>
+<main>
+<div class="eyebrow">Architecture Decision Record · Approved, not implemented · ADR-0004</div>
+
+<p class="meta">2026-08-12 · Ormah ingest lane · frozen-prefix suppression</p>
+
+<p class="statement">Move selection suppression from cursor position into a dedicated state field, preventing the ingest lane from losing transcript content when unwindowed parses skip segments.</p>
+
+<h2 id="problem">The problem, measured 2026-08-12</h2>
+
+<p>The ingest spool root holds dead-lettered jobs accumulated on the Beta instance. These measurements were taken read-only from the live system; they supersede the counts cited in the ADR's 2026-08-12 amendment.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Quantity</th>
+      <th>Value</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Dead-lettered jobs / distinct transcripts</td>
+      <td>3,806 / 1,619 (payloads from 2026-07-24 onward)</td>
+    </tr>
+    <tr>
+      <td>Dead-lettered transcripts with cursor at EOF</td>
+      <td><strong>98%</strong> (median 0 B, p90 0 B) — noise</td>
+    </tr>
+    <tr>
+      <td>State entries holding only <code>end_offset</code></td>
+      <td><strong>75 of 1,791</strong> (was 48 on 2026-08-09)</td>
+    </tr>
+    <tr>
+      <td>Those entries still on disk</td>
+      <td>68 files totalling 8,029,774 B</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Parsing each of those 68 transcripts whole, unwindowed, with the project's own <code>parse_transcript</code> reveals two categories:</p>
+
+<ul>
+  <li><strong>14 files / 5,923,567 B / 23 closed user turns</strong> — the parser closes content that the cursor skipped. <em>This is the defect.</em></li>
+  <li>54 files / 2,106,207 B — the parser closes nothing even without a window (Codex rollouts with no <code>task_complete</code>, single-turn sessions). A parser-coverage problem, not this one.</li>
+</ul>
+
+<h3 id="mechanism">The mechanism is a ratchet</h3>
+
+<p>Boundary progression from a dead-lettered job, climbed without pause:</p>
+
+<pre><code>ab16af53-….jsonl — 24 dead-letters:
+  98,985 → 125,943 → 222,943 → 257,727 → 384,984 → 437,294 → 500,884
+       → 676,978 → 694,301 → 877,060 → 971,222 → 1,017,779 → … → 1,435,339</code></pre>
+
+<p>Each job runs <code>_mark_frozen_prefix_consumed</code>, advancing the cursor to its boundary. A 1.43 MB session was pushed to EOF one slice at a time and never ingested, while a whole-file parse closes 1,434,322 of its 1,435,339 bytes. The same shape appears in <code>e238fed7</code> (5 jobs), <code>d66c054f</code> (4), <code>ebf4a5ff</code> (3).</p>
+
+<p>The trigger varies — the windowed-parse artefact identified on 2026-08-10, or a genuinely idle session with an unterminated tail. <strong>The damage does not: every path loses content at the same step, moving the cursor.</strong> With the cursor held still, all 24 ratchet steps lose nothing.</p>
+
+<h2 id="decision">Decision</h2>
+
+<p><code>_mark_frozen_prefix_consumed</code> stops writing <code>end_offset</code> and writes a suppression fact instead. Renamed to <code>_mark_frozen_prefix_parked</code> — the current name asserts the very thing that causes the loss.</p>
+
+<pre><code class="language-python"># session_watcher.py, ~L1552
+entry["frozen_until"] = max(entry.get("frozen_until") or 0, target)   # target = min(boundary, size)
+_commit_state(...)          # end_offset preserved, untouched</code></pre>
+
+<p><code>frozen_until</code> means: <em>the last examination of this file, up to byte N, closed nothing; do not re-select it until it grows past N.</em> It is not a progress offset.</p>
+
+<h3 id="naming">Naming: frozen_until, not parked_until</h3>
+
+<p><code>parked_until</code> belongs to the force-close design retracted on 2026-08-09, and two live state entries still carry <code>parked_*</code> residue from that branch. Reusing the name would make this design unreadable against that history.</p>
+
+<h3 id="precedent">Precedent and atomic construction</h3>
+
+<p><code>skipped_slices</code> (<code>session_watcher.py:1069-1085</code>) already records a suppression fact inside the state entry, in the same <code>os.replace</code> as the cursor — atomic by construction, no parallel ledger. <code>frozen_until</code> follows it, a scalar because only the ceiling matters.</p>
+
+<h3 id="rejected">Considered and rejected</h3>
+
+<ul>
+  <li><strong>Fix the predicate only</strong> — have the parser signal "refused by the ceiling" at the three <code>_exceeds_ceiling</code> breaks (<code>parser.py:350</code>, <code>:381</code>, <code>:406</code>), so <code>_idle_with_unsafe_tail</code> stops misclassifying. Smaller, and it addresses the cause named on 2026-08-10. Rejected as insufficient: it lowers the trigger rate and leaves the loss mechanism intact for the genuinely idle tail — which is what all six of today's dead-letters are.</li>
+  <li><strong>Both</strong> — full coverage of the 2026-08-10 cause. Rejected for now: two coupled mechanisms in one spec is the bundling that produced the 56-round cascade behind the retracted force-close. The predicate fix stays available as its own spec, on its own evidence.</li>
+</ul>
+
+<h2 id="selection-suppression">Selection suppression</h2>
+
+<p>The cursor does two jobs today: record progress, and drop the file from the sweep (<code>(entry["end_offset"] or 0) >= st.st_size → continue</code>, <code>reconcile</code> at <code>session_watcher.py:1622</code>). Taking the second job away from it means giving it to <strong>both</strong> producers, not one.</p>
+
+<h3 id="reconcile">reconcile gains a second cheap-skip arm</h3>
+
+<pre><code class="language-python">elif (entry.get("end_offset") or 0) >= st.st_size and not entry.get("shrink_pending"):
+    continue
+elif (entry.get("frozen_until") or 0) >= st.st_size:
+    continue          # frozen, and not grown since the examination</code></pre>
+
+<p>A separate <code>elif</code> rather than an <code>or</code> on the first: that arm carries the <code>shrink_pending</code> exception, and folding an independent gate into the same expression ties them together.</p>
+
+<h3 id="enqueue-path">_enqueue_path gains the same gate</h3>
+
+<p><code>_enqueue_path</code> (<code>session_watcher.py:1361</code>) consults no state at all today — every FSEvent becomes an <code>enqueue</code>. It gains the same gate. Gating only the sweep does not fix the defect; it relocates it. The ADR already recorded this lesson in another form: <em>"the suppression is applied in both producer lanes, because gating only the sweep would trade a full <code>failed/</code> for a hot enqueue loop on the Observer lane."</em></p>
+
+<h3 id="invariants">Invariants</h3>
+
+<ol>
+  <li><strong>Growth always re-opens.</strong> <code>size > frozen_until</code> returns the file to selection, and the parse resumes from the <strong>untouched</strong> cursor — not from where the ratchet would have left it. This collapses <code>ab16af53</code>'s 24 dead-letters into a single ingestion.</li>
+  <li><strong>Never lowers.</strong> <code>max()</code> on write: an out-of-order job with a smaller boundary cannot lower the ceiling and re-open the ratchet.</li>
+  <li><strong><code>end_offset</code> leaves the write.</strong> The committed entry preserves the current cursor by construction. <code>_commit_state</code>'s monotonic clamp (<code>:800-808</code>) stays as the backstop, but must not be what enforces this — it clamps <code>end_offset</code> only, and this design does not touch that field.</li>
+  <li><strong>A never-seen file stays eligible.</strong> A new entry may be born as <code>{frozen_until: N}</code> with no <code>end_offset</code>. <code>reconcile</code> evaluates <code>(entry.get("end_offset") or 0) >= size</code> → <code>0 >= size</code> is false → it falls through to the new gate. Legacy entries lack the field, default 0, behaviour unchanged. No migration.</li>
+  <li><strong>A confirmed shrink clears it.</strong> The shrink reset (<code>session_watcher.py:955</code>) copies <code>dict(existing or {})</code> and updates only <code>hash</code>/<code>end_offset</code>. A <code>frozen_until</code> surviving that reset would sit above the rotated file's size and suppress its fresh content — the same defect with the sign flipped. The reset must <code>pop</code> the field.</li>
+</ol>
+
+<p><span class="callout"><strong>Deliberately unchanged:</strong> <code>spool.requeue(job, failure_class="no_safe_boundary")</code>. The file still dead-letters on every freeze and the noise volume stays where it is (~110 jobs/day). That is Fix A, a separate spec.</span></p>
+
+<h2 id="tests">Tests</h2>
+
+<p><em>Test-first.</em> The reproducing test is <code>ab16af53</code>'s ratchet in miniature: a transcript whose turn terminator lands past the job's <code>boundary</code>; job 1 freezes; job 2 arrives with a higher boundary.</p>
+
+<p>Today the cursor jumps twice and nothing is ingested. After the change the cursor holds, <code>frozen_until</code> rises, and <strong>job 2 ingests the whole content</strong>. It fails against today's code — that is the done criterion.</p>
+
+<p>Then one test per invariant above (growth re-opens; a lower boundary never lowers the ceiling; <code>end_offset</code> is not written; a never-seen file stays eligible; a confirmed shrink clears the field), and one suppression test per producer — <code>reconcile</code> and <code>_enqueue_path</code> — because gating one lane is the recorded failure mode.</p>
+
+<p>Three existing tests assert the old behaviour and are <strong>rewritten, not deleted</strong>: the invariant each one guards still holds, only the field carrying it changes.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Test</th>
+      <th>Asserts today</th>
+      <th>Asserts after</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>test_frozen_prefix_advance_never_passes_the_accepted_boundary</code> (:2692)</td>
+      <td>cursor stops at B, never raw EOF</td>
+      <td><code>frozen_until == B</code>, cursor untouched</td>
+    </tr>
+    <tr>
+      <td><code>test_frozen_prefix_advance_never_moves_the_cursor_backward</code> (:2830)</td>
+      <td>a lower boundary never rewinds the cursor</td>
+      <td>a lower boundary never lowers <code>frozen_until</code></td>
+    </tr>
+    <tr>
+      <td><code>test_abandonment_with_unclosed_tail_composes_with_frozen_prefix</code> (:3850)</td>
+      <td><code>end_offset == size</code></td>
+      <td>cursor at the abandoned range's end; <code>frozen_until == size</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<p><code>test_idle_file_with_no_safe_boundary_is_dead_lettered</code> (:2666) passes unchanged — the dead-letter behaviour is untouched.</p>
+
+<h2 id="verification">Verification in production</h2>
+
+<p>Beyond the test suite: 75 state entries hold only <code>end_offset</code> today (48 on 2026-08-09). After the merge that count stops rising, and entries carrying <code>frozen_until</code> with an intact cursor start appearing. Measurable with the same read-only census used to write this spec.</p>
+
+<h2 id="residual-risks">Residual risks</h2>
+
+<ol>
+  <li><strong>A frozen file that never grows again is never ingested.</strong> The deliberate trade: today it is marked consumed and its content is <em>lost</em>; after the change it stays out of memory but <strong>recoverable</strong>. The worst failure mode improves; it does not disappear. This is the one item here that exchanges one behaviour for another rather than only fixing, and the first thing to revisit if something looks wrong later.</li>
+  <li><strong>The 75 already-damaged entries are untouched.</strong> Recovery is a separate spec — the ADR's own rule is cause before repair.</li>
+  <li><strong>The dead-letter keeps growing</strong> at roughly 110 jobs/day. Fix A, separate spec.</li>
+  <li><strong>Cross-process writers stay uncovered.</strong> <code>threading.Lock</code> is per-process; the pre-existing #150-class limitation is unchanged here.</li>
+</ol>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:1020dfcfbaba2b644eb7ac6f0e88fd36d2c232ad4571b92846d5797af4274740 -->

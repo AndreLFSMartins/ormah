@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relevance Gate (Provenance) Implementation Plan</title>
+<style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+</style>
+</head>
+<body>
+<nav class="toc">
+  <div class="eyebrow">[ PLAN ]</div>
+  <div class="doc-title">Relevance Gate (Provenance) Implementation Plan</div>
+  <a href="#objective">Goal: Drop doc/SDK noise with provenance labels</a>
+  <a href="#architecture">Architecture: No new LLM call</a>
+  <a href="#global-constraints">Global Constraints</a>
+  <a href="#task-1">1 Kill-switch setting</a>
+  <a href="#task-2">2 Emit the provenance label (schema + prompt)</a>
+  <a href="#task-3">3 Durable quarantine ledger (council safety net)</a>
+  <a href="#task-4">4 Deterministic drop → ledger + counters</a>
+  <a href="#task-5">5 In-context pre-ship eval (the ship gate)</a>
+  <a href="#verification">Verification (post-ship canary — not a unit test)</a>
+  <a href="#self-review">Self-review notes</a>
+  <a href="#amendment-2026-07-20">Amendment 2026-07-20: Council-pr guidance (both peers NO-SHIP)</a>
+</nav>
+<main>
+<article>
+  <div class="metrics">
+    <div class="metric">
+      <span class="big">5</span>
+      <span class="label">Tasks</span>
+    </div>
+    <div class="metric">
+      <span class="big">26</span>
+      <span class="label">Checkboxes</span>
+    </div>
+  </div>
+
+  <div class="progress">
+    <div class="fill" style="width: 0%"></div>
+  </div>
+
+  <section>
+    <h2 id="objective"><em>Goal:</em> Drop doc/SDK noise with provenance labels</h2>
+    <p class="statement">Make the Extractor label every candidate memory <code>provenance=material|product</code> inside the same extraction call, and have deterministic code drop <code>material</code> before write — killing the ~16.5% doc/SDK-echo noise, with a durable safety net so a false Product drop is recoverable.</p>
+  </section>
+
+  <section>
+    <h2 id="architecture"><em>Architecture:</em> No new LLM call</h2>
+    <p>Add a <code>provenance</code> field to the extraction JSON schema + a rules section to the prompt; the model labels each candidate. A guard in <code>ingest_conversation</code>'s write loop drops candidates labeled exactly <code>material</code> when the kill-switch is on, <strong>appending every drop to a durable quarantine ledger</strong> (full content + source + provider/model + prompt version) so a false drop is recoverable.</p>
+    <p>Trust the label unconditionally (no per-model calibration, no safe-list); errs toward keeping Product. The drop is validated <strong>pre-ship by an in-context eval</strong> that runs the real extraction prompt+schema end-to-end (the ship gate), and its false-drop rate is confirmed on a Beta canary before the default is trusted.</p>
+  </section>
+
+  <section>
+    <h2 id="global-constraints">Global Constraints</h2>
+    <div class="callout">
+      <p><strong>Worktree:</strong> work in <code>/Users/andre/Documents/GitHub/ormah-wt-relevance-gate</code> (branch <code>feat/relevance-gate</code>). Base is <strong>local-main, NOT upstream/main</strong> — the schema/chunk extraction this modifies is Beta-only (468 commits ahead). Never <code>git checkout</code> in the main <code>Tools/ormah</code> tree (it runs the live Beta server off its working tree).</p>
+      <p><strong>venv landmine:</strong> the session exports <code>VIRTUAL_ENV=…/Tools/ormah/.venv</code> (the Beta venv). The worktree has its own venv (deps already installed). <strong>Never run <code>uv pip install</code></strong>. Run every command with the worktree python: <code>env -u VIRTUAL_ENV HOME=$(mktemp -d) /Users/andre/Documents/GitHub/ormah-wt-relevance-gate/.venv/bin/python -m pytest …</code>.</p>
+      <p><strong>Reference docs</strong> (outside worktree): read <a href="/Users/andre/Documents/GitHub/Tools/ormah/docs/adr/0002-relevance-gate-provenance.md">ADR-0002</a>, <code>CONTEXT.md</code>, and this plan at their absolute <code>Tools/ormah/…</code> paths.</p>
+    </div>
+    <p class="eyebrow">Key guardrails</p>
+    <ul>
+      <li><strong>Ship gate (council):</strong> the <strong>in-context eval (Task 5) PASS is a documented merge prerequisite</strong> — code does not ship without it. Re-run it on any provider/model change.</li>
+      <li><strong>HOME isolation:</strong> <code>HOME=$(mktemp -d)</code> or the live <code>.env</code> breaks collection.</li>
+      <li><strong>Lint:</strong> ruff, <code>target-version = py311</code>, <code>line-length = 100</code>.</li>
+      <li><strong>Errs toward keeping Product:</strong> drop ONLY when the label is exactly <code>"material"</code>. Absent / null / <code>"product"</code> / any unrecognized value → keep.</li>
+      <li><strong>Gate runs before dedup,</strong> first thing in the write loop.</li>
+      <li><strong>Material/Product definitions</strong> are canonical in <a href="/Users/andre/Documents/GitHub/Tools/ormah/CONTEXT.md"><code>CONTEXT.md</code></a> — copy verbatim into the prompt, do not paraphrase.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2 id="task-1"><span class="phase p-o"><span class="pn">1</span> Kill-switch setting</span></h2>
+    <p class="eyebrow">Files · Interfaces</p>
+    <p>Modify <code>src/ormah/config.py</code> (field next to <code>ingest_min_confidence</code>, ~line 348) · Test <code>tests/test_config.py</code></p>
+    <p><strong>Produces:</strong> <code>Settings.ingest_relevance_gate: bool</code> (env <code>ORMAH_INGEST_RELEVANCE_GATE</code>, default <code>True</code>).</p>
+    <div class="checkpoints">
+      <label><input type="checkbox" disabled> <strong>Step 1</strong> — failing test (<code>tests/test_config.py</code>)</label>
+      <pre><code class="language-python">def test_relevance_gate_defaults_on(monkeypatch):
+    monkeypatch.delenv("ORMAH_INGEST_RELEVANCE_GATE", raising=False)
+    from ormah.config import Settings
+    assert Settings().ingest_relevance_gate is True
+
+def test_relevance_gate_env_off(monkeypatch):
+    monkeypatch.setenv("ORMAH_INGEST_RELEVANCE_GATE", "false")
+    from ormah.config import Settings
+    assert Settings().ingest_relevance_gate is False</code></pre>
+      <label><input type="checkbox" disabled> <strong>Step 2</strong> — run, expect FAIL (<code>AttributeError</code>): <code>env -u VIRTUAL_ENV HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_config.py -k relevance_gate -v</code></label>
+      <label><input type="checkbox" disabled> <strong>Step 3</strong> — add the field in <code>src/ormah/config.py</code> after <code>ingest_min_confidence</code></label>
+      <pre><code class="language-python">    ingest_relevance_gate: bool = True  # drop memories the Extractor labels provenance=material</code></pre>
+      <label><input type="checkbox" disabled> <strong>Step 4</strong> — run, expect PASS (same command)</label>
+      <label><input type="checkbox" disabled> <strong>Step 5</strong> — commit: <code>git commit -am "feat(ingest): add ORMAH_INGEST_RELEVANCE_GATE kill-switch (default on)"</code></label>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="task-2"><span class="phase p-b"><span class="pn">2</span> Emit the provenance label (schema + prompt)</span></h2>
+    <p class="eyebrow">Files · Interfaces</p>
+    <p>Modify <code>src/ormah/engine/memory_engine.py</code> (<code>_INGEST_RESPONSE_SCHEMA</code> ~3144, <code>_INGEST_LLM_RULES</code> ~3081) · Test <code>tests/test_engine/test_ingest.py</code></p>
+    <p><strong>Produces:</strong> extraction dicts carry <code>"provenance": "material"|"product"</code> (schema-required, so <code>claude_cli</code> emits it; other providers may omit — Task 4 tolerates that).</p>
+    <div class="checkpoints">
+      <label><input type="checkbox" disabled> <strong>Step 1</strong> — failing wiring test (<code>tests/test_engine/test_ingest.py</code>)</label>
+      <pre><code class="language-python">def test_extraction_schema_and_prompt_wire_provenance():
+    from ormah.engine import memory_engine as me
+    item = me._INGEST_RESPONSE_SCHEMA["properties"]["memories"]["items"]
+    assert item["properties"]["provenance"]["enum"] == ["material", "product"]
+    assert "provenance" in item["required"]
+    rules = me._INGEST_LLM_RULES
+    assert "material" in rules and "product" in rules
+    assert '"provenance"' in rules  # appears in the output-format section</code></pre>
+      <label><input type="checkbox" disabled> <strong>Step 2</strong> — run, expect FAIL (<code>KeyError: 'provenance'</code>)</label>
+      <label><input type="checkbox" disabled> <strong>Step 3</strong> — add <code>provenance</code> to <code>_INGEST_RESPONSE_SCHEMA</code> properties (after <code>"confidence"</code>) and to <code>required</code></label>
+      <pre><code class="language-python">                    "provenance": {"type": "string", "enum": ["material", "product"]},</code></pre>
+      <pre><code class="language-python">                "required": [
+                    "content", "type", "title", "tags", "about_self", "confidence",
+                    "provenance",
+                ],</code></pre>
+      <label><input type="checkbox" disabled> <strong>Step 4</strong> — add the Provenance rules to <code>_INGEST_LLM_RULES</code>, immediately <strong>before</strong> <code>## Output format</code></label>
+      <pre><code class="language-text">## Provenance (required)
+
+Label every memory on ONE axis: did the session PRODUCE it, or did it merely PASS THROUGH?
+
+- **material** — restates input that passed *through* the session: third-party API/SDK facts, a version string, generic technical knowledge, a read-through of someone else's code — content that would be true and findable in docs/code regardless of this conversation.
+- **product** — something the session itself *produced*: a decision, a user correction, a discovered bug, a complaint, an outcome — even when it is *about* an external tool.
+
+When uncertain, label **product**. A dropped Material re-extracts later (it recurs); a dropped Product often happens once and is lost.</code></pre>
+      <p>Then in the <code>## Output format</code> "For each memory:" list, after the <code>"confidence"</code> bullet:</p>
+      <pre><code class="language-text">- "provenance": "material" or "product" — see the Provenance rule above. This is required.</code></pre>
+      <label><input type="checkbox" disabled> <strong>Step 5</strong> — run, expect PASS</label>
+      <label><input type="checkbox" disabled> <strong>Step 6</strong> — commit: <code>git commit -am "feat(ingest): extractor labels each memory provenance=material|product"</code></label>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="task-3"><span class="phase p-g"><span class="pn">3</span> Durable quarantine ledger (council safety net)</span></h2>
+    <p class="eyebrow">Files · Rationale</p>
+    <p>Create <code>src/ormah/engine/relevance_quarantine.py</code> · Test <code>tests/test_engine/test_relevance_quarantine.py</code></p>
+    <div class="callout warn">
+      <p><strong>Council, HIGH:</strong> ADR-0002 promises the drop is "recoverable/measurable", but logging a title is not recovery. A durable append-only ledger of every dropped candidate (full content + source + provider/model + prompt version) makes a false Product drop recoverable and lets the canary measure the false-drop rate. <strong>JSONL, not a DB table</strong> (append-only audit log; no migration needed; inspectable with <code>jq</code>).</p>
+    </div>
+    <p class="eyebrow">Interfaces — Produces</p>
+    <ul>
+      <li><code>quarantine_path(settings) -&gt; pathlib.Path</code> — <code>&lt;ormah data dir&gt;/relevance_gate_quarantine.jsonl</code>, deriving the data dir the SAME way the store DB path is derived.</li>
+      <li><code>prompt_version() -&gt; str</code> — first 12 hex of <code>sha256(_INGEST_LLM_RULES.encode())</code>.</li>
+      <li><code>record_dropped(settings, *, content, title, node_type, space, provider, model, dropped_at) -&gt; None</code> — append one JSON object (one line, <code>json.dumps</code> + <code>"\n"</code>).</li>
+      <li><code>iter_dropped(settings) -&gt; Iterator[dict]</code> — yield each record (inspection/replay; returns empty if the file is absent).</li>
+    </ul>
+    <div class="checkpoints">
+      <label><input type="checkbox" disabled> <strong>Step 1</strong> — failing test (<code>tests/test_engine/test_relevance_quarantine.py</code>)</label>
+      <pre><code class="language-python">import json
+from ormah.engine import relevance_quarantine as q
+
+def test_record_and_iter_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "quarantine.jsonl")
+    q.record_dropped(None, content="the requests lib raises Timeout", title="requests Timeout",
+                     node_type="fact", space="proj", provider="claude_cli", model="haiku",
+                     dropped_at="2026-07-20T00:00:00+00:00")
+    rows = list(q.iter_dropped(None))
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["content"] == "the requests lib raises Timeout"
+    assert r["label"] == "material"
+    assert r["provider"] == "claude_cli"
+    assert len(r["prompt_version"]) == 12
+
+def test_iter_empty_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "missing.jsonl")
+    assert list(q.iter_dropped(None)) == []</code></pre>
+      <label><input type="checkbox" disabled> <strong>Step 2</strong> — run, expect FAIL (module missing): <code>env -u VIRTUAL_ENV HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_engine/test_relevance_quarantine.py -v</code></label>
+      <label><input type="checkbox" disabled> <strong>Step 3</strong> — implement <code>src/ormah/engine/relevance_quarantine.py</code> per the Interfaces above. <code>prompt_version</code> imports <code>_INGEST_LLM_RULES</code> lazily inside the function (avoid a heavy import at module load). <code>record_dropped</code> computes <code>prompt_version()</code> and writes one JSON line.</label>
+      <label><input type="checkbox" disabled> <strong>Step 4</strong> — run, expect PASS (2 passed)</label>
+      <label><input type="checkbox" disabled> <strong>Step 5</strong> — commit: <code>git commit -am "feat(ingest): durable quarantine ledger for dropped Material (JSONL)"</code></label>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="task-4"><span class="phase p-o"><span class="pn">4</span> Deterministic drop → ledger + counters</span></h2>
+    <p class="eyebrow">Files · Interfaces</p>
+    <p>Modify <code>src/ormah/engine/memory_engine.py</code> (<code>ingest_conversation</code> loop, ~2708–2773) · Test <code>tests/test_engine/test_ingest.py</code></p>
+    <p><strong>Consumes:</strong> <code>Settings.ingest_relevance_gate</code> (T1); <code>mem["provenance"]</code> (T2); <code>relevance_quarantine.record_dropped</code> / <code>.prompt_version</code> (T3).</p>
+    <p><strong>Produces:</strong> memories labeled <code>material</code> are absent from returned <code>created</code> when the gate is on; each recorded to the quarantine ledger; per-ingest counts of dropped-Material and missing-label are logged.</p>
+    <div class="checkpoints">
+      <label><input type="checkbox" disabled> <strong>Step 1</strong> — failing tests (<code>tests/test_engine/test_ingest.py</code>; monkeypatch <code>_extract_memories_llm</code> to return canned dicts)</label>
+      <pre><code class="language-python">def _canned(provenance):
+    m = {"content": "x" * 60, "type": "fact", "title": "t",
+         "tags": [], "about_self": False, "confidence": 0.9, "provenance": provenance}
+    if provenance is None:
+        m.pop("provenance")
+    return [m]
+
+@pytest.mark.parametrize("gate,prov,kept", [
+    (True,  "material", False),   # dropped
+    (True,  "product",  True),
+    (True,  None,       True),    # missing label -> keep (errs toward Product)
+    (True,  "garbage",  True),    # unknown label -> keep
+    (False, "material", True),    # kill-switch off -> keep
+])
+def test_relevance_gate_drop(engine, monkeypatch, gate, prov, kept):
+    engine.settings.ingest_relevance_gate = gate
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned(prov))
+    out = engine.ingest_conversation("hello world " * 20, dry_run=True)
+    assert (len(out) == 1) is kept
+
+def test_dropped_material_is_recorded(engine, monkeypatch, tmp_path):
+    from ormah.engine import relevance_quarantine as q
+    monkeypatch.setattr(q, "quarantine_path", lambda s: tmp_path / "q.jsonl")
+    engine.settings.ingest_relevance_gate = True
+    monkeypatch.setattr(type(engine), "_extract_memories_llm", lambda self, c: _canned("material"))
+    engine.ingest_conversation("hello world " * 20, dry_run=False, space="proj")
+    assert len(list(q.iter_dropped(engine.settings))) == 1</code></pre>
+      <label><input type="checkbox" disabled> <strong>Step 2</strong> — run, expect FAIL (material kept; nothing recorded)</label>
+      <label><input type="checkbox" disabled> <strong>Step 3</strong> — implement in <code>ingest_conversation</code>: init <code>dropped_material = 0</code> and <code>missing_label = 0</code> beside <code>skipped = 0</code>; as the FIRST check after <code>mem_content</code> is resolved (before the dedup block), add the gate logic and ledger recording</label>
+      <label><input type="checkbox" disabled> <strong>Step 4</strong> — run gate + record tests, expect PASS</label>
+      <label><input type="checkbox" disabled> <strong>Step 5</strong> — full ingest suite, no regressions: <code>env -u VIRTUAL_ENV HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_engine/test_ingest.py tests/test_engine/test_ingest_extraction.py -v</code></label>
+      <label><input type="checkbox" disabled> <strong>Step 6</strong> — commit: <code>git commit -am "feat(ingest): drop provenance=material, record to quarantine ledger, log counts"</code></label>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="task-5"><span class="phase p-b"><span class="pn">5</span> In-context pre-ship eval (the ship gate)</span></h2>
+    <p class="eyebrow">Files · Rationale</p>
+    <p>Create <code>eval/relevance/corpus/cases.json</code>, <code>eval/relevance/runner.py</code>, <code>eval/relevance/__init__.py</code></p>
+    <div class="callout warn">
+      <p><strong>Council, HIGH — both peers, 0.9–0.99:</strong> a standalone classify prompt over isolated node content does NOT test the production decision — production labels <em>inside</em> <code>_INGEST_LLM_PROMPT</code> with competing extraction rules, so a systematic Product→material bias can pass a standalone eval and cause irreversible loss. This eval runs the <strong>real</strong> <code>_INGEST_LLM_PROMPT</code> + <code>_INGEST_RESPONSE_SCHEMA</code> end-to-end via <code>_extract_memories_llm</code> and reads the emitted <code>provenance</code> labels. It is the <strong>ship gate</strong>.</p>
+    </div>
+    <p class="eyebrow">Interfaces — Produces</p>
+    <p>Two asymmetric rates measured on the real extraction path —</p>
+    <ul>
+      <li><code>product_preserved</code> (of product cases, fraction whose salient memory the extractor emits AND labels <code>product</code>) <strong>≥ 0.98</strong></li>
+      <li><code>material_dropped</code> (of material cases, fraction whose material candidate is labeled <code>material</code>) <strong>≥ 0.80</strong></li>
+    </ul>
+    <p>Exit non-zero (<code>FAIL</code>) if either misses or the corpus is below the minimum.</p>
+    <div class="checkpoints">
+      <label><input type="checkbox" disabled> <strong>Step 1</strong> — build the corpus <code>eval/relevance/corpus/cases.json</code>: a list of cases, each a short conversation snippet crafted to yield one salient memory of known provenance, plus its ground truth. Seed material cases from the 461 doc/SDK <code>fact</code> nodes; product cases from real <code>decision</code>/<code>preference</code>/correction nodes. <strong>Include ≥3 ambiguous pairs</strong> — near-identical text that is Material in one context and Product in another. Aim ≥20 product + ≥20 material cases.</label>
+      <pre><code class="language-json">[
+  {"id": "mat-requests-timeout", "label": "material",
+   "snippet": "user: what does requests raise on timeout?\nassistant: requests.exceptions.Timeout after the configured limit."},
+  {"id": "prod-gate-decision", "label": "product",
+   "snippet": "user: should we calibrate per model?\nassistant: no — decided to trust the label with a kill-switch; calibration lands off for the median user."}
+]</code></pre>
+      <label><input type="checkbox" disabled> <strong>Step 2</strong> — write <code>eval/relevance/runner.py</code> to run the REAL extraction prompt+schema end-to-end and score provenance labels</label>
+      <label><input type="checkbox" disabled> <strong>Step 3</strong> — run against the live provider (ship gate): <code>env -u VIRTUAL_ENV HOME=$(mktemp -d) .venv/bin/python -m eval.relevance.runner</code>. Expected: both rates + <code>PASS</code>. <strong>FAIL on <code>product_preserved</code> → do NOT merge</strong> (systematic bias — revisit the prompt). FAIL on <code>material_dropped</code> → gate under-drops (cheap error), may merge with a note.</label>
+      <label><input type="checkbox" disabled> <strong>Step 4</strong> — commit: <code>git commit -am "test(ingest): in-context relevance-gate eval (ship gate, asymmetric thresholds)"</code></label>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="verification">Verification (post-ship canary — not a unit test)</h2>
+    <p>The kill-switch defaults ON, but the drop is <strong>trusted only after this canary.</strong> Run the Beta with the gate on for a few dogfood days, then:</p>
+    <ol>
+      <li><strong>False-drop check (the safety net in action):</strong> sample the quarantine ledger (<code>jq . &lt;data-dir&gt;/relevance_gate_quarantine.jsonl</code>); any entry that is actually Product is a false drop → recover it (re-<code>remember</code> from the ledger content) and, if the rate is non-trivial, revisit the prompt or flip <code>ORMAH_INGEST_RELEVANCE_GATE=false</code>.</li>
+      <li><strong>Effect check:</strong> re-run the doc queries; the 461 Material <code>fact</code> nodes trend to ~0 while <code>decision</code>/<code>preference</code> stay flat.</li>
+      <li>Grep the server log for <code>Relevance gate: dropped</code> for the live drop + no-op-label rate.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="self-review">Self-review notes</h2>
+    <ul>
+      <li><strong>Council coverage:</strong> in-context eval as ship gate (T5) · quarantine ledger for recovery (T3, wired in T4) · eval PASS = merge prereq + re-run on provider change · no-op-label count logged (T4) · corpus guard (T5 Step 2) · canary before trusting default (Verification). Rejected: default-off-per-provider (contradicts ADR-0002; addressed via ship-gate-on-real-provider instead).</li>
+      <li><strong>ADR-0002 coverage:</strong> in-prompt label (T2) · code drops Material (T4) · trust-the-label + kill-switch, no calibration/safe-list · auditable+recoverable drop (T3 ledger) · pre-ship validation (T5) · post-ship Beta re-query (Verification).</li>
+      <li><strong>Sequencing unchanged:</strong> P1 gate → ADR-0004 → track 1 (this plan is the P1 gate).</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2 id="amendment-2026-07-20"><em>Amendment 2026-07-20:</em> Council-pr guidance (both peers NO-SHIP)</h2>
+    <div class="callout warn">
+      <p><strong>Cursor + Codex blocked the merge with 4 HIGH findings.</strong> Adopted (see <a href="/Users/andre/Documents/GitHub/Tools/ormah/docs/adr/0002-relevance-gate-provenance.md">ADR-0002 amendment</a>):</p>
+    </div>
+    <ul>
+      <li><strong>SHADOW mode is the new default</strong> (<code>ingest_relevance_gate_enforce=False</code>): the gate records would-drops to the ledger but keeps the memory. No irreversible risk on merge; shadow ledger = real-store eval data. Supersedes the "Kill-switch default = drop ON" line above (the gate is on, but observing, not dropping).</li>
+      <li><strong>Fail-open when enforcing:</strong> drop only if the recovery record was written; on quarantine-write failure, KEEP (this reverses the earlier "guard" that dropped anyway).</li>
+    </ul>
+    <p class="eyebrow">Enforce-gate — ALL required before flipping <code>ingest_relevance_gate_enforce=True</code></p>
+    <ol>
+      <li>In-context eval passes on a <strong>real-store</strong> corpus for the active provider/model (seed corpus is insufficient).</li>
+      <li>Quarantine ledger included in Ormah <strong>backup/restore</strong> + an idempotent re-ingestion command (Codex HIGH: the ledger currently sits outside the backup set → drops irrecoverable on restore).</li>
+      <li>Ship-gate scorer fixed so mixed material+product labels cannot false-pass (Codex HIGH: verified false-pass at 1.000/1.000).</li>
+      <li>(MEDIUM) ledger records source context (session/agent id); eval adds an end-to-end <code>ingest_conversation</code> case; ship-gate wired as a documented merge prerequisite.</li>
+    </ol>
+    <p>Items 2–4 are dormant-path work gating the enforce flip; shadow mode makes the branch safe to merge before they land.</p>
+  </section>
+</article>
+  <div class="spectrum"><span class="s1"></span><span class="s2"></span><span class="s3"></span></div>
+  <div class="signature">
+    <div class="name">rich-doc</div>
+    <div class="role">superpowers companion · Anthropic brand</div>
+  </div>
+</main>
+</body>
+</html>
+<!-- rich-doc-src-sha256:b1fe57c3dc0c79a18d278e9830fb9b875c19067355b31e817a1baff6b7901a2b -->

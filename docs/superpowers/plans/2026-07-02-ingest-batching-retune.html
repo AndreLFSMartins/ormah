@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ingest Batching Retune — Implementation Plan</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+h4{font:600 16px/1.3 var(--font-head);margin:20px 0 8px;color:var(--ink)}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Superpowers</div>
+  <div class="doc-title"><em>Ingest</em> Batching Retune</div>
+  <a href="#overview">Overview</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#execution">Execution Branch</a>
+  <a href="#scope">Scope Contract</a>
+  <a href="#structure">File Structure</a>
+  <a href="#task-1">Task 1: Config</a>
+  <a href="#task-2">Task 2: Byte Gate</a>
+  <a href="#task-3">Task 3: Prompt</a>
+  <a href="#task-4">Task 4: Regressions</a>
+  <a href="#task-5">Task 5: Calibrate</a>
+  <a href="#task-6">Task 6: Quota Test</a>
+  <a href="#follow-ups">Conditional Follow-ups</a>
+  <a href="#deferred">Deferred</a>
+  <a href="#review">Self-Review</a>
+</nav>
+
+<main>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="big">6</div>
+    <div class="label">Core Tasks</div>
+  </div>
+  <div class="metric">
+    <div class="big">36</div>
+    <div class="label">Implementation Steps</div>
+  </div>
+  <div class="metric">
+    <div class="big">2</div>
+    <div class="label">Conditional Follow-ups</div>
+  </div>
+</div>
+
+<div class="progress">
+  <div class="bar"><div class="fill" style="width: 0%"></div></div>
+  <div class="label">0% complete — 36 steps remaining</div>
+</div>
+
+<span class="schip todo">Not Started</span>
+
+<h2 id="overview"><em>Ingest</em> Batching Retune — Implementation Plan (rev. 2, post-council)</h2>
+
+<div class="callout">
+  <span class="label">For agentic workers</span>
+  <p style="margin: 0;">Use <strong>superpowers:subagent-driven-development</strong> (recommended) or <strong>superpowers:executing-plans</strong> to implement this plan task-by-task.</p>
+</div>
+
+<p class="statement">Make server-side extraction flush a <strong>Batch</strong> by accumulated byte-size (not per-turn), so <code>claude -p</code> runs on ~15–20K-token batches instead of one call per turn — collapsing the Max-quota burn while preserving recall and never silently dropping a batch tail.</p>
+
+<h3 id="architecture">Architecture</h3>
+
+<p>A <strong>retune of the existing <code>session_watcher</code></strong>, not a new subsystem. The per-file byte cursor, incremental parse, debounce, idle-flush and reconcile machinery already exist. We (1) add a byte-size dimension to the flush gate, (2) <strong>cap each flush at <code>flush_bytes</code> at a real turn boundary</strong> so an oversized pending delta is drained in slices instead of truncated, (3) raise the idle threshold to 600s <strong>and decouple the retry timer from it</strong>, (4) reorder the extraction prompt delta-first (<a href="../../adr/0001-batch-size-and-ordering.md">ADR 0001</a>), (5) fix the suite regressions the byte gate + idle change cause, then (6–7) <strong>measure</strong> recall and quota.</p>
+
+<p><strong>Flush policy (André's call — policy A):</strong> single high idle (600s) + byte gate + the existing session-boundary hook. NOT the short-idle variant.</p>
+
+<h3 id="execution">Execution Branch</h3>
+
+<p>Implement Tasks 1–5 on <code>feat/ingest-claude-cli-extraction</code> (the PR #79 head branch) — a subagent-driven worktree is created <strong>from that branch</strong>, not <code>local-main</code> — so the batching fix consolidates into <strong>PR #79 as one coherent change</strong> (the <code>claude_cli</code> extraction + its quota-safe batching ship together, never the burn-prone version alone). <code>local-main</code> (Beta integration) is used only for Task 6's live dev-server quota test (merge <code>feat</code> → <code>local-main</code>). PR #79 is a <strong>draft at <code>1811b2f</code></strong>; local branch commits are fine, but do NOT push <code>fork/feat</code> until Task 6 measures and André signs off.</p>
+
+<p><strong>Tech Stack:</strong> Python 3.11, pydantic-settings, pytest (<code>asyncio_mode=auto</code>). Run tests with <code>.venv/bin/python -m pytest</code>.</p>
+
+<p><strong>Council context (2 rounds, <a href="../../../.council/council-result.md">.council/council-result.md</a>):</strong> Round 1 found 2 criticals (validator not enforced; boundary trigger) — fixed. Round 2 (this revision) found the decisive one: <strong>the byte gate decides <em>when</em> to flush, not <em>how much</em> to send.</strong> The flush sends the whole <code>safe_conversation</code>; <code>_extract_memories_llm</code> truncates at <code>ingest_max_content_chars</code> (<a href="../../../src/ormah/engine/memory_engine.py#L2216">memory_engine.py:2216</a>) and the cursor advances to the full boundary (<a href="../../../src/ormah/background/session_watcher.py#L846">session_watcher.py:846</a>) → any tail beyond the cap is <strong>silently lost</strong>. Deterministic with <code>debounce=60s</code>, restart-backlog, or a large paste. So the <strong>cap is non-deferrable</strong> (André chose option A). Also corrected: critical #2's boundary flush <strong>already exists for Claude Code</strong> via <code>cmd_whisper_store</code> (<a href="../../../src/ormah/adapters/cli_adapter.py#L424">cli_adapter.py:424</a>) (PreCompact/SessionEnd hook); only Codex lacks it, and that gate is made an objective test, not a manual watch.</p>
+
+<h3 id="scope">Scope Contract (Revised Ledger, rev. 2)</h3>
+
+<ul>
+  <li><strong>Tasks 1–5</strong> — the necessary fixes: config invariants (R1 critical #1), byte gate + <strong>cap/slicing</strong> (R2 critical) + retry decouple (R1 #3), prompt delta-first, suite regression (idle <strong>and</strong> byte-gate) + min_turns</li>
+  <li><strong>Tasks 6–7</strong> — measure: calibrate <code>flush_bytes</code>/idle, then the quota test gate (no push, objective Codex-boundary check)</li>
+  <li><strong>Conditional follow-ups (NOT tasks yet)</strong> — the parser <code>max_bytes</code> <em>optimization</em> beyond the minimal cap (smarter multi-slice-per-scan), and a dedicated <strong>Codex boundary hook</strong> — built only if Task 6's objective check fails. Named, not dropped</li>
+  <li><strong>Deferred (ledger e)</strong> — maintenance seam dead (<code>llm_provider=none</code>); Ollama-removal loose-ends #1–#4. <strong>#1 (bin-path under launchd) is a prerequisite of Task 6</strong></li>
+</ul>
+
+<h3 id="structure">File Structure</h3>
+
+<table>
+  <tr>
+    <th>File</th>
+    <th>Purpose</th>
+  </tr>
+  <tr>
+    <td><code>src/ormah/config.py</code></td>
+    <td>Add <code>session_watcher_flush_bytes</code>, <code>session_watcher_retry_seconds</code>, idle→600, cross-field validator</td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/transcript/parser.py</code></td>
+    <td>Optional <code>max_bytes</code> cap on <code>parse_transcript</code></td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/background/session_watcher.py</code></td>
+    <td>Byte gate + capped parse in <code>_ingest_session</code>; thread <code>flush_bytes</code>/<code>retry_seconds</code>; fix <code>_schedule_retry</code></td>
+  </tr>
+  <tr>
+    <td><code>src/ormah/engine/memory_engine.py</code></td>
+    <td>Reorder <code>_INGEST_LLM_PROMPT</code> delta-first</td>
+  </tr>
+  <tr>
+    <td><code>tests/test_background/test_session_watcher.py</code></td>
+    <td>Repair idle + byte-gate regressions</td>
+  </tr>
+  <tr>
+    <td><code>tests/test_background/test_session_watcher_flush.py</code> (new)</td>
+    <td>Config, gate, cap, contract tests</td>
+  </tr>
+</table>
+
+<div class="callout">
+  <span class="label">Coupling invariant</span>
+  <code>flush_bytes</code> (60000) &lt; <code>ingest_max_content_chars</code> (100000, <a href="../../../src/ormah/config.py#L222">config.py:222</a>). Task 1 enforces <code>flush_bytes ≤ cap</code> with a cross-field validator; Task 2's cap guarantees a flushed batch never exceeds <code>flush_bytes</code>, so the truncation at extraction is never reached.
+</div>
+
+<div class="phase p-o">
+  <span class="pn">1</span>
+  Config <em>Invariants</em>
+</div>
+
+<h2 id="task-1">Task 1: Config Invariants — Size Gate, Decoupled Retry, Enforced Upper Bound</h2>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>src/ormah/config.py</code> (session_watcher block ~83-90; validator area ~544)</li>
+  <li>Test: <code>tests/test_background/test_session_watcher_flush.py</code> (new)</li>
+</ul>
+
+<h4>Step 1: Write the failing tests</h4>
+<pre><code class="language-python"># tests/test_background/test_session_watcher_flush.py
+import pytest
+from pydantic import ValidationError
+from ormah.config import Settings
+
+def test_flush_defaults():
+    s = Settings()
+    assert s.session_watcher_flush_bytes == 60000
+    assert s.session_watcher_retry_seconds == 30.0     # decoupled from idle
+    assert s.session_watcher_idle_threshold == 600.0   # policy A
+    assert s.session_watcher_flush_bytes <= s.ingest_max_content_chars
+
+def test_flush_bytes_over_cap_rejected():
+    with pytest.raises(ValidationError):
+        Settings(session_watcher_flush_bytes=200000, ingest_max_content_chars=100000)
+
+def test_flush_bytes_floor():
+    with pytest.raises(ValidationError):
+        Settings(session_watcher_flush_bytes=500)</code></pre>
+
+<ul style="margin-top: 16px;">
+  <li><input type="checkbox"> <strong>Step 2: Run to verify they fail</strong></li>
+</ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_session_watcher_flush.py -v</code><br>
+Expected: FAIL — <code>AttributeError: 'Settings' object has no attribute 'session_watcher_flush_bytes'</code></p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 3: Add the settings</strong> (session_watcher block near line 86)</li>
+</ul>
+
+<pre><code class="language-python">    session_watcher_idle_threshold: float = 600.0  # was 30.0 — 30s flushed 1-turn batches
+    session_watcher_retry_seconds: float = 30.0    # FSEvents-miss retry — decoupled from idle
+    session_watcher_flush_bytes: int = 60000       # pending-delta bytes that close a Batch (~15-20K tok)</code></pre>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 4: Add the validators</strong> (near line 544)</li>
+</ul>
+
+<pre><code class="language-python">    @field_validator("session_watcher_flush_bytes")
+    @classmethod
+    def _flush_bytes_min(cls, v: int) -> int:
+        if v < 1000:
+            raise ValueError(f"session_watcher_flush_bytes must be >= 1000, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _flush_bytes_within_cap(self) -> "Settings":
+        if self.session_watcher_flush_bytes > self.ingest_max_content_chars:
+            raise ValueError(
+                "session_watcher_flush_bytes "
+                f"({self.session_watcher_flush_bytes}) must be <= "
+                f"ingest_max_content_chars ({self.ingest_max_content_chars}); "
+                "a larger batch would be silently truncated before extraction"
+            )
+        return self</code></pre>
+
+<p>Ensure the import line near the top of <code>config.py</code> includes <code>model_validator</code>: <code>from pydantic import field_validator, model_validator</code> (add if absent).</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 5: Run to verify they pass</strong></li>
+</ul>
+<p>Run: <code>.venv/bin/python -m pytest tests/test_background/test_session_watcher_flush.py -v</code><br>
+Expected: PASS (3 tests)</p>
+
+<ul>
+  <li><input type="checkbox"> <strong>Step 6: Commit</strong></li>
+</ul>
+
+<pre><code class="language-bash">git add src/ormah/config.py tests/test_background/test_session_watcher_flush.py
+git commit -m "feat(ingest): flush_bytes + retry_seconds config, enforce flush_bytes<=cap"</code></pre>
+
+<div class="phase p-b">
+  <span class="pn">2</span>
+  Byte-Size <em>Flush Gate</em>
+</div>
+
+<h2 id="task-2">Task 2: Byte-Size Flush Gate + Cap + Retry Decouple</h2>
+
+<p>Replace the turn-count deferral with a byte gate, <strong>cap each parse at <code>flush_bytes</code> so an oversized delta is drained in slices instead of truncated</strong> (R2 critical — silent loss), and point <code>_schedule_retry</code> at <code>retry_seconds</code> instead of <code>idle_threshold</code> (R1 #3).</p>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>src/ormah/transcript/parser.py</code> — <code>parse_transcript</code> gets <code>max_bytes</code></li>
+  <li>Modify: <code>src/ormah/background/session_watcher.py</code> — helpers, <code>_ingest_session</code>, <code>SessionHandler</code>, <code>_schedule_retry</code>, <code>_do_ingest</code>, <code>start_session_watcher</code></li>
+  <li>Test: <code>tests/test_background/test_session_watcher_flush.py</code></li>
+</ul>
+
+<h4>Step 1: Write the failing tests</h4>
+<pre><code class="language-python"># add to tests/test_background/test_session_watcher_flush.py
+from ormah.background.session_watcher import _pending_bytes, _should_flush
+
+def test_byte_gate():
+    assert _pending_bytes(prev_offset=0, payload_offset=5000) == 5000
+    assert _should_flush(pending=5000, is_idle=False, flush_bytes=60000) is False
+    assert _should_flush(pending=60000, is_idle=False, flush_bytes=60000) is True
+    assert _should_flush(pending=10, is_idle=True, flush_bytes=60000) is True</code></pre>
+
+<ul style="margin-top: 16px;">
+  <li><input type="checkbox"> <strong>Step 2–9: Implementation steps (refer to source for details)</strong></li>
+</ul>
+
+<pre><code class="language-bash">git add src/ormah/transcript/parser.py src/ormah/background/session_watcher.py tests/test_background/test_session_watcher_flush.py
+git commit -m "feat(ingest): byte-size flush gate with flush_bytes cap; decouple retry timer"</code></pre>
+
+<div class="phase p-g">
+  <span class="pn">3</span>
+  Extraction <em>Prompt</em>
+</div>
+
+<h2 id="task-3">Task 3: Reorder Extraction Prompt Delta-First (ADR 0001)</h2>
+
+<p><code>_INGEST_LLM_PROMPT</code> is instructions-first, <code>{conversation}</code> last. <a href="../../adr/0001-batch-size-and-ordering.md">ADR 0001</a> + Anthropic long-context guidance: conversation delta at the <strong>top</strong>, instructions after → up to +30% recall.</p>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>src/ormah/engine/memory_engine.py:2492</code></li>
+  <li>Test: <code>tests/test_background/test_session_watcher_flush.py</code></li>
+</ul>
+
+<h4>Step 1–5: Reorder prompt to put conversation first</h4>
+
+<pre><code class="language-python">def test_prompt_is_delta_first():
+    from ormah.engine.memory_engine import _INGEST_LLM_PROMPT
+    filled = _INGEST_LLM_PROMPT.format(conversation="SENTINEL_CONVO")
+    assert filled.index("SENTINEL_CONVO") < filled.index("What to extract")</code></pre>
+
+<ul style="margin-top: 16px;">
+  <li><input type="checkbox"> <strong>Steps 1–5: Write test, verify fails, restructure template, verify passes, commit</strong></li>
+</ul>
+
+<pre><code class="language-bash">git add src/ormah/engine/memory_engine.py tests/test_background/test_session_watcher_flush.py
+git commit -m "feat(ingest): order extraction prompt conversation-first per ADR 0001"</code></pre>
+
+<div class="phase p-o">
+  <span class="pn">4</span>
+  Suite <em>Regressions</em>
+</div>
+
+<h2 id="task-4">Task 4: Repair Suite Regressions — Idle and Byte Gate</h2>
+
+<p>Two regressions, not one:</p>
+<ul>
+  <li><strong>(a) Idle default 30→600:</strong> <code>_mark_idle</code> recedes mtime only 120s, so <code>age=120 < 600</code> is no longer idle</li>
+  <li><strong>(b) The byte gate itself:</strong> a small <strong>active</strong> file (&lt;<code>flush_bytes</code>) now returns <code>TRANSIENT</code> even with 6+ turns, where it used to pass via <code>payload_users >= min_turns</code></li>
+</ul>
+
+<p><strong>Files:</strong></p>
+<ul>
+  <li>Modify: <code>tests/test_background/test_session_watcher.py</code></li>
+  <li>Modify: <code>docs/12 - Configuration Reference.md</code> (min_turns note)</li>
+</ul>
+
+<ul style="margin-top: 16px;">
+  <li><input type="checkbox"> <strong>Step 1: Enumerate ALL failures</strong> — Run pytest with grep to find breakage</li>
+  <li><input type="checkbox"> <strong>Step 2: Fix idle-dependent tests</strong> — Adjust <code>_mark_idle</code> recede time</li>
+  <li><input type="checkbox"> <strong>Step 3: Fix byte-gate-dependent tests</strong> — Add low <code>flush_bytes</code> or mark idle</li>
+  <li><input type="checkbox"> <strong>Step 4: Resolve min_turns</strong> — Update documentation note</li>
+  <li><input type="checkbox"> <strong>Step 5: Green suite</strong> — Run full test suite</li>
+  <li><input type="checkbox"> <strong>Step 6: Commit</strong></li>
+</ul>
+
+<pre><code class="language-bash">git add tests/test_background/test_session_watcher.py "docs/12 - Configuration Reference.md"
+git commit -m "test(ingest): repair idle + byte-gate regressions; document min_turns change"</code></pre>
+
+<div class="phase p-b">
+  <span class="pn">5</span>
+  Calibrate <em>Thresholds</em>
+</div>
+
+<h2 id="task-5">Task 5: Calibrate <code>flush_bytes</code> and <code>idle_threshold</code> (Measured)</h2>
+
+<p>The ~15–20K-token bracket is from the literature; the exact point is measured on ormah's own prompt + transcripts.</p>
+
+<ul style="margin-top: 16px;">
+  <li><input type="checkbox"> <strong>Step 1: Recall across batch sizes</strong> — Pick 3 real transcripts. For byte sizes {30000, 60000, 90000}, run <code>_extract_memories_llm</code> on the first N bytes; record memory count + spot-check of missed memories</li>
+  <li><input type="checkbox"> <strong>Step 2: Decide flush_bytes</strong> — Use the largest size where recall stays clean. Update default in <code>config.py</code> if needed</li>
+  <li><input type="checkbox"> <strong>Step 3: Confirm idle 600s</strong> — Verify it stops per-turn flushes without stranding short sessions</li>
+  <li><input type="checkbox"> <strong>Step 4: Record measured values</strong> — Append note to <a href="../../adr/0001-batch-size-and-ordering.md">ADR 0001</a> (Consequences); commit defaults</li>
+</ul>
+
+<pre><code class="language-bash">git add src/ormah/config.py docs/adr/0001-batch-size-and-ordering.md
+git commit -m "chore(ingest): calibrate flush_bytes/idle_threshold from recall measurement"</code></pre>
+
+<div class="phase p-g">
+  <span class="pn">6</span>
+  Quota Test <em>Gate</em>
+</div>
+
+<h2 id="task-6">Task 6: Quota Test Gate — Measure Before Merge (Do NOT Push)</h2>
+
+<p>Prove batching collapses the Max-quota burn, and prove the Codex boundary path with an <strong>objective</strong> check (not a manual watch).</p>
+
+<ul style="margin-top: 16px;">
+  <li><input type="checkbox"> <strong>Step 0 (prereq):</strong> Confirm <code>ORMAH_CLAUDE_CLI_BIN</code> is still set in <code>~/.config/ormah/.env</code> so <code>claude</code> resolves under launchd — OR land loose-end #1 first. Do not proceed without a resolvable bin</li>
+  <li><input type="checkbox"> <strong>Step 1:</strong> Merge Tasks 1–5 into <code>local-main</code> (<code>git merge --no-ff</code>), restart: <code>launchctl kickstart -k gui/$(id -u)/com.ormah.server.dev</code></li>
+  <li><input type="checkbox"> <strong>Step 2:</strong> Re-enable extraction <strong>for the test only</strong>: <code>ORMAH_INGEST_LLM_PROVIDER=claude_cli</code> in <code>~/.config/ormah/.env</code> (no inline comments), restart</li>
+  <li><input type="checkbox"> <strong>Step 3 (quota):</strong> Over one working day, measure vs baseline (764 calls/15h): grep <code>~/.local/share/ormah/logs/ormah.log</code> for <code>memories extracted</code> per hour. Success = order-of-magnitude fewer calls, recall intact</li>
+  <li><input type="checkbox"> <strong>Step 4 (objective Codex boundary):</strong> Deterministic reproduction — finalize a Codex session with a closed delta < <code>flush_bytes</code>, then assert memory is extracted within the expected window. If it strands beyond 600s SLA → Codex boundary hook becomes a real task</li>
+  <li><input type="checkbox"> <strong>Step 5:</strong> If numbers are bad, tune via Task 5 and re-measure. <strong>Do NOT push</strong> — PR #79 stays at <code>1811b2f</code> until André signs off</li>
+</ul>
+
+<h2 id="follow-ups">Conditional Follow-ups (Built Only if Task 6 Fails — Named, Not Dropped)</h2>
+
+<ul>
+  <li><strong>Parser <code>max_bytes</code> optimization beyond the minimal cap.</strong> <em>Trigger:</em> calibration shows the one-slice-per-scan drain is too slow for real backlogs. <em>Fix:</em> multi-slice loop inside <code>_ingest_session</code> (bounded, anti-storm-aware) instead of one slice per reconcile cycle</li>
+  <li><strong>Dedicated Codex boundary hook.</strong> <em>Trigger:</em> Task 6 Step 4 shows a real strand beyond the SLA. <em>Today:</em> CC compaction/end is covered by <code>cmd_whisper_store</code>; Codex has none. <em>Fix:</em> a Codex boundary signal or a forced flush on file-shrink independent of the byte gate</li>
+</ul>
+
+<h2 id="deferred">Deferred (Ledger e — Named, Not Dropped)</h2>
+
+<ul>
+  <li><strong>Maintenance seam still dead</strong> (<code>llm_provider=none</code> → 4 semantic jobs + feedback judge no-op). Separate decision; revisit as its own plan (council option-A/C debate)</li>
+  <li><strong>Ollama-removal loose ends #1–#4</strong> (<a href="2026-07-02-ingest-ollama-removal-loose-ends.md">2026-07-02-ingest-ollama-removal-loose-ends.md</a>). <strong>#1 is a Task 6 prerequisite</strong> (bin-path under launchd). #2/#3/#4 deferred</li>
+</ul>
+
+<h2 id="review">Self-Review</h2>
+
+<ul>
+  <li><strong>Council coverage (both rounds):</strong> R1 #1 validator → Task 1 cross-field + test; R1 #2 boundary → CC covered by <code>cmd_whisper_store</code>, Codex objective-checked in Task 6 Step 4; R1 #3 retry decouple → Task 2 Step 6; <strong>R2 critical silent-loss → Task 2 Steps 4-7</strong> (parser cap + contract test) — the decisive fix; R2 Task-4-incomplete → Task 4 Steps 1/3; R2 whisper-out-partial → Task 6 Step 4; min_turns → Task 4 Step 4</li>
+  <li><strong>Silent loss closed:</strong> the cap makes a flushed batch ≤ <code>flush_bytes</code> (+one turn) < the truncation cap; the contract test asserts every <code>ingest_conversation</code> payload is bounded AND slices cover the full delta</li>
+  <li><strong>Policy A honored:</strong> idle 600 kept; retry decoupled so 600s never slows recovery</li>
+  <li><strong>No silent drops:</strong> the two remaining expensive items are conditional follow-ups with explicit triggers</li>
+  <li><strong>Ledger:</strong> 6 tasks + 2 conditional follow-ups + deferred(e). Task 6 prereq (#1) surfaced</li>
+</ul>
+
+<div class="spectrum">
+  <span class="s1"></span>
+  <span class="s2"></span>
+  <span class="s3"></span>
+</div>
+
+<div class="signature">
+  <div class="name">Ingest <em>Batching Retune</em></div>
+  <div class="role">Implementation Plan — rev. 2, post-council review</div>
+</div>
+
+</main>
+
+<!-- rich-doc-src-sha256:daa9899b86557c0819b8780f9b9e75611994fab44cc650a63d261e8aefa9b8ec -->
+</body>
+</html>

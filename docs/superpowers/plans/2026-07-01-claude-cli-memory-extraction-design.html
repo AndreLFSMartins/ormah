@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design: Claude-CLI memory extraction (replace local gemma)</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <div class="eyebrow">Spec</div>
+    <div class="doc-title">Claude-CLI <em>memory extraction</em></div>
+    <a href="#problem">Problem</a>
+    <a href="#goals">Goals</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#components">Components</a>
+    <a href="#recursion">Recursion & exclusion</a>
+    <a href="#auth">Auth / no-API gate</a>
+    <a href="#cursor">Cursor unification</a>
+    <a href="#config">Config surface</a>
+    <a href="#error">Error handling</a>
+    <a href="#testing">Testing</a>
+    <a href="#risks">Open risks / spikes</a>
+    <a href="#scope">Out of scope</a>
+    <a href="#branching">Branching</a>
+  </nav>
+
+  <main>
+    <div class="eyebrow">Design — awaiting review</div>
+    <h1 style="font:400 italic 42px/1.1 var(--font-body); letter-spacing:-.015em; margin:0 0 8px; color:var(--ink)">Claude-CLI memory extraction</h1>
+    <p class="meta">2026-07-01 · André + Claude</p>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="big">2</div>
+        <div class="label">Extraction paths</div>
+      </div>
+      <div class="metric">
+        <div class="big">1</div>
+        <div class="label">New adapter</div>
+      </div>
+      <div class="metric">
+        <div class="big">3</div>
+        <div class="label">Spikes</div>
+      </div>
+    </div>
+
+    <h2 id="problem"><em>Problem</em></h2>
+    <p>Server-side transcript extraction runs on the local Ollama <code>gemma3:12b-it-qat</code>. Each extraction stalls 30–140 seconds, pins ~8.6 GB of VRAM, and today runs continuously (23 calls / 95 memories on 2026-07-01) via two triggers:</p>
+    <ul>
+      <li>Client-side whisper-out hook</li>
+      <li>Server-side session watcher (when enabled)</li>
+    </ul>
+    <p><strong>Goal:</strong> Extract memories with Claude via the local <code>claude</code> CLI (<code>claude -p</code>, subscription auth — no paid API), pinned to <strong>Haiku</strong> even when the interactive session runs a larger model, while guaranteeing that content is eventually consumed even if a session closes abruptly (VSCode/Claude Code closed, crash, <code>kill -9</code>).</p>
+
+    <h2 id="goals"><em>Goals</em></h2>
+    <ul>
+      <li>Extraction LLM = <code>claude -p --model haiku</code>, subscription auth, not the Anthropic API.</li>
+      <li>Haiku pinned regardless of the user's interactive model (extraction is a cheap mechanical task).</li>
+      <li>Guaranteed eventual consumption of transcript content (no orphaned tails).</li>
+      <li>Reuse existing server-side dedup; minimal new surface.</li>
+    </ul>
+
+    <h2 style="margin-top:56px"><em>Non-goals</em></h2>
+    <ul>
+      <li>No gemma fallback. On Claude failure the extraction <strong>defers</strong> (cursor not advanced, retried on the next scan). Gemma is cut entirely.</li>
+      <li>No change to the whisper-<strong>inject</strong>/recall path (whisper-in). Only extraction (whisper-out).</li>
+      <li>Not building an agentic tool-calling extractor (Approach B) — deterministic shell-out.</li>
+    </ul>
+
+    <h2 id="architecture"><em>Architecture</em> (Approach A, refined)</h2>
+    <p>Model the shell-out as a <strong>new LLM provider <code>claude_cli</code></strong> in the existing <code>get_adapter</code> switch (<code>src/ormah/background/llm/__init__.py</code>), alongside <code>ollama</code> / <code>litellm</code> / <code>none</code>. Because <code>_extract_memories_llm</code> already calls <code>llm_generate</code> → adapter, <strong>both extraction callers route through Claude with zero call-site changes</strong>:</p>
+
+    <div class="phase p-o">
+      <span class="pn">1</span>
+      Session watcher (reconciler) — the guarantee
+    </div>
+    <p><code>watchdog</code> real-time events (near-real-time, debounced) + catch-up <code>_scan_sessions</code> on server boot. Already handles in-flight/idle/shrink/legacy-cursor cases. Revived, now extracting via <code>claude_cli</code>.</p>
+
+    <div class="phase p-b">
+      <span class="pn">2</span>
+      Whisper-out hook — the latency optimization
+    </div>
+    <p>(<code>cmd_whisper_store</code>, UserPromptSubmit-periodic / PreCompact / SessionEnd) — unchanged; POSTs <code>content</code>, server extracts via <code>claude_cli</code>.</p>
+
+    <p>Both kept (user decision). Both hit a <strong>metered</strong> LLM now, so they share <strong>one cursor</strong> to avoid redundant extraction (see <a href="#cursor">Cursor unification</a>).</p>
+
+    <h2 id="components"><em>Components</em></h2>
+
+    <h3>1. ClaudeCliAdapter (new)</h3>
+    <p><code>src/ormah/background/llm/claude_cli_adapter.py</code>, registered under <code>provider="claude_cli"</code>.</p>
+    <ul>
+      <li><code>.generate(prompt, json_mode, ...)</code> builds argv: <code>claude -p &lt;prompt&gt; --model &lt;claude_cli_model&gt; --output-format json</code></li>
+      <li>Runs <code>subprocess.run(..., timeout=claude_cli_timeout, env=&lt;child_env&gt;)</code>.</li>
+      <li>Parses the <code>--output-format json</code> envelope → assistant text → reuse <code>_extract_json</code>.</li>
+      <li>Returns text, or <code>None</code> on nonzero exit / timeout / invalid JSON.</li>
+    </ul>
+
+    <h3>2. Provider wiring</h3>
+    <p>Add <code>claude_cli</code> to the <code>get_adapter</code> switch and to the <code>llm_provider</code> enum validator (<code>config.py:_llm_provider_enum</code>). No changes to <code>_extract_memories_llm</code> or <code>llm_generate</code>.</p>
+
+    <h3>3. Session watcher revival</h3>
+    <p>Re-enable via <code>ORMAH_SESSION_WATCHER_ENABLED=true</code>. No logic change — it calls <code>ingest_conversation(content=...)</code>, which now uses <code>claude_cli</code>.</p>
+
+    <h2 id="recursion"><em>Recursion & exclusion</em> (critical)</h2>
+    <p><code>claude -p</code> writes its own transcript under <code>~/.claude/projects</code> and fires Claude Code hooks → the reconciler would ingest the worker's own transcript, and the worker's hooks would spawn more extraction. Two defenses (exact CC mechanism confirmed during the spike):</p>
+    <ul>
+      <li><strong>Hooks off in the child:</strong> Run <code>claude -p</code> with ormah hooks disabled (settings profile without the plugin, or an env flag the hook <code>bin/</code> scripts check to no-op).</li>
+      <li><strong>Exclude the worker's transcript:</strong> Run the worker in a dedicated cwd/project the watcher ignores, or tag its <code>session_id</code> and skip it in <code>_scan_sessions</code>.</li>
+    </ul>
+
+    <h2 id="auth"><em>Auth / no-API gate</em> (spike — before implementation)</h2>
+    <p>Confirm <code>claude -p</code> in the launchd server context authenticates via <strong>subscription OAuth</strong> (<code>~/.claude/</code>), not <code>ANTHROPIC_API_KEY</code>. If <code>ANTHROPIC_API_KEY</code> is present in the server env, the child may use the paid API → violates the core requirement. Mitigation: the adapter strips <code>ANTHROPIC_API_KEY</code> from the child env and verifies subscription mode. <strong>This spike gates the whole design.</strong></p>
+
+    <h2 id="cursor"><em>Cursor unification</em></h2>
+    <p>Today: hook cursor <code>~/.cache/ormah/whisper-cursors.json</code> (keyed by <code>session_id</code>) and watcher cursor <code>&lt;watch_dir&gt;/.session_watcher_state</code> (keyed by relative path) are separate. With a metered LLM, running both against separate cursors risks double extraction.</p>
+    <p><strong>Decision:</strong> Unify on a single <code>session_id</code>-keyed cursor store shared by both paths. Whichever fires first extracts the safe slice and advances; the other sees "nothing new" and skips. A per-session advisory lock (cross-process: hook subprocess vs server watcher) prevents the simultaneous-fire race; worst case without the lock is one redundant, dedup-safe extraction.</p>
+
+    <h2 id="config"><em>Config surface</em> (new)</h2>
+    <table>
+      <tr>
+        <th>Setting</th>
+        <th>Value</th>
+      </tr>
+      <tr>
+        <td><code>ORMAH_LLM_PROVIDER</code></td>
+        <td><code>claude_cli</code></td>
+      </tr>
+      <tr>
+        <td><code>ORMAH_CLAUDE_CLI_MODEL</code></td>
+        <td><code>haiku</code> (or full id)</td>
+      </tr>
+      <tr>
+        <td><code>ORMAH_CLAUDE_CLI_TIMEOUT_SECONDS</code></td>
+        <td><code>120</code></td>
+      </tr>
+      <tr>
+        <td><code>ORMAH_CLAUDE_CLI_BIN</code></td>
+        <td>Optional; default <code>shutil.which("claude")</code></td>
+      </tr>
+      <tr>
+        <td><code>ORMAH_SESSION_WATCHER_ENABLED</code></td>
+        <td><code>true</code></td>
+      </tr>
+    </table>
+
+    <h2 id="error"><em>Error handling</em></h2>
+    <ul>
+      <li>Adapter <code>None</code> → <code>_extract_memories_llm</code> returns "No LLM available" → ingest defers, cursor not advanced → next watcher scan retries. No gemma fallback.</li>
+      <li>Server/<code>claude</code> binary missing → same defer path; watcher catch-up recovers on next boot.</li>
+    </ul>
+
+    <h2 id="testing"><em>Testing</em></h2>
+    <ul>
+      <li><strong>Unit:</strong> Adapter builds correct argv; parses the JSON envelope; returns <code>None</code> on exit≠0 / timeout / bad JSON (mock subprocess). Recursion guard: child invoked with hooks-off flag/env and <code>ANTHROPIC_API_KEY</code> stripped.</li>
+      <li><strong>Integration:</strong> Reconciler does not re-ingest the worker's own transcript; unified cursor makes the second path skip an already-extracted slice.</li>
+      <li><strong>Contract:</strong> Recorded real <code>claude -p --output-format json</code> envelope fixture → parser extracts the memory list.</li>
+      <li><strong>Manual spike:</strong> Real <code>claude -p</code> under launchd authenticates via subscription.</li>
+    </ul>
+
+    <h2 id="risks"><em>Open risks / spikes</em></h2>
+    <ol>
+      <li>Subscription-auth propagation under launchd (gating spike).</li>
+      <li>Exact Claude Code flag/env to disable hooks in the <code>claude -p</code> child.</li>
+      <li><code>claude -p --output-format json</code> envelope shape (fixture for the contract test).</li>
+    </ol>
+
+    <h2 id="scope"><em>Out of scope</em></h2>
+    <ul>
+      <li>Agentic SDK worker (Approach B), in-session subagent extraction (Approach C).</li>
+      <li>Migrating background maintenance jobs off their current LLM path.</li>
+      <li>Cursor unification beyond the two extraction paths.</li>
+    </ul>
+
+    <h2 id="branching"><em>Branching</em></h2>
+    <p>Upstream-clean feature branch off <code>origin/main</code> after the standard upstream-compare (local-main vs origin/main). Genuine upstream feature.</p>
+
+    <div class="spectrum">
+      <span class="s1"></span>
+      <span class="s2"></span>
+      <span class="s3"></span>
+    </div>
+    <div class="signature">
+      <div class="name">André + Claude</div>
+      <div class="role">Design</div>
+    </div>
+  </main>
+
+<!-- rich-doc-src-sha256:8ee04d73ed92a7a9827e97685510f647c5f041bda5ba79fa73dab5d69626b5c9 -->
+</body>
+</html>

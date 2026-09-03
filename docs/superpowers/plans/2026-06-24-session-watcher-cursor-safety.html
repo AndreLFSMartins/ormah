@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Session Watcher Cursor Safety Implementation Plan (v3)</title>
+  <style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Superpowers Plan</div>
+  <h1 class="doc-title">Session Watcher <em>Cursor Safety</em></h1>
+  <a href="#goal">Goal</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#tech-stack">Tech stack</a>
+  <a href="#council-decisions">Council decisions</a>
+  <a href="#known-limitations">Known limitations</a>
+  <a href="#file-map">File map</a>
+  <a href="#task-1">Task 1</a>
+  <a href="#task-2">Task 2</a>
+  <a href="#task-3">Task 3</a>
+  <a href="#task-4">Task 4</a>
+  <a href="#task-5">Task 5</a>
+  <a href="#coverage-map">Coverage map</a>
+</nav>
+
+<main>
+  <p class="meta">Implementation plan (v3 — post-council review x2)</p>
+
+  <p class="statement">Fix two cursor edge cases in the session watcher — mid-turn race and session tail loss — without duplicating or dropping the final user+assistant pair, and without concurrent double-ingestion.</p>
+
+  <h2 id="goal">Goal</h2>
+  <p>Fix two cursor edge cases in the session watcher:</p>
+  <ul>
+    <li><strong>Mid-turn race:</strong> cursor advances past a dangling user turn</li>
+    <li><strong>Session tail loss:</strong> final turns below <code>min_turns</code> are never ingested</li>
+  </ul>
+  <p>Without duplicating or dropping the final user+assistant pair, and without concurrent double-ingestion.</p>
+
+  <h2 id="architecture">Architecture</h2>
+  <p>The parser exposes a <em>safe boundary</em> (<code>safe_end_offset</code>) plus a <em>safe payload</em> (<code>safe_conversation</code> / <code>safe_user_turn_count</code>) covering only completed pairs, where a pair completes at an assistant turn <strong>that has text</strong>.</p>
+  <p>The watcher ingests the safe payload and saves <code>safe_end_offset</code> as its cursor, so ingested content and cursor always share the same completion boundary (no duplication).</p>
+  <p>A short tail below <code>min_turns</code> is flushed once the file is idle; while the file is still active the handler schedules a delayed retry. A per-path in-flight guard prevents the retry and the debounce from ingesting the same slice concurrently.</p>
+
+  <h2 id="tech-stack">Tech stack</h2>
+  <p class="meta">Python 3.11, pytest</p>
+  <ul>
+    <li><code>src/ormah/transcript/parser.py</code></li>
+    <li><code>src/ormah/background/session_watcher.py</code></li>
+    <li><code>src/ormah/config.py</code></li>
+  </ul>
+
+  <h2 id="council-decisions">Council decisions (v3)</h2>
+  <ul>
+    <li><strong>C1 (dup user)</strong> → safe payload; ingested content and cursor share the boundary.</li>
+    <li><strong>C2 (tail loss)</strong> → idle flush + scheduled retry.</li>
+    <li><strong>I1 (first-wins <code>source</code>)</strong> → preserved in the rewritten loop.</li>
+    <li><strong>I2 REVERTED</strong> → <code>safe_end_offset</code> advances only after an assistant turn <strong>with text</strong> (avoids fragmenting <code>tool_use → text</code> and avoids false recovery triggers).</li>
+    <li><strong>E1 DEFERRED</strong> (signed off by André) → no corrupted-cursor recovery. Known limitation documented below.</li>
+    <li><strong>Concurrency</strong> → per-path in-flight guard in <code>SessionHandler</code>.</li>
+  </ul>
+
+  <h2 id="known-limitations">Known limitations (accepted)</h2>
+  <div class="callout warn">
+    <span class="label">Watch out</span>
+    <p><strong>Pre-existing corrupted cursors:</strong> written by the old bug (a session that was exactly mid-turn at upgrade time) are not repaired; the user side of that one final pair may be lost. Local single-user impact only.</p>
+  </div>
+  <div class="callout warn">
+    <span class="label">Watch out</span>
+    <p><strong>Terminal tool-only assistant:</strong> if a session ends on an assistant turn that has no text at all (only <code>tool_use</code>), that final pair stays pending and is not ingested. Pathological/rare.</p>
+  </div>
+
+  <h2 id="file-map">File map</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>File</th>
+        <th>What changes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>src/ormah/transcript/parser.py</code></td>
+        <td><code>readline()</code> loop preserving first-wins <code>source</code> + existing guards; add <code>safe_end_offset</code>, <code>safe_conversation</code>, <code>safe_user_turn_count</code>; boundary advances only after an assistant turn <strong>with text</strong></td>
+      </tr>
+      <tr>
+        <td><code>src/ormah/config.py</code></td>
+        <td>add <code>session_watcher_idle_threshold: float = 30.0</code></td>
+      </tr>
+      <tr>
+        <td><code>src/ormah/background/session_watcher.py</code></td>
+        <td>guard on <code>safe_end_offset == prev_offset</code>; idle flush with <code>on_defer_active</code> callback; ingest <code>safe_conversation</code>; save <code>safe_end_offset</code>; <code>SessionHandler</code> gets <code>idle_threshold</code>, <code>_schedule_retry</code>, and a per-path in-flight guard</td>
+      </tr>
+      <tr>
+        <td><code>tests/test_transcript/test_parser.py</code></td>
+        <td>4 new tests (safe boundary, safe payload, <code>user→tool_use→text</code> single pair, terminal tool-only does NOT advance)</td>
+      </tr>
+      <tr>
+        <td><code>tests/test_background/test_session_watcher.py</code></td>
+        <td>5 new tests (mid-turn race, idle no-dup tail, idle tail flush, retry fires & ingests after idle, concurrent ingest skipped)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="metrics">
+    <div class="metric">
+      <div class="big">5</div>
+      <div class="label">Implementation tasks</div>
+    </div>
+    <div class="metric">
+      <div class="big">9</div>
+      <div class="label">New tests (4 parser, 5 watcher)</div>
+    </div>
+    <div class="metric">
+      <div class="big">3</div>
+      <div class="label">Files modified</div>
+    </div>
+  </div>
+
+  <h2 id="task-1">Task 1: Parser — safe boundary tests (failing)</h2>
+  <p>Write 4 failing tests in <code>tests/test_transcript/test_parser.py</code>: safe boundary, safe payload, tool-use fragment handling, and terminal tool-only assistant.</p>
+  <p><strong>Expected:</strong> <code>AttributeError: 'TranscriptResult' object has no attribute 'safe_end_offset'</code></p>
+
+  <h2 id="task-2">Task 2: Parser — safe boundary implementation</h2>
+  <p>Add safe fields to <code>TranscriptResult</code>: <code>safe_end_offset</code>, <code>safe_conversation</code>, <code>safe_user_turn_count</code>.</p>
+  <p>Rewrite the parsing loop with <code>readline()</code> preserving first-wins <code>source</code> and advancing the boundary only after a text-bearing assistant turn (I2 reverted).</p>
+  <p><strong>Expected:</strong> 4 new <code>TestSafeBoundary</code> tests pass; all existing tests still pass.</p>
+
+  <h2 id="task-3">Config — idle threshold</h2>
+  <p>Add <code>session_watcher_idle_threshold: float = 30.0</code> to <code>src/ormah/config.py</code>.</p>
+  <p>Default 30 s < the 60 s debounce: when the debounce fires after a quiet period the file is already idle, so the tail flushes on the natural debounce; the scheduled retry in Task 5 covers any other config.</p>
+
+  <h2 id="task-4">Task 4: Watcher — behaviour tests (failing)</h2>
+  <p>Add 5 test helpers and tests to <code>tests/test_background/test_session_watcher.py</code>:</p>
+  <ul>
+    <li>Test 14: Mid-turn race — dangling user does not advance cursor</li>
+    <li>Test 15: Idle tail with dangling user — no duplication (C1)</li>
+    <li>Test 16: Short tail flushed when idle</li>
+    <li>Test 17: Retry fires and ingests after idle (C2 end-to-end)</li>
+    <li>Test 18: Concurrent ingest skipped by in-flight guard</li>
+  </ul>
+  <p><strong>Expected:</strong> failures — <code>TypeError: _ingest_session() got an unexpected keyword argument 'idle_threshold'</code></p>
+
+  <h2 id="task-5">Task 5: Watcher — implementation</h2>
+  <ul>
+    <li>Extend <code>_ingest_session</code> signature with <code>idle_threshold</code> and <code>on_defer_active</code> callback</li>
+    <li>Replace <code>min_turns</code> guard with safe-boundary + idle + retry logic</li>
+    <li>Ingest safe payload and save <code>safe_end_offset</code> as cursor</li>
+    <li>Add to <code>SessionHandler</code>: idle threshold, <code>_schedule_retry</code>, per-path in-flight guard</li>
+    <li>Pass config setting when constructing the handler</li>
+  </ul>
+  <p><strong>Expected:</strong> 5 new tests pass; no regressions on existing tests.</p>
+
+  <h2 id="coverage-map">Coverage map (council findings → tasks)</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Finding</th>
+        <th>Severity</th>
+        <th>Resolution</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>C1 dup user via raw payload</td>
+        <td>critical</td>
+        <td><a href="#task-2">Task 2</a> (safe payload) + Task 5 step 3; Test 15</td>
+      </tr>
+      <tr>
+        <td>C2 idle flush no retry</td>
+        <td>critical</td>
+        <td><a href="#task-3">Task 3</a> + Task 5 steps 2,4; Test 17 (e2e)</td>
+      </tr>
+      <tr>
+        <td>I1 first-wins source regression</td>
+        <td>important</td>
+        <td><a href="#task-2">Task 2</a></td>
+      </tr>
+      <tr>
+        <td>I2 boundary on tool-only assistant</td>
+        <td>important</td>
+        <td><a href="#task-2">Task 2</a> (advance only on text)</td>
+      </tr>
+      <tr>
+        <td>Concurrent double-ingestion</td>
+        <td>high</td>
+        <td><a href="#task-5">Task 5</a> (in-flight guard); Test 18</td>
+      </tr>
+      <tr>
+        <td>E1 corrupted cursor</td>
+        <td>medium</td>
+        <td><strong>Deferred (signed off)</strong> — known limitation documented</td>
+      </tr>
+      <tr>
+        <td>Retry test was callback-only</td>
+        <td>important</td>
+        <td><a href="#task-4">Task 4</a> Test 17 fires the timer e2e</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="spectrum">
+    <span class="s1"></span>
+    <span class="s2"></span>
+    <span class="s3"></span>
+  </div>
+  <div class="signature">
+    <div class="name">Session Watcher <em>Cursor Safety</em></div>
+    <div class="role">Implementation plan (v3)</div>
+  </div>
+
+</main>
+
+<!-- rich-doc-src-sha256:d618c4db99c0ae41bca0e10f2d06dc22dfac9232f1000eea6b7d5c3f7cd10bd6 -->
+</body>
+</html>

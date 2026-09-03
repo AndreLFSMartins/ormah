@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Maintenance JSON-Schema Seam + Bounded/Persisted Dedup</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Superpowers Plan</div>
+  <h1 class="doc-title">Maintenance <em>JSON-Schema</em> + Bounded Dedup</h1>
+  <a href="#overview">Overview</a>
+  <a href="#task-1">Task 1: claude_cli adapter</a>
+  <a href="#task-2">Task 2: dedup schema</a>
+  <a href="#task-3">Task 3: duplicate_checked table</a>
+  <a href="#task-4">Task 4: run_duplicate_detection</a>
+  <a href="#task-5">Task 5: cap knob + reject</a>
+  <a href="#task-6">Task 6: integration check</a>
+  <a href="#post">Post-implementation</a>
+</nav>
+
+<main>
+
+<section id="overview">
+  <div class="eyebrow">Introduction</div>
+  <h2>Overview &amp; <em>Architecture</em></h2>
+
+  <p class="statement">Stop the sleep-cycle credit bleed at its roots: schema-valid JSON from <code>claude -p</code> (so dedup merges parse) and a bounded + persisted + failure-safe dedup sweep (no thousands of LLM calls, no dead-LLM loop, no dropped merges).</p>
+
+  <div class="metrics">
+    <div class="metric">
+      <div class="big">6</div>
+      <div class="label">Tasks</div>
+    </div>
+    <div class="metric">
+      <div class="big">30</div>
+      <div class="label">Steps</div>
+    </div>
+    <div class="metric">
+      <div class="big">5</div>
+      <div class="label">Files</div>
+    </div>
+  </div>
+
+  <h3>Goal &amp; Architecture</h3>
+  <p>Reuse existing patterns:</p>
+  <ul>
+    <li><strong>(A) Response format seam:</strong> The <code>response_format</code> seam is already honored by the Ollama adapter; wire the <code>claude_cli</code> adapter to <code>--json-schema</code> + read <code>structured_output</code> (verified under subscription auth 2026-07-03).</li>
+    <li><strong>(B) Dedup isolation:</strong> Dedup gets its own <code>duplicate_checked</code> table (NOT shared <code>auto_link_checked</code>), and <strong>persists only terminal outcomes</strong>: <code>not_duplicate</code> on a confirmed non-duplicate, <code>error</code> (with backoff) on a transient LLM failure — never <code>duplicate</code> (the merge's own invalidation + the pending-proposal check cover that side, so a failed/rejected merge is never permanently skipped).</li>
+    <li><strong>Safety features:</strong> Per-run LLM cap and a consecutive-failure circuit breaker.</li>
+  </ul>
+
+  <div class="callout">
+    <span class="label">Council history</span>
+    <p><strong>R1</strong> (cursor=ressalvas, codex=rejeitou) → fixed startup-break, cross-poison, transient churn. <strong>R2</strong> (both rejeitou) → this revision: persist only <code>not_duplicate</code>/<code>error</code> never <code>duplicate</code> (drops-merge critical); error+backoff (breaker starvation); skip in <code>_find_merge_candidates</code> (agent-path re-churn); 5 invalidation statements incl. both merge DELETEs; real invalidation test; <code>-1</code> cap sentinel (0-is-falsy footgun); reject-invalidation.</p>
+  </div>
+
+  <h3>Tech Stack &amp; Scope</h3>
+  <p class="meta">Python 3.11 · pytest (asyncio_mode=auto) · sqlite · <code>claude -p</code></p>
+  <ul>
+    <li><strong>Target branch:</strong> <code>local-main</code></li>
+    <li><strong>Out of scope:</strong> re-arming <code>me.ormah.sleepcycle</code>, pushing PR #79, the other 3 semantic jobs, sizing the cap (calibrate next week)</li>
+  </ul>
+
+</section>
+
+<section id="task-1">
+  <div class="phase p-o"><span class="pn">Task 1</span> schema-enforced JSON</div>
+  <h2><code>claude_cli</code> adapter honors <em>response_format</em></h2>
+
+  <p class="meta">Files: <code>src/ormah/background/llm/claude_cli_adapter.py:104-153</code> · Test: <code>tests/test_background/test_claude_cli_adapter.py</code></p>
+
+  <h3>Steps</h3>
+  <ol>
+    <li><strong>Step 1 — failing test</strong>
+      <pre><code>def test_response_format_adds_json_schema_and_reads_structured_output(monkeypatch):
+    from ormah.background.llm import claude_cli_adapter as mod
+    captured = {}
+    class _Proc:
+        returncode = 0; stderr = ""
+        stdout = '{&quot;result&quot;: &quot;&quot;, &quot;is_error&quot;: false, &quot;structured_output&quot;: {&quot;is_duplicate&quot;: true}}'
+    def _fake_run(argv, **kwargs):
+        captured[&quot;argv&quot;] = argv; return _Proc()
+    monkeypatch.setattr(mod.subprocess, &quot;run&quot;, _fake_run)
+    adapter = mod.ClaudeCliAdapter(model=&quot;claude-haiku-4-5-20251001&quot;)
+    schema = {&quot;type&quot;: &quot;object&quot;, &quot;properties&quot;: {&quot;is_duplicate&quot;: {&quot;type&quot;: &quot;boolean&quot;}}, &quot;required&quot;: [&quot;is_duplicate&quot;]}
+    raw = adapter.generate(&quot;hi&quot;, response_format={&quot;type&quot;: &quot;json_schema&quot;, &quot;json_schema&quot;: {&quot;schema&quot;: schema}})
+    assert &quot;--json-schema&quot; in captured[&quot;argv&quot;]
+    i = captured[&quot;argv&quot;].index(&quot;--json-schema&quot;)
+    assert '&quot;is_duplicate&quot;' in captured[&quot;argv&quot;][i + 1]
+    import json; assert json.loads(raw) == {&quot;is_duplicate&quot;: True}</code></pre>
+    </li>
+    <li><strong>Step 2 — run, expect FAIL:</strong> <code>--json-schema</code> not in argv
+      <pre><code>.venv/bin/python -m pytest tests/test_background/test_claude_cli_adapter.py::test_response_format_adds_json_schema_and_reads_structured_output -v</code></pre>
+    </li>
+    <li><strong>Step 3 — implement</strong> In <code>generate</code>, before the semaphore build <code>schema</code> and extend argv:
+      <pre><code>        schema = None
+        if response_format and response_format.get(&quot;type&quot;) == &quot;json_schema&quot;:
+            schema = response_format.get(&quot;json_schema&quot;, {}).get(&quot;schema&quot;)
+        argv = [
+            self.bin_path, &quot;-p&quot;, &quot;--model&quot;, self.model,
+            &quot;--output-format&quot;, &quot;json&quot;, &quot;--no-session-persistence&quot;,
+            &quot;--permission-mode&quot;, &quot;default&quot;, &quot;--settings&quot;, _HARDENED_SETTINGS,
+        ]
+        if schema is not None:
+            argv += [&quot;--json-schema&quot;, json.dumps(schema)]</code></pre>
+      Replace the final return:
+      <pre><code>        if schema is not None:
+            structured = envelope.get(&quot;structured_output&quot;)
+            # Fail-closed: schema requested but not produced → None (caller retries),
+            # never a silent downgrade to free-text `result`.
+            return json.dumps(structured) if structured is not None else None
+        result = envelope.get(&quot;result&quot;)
+        return result if isinstance(result, str) else None</code></pre>
+    </li>
+    <li><strong>Step 4 — run, expect PASS:</strong>
+      <pre><code>.venv/bin/python -m pytest tests/test_background/test_claude_cli_adapter.py -v</code></pre>
+    </li>
+    <li><strong>Step 5 — commit:</strong>
+      <pre><code>git commit -am "feat(llm): claude_cli honors response_format via --json-schema/structured_output"</code></pre>
+    </li>
+  </ol>
+
+</section>
+
+<section id="task-2">
+  <div class="phase p-b"><span class="pn">Task 2</span> strict JSON schema</div>
+  <h2>Dedup passes a <em>strict schema</em></h2>
+
+  <p class="meta">Files: <code>src/ormah/background/duplicate_merger.py:104-132</code> · Test: <code>tests/test_background/test_duplicate_merger.py</code></p>
+
+  <h3>Steps</h3>
+  <ol>
+    <li><strong>Step 1 — failing test</strong>
+      <pre><code>def test_llm_check_passes_json_schema_response_format(monkeypatch):
+    import ormah.background.llm_client as llm_client
+    from ormah.background import duplicate_merger as dm
+    captured = {}
+    def _fake_generate(settings, prompt, json_mode=True, **kwargs):
+        captured.update(kwargs)
+        return '{&quot;is_duplicate&quot;: false, &quot;merged_title&quot;: null, &quot;merged_content&quot;: null, &quot;reason&quot;: &quot;x&quot;}'
+    monkeypatch.setattr(llm_client, &quot;llm_generate&quot;, _fake_generate)
+    result = dm._llm_check_duplicate(object(),
+        {&quot;title&quot;: &quot;A&quot;, &quot;type&quot;: &quot;fact&quot;, &quot;content&quot;: &quot;a&quot;}, {&quot;title&quot;: &quot;B&quot;, &quot;type&quot;: &quot;fact&quot;, &quot;content&quot;: &quot;b&quot;})
+    rf = captured.get(&quot;response_format&quot;)
+    assert rf and rf[&quot;type&quot;] == &quot;json_schema&quot;
+    assert &quot;is_duplicate&quot; in rf[&quot;json_schema&quot;][&quot;schema&quot;][&quot;properties&quot;]
+    assert result == {&quot;is_duplicate&quot;: False, &quot;merged_title&quot;: None, &quot;merged_content&quot;: None, &quot;reason&quot;: &quot;x&quot;}</code></pre>
+    </li>
+    <li><strong>Step 2 — run, expect FAIL:</strong>
+      <pre><code>.venv/bin/python -m pytest tests/test_background/test_duplicate_merger.py::test_llm_check_passes_json_schema_response_format -v</code></pre>
+    </li>
+    <li><strong>Step 3 — implement</strong> Add after <code>_LLM_DUPLICATE_PROMPT</code>:
+      <pre><code>_DUP_RESPONSE_SCHEMA = {
+    &quot;type&quot;: &quot;object&quot;,
+    &quot;properties&quot;: {
+        &quot;is_duplicate&quot;: {&quot;type&quot;: &quot;boolean&quot;},
+        &quot;merged_title&quot;: {&quot;type&quot;: [&quot;string&quot;, &quot;null&quot;]},
+        &quot;merged_content&quot;: {&quot;type&quot;: [&quot;string&quot;, &quot;null&quot;]},
+        &quot;reason&quot;: {&quot;type&quot;: [&quot;string&quot;, &quot;null&quot;]},
+    },
+    &quot;required&quot;: [&quot;is_duplicate&quot;, &quot;merged_title&quot;, &quot;merged_content&quot;, &quot;reason&quot;],
+    &quot;additionalProperties&quot;: False,
+}</code></pre>
+      Change the <code>llm_generate</code> call (~line 121):
+      <pre><code>    raw = llm_generate(settings, prompt, json_mode=True,
+        response_format={&quot;type&quot;: &quot;json_schema&quot;, &quot;json_schema&quot;: {&quot;schema&quot;: _DUP_RESPONSE_SCHEMA}})</code></pre>
+    </li>
+    <li><strong>Step 4 — run, expect PASS:</strong>
+      <pre><code>.venv/bin/python -m pytest tests/test_background/test_duplicate_merger.py -v</code></pre>
+    </li>
+    <li><strong>Step 5 — commit:</strong>
+      <pre><code>git commit -am "feat(dedup): pass strict json_schema response_format for duplicate check"</code></pre>
+    </li>
+  </ol>
+
+  <p><strong>Rationale:</strong> <a href="#task-1">Task 1</a> establishes the seam; this task passes a strict, schema-enforced response from the LLM to guarantee parseable merge decisions.</p>
+
+</section>
+
+<section id="task-3">
+  <div class="phase p-g"><span class="pn">Task 3</span> table + invalidation</div>
+  <h2><code>duplicate_checked</code> table &amp; <em>COMPLETE invalidation</em></h2>
+
+  <p class="meta">Files: <code>src/ormah/index/schema.sql</code> (after <code>auto_link_checked</code>, ~line 91) · <code>src/ormah/engine/memory_engine.py</code> (5 DELETE sites) · Test: <code>tests/test_index/test_migrations.py</code></p>
+
+  <h3>Rationale</h3>
+  <p>Dedicated table avoids cross-poisoning <code>auto_linker</code> / <code>conflict_detector</code>. Invalidation must mirror EVERY place that deletes from <code>auto_link_checked</code> — including BOTH <code>execute_merge</code> deletes (removed node AND the kept node when merge changes its content).</p>
+
+  <h3>Steps</h3>
+  <ol>
+    <li><strong>Step 1 — failing test</strong> (real invalidation, not a column check)
+      <pre><code>def test_duplicate_checked_invalidated_on_node_delete_update_merge(tmp_path):
+    # Build an engine on a temp db (mirror the existing engine fixture in the test suite).
+    engine = _make_engine(tmp_path)  # helper: returns a MemoryEngine on a fresh db
+    a = engine.remember(&quot;alpha one&quot;, type=&quot;fact&quot;); b = engine.remember(&quot;alpha two&quot;, type=&quot;fact&quot;)
+    def _seed():
+        with engine.db.transaction() as conn:
+            conn.execute(&quot;INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) &quot;
+                         &quot;VALUES (?, ?, 'not_duplicate', '2026-01-01T00:00:00+00:00')&quot;, tuple(sorted([a, b])))
+    def _count():
+        return engine.db.conn.execute(&quot;SELECT count(*) FROM duplicate_checked&quot;).fetchone()[0]
+    _seed(); engine.update_node(a, content=&quot;alpha one changed&quot;); assert _count() == 0   # update invalidates
+    _seed(); engine.delete_node(b); assert _count() == 0                                 # delete invalidates</code></pre>
+      (Add helper <code>_make_engine(tmp_path)</code> if the test module lacks one; reuse the suite's existing engine construction.)
+    </li>
+    <li><strong>Step 2 — run, expect FAIL:</strong> no such table / no invalidation
+      <pre><code>.venv/bin/python -m pytest tests/test_index/test_migrations.py -k duplicate_checked_invalidated -v</code></pre>
+    </li>
+    <li><strong>Step 3 — implement</strong> In <code>schema.sql</code> after the <code>auto_link_checked</code> block:
+      <pre><code>CREATE TABLE IF NOT EXISTS duplicate_checked (
+    node_a TEXT NOT NULL,
+    node_b TEXT NOT NULL,
+    result TEXT NOT NULL,           -- 'not_duplicate' | 'error'
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (node_a, node_b)
+);</code></pre>
+      In <code>memory_engine.py</code>, immediately after EACH of the 5 <code>DELETE FROM auto_link_checked WHERE node_a = ? OR node_b = ?</code> statements, add the parallel delete with the SAME params bound at that site:
+      <pre><code>                conn.execute(&quot;DELETE FROM duplicate_checked WHERE node_a = ? OR node_b = ?&quot;, (nid, nid))</code></pre>
+      Verify all 5 first: <code>grep -n "DELETE FROM auto_link_checked" src/ormah/engine/memory_engine.py</code> — there must be a matching <code>duplicate_checked</code> delete after each (the two inside <code>execute_merge</code> cover removed + kept).
+    </li>
+    <li><strong>Step 4 — run, expect PASS:</strong>
+      <pre><code>.venv/bin/python -m pytest tests/test_index/test_migrations.py -v</code></pre>
+    </li>
+    <li><strong>Step 5 — commit:</strong>
+      <pre><code>git commit -am "feat(dedup): duplicate_checked table + full node-mutation invalidation (5 sites)"</code></pre>
+    </li>
+  </ol>
+
+</section>
+
+<section id="task-4">
+  <div class="phase p-o"><span class="pn">Task 4</span> terminal outcomes + persistence</div>
+  <h2><code>run_duplicate_detection</code> &amp; <code>_find_merge_candidates</code></h2>
+
+  <p class="meta">Files: <code>src/ormah/background/duplicate_merger.py</code> (<code>run_duplicate_detection</code> ~255-370, <code>_find_merge_candidates</code> ~135-226) · Test: <code>tests/test_background/test_duplicate_merger.py</code></p>
+
+  <h3>Overview</h3>
+  <p>Persist terminal outcomes only (<code>not_duplicate</code>, <code>error</code> with backoff), implement a circuit breaker for consecutive LLM failures, and add skips in both the background and agent paths so rejected merges don't get re-proposed.</p>
+
+  <h3>Steps</h3>
+  <ol>
+    <li><strong>Step 1 — failing tests</strong>
+      <pre><code>def test_run_dedup_records_only_not_duplicate_never_duplicate(monkeypatch, tmp_path):
+    from ormah.background import duplicate_merger as dm
+    monkeypatch.setattr(dm, &quot;_llm_check_duplicate&quot;, lambda s, a, b: {&quot;is_duplicate&quot;: False})
+    engine = _make_engine_with_two_similar_nodes(tmp_path)
+    dm.run_duplicate_detection(engine)
+    rows = engine.db.conn.execute(&quot;SELECT result FROM duplicate_checked&quot;).fetchall()
+    assert rows and all(r[0] == &quot;not_duplicate&quot; for r in rows)  # never 'duplicate'
+
+def test_run_dedup_records_error_and_circuit_breaks(monkeypatch, tmp_path):
+    from ormah.background import duplicate_merger as dm
+    calls = {&quot;n&quot;: 0}
+    def _fail(s, a, b): calls[&quot;n&quot;] += 1; return None
+    monkeypatch.setattr(dm, &quot;_llm_check_duplicate&quot;, _fail)
+    engine = _make_engine_with_many_similar_nodes(tmp_path, n=20)
+    engine.settings.duplicate_check_max_llm_calls_per_run = 100
+    dm.run_duplicate_detection(engine)
+    assert calls[&quot;n&quot;] &lt;= 3  # breaker aborts after 3 consecutive None
+    errs = engine.db.conn.execute(&quot;SELECT count(*) FROM duplicate_checked WHERE result='error'&quot;).fetchone()[0]
+    assert errs &gt;= 1  # failures recorded with backoff (not lost, not re-churned immediately)</code></pre>
+    </li>
+    <li><strong>Step 2 — run, expect FAIL:</strong>
+      <pre><code>.venv/bin/python -m pytest tests/test_background/test_duplicate_merger.py -k "only_not_duplicate or error_and_circuit" -v</code></pre>
+    </li>
+    <li><strong>Step 3 — implement</strong> Add near the top of <code>duplicate_merger.py</code>:
+      <pre><code>_DEDUP_ERROR_BACKOFF = "-6 hours"  # errored pairs become eligible again after this window</code></pre>
+      In <code>run_duplicate_detection</code>, after <code>nodes = ...</code> change the query to newest-first and init a breaker counter:
+      <pre><code>        nodes = engine.db.conn.execute(
+            &quot;SELECT id, content, title, type FROM nodes ORDER BY created DESC&quot;).fetchall()
+        consecutive_failures = 0
+        from datetime import datetime, timezone</code></pre>
+      Persistent skip after computing <code>pair</code> (skip permanent <code>not_duplicate</code>, and <code>error</code> still inside backoff):
+      <pre><code>                skip = engine.db.conn.execute(
+                    &quot;SELECT 1 FROM duplicate_checked WHERE node_a = ? AND node_b = ? AND &quot;
+                    &quot;(result = 'not_duplicate' OR (result = 'error' AND checked_at &gt; datetime('now', ?)))&quot;,
+                    (*pair, _DEDUP_ERROR_BACKOFF),
+                ).fetchone()
+                if skip:
+                    continue</code></pre>
+      Replace the <code>_llm_check_duplicate</code> call + <code>if llm_result is None: continue</code>:
+      <pre><code>                llm_result = _llm_check_duplicate(settings, node, other)
+                _now = datetime.now(timezone.utc).isoformat()
+                if llm_result is None:  # transient failure
+                    consecutive_failures += 1
+                    with engine.db.transaction() as conn:
+                        conn.execute(
+                            &quot;INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) &quot;
+                            &quot;VALUES (?, ?, 'error', ?)&quot;, (*pair, _now))
+                    if consecutive_failures &gt;= 3:
+                        logger.warning(&quot;Duplicate detection: 3 consecutive LLM failures, aborting run&quot;)
+                        break  # abort; see labeled outer break below
+                    continue
+                consecutive_failures = 0
+                if not llm_result.get(&quot;is_duplicate&quot;):
+                    with engine.db.transaction() as conn:
+                        conn.execute(
+                            &quot;INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) &quot;
+                            &quot;VALUES (?, ?, 'not_duplicate', ?)&quot;, (*pair, _now))
+                    continue
+                # is_duplicate == True: do NOT persist here — execute_merge invalidates on
+                # success, and the pending-proposal check below prevents re-churn. A failed
+                # merge or a later-rejected proposal is therefore never permanently skipped.</code></pre>
+      Keep the existing auto-merge / pending-proposal-check / proposal-create logic that follows (unchanged). Ensure the <code>break</code> on breaker also exits the OUTER node loop — set a flag:
+      <pre><code>        for node in nodes:
+            if consecutive_failures &gt;= 3:
+                break
+            ...</code></pre>
+      Also add the SAME persistent skip to <code>_find_merge_candidates</code> (right where it already checks <code>auto_link_checked</code> at ~line 183) so the agent/maintenance batch path does not re-offer background-decided pairs:
+      <pre><code>                dup_skip = engine.db.conn.execute(
+                    &quot;SELECT 1 FROM duplicate_checked WHERE node_a = ? AND node_b = ? AND result = 'not_duplicate'&quot;,
+                    pair).fetchone()
+                if dup_skip:
+                    continue</code></pre>
+    </li>
+    <li><strong>Step 4 — run, expect PASS:</strong>
+      <pre><code>.venv/bin/python -m pytest tests/test_background/test_duplicate_merger.py -v</code></pre>
+    </li>
+    <li><strong>Step 5 — commit:</strong>
+      <pre><code>git commit -am "feat(dedup): persist not_duplicate/error only, backoff, breaker, agent-path skip"</code></pre>
+    </li>
+  </ol>
+
+</section>
+
+<section id="task-5">
+  <div class="phase p-b"><span class="pn">Task 5</span> cap + reject invalidation</div>
+  <h2>Cap knob (sentinel <code>-1</code>) &amp; <em>reject-invalidation</em></h2>
+
+  <p class="meta">Files: <code>src/ormah/config.py</code> (declare near <code>auto_merge_threshold:148</code>) · <code>src/ormah/background/duplicate_merger.py</code> (cap + log) · <code>src/ormah/api/routes_agent.py</code> (reject path) · Tests: <code>tests/test_config.py</code>, <code>tests/test_background/test_duplicate_merger.py</code></p>
+
+  <h3>Overview</h3>
+  <p>Add a configurable per-run LLM call limit (with <code>-1</code> as the unlimited sentinel, avoiding the 0-is-falsy footgun). When a merge proposal is rejected by the user, record that pair as <code>not_duplicate</code> to prevent re-proposal. Include a run-summary log for calibration.</p>
+
+  <h3>Steps</h3>
+  <ol>
+    <li><strong>Step 1 — failing tests</strong>
+      <pre><code># tests/test_config.py
+def test_dedup_cap_default_sentinel_and_validator():
+    from ormah.config import Settings
+    import pytest
+    assert Settings().duplicate_check_max_llm_calls_per_run == 100
+    assert Settings(duplicate_check_max_llm_calls_per_run=-1).duplicate_check_max_llm_calls_per_run == -1  # unlimited
+    with pytest.raises(ValueError):
+        Settings(duplicate_check_max_llm_calls_per_run=-2)
+
+# tests/test_background/test_duplicate_merger.py
+def test_run_dedup_stops_at_cap(monkeypatch, tmp_path):
+    from ormah.background import duplicate_merger as dm
+    calls = {&quot;n&quot;: 0}
+    monkeypatch.setattr(dm, &quot;_llm_check_duplicate&quot;, lambda s, a, b: (calls.__setitem__(&quot;n&quot;, calls[&quot;n&quot;]+1) or {&quot;is_duplicate&quot;: False}))
+    engine = _make_engine_with_many_similar_nodes(tmp_path, n=10)
+    engine.settings.duplicate_check_max_llm_calls_per_run = 3
+    dm.run_duplicate_detection(engine)
+    assert calls[&quot;n&quot;] == 3</code></pre>
+    </li>
+    <li><strong>Step 2 — run, expect FAIL:</strong>
+      <pre><code>.venv/bin/python -m pytest tests/test_config.py::test_dedup_cap_default_sentinel_and_validator tests/test_background/test_duplicate_merger.py::test_run_dedup_stops_at_cap -v</code></pre>
+    </li>
+    <li><strong>Step 3 — implement</strong> In <code>config.py</code> after <code>auto_merge_threshold: float = 0.85</code>:
+      <pre><code>    # Per-run LLM confirmation cap for dedup. -1 = unlimited, 0 = no calls, N>=1 = cap.
+    # Conservative default; calibrate against clean-week growth. NOTE: 0 is a valid
+    # "disable dedup calls" value — not unlimited (that is -1).
+    duplicate_check_max_llm_calls_per_run: int = 100</code></pre>
+      Separate validator (NOT <code>_threshold_range</code>):
+      <pre><code>    @field_validator(&quot;duplicate_check_max_llm_calls_per_run&quot;)
+    @classmethod
+    def _dedup_cap_range(cls, v: int) -&gt; int:
+        if v &lt; -1:
+            raise ValueError(f&quot;duplicate_check_max_llm_calls_per_run must be &gt;= -1, got {v}&quot;)
+        return v</code></pre>
+      In <code>run_duplicate_detection</code>, init and guard (note <code>&gt;= 0</code> so 0 caps at zero, -1 disables the cap):
+      <pre><code>        llm_calls = 0
+        max_calls = getattr(engine.settings, &quot;duplicate_check_max_llm_calls_per_run&quot;, -1)</code></pre>
+      At the top of the <code>for node in nodes:</code> loop and again just before each <code>_llm_check_duplicate</code>:
+      <pre><code>            if max_calls &gt;= 0 and llm_calls &gt;= max_calls:
+                break</code></pre>
+      and <code>llm_calls += 1</code> immediately after the <code>_llm_check_duplicate</code> call.
+      <br>Run-summary log at function end (per-run counters for calibration):
+      <pre><code>        logger.info(&quot;Duplicate detection run: llm_calls=%d proposals=%d cap=%d cap_hit=%s&quot;,
+                    llm_calls, proposals_created, max_calls, bool(max_calls &gt;= 0 and llm_calls &gt;= max_calls))</code></pre>
+      In <code>routes_agent.py</code> <code>resolve_proposal</code>, when a <code>merge</code> proposal is REJECTED, record the pair so it is not re-proposed:
+      <pre><code>        if proposal[&quot;type&quot;] == &quot;merge&quot; and action == &quot;rejected&quot;:
+            ids = json.loads(proposal[&quot;source_nodes&quot;])
+            if len(ids) == 2:
+                pair = tuple(sorted(ids))
+                with engine.db.transaction() as conn:
+                    conn.execute(
+                        &quot;INSERT OR REPLACE INTO duplicate_checked (node_a, node_b, result, checked_at) &quot;
+                        &quot;VALUES (?, ?, 'not_duplicate', ?)&quot;,
+                        (*pair, datetime.now(timezone.utc).isoformat()))</code></pre>
+    </li>
+    <li><strong>Step 4 — run, expect PASS:</strong>
+      <pre><code>.venv/bin/python -m pytest tests/test_config.py tests/test_background/test_duplicate_merger.py -v</code></pre>
+    </li>
+    <li><strong>Step 5 — commit:</strong>
+      <pre><code>git commit -am "feat(dedup): cap sentinel -1, reject-invalidation, run-summary log"</code></pre>
+    </li>
+  </ol>
+
+</section>
+
+<section id="task-6">
+  <div class="phase p-g"><span class="pn">Task 6</span> integration check</div>
+  <h2>Real-binary <em>integration check</em></h2>
+
+  <p class="meta">Files: <code>tests/test_background/test_claude_cli_adapter.py</code></p>
+
+  <h3>Steps</h3>
+  <ol>
+    <li><strong>Step 1 — add skip-guarded integration test</strong>
+      <pre><code>import shutil, pytest
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which(&quot;claude&quot;) is None, reason=&quot;claude CLI not installed&quot;)
+def test_real_claude_json_schema_returns_structured_output():
+    from ormah.background.llm.claude_cli_adapter import ClaudeCliAdapter
+    adapter = ClaudeCliAdapter(model=&quot;claude-haiku-4-5-20251001&quot;, timeout=60)
+    schema = {&quot;type&quot;: &quot;object&quot;, &quot;properties&quot;: {&quot;n&quot;: {&quot;type&quot;: &quot;integer&quot;}}, &quot;required&quot;: [&quot;n&quot;], &quot;additionalProperties&quot;: False}
+    raw = adapter.generate(&quot;Return the integer 7 in a field n.&quot;,
+        response_format={&quot;type&quot;: &quot;json_schema&quot;, &quot;json_schema&quot;: {&quot;schema&quot;: schema}})
+    import json; assert json.loads(raw) == {&quot;n&quot;: 7}</code></pre>
+    </li>
+    <li><strong>Step 2 — run explicitly:</strong>
+      <pre><code>.venv/bin/python -m pytest tests/test_background/test_claude_cli_adapter.py -m integration -v</code></pre>
+      (PASS or SKIP)
+    </li>
+    <li><strong>Step 3 — commit:</strong>
+      <pre><code>git commit -am "test(llm): skip-guarded real claude -p --json-schema integration"</code></pre>
+    </li>
+  </ol>
+
+</section>
+
+<section id="post">
+  <div class="eyebrow">Post-implementation</div>
+  <h2>For André <em>after</em> task completion</h2>
+
+  <p><strong>NOT tasks — reference only.</strong></p>
+
+  <ul>
+    <li><strong>Full suite:</strong> <code>.venv/bin/python -m pytest tests/ -v</code> (resolve the native-extension crash seen in council pre-flight before merge).</li>
+    <li><strong>Calibration (~2026-07-10):</strong> use the run-summary log + clean-week growth to size <code>duplicate_check_max_llm_calls_per_run</code>. Re-arm <code>me.ormah.sleepcycle</code> only after.</li>
+    <li><strong>Deferred follow-ups (documented):</strong> O(n) embedding encode per run is only partially bounded (newest-first + early break) — add a <code>dedup_scanned_at</code> node cursor if profiling shows it matters (CPU/local, not quota). <code>conflict_detector</code>/<code>consolidator</code> share the prose-JSON pattern (now fixable via the same seam) and may share unbounded sweeps — audit separately. Fuller merge-persistence sharing between background + agent paths (both writing <code>duplicate_checked</code>) beyond the read-skip added here.</li>
+    <li><strong>Upstream:</strong> <a href="#task-1">Task 1</a>'s adapter change may later be cherry-picked to <code>feat/ingest-claude-cli-extraction</code> (PR #79).</li>
+  </ul>
+
+</section>
+
+<div class="spectrum">
+  <span class="s1"></span><span class="s2"></span><span class="s3"></span>
+</div>
+
+<div class="signature">
+  <div class="name">Superpowers Plan Companion</div>
+  <div class="role">Generated for Claude Code</div>
+</div>
+
+</main>
+
+<!-- rich-doc-src-sha256:c5a1c2acd92f800a560b8cffa6c9dbcc665fcee1645e0008faaaed15a1f4c625 -->
+</body>
+</html>

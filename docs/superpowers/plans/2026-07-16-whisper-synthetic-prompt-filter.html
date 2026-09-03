@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Whisper Synthetic-Prompt Filter — Implementation Plan</title>
+  <style>
+/* rich-doc design system — Anthropic brand, document-oriented.
+   Light paper/ink, Lora italic display, Poppins body, system mono.
+   Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+   monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+   single <style>. Fonts come from Google Fonts (the only external request);
+   everything degrades to system serif/sans/mono offline. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+:root{
+  /* Anthropic brand */
+  --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+  --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+  --accent:var(--orange);            /* fixed primary accent */
+  --font-head:"Poppins",Arial,sans-serif;
+  --font-body:"Lora",Georgia,serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+}
+[data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+*{box-sizing:border-box} html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+  display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+/* ---- TOC sidebar ---- */
+nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+  border-right:1px solid var(--hairline);padding:46px 30px}
+nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+  color:var(--accent);margin-bottom:14px}
+nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+  letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+  padding:5px 0;border:none}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+/* ---- main column ---- */
+main{padding:56px 72px 140px;max-width:var(--maxw)}
+.eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+.meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+  padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+h2:first-of-type{margin-top:0}
+/* anchor word inside a title → Lora italic, accent */
+h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+  letter-spacing:-.005em}
+h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+p,li{color:var(--ink)} strong{font-weight:700}
+a{color:var(--accent);text-underline-offset:2px}
+a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+a.backlink:hover{color:var(--accent)}
+
+/* pull statement — Lora italic protagonist */
+.statement{font:400 italic 26px/1.25 var(--font-body);
+  letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+/* ---- callout: single accent, hairline, no shadow ---- */
+.callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+  background:transparent;padding:14px 20px;margin:20px 0}
+.callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--accent);display:block;margin-bottom:8px}
+.callout.warn .label::after{content:" — watch out"}
+.callout.guard{border-left:2px solid var(--orange);background:rgba(217,119,87,0.05)}
+.callout.guard .label{color:var(--orange);font-weight:600}
+
+/* ---- chips ---- */
+.chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+  padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+.chip.on{color:var(--accent);border-color:var(--accent)}
+
+/* ---- tables: hairlines + mono headers, no heavy fills ---- */
+table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+tr:last-child td{border-bottom:none}
+td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+/* ---- figure / diagram ---- */
+figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+figure svg{max-width:100%;height:auto}
+figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+  text-transform:uppercase;letter-spacing:.04em}
+
+/* ---- code / details ---- */
+code{font:14px var(--font-mono);color:var(--accent)}
+pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+pre code{color:inherit}
+details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone);padding:12px 0}
+summary:hover{color:var(--accent)}
+
+/* ---- signature: monogram (always ink) + spectrum bar ---- */
+.spectrum{display:flex;height:4px;margin:40px 0 22px}
+.spectrum span{flex:1}
+.spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+.signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+  border-left:2px solid var(--accent);padding-left:16px}
+.signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+.signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+/* ---- phase color-coding: thin left bar, accent cycles ---- */
+.phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+  padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+.phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+.phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+/* ---- metrics row: large numbers ---- */
+.metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+.metrics .metric{flex:0 1 auto}
+.metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+.metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+/* ---- status chips: done / active / todo ---- */
+.schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+.schip.done{background:var(--green);color:#fff}
+.schip.active{background:var(--orange);color:#fff}
+.schip.todo{background:var(--hairline);color:var(--stone)}
+
+/* ---- progress bar ---- */
+.progress{margin:18px 0}
+.progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+.progress .fill{height:100%;background:var(--orange)}
+.progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+@media(max-width:880px){
+  body{grid-template-columns:1fr}
+  nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+  main{padding:32px 24px 90px}
+}
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <div class="eyebrow">superpowers/plans</div>
+    <div class="doc-title">Whisper <em>Synthetic-Prompt</em> Filter</div>
+    <a href="#task-0">Task 0: Cut branch</a>
+    <a href="#task-1">Task 1: Predicate</a>
+    <a href="#task-2">Task 2: Settings</a>
+    <a href="#task-3">Task 3: Guard</a>
+    <a href="#task-4">Task 4: Schema doc</a>
+    <a href="#task-5">Task 5: Gate &amp; push</a>
+    <a href="#task-6">Task 6: Verify Beta</a>
+  </nav>
+
+  <main>
+    <p class="eyebrow">Implementation Plan</p>
+    <h2>Whisper <em>Synthetic-Prompt</em> Filter</h2>
+    <p><strong>Goal:</strong> Stop the whisper pipeline from spending encode + search + rerank on machine-generated prompts, and record the skip so it stays measurable.</p>
+    <p><strong>Architecture:</strong> A pure predicate <code>is_synthetic_prompt()</code> in <code>prompt_classifier.py</code>; a 6-line guard in <code>build_whisper_context</code> placed after the short-prompt check and before the classifier (the last point where no compute is spent); a new <code>silent_synthetic</code> outcome in <code>whisper_decisions</code>. Structural patterns ship as defaults; install-specific ones come from settings.</p>
+    <p><strong>Tech Stack:</strong> Python 3.11+, pytest (<code>asyncio_mode=auto</code>), pydantic-settings, ruff (line-length 100).</p>
+    <p><strong>Spec:</strong> <code>docs/superpowers/specs/2026-07-16-whisper-synthetic-prompt-filter-design.md</code> · <strong>Issue:</strong> <a href="#issue-134">#134</a></p>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="big">7</div>
+        <div class="label">Tasks</div>
+      </div>
+      <div class="metric">
+        <div class="big">23</div>
+        <div class="label">Checkboxes</div>
+      </div>
+      <div class="metric">
+        <div class="big">2</div>
+        <div class="label">Regression guards</div>
+      </div>
+    </div>
+
+    <div class="progress">
+      <div class="bar"><div class="fill" style="width:0%"></div></div>
+      <div class="label">0 of 23 steps completed</div>
+    </div>
+
+    <h2 id="task-0">Task 0: Cut the <em>contribution</em> branch</h2>
+    <p>Per <code>FORK-WORKFLOW.md</code>, contribution branches are born from <code>upstream/main</code>, <strong>never</strong> from <code>local-main</code>. Do not rename remotes.</p>
+
+    <h3>Step 1: Fetch upstream and cut the branch</h3>
+    <pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+git fetch upstream
+git checkout upstream/main -b fix/whisper-synthetic-prompt-filter</code></pre>
+
+    <h3>Step 2: Verify the branch is anchored on upstream, not on the Beta</h3>
+    <pre><code>git log --oneline -1
+git merge-base --is-ancestor HEAD upstream/main && echo "ANCHORED OK"</code></pre>
+    <p><strong>Expected:</strong> <code>ANCHORED OK</code>. If it fails, the branch was cut from the wrong base — redo Step 1.</p>
+
+    <h2 id="task-1">Task 1: <code>is_synthetic_prompt()</code> <em>predicate</em></h2>
+    <p class="meta">Files: modify <code>src/ormah/engine/prompt_classifier.py</code> (add after the <code>logger</code> line, ~L14); test <code>tests/test_engine/test_prompt_classifier.py</code></p>
+
+    <h3>Step 1: Write the failing tests</h3>
+    <p>Append to <code>tests/test_engine/test_prompt_classifier.py</code>:</p>
+    <pre><code>from ormah.engine.prompt_classifier import is_synthetic_prompt
+
+
+class TestIsSyntheticPrompt:
+    def test_task_notification_is_synthetic(self):
+        assert is_synthetic_prompt("&lt;task-notification&gt;\n&lt;task-id&gt;abc&lt;/task-id&gt;") is True
+
+    def test_scheduled_task_is_synthetic(self):
+        assert is_synthetic_prompt('&lt;scheduled-task name="drive-watch" file="/x/S.md"&gt;') is True
+
+    def test_autonomous_loop_is_synthetic(self):
+        assert is_synthetic_prompt("# Autonomous loop check\n\nYou're being invoked") is True
+
+    def test_leading_whitespace_still_matches(self):
+        assert is_synthetic_prompt("\n  &lt;task-notification&gt;\n&lt;task-id&gt;a&lt;/task-id&gt;") is True
+
+    def test_ide_wrapper_with_human_prompt_is_not_synthetic(self):
+        # REGRESSION GUARD (issue #134): the IDE prefixes this tag to a REAL human
+        # prompt — 46/46 such events on the live DB carried human text. Filtering it
+        # would silence the whisper for every prompt sent with a file open in the IDE.
+        prompt = (
+            "&lt;ide_opened_file&gt;The user opened the file /x/notes.md in the IDE."
+            "&lt;/ide_opened_file&gt;\nnão, isso fica em estratégia — revisa o portfólio"
+        )
+        assert is_synthetic_prompt(prompt) is False
+
+    def test_human_asking_about_a_marker_is_not_synthetic(self):
+        # The anchor is deliberate and fail-open: when in doubt, whisper.
+        assert is_synthetic_prompt("what is a &lt;task-notification&gt; block?") is False
+
+    def test_extra_pattern_from_settings_matches(self):
+        assert is_synthetic_prompt("You are classifying the relationship between two memories",
+                                   extra_patterns=[r"You are classifying the relationship"]) is True
+
+    def test_invalid_extra_pattern_fails_open(self, caplog):
+        # A config typo must degrade to "filters less", never kill the whisper.
+        assert is_synthetic_prompt("hello there", extra_patterns=["[unclosed"]) is False
+
+    def test_empty_prompt_is_not_synthetic(self):
+        assert is_synthetic_prompt("") is False</code></pre>
+
+    <div class="callout guard">
+      <span class="label">Regression Guard — test_ide_wrapper_with_human_prompt_is_not_synthetic</span>
+      <p>The IDE prefixes <code>&lt;ide_opened_file&gt;</code> to a <strong>real human prompt</strong> — 46/46 such events on the live DB carried human text. This test is critical: filtering this tag would silence the whisper for every prompt sent with a file open in the IDE. The test verifies that the predicate correctly <em>fails open</em> when the wrapper tag carries genuine human content after it.</p>
+    </div>
+
+    <h3>Step 2: Run tests to verify they fail</h3>
+    <p>Run: <code>.venv/bin/python -m pytest tests/test_engine/test_prompt_classifier.py::TestIsSyntheticPrompt -v</code></p>
+    <p><strong>Expected:</strong> FAIL — <code>ImportError: cannot import name 'is_synthetic_prompt'</code></p>
+
+    <h3>Step 3: Write the implementation</h3>
+    <p>In <code>src/ormah/engine/prompt_classifier.py</code>, after <code>logger = logging.getLogger(__name__)</code> (~L14):</p>
+    <pre><code># Machine-generated turns that reach the UserPromptSubmit hook. Matched ANCHORED
+# at the start of the prompt: a human ASKING about one of these markers is a real
+# prompt and still gets a whisper. Fail-open — when in doubt, whisper.
+# Deliberately excluded: wrapper tags like &lt;ide_opened_file&gt; and &lt;system-reminder&gt;,
+# which PREFIX a real human prompt rather than replace it (issue #134).
+_SYNTHETIC_PATTERNS = (
+    re.compile(r"&lt;task-notification&gt;"),
+    re.compile(r"&lt;scheduled-task\b"),
+    re.compile(r"#\s*Autonomous loop check\b"),
+)
+
+
+def is_synthetic_prompt(prompt: str, extra_patterns: Sequence[str] = ()) -&gt; bool:
+    """True when the prompt was authored by a machine, not a human.
+
+    ``extra_patterns`` carries install-specific regexes from settings; the
+    defaults stay generic to Claude Code. An invalid pattern is logged and
+    ignored — a config typo must never take the whisper down.
+    """
+    text = prompt.lstrip()
+    if not text:
+        return False
+    if any(p.match(text) for p in _SYNTHETIC_PATTERNS):
+        return True
+    for raw in extra_patterns or ():
+        try:
+            if re.match(raw, text):
+                return True
+        except (re.error, TypeError) as e:
+            logger.warning("Ignoring invalid synthetic-prompt pattern %r: %s", raw, e)
+    return False</code></pre>
+
+    <p>Add <code>Sequence</code> to the imports at the top of the file:</p>
+    <pre><code>from collections.abc import Sequence</code></pre>
+
+    <h3>Step 4: Run tests to verify they pass</h3>
+    <p>Run: <code>.venv/bin/python -m pytest tests/test_engine/test_prompt_classifier.py::TestIsSyntheticPrompt -v</code></p>
+    <p><strong>Expected:</strong> PASS (9 passed)</p>
+
+    <h3>Step 5: Commit</h3>
+    <pre><code>git add src/ormah/engine/prompt_classifier.py tests/test_engine/test_prompt_classifier.py
+git commit -m "feat(whisper): add is_synthetic_prompt predicate for machine-generated turns (#134)"</code></pre>
+
+    <h2 id="task-2">Task 2: <em>Settings</em></h2>
+    <p class="meta">Files: modify <code>src/ormah/config.py</code> (after <code>whisper_intent_threshold</code>, ~L259)</p>
+
+    <h3>Step 1: Add the settings</h3>
+    <pre><code>    # Machine-generated turns (subagent task-notifications, scheduled tasks,
+    # autonomous-loop checks) reach the UserPromptSubmit hook like any prompt.
+    # Whispering into them burns encode+search+rerank where no human reads, and
+    # the injection can never be "referenced" — contaminating the usage judge.
+    # Defaults cover Claude Code's own markers; add install-specific regexes
+    # (headless scripts, other agents) here. Anchored at the prompt start.
+    whisper_synthetic_filter_enabled: bool = True
+    whisper_synthetic_prompt_patterns: list[str] = []</code></pre>
+
+    <h3>Step 2: Verify the settings load with defaults</h3>
+    <p>Run:</p>
+    <pre><code>.venv/bin/python -c "from ormah.config import Settings; s=Settings(); print(s.whisper_synthetic_filter_enabled, s.whisper_synthetic_prompt_patterns)"</code></pre>
+    <p><strong>Expected:</strong> <code>True []</code></p>
+
+    <h3>Step 3: Commit</h3>
+    <pre><code>git add src/ormah/config.py
+git commit -m "feat(whisper): add synthetic-prompt filter settings (#134)"</code></pre>
+
+    <h2 id="task-3">Task 3: The <em>guard</em> in <code>build_whisper_context</code></h2>
+    <p class="meta">Files: modify <code>src/ormah/engine/context_builder.py</code> (insert between the <code>if not self.engine:</code> block ending ~L398 and the <code># Classify prompt intent</code> comment ~L400); test <code>tests/test_engine/test_whisper_context.py</code> (class <code>TestWhisperDecisions</code></p>
+    <p>Reads settings via <code>getattr(self.engine.settings, ...)</code> — the same pattern the file already uses for <code>whisper_exploration_enabled</code> (L814) — rather than threading two more parameters through a signature that already takes 25.</p>
+
+    <h3>Step 1: Write the failing tests</h3>
+    <p>Add to class <code>TestWhisperDecisions</code> in <code>tests/test_engine/test_whisper_context.py</code>:</p>
+    <pre><code>    def test_synthetic_prompt_logs_silent_synthetic(self, db_graph):
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph)
+        builder.engine.settings.whisper_synthetic_filter_enabled = True
+        builder.engine.settings.whisper_synthetic_prompt_patterns = []
+
+        out = builder.build_whisper_context(
+            prompt="&lt;task-notification&gt;\n&lt;task-id&gt;x&lt;/task-id&gt;\n&lt;status&gt;done&lt;/status&gt;",
+            session_id="s-synth",
+        )
+
+        assert out == ""
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "silent_synthetic"
+        assert rows[0]["session_id"] == "s-synth"
+
+    def test_ide_wrapped_human_prompt_is_not_skipped(self, db_graph):
+        # REGRESSION GUARD (issue #134): must NOT log silent_synthetic — this is a
+        # real human prompt the IDE merely prefixed. 46/46 live events carried
+        # human text after the tag.
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph, results=[])
+        builder.engine.settings.whisper_synthetic_filter_enabled = True
+        builder.engine.settings.whisper_synthetic_prompt_patterns = []
+
+        builder.build_whisper_context(
+            prompt=("&lt;ide_opened_file&gt;The user opened /x/a.md in the IDE."
+                    "&lt;/ide_opened_file&gt;\nrevisa o portfólio de segurança"),
+            session_id="s-ide",
+        )
+
+        rows = self._decisions(db)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] != "silent_synthetic"
+
+    def test_filter_disabled_does_not_skip(self, db_graph):
+        db, graph = db_graph
+        builder = self._builder_with_db(db, graph, results=[])
+        builder.engine.settings.whisper_synthetic_filter_enabled = False
+        builder.engine.settings.whisper_synthetic_prompt_patterns = []
+
+        builder.build_whisper_context(
+            prompt="&lt;task-notification&gt;\n&lt;task-id&gt;x&lt;/task-id&gt;", session_id="s-off",
+        )
+
+        rows = self._decisions(db)
+        assert rows[0]["outcome"] != "silent_synthetic"</code></pre>
+
+    <div class="callout guard">
+      <span class="label">Regression Guard — test_ide_wrapped_human_prompt_is_not_skipped</span>
+      <p>This test validates that the filter does <strong>not</strong> log <code>silent_synthetic</code> for IDE-wrapped human prompts. This is critical: 46/46 live events with <code>&lt;ide_opened_file&gt;</code> carried human text after the tag. The test ensures that a real human prompt prefixed by the IDE wrapper is not silenced by the synthetic-prompt filter.</p>
+    </div>
+
+    <h3>Step 2: Run tests to verify they fail</h3>
+    <p>Run: <code>.venv/bin/python -m pytest tests/test_engine/test_whisper_context.py::TestWhisperDecisions -v -k "synthetic or ide_wrapped or disabled"</code></p>
+    <p><strong>Expected:</strong> FAIL — <code>test_synthetic_prompt_logs_silent_synthetic</code> gets outcome <code>silent_no_candidates</code>, not <code>silent_synthetic</code>.</p>
+
+    <h3>Step 3: Write the implementation</h3>
+    <p>In <code>src/ormah/engine/context_builder.py</code>, add the import at the top alongside the existing <code>prompt_classifier</code> imports:</p>
+    <pre><code>from ormah.engine.prompt_classifier import is_synthetic_prompt</code></pre>
+
+    <p>Insert immediately after the <code>if not self.engine:</code> block (before the <code># Classify prompt intent before searching</code> comment):</p>
+    <pre><code>        # Machine-generated turn (subagent notification, scheduled task, loop
+        # check): no human will read the injection, and the usage judge would
+        # score it as an unreferenced miss. Skip before the classifier — the
+        # last point where no encode/search/rerank has been paid (#134).
+        _s = getattr(self.engine, "settings", None)
+        if getattr(_s, "whisper_synthetic_filter_enabled", True) and is_synthetic_prompt(
+            prompt, getattr(_s, "whisper_synthetic_prompt_patterns", ()) or ()
+        ):
+            logger.info(
+                "Whisper diagnostics: prompt=%r synthetic_prompt -&gt; skip",
+                prompt_snippet,
+            )
+            self._log_decision(
+                session_id=session_id, space=space, prompt=prompt,
+                intent=None, outcome="silent_synthetic",
+            )
+            if _return_debug:
+                return "", _injected_ids
+            return ""</code></pre>
+
+    <h3>Step 4: Run tests to verify they pass</h3>
+    <p>Run: <code>.venv/bin/python -m pytest tests/test_engine/test_whisper_context.py::TestWhisperDecisions -v</code></p>
+    <p><strong>Expected:</strong> PASS (all, including the pre-existing decision tests)</p>
+
+    <h3>Step 5: Commit</h3>
+    <pre><code>git add src/ormah/engine/context_builder.py tests/test_engine/test_whisper_context.py
+git commit -m "feat(whisper): skip synthetic prompts before the classifier, log silent_synthetic (#134)"</code></pre>
+
+    <h2 id="task-4">Task 4: Document the new outcome in the <em>schema</em></h2>
+    <p class="meta">Files: modify <code>src/ormah/index/schema.sql:228-230</code></p>
+    <p>No migration: <code>whisper_decisions.outcome</code> is a free-text column and <code>_whisper_decision_stats</code> aggregates with an open <code>GROUP BY outcome</code>, so the new value flows into stats untouched. Only the comment needs to keep telling the truth.</p>
+
+    <h3>Step 1: Update the comment</h3>
+    <p>Replace lines 228-230:</p>
+    <pre><code>    outcome         TEXT NOT NULL,      -- 'injected' | 'silent_short' | 'silent_conversational'
+                                        -- | 'silent_topic_shift' | 'silent_no_candidates'
+                                        -- | 'silent_gate' | 'silent_blackout' | 'silent_error'
+                                        -- | 'silent_synthetic'</code></pre>
+
+    <h3>Step 2: Commit</h3>
+    <pre><code>git add src/ormah/index/schema.sql
+git commit -m "docs(schema): document silent_synthetic whisper outcome (#134)"</code></pre>
+
+    <h2 id="task-5">Task 5: Full <em>gate</em> + push</h2>
+
+    <h3>Step 1: Run lint and the full fast suite</h3>
+    <pre><code>cd /Users/andre/Documents/GitHub/Tools/ormah
+.venv/bin/python -m ruff check src/ tests/
+.venv/bin/python -m pytest tests/ -q</code></pre>
+    <p><strong>Expected:</strong> ruff clean; suite green except the ~7 known environmental failures from the global <code>~/.config/ormah/.env</code> leak (pre-existing — confirm they also fail on <code>upstream/main</code> before blaming this change).</p>
+
+    <h3>Step 2: Push to the fork (never upstream)</h3>
+    <pre><code>git push fork fix/whisper-synthetic-prompt-filter</code></pre>
+
+    <h3>Step 3: Open the PR via council</h3>
+    <p>Run <code>/council-pr</code>. If it refuses with <code>origin-is-upstream — refusing to push</code>, that guard is council's, not git's — Step 2 already pushed.</p>
+
+    <h2 id="task-6">Task 6: Verify on the <em>Beta</em> (this is what "done" means)</h2>
+    <p>Tests passing is not verification — the claim is about live traffic.</p>
+
+    <h3>Step 1: Merge into the Beta and restart</h3>
+    <pre><code>git checkout local-main
+git merge fix/whisper-synthetic-prompt-filter
+make restart</code></pre>
+
+    <h3>Step 2: Confirm the filter fires on real traffic</h3>
+    <p>After the Beta has served traffic, run:</p>
+    <pre><code>.venv/bin/python -c "
+import sqlite3, os
+db = os.path.expanduser('~/.local/share/ormah/memory/index.db')
+c = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+for row in c.execute(\"SELECT outcome, COUNT(*) n FROM whisper_decisions \"
+                     \"WHERE logged_at &gt; datetime('now','-1 day') GROUP BY outcome ORDER BY n DESC\"):
+    print(row)
+"</code></pre>
+    <p><strong>Expected:</strong> a <code>silent_synthetic</code> row appears. Projection from the 30d investigation: ~295 events/30d on defaults alone (~10/day). If it stays at 0 while subagents run, the patterns did not match — diagnose, do not assume.</p>
+
+    <h3>Step 3: Report the local-pattern config to André — do NOT edit <code>.env</code></h3>
+    <p><code>.env</code> is André's decision, not the agent's. Do not apply this. Report it and let him choose:</p>
+    <pre><code># covers the remaining ~336 events/30d (~19.6%) measured on this install:
+# the PT-BR description script (298), council/Codex reviews (30), ormah's own judge (8)
+ORMAH_WHISPER_SYNTHETIC_PROMPT_PATTERNS=["Leia o seguinte conteúdo e gere uma description","&lt;role&gt;\\s*\\n?\\s*You are Codex","You are classifying the relationship"]</code></pre>
+
+    <h2 id="out-of-scope">Out of scope</h2>
+    <ul>
+      <li>Stripping wrapper tags (<code>&lt;ide_opened_file&gt;</code>) from the query before search — separate issue.</li>
+      <li>ormah marking its own maintenance prompts at the source — separate issue.</li>
+      <li>Investigation items [1]–[7] (#135–#140).</li>
+    </ul>
+
+    <div class="spectrum">
+      <span class="s1"></span>
+      <span class="s2"></span>
+      <span class="s3"></span>
+    </div>
+
+    <div class="signature">
+      <div class="name">Claude Code</div>
+      <div class="role">AI Development Agent</div>
+    </div>
+
+  </main>
+  <!-- rich-doc-src-sha256:a98996f1b20c6591ac2fabaef8d050b134716b9c0222736bda8093825a39236f -->
+</body>
+</html>

@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Preserve seq on edge-only reindex (#126) — Implementation Plan (v2, post-council)</title>
+  <style>
+    /* rich-doc design system — Anthropic brand, document-oriented.
+       Light paper/ink, Lora italic display, Poppins body, system mono.
+       Hard rules honored: ONE accent per piece, no gradients, no drop-shadow,
+       monogram always ink, hairlines 1px/2px only. Inline this whole file into a
+       single <style>. Fonts come from Google Fonts (the only external request);
+       everything degrades to system serif/sans/mono offline. */
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+
+    :root{
+      /* Anthropic brand */
+      --paper:#faf9f5; --ink:#141413; --stone:#b0aea5; --hairline:#e8e6dc;
+      --orange:#d97757; --blue:#6a9bcc; --green:#788c5d;
+      --accent:var(--orange);            /* fixed primary accent */
+      --font-head:"Poppins",Arial,sans-serif;
+      --font-body:"Lora",Georgia,serif;
+      --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+      --lh-body:1.55; --lh-title:1.12; --maxw:1140px;
+    }
+    [data-mode="dark"]{--paper:#141413; --ink:#faf9f5; --stone:#8a8780; --hairline:#2a2926}
+
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/var(--lh-body) var(--font-body);
+      display:grid;grid-template-columns:300px minmax(0,1fr);min-height:100vh}
+
+    /* ---- TOC sidebar ---- */
+    nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+      border-right:1px solid var(--hairline);padding:46px 30px}
+    nav.toc .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;
+      color:var(--accent);margin-bottom:14px}
+    nav.toc .doc-title{font:400 italic 30px/1.1 var(--font-body);
+      letter-spacing:-.005em;margin:0 0 26px;color:var(--ink)}
+    nav.toc a{display:block;color:var(--stone);text-decoration:none;font-size:14.5px;font-family:var(--font-head);
+      padding:5px 0;border:none}
+    nav.toc a:hover{color:var(--ink)}
+    nav.toc a.lvl-2{padding-left:0}
+    nav.toc a.lvl-3{padding-left:16px;font-size:13.5px}
+
+    /* ---- main column ---- */
+    main{padding:56px 72px 140px;max-width:var(--maxw)}
+    .eyebrow{font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.12em;color:var(--accent)}
+    .meta{font:400 13px/1.4 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+    h2{font:600 30px/var(--lh-title) var(--font-head);letter-spacing:-.015em;margin:56px 0 16px;
+      padding-bottom:10px;border-bottom:1px solid var(--hairline);scroll-margin-top:24px}
+    h2:first-of-type{margin-top:0}
+    /* anchor word inside a title → Lora italic, accent */
+    h2 em,.anchor{font:400 italic 1.1em/1 var(--font-body);color:var(--accent);
+      letter-spacing:-.005em}
+    h3{font:600 20px/1.2 var(--font-head);margin:34px 0 10px;scroll-margin-top:24px}
+    h4{font:600 16px/1.2 var(--font-head);margin:24px 0 8px}
+    p,li{color:var(--ink)} strong{font-weight:700}
+    a{color:var(--accent);text-underline-offset:2px}
+    a.backlink{float:right;font:400 12px/1.6 var(--font-head);color:var(--stone);text-decoration:none}
+    a.backlink:hover{color:var(--accent)}
+
+    /* pull statement — Lora italic protagonist */
+    .statement{font:400 italic 26px/1.25 var(--font-body);
+      letter-spacing:-.01em;color:var(--ink);margin:26px 0;max-width:24em;text-wrap:pretty}
+
+    /* ---- callout: single accent, hairline, no shadow ---- */
+    .callout{border:1px solid var(--hairline);border-left:2px solid var(--accent);
+      background:transparent;padding:14px 20px;margin:20px 0}
+    .callout .label{font:500 11px/1 var(--font-head);text-transform:uppercase;letter-spacing:.1em;
+      color:var(--accent);display:block;margin-bottom:8px}
+    .callout.warn{border-left-color:#d97757}
+    .callout.warn .label{color:#d97757}
+    .callout.warn .label::after{content:" — watch out"}
+
+    /* ---- chips ---- */
+    .chip{display:inline-block;font:500 12px/1 var(--font-head);text-transform:uppercase;letter-spacing:.04em;
+      padding:5px 9px;border:1px solid var(--hairline);color:var(--stone);margin:0 5px 5px 0}
+    .chip.on{color:var(--accent);border-color:var(--accent)}
+
+    /* ---- tables: hairlines + mono headers, no heavy fills ---- */
+    table{border-collapse:collapse;width:100%;margin:20px 0;font-size:15px;border:1px solid var(--hairline)}
+    th,td{text-align:left;padding:11px 16px;border-bottom:1px solid var(--hairline)}
+    th{font:500 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.05em;color:var(--stone)}
+    tr:last-child td{border-bottom:none}
+    td .yes{color:var(--accent);font-weight:700} td .no{color:var(--ink);font-weight:700}
+
+    /* ---- figure / diagram ---- */
+    figure{margin:26px 0;padding:22px;border:1px solid var(--hairline);text-align:center}
+    figure svg{max-width:100%;height:auto}
+    figcaption{margin-top:12px;font:400 13px/1.4 var(--font-head);color:var(--stone);
+      text-transform:uppercase;letter-spacing:.04em}
+
+    /* ---- code / details ---- */
+    code{font:14px var(--font-mono);color:var(--accent)}
+    pre{border:1px solid var(--hairline);padding:16px;overflow-x:auto;font:13px/1.6 var(--font-mono);color:var(--ink)}
+    pre code{color:inherit}
+    details{border:1px solid var(--hairline);padding:4px 18px;margin:16px 0}
+    summary{cursor:pointer;font:500 14px/1 var(--font-head);text-transform:uppercase;letter-spacing:.05em;
+      color:var(--stone);padding:12px 0}
+    summary:hover{color:var(--accent)}
+
+    /* ---- signature: monogram (always ink) + spectrum bar ---- */
+    .spectrum{display:flex;height:4px;margin:40px 0 22px}
+    .spectrum span{flex:1}
+    .spectrum .s1{background:var(--orange)} .spectrum .s2{background:var(--blue)} .spectrum .s3{background:var(--green)}
+    .signature{display:flex;flex-direction:column;gap:3px;color:var(--stone);
+      border-left:2px solid var(--accent);padding-left:16px}
+    .signature .name{font:400 italic 18px/1 var(--font-body);color:var(--ink)}
+    .signature .role{font:400 12px/1.3 var(--font-head);text-transform:uppercase;letter-spacing:.06em;color:var(--stone)}
+
+    /* ---- phase color-coding: thin left bar, accent cycles ---- */
+    .phase{display:flex;align-items:baseline;gap:10px;font:500 16px/1.4 var(--font-head);
+      padding:7px 0 7px 13px;border-left:3px solid var(--stone);margin:6px 0}
+    .phase .pn{font:600 10px/1 var(--font-head);letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
+    .phase.p-o{border-color:var(--orange)} .phase.p-b{border-color:var(--blue)} .phase.p-g{border-color:var(--green)}
+
+    /* ---- metrics row: large numbers ---- */
+    .metrics{display:flex;gap:28px;margin:24px 0;padding:18px 0;border-top:1px solid var(--hairline);border-bottom:1px solid var(--hairline)}
+    .metrics .metric{flex:0 1 auto}
+    .metrics .big{font:700 34px/1 var(--font-head);color:var(--orange)}
+    .metrics .label{font:500 11px/1 var(--font-head);letter-spacing:.08em;text-transform:uppercase;color:var(--stone);margin-top:6px}
+
+    /* ---- status chips: done / active / todo ---- */
+    .schip{display:inline-block;font:600 11px/1 var(--font-head);letter-spacing:.05em;text-transform:uppercase;
+      padding:5px 10px;border-radius:20px;margin:0 5px 5px 0}
+    .schip.done{background:var(--green);color:#fff}
+    .schip.active{background:var(--orange);color:#fff}
+    .schip.todo{background:var(--hairline);color:var(--stone)}
+
+    /* ---- progress bar ---- */
+    .progress{margin:18px 0}
+    .progress .bar{height:8px;border-radius:6px;background:var(--hairline);overflow:hidden}
+    .progress .fill{height:100%;background:var(--orange)}
+    .progress .label{font:500 12px/1 var(--font-head);color:var(--stone);margin-top:6px}
+
+    /* ---- task steps ---- */
+    .task-steps{margin:20px 0;padding:0}
+    .task-steps li{list-style:none;margin:10px 0;position:relative;padding-left:26px}
+    .task-steps li::before{content:"□";position:absolute;left:0;color:var(--stone);font-weight:600}
+
+    /* ---- blockquote ---- */
+    blockquote{border-left:2px solid var(--accent);padding-left:16px;margin:20px 0;color:var(--stone);font-style:italic}
+
+    @media(max-width:880px){
+      body{grid-template-columns:1fr}
+      nav.toc{position:static;height:auto;border-right:none;border-bottom:1px solid var(--hairline)}
+      main{padding:32px 24px 90px}
+    }
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <div class="eyebrow">Superpowers</div>
+  <div class="doc-title">Preserve <em>seq</em></div>
+  <a href="#goal" class="lvl-2">Goal</a>
+  <a href="#architecture" class="lvl-2">Architecture</a>
+  <a href="#why-v2" class="lvl-2">Why v2</a>
+  <a href="#finding-1" class="lvl-3">1. auto_cluster</a>
+  <a href="#finding-2" class="lvl-3">2. Cached verdicts</a>
+  <a href="#finding-3" class="lvl-3">3. More refinements</a>
+  <a href="#environment" class="lvl-2">Environment</a>
+  <a href="#files" class="lvl-2">File structure</a>
+  <a href="#task-0" class="lvl-2">Task 0: Worktree</a>
+  <a href="#task-1" class="lvl-2">Task 1: Schema</a>
+  <a href="#task-2" class="lvl-2">Task 2: Edge write</a>
+  <a href="#task-3" class="lvl-2">Task 3: Cache</a>
+  <a href="#task-4" class="lvl-2">Task 4: auto_cluster</a>
+  <a href="#task-5" class="lvl-2">Task 5: Fields</a>
+  <a href="#task-6" class="lvl-2">Task 6: full_rebuild</a>
+  <a href="#task-6b" class="lvl-2">Task 6b: Migration</a>
+  <a href="#task-7" class="lvl-2">Task 7: Verify</a>
+  <a href="#self-review" class="lvl-2">Self-review</a>
+</nav>
+
+<main>
+
+<div class="eyebrow">Issue #126 fix</div>
+<h2><em>Preserve</em> <code>seq</code> on edge-only reindex</h2>
+
+<p class="meta">Implementation Plan v2, post-council review</p>
+
+<p class="statement">Stop the auto_linker from re-queueing the nodes it just processed, without ever freezing a node out of relinking.</p>
+
+<h3 id="goal">Goal</h3>
+<p><code>seq</code> is a change-sequence: the builder reallocates it on every index pass and the auto_linker enqueues by <code>seq > watermark</code>. Writing an edge rewrites the node's markdown, so the reindex bumps its <code>seq</code> and the node re-enters the queue with nothing to learn. The fix stores a <strong>content fingerprint</strong> (<code>sha256(title, content, type, space)</code>) in a column written <strong>only by the builder</strong>, and reallocates <code>seq</code> only when that fingerprint changes. When it does change, the node's cached pair verdicts are invalidated in the same transaction — otherwise the requeue is a no-op, because the auto_linker skips pairs already in <code>auto_link_checked</code>.</p>
+
+<h3 id="architecture">Architecture</h3>
+<p><strong>Tech Stack:</strong> Python 3.12, SQLite, pytest (<code>asyncio_mode=auto</code>), ruff (line-length 100, py311).</p>
+
+<h2 id="why-v2">Why v2 — what the <em>council caught</em></h2>
+
+<div class="callout">
+  <span class="label">Critical peer review findings</span>
+  <p>The first version compared the incoming markdown against the stored row. Two peers identified three regressions and refinements, forcing a redesign. All are now addressed.</p>
+</div>
+
+<h3 id="finding-1">1. <code>auto_cluster</code> dual-writes (Cursor, confirmed)</h3>
+<p><a href="https://github.com/r-spade/ormah/blob/main/src/ormah/background/auto_cluster.py#L64-L86"><code>auto_cluster.py:64-86</code></a> writes <code>space</code> <strong>straight into SQLite</strong> (<code>UPDATE nodes SET space = ?</code>) <em>and</em> saves the markdown, bypassing the builder. So by reindex time the stored row <strong>already holds the new space</strong> — prior == incoming, fingerprint unchanged, <code>seq</code> preserved, and the node is <strong>frozen out of relinking forever</strong> (it sits behind the watermark). Today's unconditional bump requeues it. v1 would have shipped a <strong>regression</strong>.</p>
+
+<blockquote>The baseline cannot be the stored row. It must be a value only the builder writes: a persisted fingerprint column, which a direct <code>UPDATE</code> does not touch.</blockquote>
+
+<h3 id="finding-2">2. A fresh <code>seq</code> does not invalidate cached verdicts (Codex, confirmed)</h3>
+<p>The auto_linker skips any pair already in <code>auto_link_checked</code> (<a href="https://github.com/r-spade/ormah/blob/main/src/ormah/background/auto_linker.py#L552-L554"><code>auto_linker.py:552-554</code></a>) <strong>before</strong> it even looks at the edge. And invalidation today is incomplete: <a href="https://github.com/r-spade/ormah/blob/main/src/ormah/engine/memory_engine.py#L1098-L1117"><code>memory_engine.py:1098-L1117</code></a> clears <code>auto_link_checked</code> only for content/title edits — a <code>type</code>/<code>space</code> edit clears only <code>conflict_checked</code>, and a <strong>direct markdown edit clears nothing at all</strong>. So requeueing a node whose pairs are all cached does nothing: it is re-scanned and every pair is skipped.</p>
+
+<blockquote>Bumping <code>seq</code> is necessary but <strong>not sufficient</strong>. The fingerprint change must invalidate the node's cached pairs atomically.</blockquote>
+
+<h3 id="finding-3">3. Three more refinements (Cursor, accepted)</h3>
+
+<h4>The backfill would bake in a pending relink</h4>
+<p>It stamps the fingerprint from the current rows — but a row whose <code>file_hash</code> is stale has a reindex pending, and if <code>auto_cluster</code> already wrote the new <code>space</code> to the DB <strong>and</strong> the markdown, stamping it would make the next reindex see no change and lose the relink. Rows with a stale <code>file_hash</code> are now left <strong>NULL</strong> (a NULL never equals the incoming fingerprint, so they requeue). Tested in Task 6b.</p>
+
+<h4>The tests used a column that does not exist</h4>
+<p><code>auto_link_checked</code> has <strong><code>result</code></strong>, not <code>edge_type</code> (<a href="https://github.com/r-spade/ormah/blob/main/src/ormah/index/schema.sql#L85-L91"><code>schema.sql:85-91</code></a>) — the v2 test INSERTs would have failed outright. Fixed.</p>
+
+<h4><code>full_rebuild</code> would fire ~15k invalidations</h4>
+<p>With <code>prior=None</code> for every node, each would call <code>_invalidate_checked_pairs</code>, i.e. a <code>WHERE node_a = ? OR node_b = ?</code> delete against a table whose PK is <code>(node_a, node_b)</code> with <strong>no index on <code>node_b</code></strong> — a partial scan per node.</p>
+
+<h4>Deliberate divergence from Cursor</h4>
+<p>Cursor proposed fixing the last one by clearing the three <code>*_checked</code> tables <strong>globally</strong> inside <code>full_rebuild</code>. That fixes the performance but changes behaviour: a rebuild would then re-judge the <strong>entire store</strong> with the LLM — a large new cost, on a store of ~15k nodes, that nobody asked for. Instead, invalidation is gated on <code>prior is not None</code>, so it runs only on an incremental reindex of an existing node. <code>full_rebuild</code> keeps its current cost and its current (pre-existing) behaviour of not clearing cached verdicts. That gap is real but is <strong>not</strong> this issue's; recorded as a follow-up.</p>
+
+<h4>Connection topology (Codex) — partially rebutted</h4>
+<p>Codex argued that removing/retargeting a connection changes candidate eligibility (the auto_linker skips pairs that already have an edge), so it should requeue. Two reasons it does not: (a) the <code>auto_link_checked</code> lookup runs <strong>before</strong> the existing-edge lookup, so an already-judged pair is skipped regardless of topology; (b) rejudging a pair whose edge a user deliberately deleted would <strong>recreate the edge they removed</strong>. The residual case — a never-judged pair whose imported edge is later removed — is narrow and is <strong>not</strong> addressed here. Recorded as a follow-up, not a blocker.</p>
+
+<h3 id="environment">Environment — read this first, it will cost you the session if you get it wrong</h3>
+
+<div class="callout warn">
+  <span class="label">Environment — critical</span>
+  <p><strong>NEVER check out a branch in <code>/Users/andre/Documents/GitHub/Tools/ormah</code>.</strong> That clone is the Beta: editable install, serves the live server. All work happens in a worktree of <code>/Users/andre/Documents/GitHub/ormah-dev</code>.</p>
+  <ul style="margin:12px 0 0 0">
+    <li><code>ormah-dev</code> remotes: <code>origin</code> = fork (<code>AndreLFSMartins/ormah</code>), <code>upstream</code> = <code>r-spade/ormah</code>. Base: <code>upstream/main</code>.</li>
+    <li><strong>pytest requires an isolated <code>HOME</code></strong> — otherwise the real <code>~/.config/ormah/.env</code> (which sets <code>ORMAH_LLM_PROVIDER=claude_cli</code>) is read by <code>tests/conftest.py</code> at import and collection dies with a pydantic <code>ValidationError</code> (issue #106). Every pytest command below is prefixed with <code>HOME=$(mktemp -d)</code>.</li>
+    <li>The worktree needs its <strong>own venv</strong> — the Beta's venv lacks <code>respx</code> and must not be touched.</li>
+  </ul>
+</div>
+
+<h3 id="files">File structure</h3>
+<table>
+  <thead>
+    <tr>
+      <th>File</th>
+      <th>Responsibility</th>
+      <th>Change</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>src/ormah/index/schema.sql</code></td>
+      <td>Table definitions for fresh DBs</td>
+      <td><strong>Modified</strong> — add <code>content_fingerprint</code></td>
+    </tr>
+    <tr>
+      <td><code>src/ormah/index/db.py</code></td>
+      <td>Schema migrations for existing DBs</td>
+      <td><strong>Modified</strong> — add + backfill the column</td>
+    </tr>
+    <tr>
+      <td><code>src/ormah/index/builder.py</code></td>
+      <td>Index build/update. Owns <code>seq</code> allocation.</td>
+      <td><strong>Modified</strong> — conditional <code>seq</code> + cache invalidation</td>
+    </tr>
+    <tr>
+      <td><code>tests/test_index/test_seq_fingerprint.py</code></td>
+      <td>Tests for conditional <code>seq</code> allocation</td>
+      <td><strong>Created</strong></td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Fixing it in the builder (not in <code>_apply_edge</code>) covers <code>conflict_detector</code> and the six <code>memory_engine.index_single</code> call-sites for free.</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="big">9</div>
+    <div class="label">Tasks</div>
+  </div>
+  <div class="metric">
+    <div class="big">42</div>
+    <div class="label">Checkbox steps</div>
+  </div>
+</div>
+
+<div class="progress">
+  <div class="bar"><div class="fill" style="width:0%"></div></div>
+  <div class="label">0 of 42 steps completed</div>
+</div>
+
+<h3 id="task-0">Task 0: Worktree + green baseline</h3>
+
+<p class="meta">No files modified</p>
+
+<ul class="task-steps">
+  <li><strong>Step 1: Create the worktree from upstream/main</strong>
+    <pre><code>cd /Users/andre/Documents/GitHub/ormah-dev
+git fetch upstream
+git worktree add /Users/andre/Documents/GitHub/ormah-dev/.wt-126 -b fix/126-seq-fingerprint upstream/main</code></pre>
+  </li>
+  <li><strong>Step 2: Isolated venv</strong>
+    <pre><code>cd /Users/andre/Documents/GitHub/ormah-dev/.wt-126
+uv venv .venv --python 3.12
+uv pip install -e ".[dev]" --python /Users/andre/Documents/GitHub/ormah-dev/.wt-126/.venv/bin/python</code></pre>
+  </li>
+  <li><strong>Step 3: Record the baseline</strong>
+    <pre><code>HOME=$(mktemp -d) .venv/bin/python -m pytest tests/ -q 2>&1 | tail -3</code></pre>
+    <p>Expected: green except <strong>5 pre-existing failures</strong> in <code>tests/test_setup.py</code> (<code>TestConfigureClaudeCodeMcp</code> / <code>TestConfigureCodexMcp</code>) — they fail identically on pristine <code>upstream/main</code> because they touch the machine's real Codex CLI. <strong>Do not fix them.</strong> Write the exact counts down; Task 7 compares against them.</p>
+  </li>
+</ul>
+
+<h3 id="task-1">Task 1: Schema — the fingerprint column</h3>
+
+<p class="meta">Files: schema.sql, db.py, fingerprint.py (new), builder.py, test_seq_fingerprint.py (new)</p>
+
+<p>The column must be written <strong>only</strong> by the builder. That is the whole point: a direct <code>UPDATE nodes SET space = ...</code> (auto_cluster) leaves the fingerprint stale, so the next reindex sees a mismatch and correctly requeues the node.</p>
+
+<ul class="task-steps">
+  <li><strong>Step 1: Write the failing test</strong>
+    <p>Create <code>tests/test_index/test_seq_fingerprint.py</code>:</p>
+    <pre><code>"""Conditional seq allocation driven by a persisted content fingerprint (#126)."""
+
+from __future__ import annotations
+
+from ormah.models.node import Connection, CreateNodeRequest, EdgeType, NodeType
+
+
+def _row(engine, node_id: str):
+    return engine.db.conn.execute(
+        "SELECT seq, content_fingerprint FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+
+
+def _seq(engine, node_id: str) -> int:
+    return _row(engine, node_id)["seq"]
+
+
+def _make_node(engine, title="Python language", content="Python is a programming language.",
+               node_type=NodeType.fact, tags=None):
+    node_id, _ = engine.remember(
+        CreateNodeRequest(content=content, type=node_type, title=title,
+                          tags=tags if tags is not None else ["test"]),
+        agent_id="test",
+    )
+    return node_id
+
+
+def test_indexing_persists_a_content_fingerprint(engine):
+    """The builder stamps a fingerprint on every node it indexes."""
+    node_id = _make_node(engine)
+    fp = _row(engine, node_id)["content_fingerprint"]
+    assert fp, "builder must persist a content fingerprint"
+    assert len(fp) == 64, "expected a sha256 hex digest"</code></pre>
+  </li>
+  <li><strong>Step 2: Run it — must fail</strong>
+    <pre><code>cd /Users/andre/Documents/GitHub/ormah-dev/.wt-126
+HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_index/test_seq_fingerprint.py -q</code></pre>
+    <p>Expected: <strong>FAIL</strong> — <code>no such column: content_fingerprint</code>.</p>
+  </li>
+  <li><strong>Step 3: Add the column to the schema</strong>
+    <p>In <code>src/ormah/index/schema.sql</code>, inside the <code>nodes</code> table definition, add after the <code>seq</code> column: <code>content_fingerprint TEXT</code></p>
+  </li>
+  <li><strong>Step 4: Migrate existing DBs, with a backfill</strong>
+    <p>In <code>src/ormah/index/db.py</code>, inside <code>_migrate()</code>, after the existing <code>nodes</code> enrichment-column block, add the migration code (see source for full details). Note: confirm how <code>FileStore.file_hash()</code> computes the digest and reuse that exact function rather than re-implementing sha256-over-bytes — a mismatch in the algorithm would mark every row as stale and requeue the whole store.</p>
+  </li>
+  <li><strong>Step 5: Create the fingerprint helper</strong>
+    <p>Create <code>src/ormah/index/fingerprint.py</code> with the <code>content_fingerprint()</code> function that hashes title, content, type, and space using NUL-byte separator.</p>
+  </li>
+  <li><strong>Step 6: Stamp the fingerprint in the builder</strong>
+    <p>In <code>src/ormah/index/builder.py</code>, add the import and modify <code>_index_file_nodes_only</code> to include <code>content_fingerprint</code> in the INSERT OR REPLACE statement, passing <code>content_fingerprint(node.title, node.content, node.type.value, node.space)</code>.</p>
+  </li>
+  <li><strong>Step 7: Run — must pass</strong>
+    <pre><code>HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_index/test_seq_fingerprint.py -q</code></pre>
+    <p>Expected: <strong>PASS</strong>.</p>
+  </li>
+  <li><strong>Step 8: Commit</strong>
+    <pre><code>git add src/ormah/index/schema.sql src/ormah/index/db.py src/ormah/index/fingerprint.py src/ormah/index/builder.py tests/test_index/test_seq_fingerprint.py
+git commit -m "feat(index): persist a content fingerprint written only by the builder (#126)"</code></pre>
+  </li>
+</ul>
+
+<h3 id="task-2">Task 2: The bug — an edge write must not requeue the node</h3>
+
+<p class="meta">Files: builder.py, test_seq_fingerprint.py</p>
+
+<ul class="task-steps">
+  <li><strong>Step 1: Write the failing test</strong>
+    <p>This is #126. It reproduces exactly what <code>_apply_edge</code> does: append a connection, save the markdown, reindex. The <code>seq</code> must not move.</p>
+  </li>
+  <li><strong>Step 2: Run it — must fail</strong>
+    <pre><code>HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_index/test_seq_fingerprint.py::test_edge_write_does_not_bump_seq -q</code></pre>
+    <p>Expected: <strong>FAIL</strong> — the seq is bumped. This is the bug.</p>
+  </li>
+  <li><strong>Step 3: Add <code>_prior_row</code> method</strong>
+    <p>Reads the stored fingerprint + seq BEFORE _remove_node deletes the row.</p>
+  </li>
+  <li><strong>Step 4: Make the seq allocation conditional</strong>
+    <p>In <code>_index_file_nodes_only</code>, change signature to accept <code>prior=None</code> and implement conditional seq logic based on fingerprint comparison.</p>
+  </li>
+  <li><strong>Step 5: Add cache invalidation stub</strong>
+    <p>Add <code>_invalidate_checked_pairs</code> method that deletes from auto_link_checked, duplicate_checked, and conflict_checked.</p>
+  </li>
+  <li><strong>Step 6: Thread <code>prior</code> through <code>_index_file</code></strong>
+    <pre><code>def _index_file(self, path: Path, prior=None) -> None:</code></pre>
+  </li>
+  <li><strong>Step 7: Capture <code>prior</code> in <code>index_single</code></strong>
+    <p>Read prior BEFORE the delete, then pass through.</p>
+  </li>
+  <li><strong>Step 8: Capture <code>prior</code> in <code>update_index</code></strong>
+    <p>In the update branch, read prior BEFORE the delete.</p>
+  </li>
+  <li><strong>Step 9: Run — must pass</strong>
+    <pre><code>HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_index/test_seq_fingerprint.py -q
+HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_background/test_auto_linker.py -q -k "seq or watermark"</code></pre>
+    <p>Expected: <strong>PASS</strong>, including existing seq tests.</p>
+  </li>
+  <li><strong>Step 10: Commit</strong>
+    <pre><code>git add src/ormah/index/builder.py tests/test_index/test_seq_fingerprint.py
+git commit -m "fix(index): an edge write no longer requeues the node (#126)"</code></pre>
+  </li>
+</ul>
+
+<h3 id="task-3">Task 3: A requeue must actually rejudge — invalidate cached pairs</h3>
+
+<p class="meta">Files: test_seq_fingerprint.py</p>
+
+<p>This is the council's second finding. Without it the whole fix is theatre: the node returns to the queue and every pair is skipped.</p>
+
+<ul class="task-steps">
+  <li><strong>Step 1: Write the test</strong>
+    <p>Add <code>test_fingerprint_change_invalidates_cached_pairs</code> and <code>test_edge_write_keeps_cached_pairs</code> to demonstrate that fingerprint changes invalidate but edge writes do not.</p>
+  </li>
+  <li><strong>Step 2: Run — both must pass</strong>
+    <pre><code>HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_index/test_seq_fingerprint.py -q -k cached</code></pre>
+    <p>Expected: <strong>PASS</strong> (Task 2 Step 5 already implemented it).</p>
+  </li>
+  <li><strong>Step 3: Commit</strong>
+    <pre><code>git add tests/test_index/test_seq_fingerprint.py
+git commit -m "test(index): a fingerprint change invalidates cached pair verdicts (#126)"</code></pre>
+  </li>
+</ul>
+
+<h3 id="task-4">Task 4: The regression the council caught — auto_cluster's direct DB write</h3>
+
+<p class="meta">Files: test_seq_fingerprint.py</p>
+
+<p><strong>This is the most important test in the plan.</strong> It is the exact scenario that would have shipped a node-freezing regression: <code>auto_cluster</code> writes <code>space</code> into SQLite <em>and</em> into the markdown, bypassing the builder. If the baseline were the stored row, prior would already equal the incoming value and the node would never be requeued.</p>
+
+<ul class="task-steps">
+  <li><strong>Step 1: Write the test</strong>
+    <p>Simulate auto_cluster's dual-write: UPDATE the DB directly, then save the markdown, then index. The seq must increase.</p>
+  </li>
+  <li><strong>Step 2: Run — must pass</strong>
+    <pre><code>HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_index/test_seq_fingerprint.py::test_direct_db_space_update_still_requeues -q</code></pre>
+    <p>Expected: <strong>PASS</strong>. If it fails, the fingerprint is being compared against the row's live columns instead of the persisted column.</p>
+  </li>
+  <li><strong>Step 3: Commit</strong>
+    <pre><code>git add tests/test_index/test_seq_fingerprint.py
+git commit -m "test(index): a direct DB space write must still requeue (auto_cluster) (#126)"</code></pre>
+  </li>
+</ul>
+
+<h3 id="task-5">Task 5: Every fingerprint field requeues; nothing else does</h3>
+
+<p class="meta">Files: test_seq_fingerprint.py</p>
+
+<ul class="task-steps">
+  <li><strong>Step 1: Write the tests</strong>
+    <p>Add tests for content_change_bumps_seq, title_change_bumps_seq, type_change_bumps_seq, and tags_only_change_does_not_bump_seq.</p>
+  </li>
+  <li><strong>Step 2: Run</strong>
+    <pre><code>HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_index/test_seq_fingerprint.py -q</code></pre>
+    <p>Expected: <strong>PASS</strong>.</p>
+  </li>
+  <li><strong>Step 3: Commit</strong>
+    <pre><code>git add tests/test_index/test_seq_fingerprint.py
+git commit -m "test(index): pin each fingerprint field; tags must not requeue (#126)"</code></pre>
+  </li>
+</ul>
+
+<h3 id="task-6">Task 6: <code>full_rebuild</code> must still requeue everything</h3>
+
+<p class="meta">Files: test_seq_fingerprint.py</p>
+
+<p><code>full_rebuild</code> empties the table, so <code>prior</code> is always <code>None</code> and every node gets a fresh <code>seq</code>. Nothing in the code <em>states</em> that, and a refactor could break it silently.</p>
+
+<ul class="task-steps">
+  <li><strong>Step 1: Write the test</strong>
+    <p>Add <code>test_full_rebuild_allocates_new_seq</code> that verifies new seqs and watermark is cleared.</p>
+  </li>
+  <li><strong>Step 2: Run</strong>
+    <pre><code>HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_index/test_seq_fingerprint.py::test_full_rebuild_allocates_new_seq -q</code></pre>
+    <p>Expected: <strong>PASS</strong>.</p>
+  </li>
+  <li><strong>Step 3: Commit</strong>
+    <pre><code>git add tests/test_index/test_seq_fingerprint.py
+git commit -m "test(index): full_rebuild still requeues the whole store (#126)"</code></pre>
+  </li>
+</ul>
+
+<h3 id="task-6b">Task 6b: The migration backfill must not bake in a pending relink</h3>
+
+<p class="meta">Files: test_seq_fingerprint.py</p>
+
+<p>The backfill stamps the fingerprint from the current rows — except for rows whose <code>file_hash</code> is stale, which are left <code>NULL</code> so the first reindex requeues them. That exception exists for one reason: <code>auto_cluster</code> may have already written the new <code>space</code> into both the DB and the markdown without a reindex, and baking that into the fingerprint would silently lose the pending relink.</p>
+
+<ul class="task-steps">
+  <li><strong>Step 1: Write the test</strong>
+    <p>Add <code>test_migration_leaves_stale_rows_unstamped</code> to verify NULL handling for rows with pending reindex.</p>
+  </li>
+  <li><strong>Step 2: Run</strong>
+    <pre><code>HOME=$(mktemp -d) .venv/bin/python -m pytest tests/test_index/test_seq_fingerprint.py::test_migration_leaves_stale_rows_unstamped -q</code></pre>
+    <p>Expected: <strong>PASS</strong>. The backfill must be idempotent and scoped to rows where <code>content_fingerprint IS NULL</code>.</p>
+  </li>
+  <li><strong>Step 3: Commit</strong>
+    <pre><code>git add tests/test_index/test_seq_fingerprint.py
+git commit -m "test(index): the migration must not stamp rows with a pending reindex (#126)"</code></pre>
+  </li>
+</ul>
+
+<h3 id="task-7">Task 7: Full suite, lint, PR</h3>
+
+<p class="meta">Files: none (verification only)</p>
+
+<ul class="task-steps">
+  <li><strong>Step 1: Full suite</strong>
+    <pre><code>cd /Users/andre/Documents/GitHub/ormah-dev/.wt-126
+HOME=$(mktemp -d) .venv/bin/python -m pytest tests/ -q 2>&1 | tail -5</code></pre>
+    <p>Expected: the Task 0 baseline <strong>plus the 9 new tests passing</strong>. The only permitted failures are the 5 pre-existing <code>tests/test_setup.py</code> ones. <strong>Any other failure is a regression you introduced — fix it, do not rationalise it.</strong></p>
+  </li>
+  <li><strong>Step 2: Lint</strong>
+    <pre><code>.venv/bin/python -m ruff check src/ tests/</code></pre>
+    <p>Expected: no new errors (<code>memory_engine.py</code> has 4 pre-existing ones on <code>upstream/main</code>).</p>
+  </li>
+  <li><strong>Step 3: Push and open the PR</strong>
+    <p>Push to <code>fix/126-seq-fingerprint</code> and create PR with the detailed body explaining the bug, the fix, and the migration strategy. See source for full PR body template.</p>
+  </li>
+</ul>
+
+<h2 id="self-review">Self-Review</h2>
+
+<h3>Council coverage</h3>
+<p>Cursor's <code>auto_cluster</code> freeze → <a href="#task-1">Task 1</a> (persisted column) + <a href="#task-4">Task 4</a> (the test). Codex's cached-verdict finding → <a href="#task-2">Task 2</a> Step 5 + <a href="#task-3">Task 3</a>. Codex's connection-topology finding → rebutted in <a href="#why-v2">"Why v2"</a>, recorded as a follow-up in the PR body.</p>
+
+<h3>Type consistency</h3>
+<p><code>content_fingerprint(title, content, node_type, space)</code> is called with <code>node.type.value</code> (<code>str</code>) everywhere — in the builder, and in the migration backfill (which reads the <code>type</code> column, also <code>str</code>). <code>_prior_row</code> returns a <code>sqlite3.Row</code> read by key, matching the rest of <code>builder.py</code>.</p>
+
+<h3>Deliberate gap</h3>
+<p><code>_apply_edge</code> still calls <code>touch_updated()</code>, so <code>updated</code> still changes on an edge write. It is informational metadata and no longer affects the queue.</p>
+
+<div class="spectrum">
+  <span class="s1"></span>
+  <span class="s2"></span>
+  <span class="s3"></span>
+</div>
+
+<div class="signature">
+  <div class="name">Claude Code</div>
+  <div class="role">Superpowers implementation planner</div>
+</div>
+
+</main>
+
+</body>
+</html>
+<!-- rich-doc-src-sha256:0ed04dc84fac210806c57c26b7f18d5423a3f50fd39de9611d3bfb708b6dc764 -->
