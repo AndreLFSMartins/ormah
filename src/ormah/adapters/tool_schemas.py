@@ -380,9 +380,10 @@ ADMIN_TOOLS = [
     {
         "name": "resolve_proposal",
         "description": (
-            "Approve or reject a pending proposal. When a merge proposal is approved, "
-            "the merge is executed automatically — the duplicate node is removed and its "
-            "edges and tags are transferred to the kept node."
+            "Approve or reject a pending proposal. Resolving one records the decision; "
+            "approving a conflict proposal also connects the two memories. No proposal "
+            "type triggers a merge: duplicates are merged automatically during "
+            "maintenance when they clear the auto-merge threshold, or not at all."
         ),
         "parameters": {
             "type": "object",
