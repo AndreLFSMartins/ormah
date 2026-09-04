@@ -354,10 +354,11 @@ class IndexBuilder:
         different-question bug of `AndreLFSMartins/ormah#6`. Background dedup and conflict runs
         read no Pair memo at all; they converge by Watermark (ADR-0006).
 
-        `auto_link_checked` is the only Pair memo with a reader: `duplicate_checked` and
-        `conflict_checked` never had one (`AndreLFSMartins/ormah#4`), which is why clearing them
-        here bought nothing. Doing it here covers every path into the index, including disk
-        edits and sync.
+        `auto_link_checked` is the only Pair memo left: `duplicate_checked` and
+        `conflict_checked` never had a reader (`AndreLFSMartins/ormah#4`), which is why clearing
+        them here bought nothing, and the startup migration dropped both tables outright
+        (`AndreLFSMartins/ormah#12`, ADR-0006). Doing it here covers every path into the index,
+        including disk edits and sync.
 
         The fingerprint bundles title/content/type/space, so it changes on more than an edit to
         the embedded text; clearing on any of them is the conservative side of that bound.

@@ -80,9 +80,9 @@ def _row_counts(engine) -> dict[str, int]:
     """Row count of every table in the store.
 
     Table-agnostic on purpose: it catches a Veto written into *any* table, not only into
-    the one the removed branch named. It does not, on its own, survive #12 dropping
-    `duplicate_checked` — a restored INSERT against a missing table raises, the endpoint
-    swallows it, and the counts stay equal. The log assertion is what covers that.
+    the one the removed branch named. It does not, on its own, cover the store now that #12
+    has dropped `duplicate_checked` — a restored INSERT against a missing table raises, the
+    endpoint swallows it, and the counts stay equal. The log assertion is what covers that.
     """
     tables = [
         r["name"]
