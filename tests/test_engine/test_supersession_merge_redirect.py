@@ -8,6 +8,8 @@ represents them.  Reported on PR #257 by the maintainer.
 
 from __future__ import annotations
 
+import pytest
+
 from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, Tier
 from tests.confirmed_use_helpers import reinforce
 
@@ -73,6 +75,39 @@ def test_a_redirected_source_still_blocks_promotion(engine):
     dangling (C is gone), the self-healing branch lifts the block, and A promotes
     into the whisper-eligible tier even though D represents it."""
     a, _b, _c, _d = _consolidation_then_merge(engine)
+
+    reinforce(engine, a)
+
+    assert engine.file_store.load(a).tier is Tier.archival
+
+
+def test_a_crash_after_deleting_the_replacement_cannot_reopen_its_source(
+    engine, monkeypatch
+):
+    """Deletion is the final filesystem mutation. If the process dies immediately
+    after C is removed, A's markdown must already point at D; otherwise confirmed
+    use reads a dangling C marker and promotes A despite D still representing it."""
+    c = _live(engine, "the consolidation node", "C")
+    a = _superseded_source(engine, "source A folded into C", c)
+    d = _live(
+        engine,
+        "the node C is merged into, deliberately much longer so _pick_keeper keeps it",
+        "D",
+    )
+    original_soft_delete = engine.file_store.soft_delete
+
+    def crash_after_soft_delete(node_id: str) -> bool:
+        original_soft_delete(node_id)
+        raise RuntimeError("simulated process crash after C is removed")
+
+    monkeypatch.setattr(engine.file_store, "soft_delete", crash_after_soft_delete)
+
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        engine.execute_merge(c, d)
+
+    assert engine.file_store.load(c) is None, "precondition: C was removed"
+    assert engine.file_store.load(a).superseded_by == d
+    assert _sql_marker(engine, a) == d
 
     reinforce(engine, a)
 
