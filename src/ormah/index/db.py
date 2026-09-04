@@ -352,8 +352,34 @@ class Database:
                     "CREATE INDEX IF NOT EXISTS idx_review_log_node ON review_log(node_id)"
                 )
 
+            self._migrate_drop_retired_merge_machinery(conn)
+
         # Migrate FTS table to porter stemmer if needed
         self._migrate_fts_tokenizer()
+
+    def _migrate_drop_retired_merge_machinery(self, conn: sqlite3.Connection) -> None:
+        """Drop the dead Pair memo tables and every stored Merge proposal (#12, ADR-0006).
+
+        A Pair now either clears the Auto-merge threshold or nothing happens to it, so
+        `duplicate_checked` and `conflict_checked` lost their last writer (#11) and no
+        producer files a Merge proposal any more (#9). Neither the tables nor the rows
+        have a reader left; they only offer the operator a decision on Pairs judged
+        against content that has changed since.
+
+        Scoped by type, not by status: a `merge` row is gone whatever state it is in,
+        while every other proposal type — the Review queue still serves the one that has
+        a producer — is untouched.
+
+        Both statements are guarded in themselves (`IF EXISTS`, and a DELETE that matches
+        nothing the second time), so a restart loop re-runs this as a no-op.
+        """
+        for table in ("duplicate_checked", "conflict_checked"):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        deleted = conn.execute("DELETE FROM proposals WHERE type = 'merge'").rowcount
+        if deleted:
+            # Measured, not guessed: the one-off deletion against a live store is loud
+            # once and silent on every boot after it.
+            logger.info("retired %d stored merge proposal(s) (#12, ADR-0006)", deleted)
 
     def _backfill_content_fingerprint(self, conn: sqlite3.Connection) -> None:
         """Backfill content_fingerprint for rows whose file on disk hasn't changed.

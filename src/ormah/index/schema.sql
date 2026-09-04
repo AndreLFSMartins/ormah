@@ -96,22 +96,6 @@ CREATE TABLE IF NOT EXISTS auto_link_checked (
 );
 CREATE INDEX IF NOT EXISTS idx_auto_link_checked_node_b ON auto_link_checked(node_b);
 
-CREATE TABLE IF NOT EXISTS duplicate_checked (
-    node_a TEXT NOT NULL,
-    node_b TEXT NOT NULL,
-    result TEXT NOT NULL,           -- 'not_duplicate' | 'error'
-    checked_at TEXT NOT NULL,
-    PRIMARY KEY (node_a, node_b)
-);
-
-CREATE TABLE IF NOT EXISTS conflict_checked (
-    node_a TEXT NOT NULL,
-    node_b TEXT NOT NULL,
-    result TEXT NOT NULL,           -- 'none' | 'evolution' | 'tension' | 'error'
-    checked_at TEXT NOT NULL,
-    PRIMARY KEY (node_a, node_b)
-);
-
 CREATE TABLE IF NOT EXISTS consolidation_checked (
     signature  TEXT PRIMARY KEY,   -- sha256 of sorted per-node sha256("id|title|content|space|type")
     checked_at TEXT NOT NULL
