@@ -42,39 +42,89 @@ the names as they are.
    - **`.gitignore` decides what enters a commit.** `CLAUDE.md`, `INSTRUCTIONS.md`,
      `SESSION_LOG.md` and `.council/` are **untracked**: no git backup, and a `git clean -x`
      erases them.
-   - **`.git/hooks/pre-push` decides what ships.** `FORK-WORKFLOW.md` and the
+   - **The `pre-push` hook decides what ships.** `FORK-WORKFLOW.md` and the
      decision history under `docs/` *are* versioned on `local-main` (history a `git clean -x`
      can erase is not history), and the hook is what keeps them out of a PR: fail-closed, it
-     rejects any push whose three-dot diff against `upstream/main` touches a path in its
-     `PROTECTED` allowlist. Two ref classes are exempt, and only towards `fork` (the private
-     Beta backup): `local-main` and `integration/*`.
+     rejects any push whose three-dot diff against `upstream/main` carries a local-only path.
+     Two ref classes are exempt, and only towards `fork` (the private Beta backup):
+     `local-main` and `integration/*`.
 
-   `PROTECTED` is a **prefix allowlist** — read the regex in the hook before assuming a newly
-   added `docs/` path is covered by it. The hook lives in `.git/hooks/`, which every worktree in
-   this clone shares, so it covers all of them at once. Rule 2 is the practice; the hook is the
-   net for when it slips (a cherry-pick from `local-main`, a branch cut from the wrong base).
-   Override deliberately and visibly: `git push --no-verify`.
+   **The rule is derived, not written** (since 2026-09-02). Inside the **territory** —
+   `docs/`, `.council/`, and any `.md`/`.html` anywhere — a path may ship **only if
+   `upstream/main` already tracks it**. Nothing to register, ever: a new local-only doc is
+   blocked the moment it exists, and a doc upstream adds becomes shippable on its own.
 
-   > Nothing under `.git/` is versioned, so re-cloning this repo loses the hook — re-create it
-   > from this rule before pushing anything.
+   This replaced a hand-written `PROTECTED` enumeration that was fail-closed for the paths it
+   listed and fail-**open** for every path it did not — three retrofits in three weeks
+   (`docs/runbooks/`, `docs/agents/`, the `CONTEXT*.md` glossaries), and 21 local-only files
+   still slipping through when it was replaced, including the whole `.scratch/` tree.
+
+   Source code is deliberately **outside** the territory: PRs are made of new source files, so
+   deny-by-default there would block every legitimate contribution. Fork-only source (e.g.
+   `background/pair_skip.py`) is not covered by the hook — Rule 2 is what keeps it out of a PR.
+
+   The one case it blocks wrongly is a PR that genuinely **adds** a doc upstream. Override
+   deliberately and visibly: `git push --no-verify`.
+
+   > **The hook lives OUTSIDE the clone**, at `~/.config/ormah/githooks/pre-push`, reached via
+   > `core.hooksPath`. Not in `.git/hooks/` (a re-clone erases it) and deliberately **not**
+   > versioned in the repo as `.githooks/`: an island is born from `upstream/main`, which has no
+   > such directory, so the hook would vanish on exactly the branches it exists to watch. Living
+   > outside, one file covers every worktree and every branch.
+   >
+   > A re-clone still loses `.git/config`, so re-run this one line before pushing anything:
+   >
+   > ```bash
+   > git config core.hooksPath "$HOME/.config/ormah/githooks"
+   > ```
 
 ## Recipe A — contribute a change upstream
 
+**Islands are created by `/wt-start`, never by hand.** It fetches `upstream`, cuts the branch from
+the Base you name, **hydrates the gitignored agent docs** (`CLAUDE.md`, `AGENTS.md`,
+`INSTRUCTIONS.md`, `.council/` memory) that a fresh worktree is otherwise born without, and opens a
+VSCode window of its own. Run it from the `Tools/ormah` window:
+
 ```bash
-git fetch upstream
-git worktree add -b fix/<slug> ../ormah-wt-<slug> upstream/main   # the clean island
-cd ../ormah-wt-<slug>                        # work HERE — Tools/ormah stays on local-main
-python3 -m venv .venv                        # every island gets its OWN venv — see the gate below
-env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/pip install -e ".[dev]"
+/wt-start <issue#> --base upstream --deps    # the clean island, in a window of its own
+```
+
+`--base upstream` is not optional here: this repo declares two Bases (`upstream` = `upstream/main`,
+`local` = `local-main`) plus `requireBaseChoice`, so the skill refuses to choose for you — it stops
+and asks. Use `--base local` for a Beta-only fix that is not going upstream (Recipe B territory).
+`--deps` runs the `deps` command from `.claude/worktree.json` — `env -u VIRTUAL_ENV -u PYTHONPATH
+uv sync` — whose `env -u` prefix is the import gate below applied at install time; without the flag
+the skill only prints the reminder. Island and branch carry the issue number
+(`../ormah-wt-<n>-<slug>`, `<fix|feat>/<n>-<slug>`, the prefix taken from the issue's `bug` label);
+the older number-less `ormah-wt-<slug>` islands are legacy and the Sweep still handles them.
+
+Everything below runs **in the new window**, never in `Tools/ormah`:
+
+```bash
 # ... commits ...
 git log --oneline upstream/main..HEAD        # gate: ONLY your own commits, nothing else
-git push fork fix/<slug>                     # the branch lives on YOUR fork
-/council-pr                                  # review + open PR (base r-spade:main, head fork:fix/<slug>)
+git push fork fix/<n>-<slug>                 # the branch lives on YOUR fork
+/council-pr                                  # review + open PR (base r-spade:main, head fork:fix/<n>-<slug>)
 ```
 
 The gate line is the proof the island is clean: anything in that log you did not write means
 the branch was cut from the wrong base — rebuild the island before pushing. Once the PR lands,
-prune the island with `git worktree remove ../ormah-wt-<slug>` (branch rules in Recipe D).
+prune the island with the Sweep (`/wt-start --sweep`, then confirm the candidate) instead of by
+hand: it reads PR state from `gh`, so it sees squash-merges, and it warns if a hydrated file was
+edited inside the island before removing anything. Branch rules in Recipe D.
+
+> The skill creates, hydrates, opens and prunes — it never implements, commits, merges, or touches
+> the branch `Tools/ormah` is parked on. And `uv sync` is how the **islands** are built locally
+> only: `make install` (`pip install -e ".[dev]"`) is byte-identical to `upstream/main` and must
+> not diverge.
+
+> **`/council-pr` serves islands only.** On a fork-local branch (cut from `local-main`, spec
+> carrying `Upstream: none`) `diff-base` resolves `REMOTE=upstream` and returns the merge-base
+> with `upstream/main`, so the whole fork-local lead lands in the diff — 660 files on #11,
+> 2026-09-03. Release the run and restart it with `review-run-start --base-sha $(git merge-base
+> local-main HEAD)`: `capture-diff`, `build-review-scope --base-ref` and `peer-round
+> --codex-base` all take an explicit base. Steps 2–5 do not — stop before the Merge Flow and
+> merge through Recipe B.
 
 ### Import gate — run it before trusting any test number from an island
 
@@ -87,7 +137,7 @@ Strip the leaked variables and **prove which tree you imported** before any test
 
 ```bash
 env -u VIRTUAL_ENV -u PYTHONPATH .venv/bin/python -c "import ormah; print(ormah.__file__)"
-#   the printed path MUST contain ormah-wt-<slug>/ — if it does not, STOP: the number is not yours
+#   the printed path MUST contain ormah-wt-<n>-<slug>/ — if it does not, STOP: the number is not yours
 env -u VIRTUAL_ENV -u PYTHONPATH HOME=$(mktemp -d) .venv/bin/python -m pytest tests/ -q > out.txt 2>&1
 echo "PYTEST_EXIT=$?" >> out.txt              # NEVER pipe pytest to `tail` — the exit code becomes tail's
 ```
@@ -153,6 +203,9 @@ Identical commits merge cleanly on their own. Conflicts appear only where the ma
 edited your PR — resolve by taking their version.
 
 ## Recipe D — branch hygiene (prune)
+
+The `/wt-start` Sweep implements these rules and is the normal way to apply them; the rules below
+are what it enforces, and what you follow when pruning by hand.
 
 - Prune a **local** branch once its PR is **merged** or **closed** — confirm with
   `gh pr list --repo r-spade/ormah --author AndreLFSMartins`. A branch whose PR is still
