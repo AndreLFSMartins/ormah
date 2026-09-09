@@ -197,3 +197,22 @@ def test_colliding_files_keep_the_short_id_suffix(file_store):
     }
     cold = type(file_store)(file_store.nodes_dir)
     assert cold.load(first.short_id) is None  # ambiguous Short id resolves to nothing
+
+
+def test_save_never_overwrites_a_file_the_lookup_cannot_read(file_store):
+    """Every Full id candidate taken by files the lookup cannot confirm: the save
+    still gets a path of its own instead of replacing one of them."""
+    first, second = _colliding_pair()
+    file_store.save(first)
+    slug = "same-title"
+    parts = second.id.split("-")
+    for width in range(len(parts)):
+        extra = "-".join(parts[1 : width + 1])
+        widened = f"{slug}-{extra}" if extra else slug
+        (file_store.nodes_dir / f"fact_{widened}_{second.short_id}.md").write_text(
+            "not frontmatter"
+        )
+
+    path = file_store.save(second)
+    assert file_store.load(second.id).content == "Second memory."
+    assert path.read_text() != "not frontmatter"
