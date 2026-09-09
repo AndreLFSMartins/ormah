@@ -178,12 +178,15 @@ class FileStore:
         # Full id exhausted: every candidate is taken by a file the lookup did not
         # confirm (unparseable, or renamed behind the store's back). Number it
         # rather than overwrite.
-        n = 2
+        attempt = 2
         while True:
-            path = self.nodes_dir / f"{node.type.value}_{slug}-{n}_{node.short_id}.md"
+            path = (
+                self.nodes_dir
+                / f"{node.type.value}_{slug}-{attempt}_{node.short_id}.md"
+            )
             if not path.exists():
                 return path
-            n += 1
+            attempt += 1
 
     def _forget(self, path: Path) -> None:
         """Drop every cache entry naming ``path``.
