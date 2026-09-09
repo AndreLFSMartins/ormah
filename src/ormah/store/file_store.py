@@ -160,8 +160,30 @@ class FileStore:
         if existing:
             return existing
         slug = slugify(node.title or node.content[:60], max_length=40)
-        filename = f"{node.type.value}_{slug}_{node.short_id}.md"
-        return self.nodes_dir / filename
+        # The Short id is not unique, so type, slug and Short id can all coincide and
+        # hand a new node the path of a live one — the save would replace its content
+        # while the filename kept advertising the old title (ADR-0007). Widen the slug
+        # with the next groups of the Full id until the path is free. `_find_file`
+        # above already returned the node's own file, so any hit here holds a
+        # different node. The Short id stays the last element of the name: the lookup
+        # globs on that suffix, and a name that dropped it would hide one of two
+        # colliding nodes from the ambiguity check instead of reporting the clash.
+        parts = node.id.split("-")
+        for width in range(len(parts)):
+            extra = "-".join(parts[1 : width + 1])
+            widened = f"{slug}-{extra}" if extra else slug
+            path = self.nodes_dir / f"{node.type.value}_{widened}_{node.short_id}.md"
+            if not path.exists():
+                return path
+        # Full id exhausted: every candidate is taken by a file the lookup did not
+        # confirm (unparseable, or renamed behind the store's back). Number it
+        # rather than overwrite.
+        n = 2
+        while True:
+            path = self.nodes_dir / f"{node.type.value}_{slug}-{n}_{node.short_id}.md"
+            if not path.exists():
+                return path
+            n += 1
 
     def _forget(self, path: Path) -> None:
         """Drop every cache entry naming ``path``.
