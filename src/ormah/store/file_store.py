@@ -228,17 +228,23 @@ class FileStore:
         `os.link` is the atomic create-if-absent primitive `IngestSpool` already
         publishes with: it fails with EEXIST instead of clobbering. On EEXIST the name
         is gone, so ask `_path_for` again — it sees the new file and widens past it.
-        `os.replace` stays for the one case it is right: this node's own file, which
-        `_find_file` confirms by reading the Full id back out of it.
+        `os.replace` stays for the one case it is right: this node's own file, and
+        `_holds_node` reads that off the file. Asking `_find_file` instead would accept
+        a cache hit, which is validated by existence alone — blind to another store
+        having deleted this node and given the freed name to a colliding one.
         """
         for _ in range(_PUBLISH_ATTEMPTS):
             path = self._path_for(node)
             try:
                 os.link(tmp, str(path))
             except FileExistsError:
-                if self._find_file(node.id) == path:
+                if self._holds_node(path, node.id):
                     os.replace(tmp, str(path))  # our own file: an update, not a clobber
                     return path
+                # Someone else holds the name, and a cache entry may still point here.
+                # Drop it, or `_path_for` keeps handing back this path until the bound
+                # runs out instead of widening past the new file.
+                self._id_cache.pop(node.id, None)
                 continue
             os.unlink(tmp)
             return path
@@ -246,6 +252,23 @@ class FileStore:
             f"could not reserve a filename for node {node.id} in "
             f"{_PUBLISH_ATTEMPTS} attempts"
         )
+
+    def _holds_node(self, path: Path, node_id: str) -> bool:
+        """Whether the file at ``path`` names ``node_id`` as its own Full id.
+
+        Read off the file, never out of `_id_cache`: a cache hit is validated by
+        existence alone, so it cannot tell this node's file from a colliding node that
+        took the name after a delete — and the caller is about to overwrite whatever is
+        there. A file that will not parse names nothing, so it does not own the name.
+        An OSError propagates, as it does in `_find_file`: not knowing is not permission
+        to overwrite.
+        """
+        try:
+            return self._load_path(path).id == node_id
+        except OSError:
+            raise
+        except Exception:
+            return False
 
     def _path_for(self, node: MemoryNode) -> Path:
         """Compute the file path for a node, reusing existing file if present.

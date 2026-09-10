@@ -259,3 +259,28 @@ def test_concurrent_saves_from_two_stores_keep_both_nodes(tmp_path):
     assert cold.load(first.id).content == "First memory."
     assert cold.load(second.id).content == "Second memory."
     assert len(cold.list_paths()) == 2
+
+
+def test_update_does_not_clobber_a_node_that_reused_the_freed_name(tmp_path):
+    """The cache validates a hit by existence alone, so a store holding a warm entry
+    cannot read its own cache as proof of identity: another store can have deleted this
+    node and handed the freed filename to a colliding one. No barrier needed — the
+    sequence is ordered.
+    """
+    nodes_dir = tmp_path / "nodes"
+    first, second = _colliding_pair()
+    a = FileStore(nodes_dir)
+    b = FileStore(nodes_dir)
+
+    a.save(first)  # A now caches first -> the canonical path
+    assert b.delete(first.id) is True
+    second_path = b.save(second)  # B takes the freed canonical name
+
+    first.content = "First memory, edited."
+    a.save(first)  # must not publish over B's node
+
+    cold = FileStore(nodes_dir)
+    assert cold.load(second.id).content == "Second memory."
+    assert cold.load(first.id).content == "First memory, edited."
+    assert second_path.exists()
+    assert len(cold.list_paths()) == 2
