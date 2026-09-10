@@ -1,6 +1,10 @@
 """Tests for file store CRUD operations."""
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 from ormah.models.node import MemoryNode, NodeType, Tier
+from ormah.store.file_store import FileStore
 
 
 def test_save_and_load(file_store):
@@ -206,13 +210,52 @@ def test_save_never_overwrites_a_file_the_lookup_cannot_read(file_store):
     file_store.save(first)
     slug = "same-title"
     parts = second.id.split("-")
+    taken = []
     for width in range(len(parts)):
         extra = "-".join(parts[1 : width + 1])
         widened = f"{slug}-{extra}" if extra else slug
-        (file_store.nodes_dir / f"fact_{widened}_{second.short_id}.md").write_text(
-            "not frontmatter"
-        )
+        occupied = file_store.nodes_dir / f"fact_{widened}_{second.short_id}.md"
+        occupied.write_text("not frontmatter")
+        taken.append(occupied)
 
     path = file_store.save(second)
     assert file_store.load(second.id).content == "Second memory."
-    assert path.read_text() != "not frontmatter"
+    # `path.read_text() != "not frontmatter"` alone stays green when the save
+    # overwrites one of the occupied candidates — including the canonical name, which
+    # is what the old _path_for returned. Name the survivors instead.
+    assert path not in taken
+    assert all(p.read_text() == "not frontmatter" for p in taken)
+
+
+def test_concurrent_saves_from_two_stores_keep_both_nodes(tmp_path):
+    """Two FileStores over one directory do not share a lock, so `_path_for` picking a
+    free name proves nothing by the time the save publishes. Both stores choose before
+    either writes; the publish itself has to reserve the name.
+    """
+    nodes_dir = tmp_path / "nodes"
+    first, second = _colliding_pair()
+    stores = [FileStore(nodes_dir), FileStore(nodes_dir)]
+    gate = Barrier(2, timeout=5)
+
+    for store in stores:
+        choose = store._path_for
+        fired: list[bool] = []
+
+        def gated(node, _choose=choose, _fired=fired):
+            path = _choose(node)
+            if not _fired:  # a retry after a lost race must not re-enter the barrier
+                _fired.append(True)
+                gate.wait()
+            return path
+
+        store._path_for = gated
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        paths = list(pool.map(lambda pair: pair[0].save(pair[1]),
+                              zip(stores, [first, second])))
+
+    assert len(set(paths)) == 2
+    cold = FileStore(nodes_dir)
+    assert cold.load(first.id).content == "First memory."
+    assert cold.load(second.id).content == "Second memory."
+    assert len(cold.list_paths()) == 2
