@@ -627,6 +627,26 @@ class TestClaudeCodeWirePluginGuard:
         }, indent=2) + "\n")
         return claude_dir
 
+    def _run_plugin_safe_setup(self, tmp_path: Path) -> None:
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._detected_agents", return_value=[]),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_llm"),
+            patch(
+                "ormah.setup.generate_server_wrapper",
+                return_value=tmp_path / "ormah-server",
+            ),
+            patch("ormah.setup._preload_local_models"),
+            patch("ormah.setup.is_server_running", return_value=True),
+            patch("ormah.setup.restart_with_autostart", return_value=True),
+            patch("ormah.setup.backfill_transcripts"),
+            patch("ormah.setup.play_finale"),
+            patch("ormah.setup._print_setup_summary"),
+            patch("ormah.setup.webbrowser.open"),
+        ):
+            run_setup(skip_client_setup=True)
+
     def test_working_plugin_strips_hooks_and_mcp_and_writes_no_wiring(self, tmp_path):
         claude_dir = self._seed_working_plugin(tmp_path)
         # Left behind by a pre-plugin `ormah setup`. Both call the CLI-registered
@@ -667,30 +687,42 @@ class TestClaudeCodeWirePluginGuard:
             stale.parent.mkdir(parents=True, exist_ok=True)
             stale.write_text("calls mcp__ormah__run_maintenance\n")
 
-        with (
-            patch("ormah.setup.Path.home", return_value=tmp_path),
-            patch("ormah.setup._detected_agents", return_value=[]),
-            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
-            patch("ormah.setup.configure_llm"),
-            patch(
-                "ormah.setup.generate_server_wrapper",
-                return_value=tmp_path / "ormah-server",
-            ),
-            patch("ormah.setup._preload_local_models"),
-            patch("ormah.setup.is_server_running", return_value=True),
-            patch("ormah.setup.restart_with_autostart", return_value=True),
-            patch("ormah.setup.backfill_transcripts"),
-            patch("ormah.setup.play_finale"),
-            patch("ormah.setup._print_setup_summary"),
-            patch("ormah.setup.webbrowser.open"),
-        ):
-            run_setup(skip_client_setup=True)
+        self._run_plugin_safe_setup(tmp_path)
+        self._run_plugin_safe_setup(tmp_path)  # repeated plugin repair is idempotent
 
         settings = json.loads((claude_dir / "settings.json").read_text())
         assert "hooks" not in settings
         assert "mcpServers" not in json.loads((tmp_path / ".claude.json").read_text())
         assert not stale_agent.exists()
         assert not stale_command.exists()
+
+    @pytest.mark.parametrize(
+        ("enabled", "scope"),
+        [(False, "user"), (True, "project")],
+        ids=["disabled-user-plugin", "project-scoped-plugin"],
+    )
+    def test_plugin_safe_setup_preserves_cli_surfaces_without_user_plugin(
+        self,
+        tmp_path,
+        enabled,
+        scope,
+    ):
+        """Only a working user-scoped plugin licenses deleting global CLI wiring."""
+        claude_dir = self._seed_working_plugin(tmp_path, enabled=enabled, scope=scope)
+        stale_agent = claude_dir / "agents" / "ormah-maintenance.md"
+        stale_command = claude_dir / "commands" / "ormah-maintenance.md"
+        for stale in (stale_agent, stale_command):
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("calls mcp__ormah__run_maintenance\n")
+        settings_before = (claude_dir / "settings.json").read_text()
+        mcp_before = (tmp_path / ".claude.json").read_text()
+
+        self._run_plugin_safe_setup(tmp_path)
+
+        assert (claude_dir / "settings.json").read_text() == settings_before
+        assert (tmp_path / ".claude.json").read_text() == mcp_before
+        assert stale_agent.exists()
+        assert stale_command.exists()
 
     def test_strip_preserves_third_party_hooks(self, tmp_path):
         claude_dir = self._seed_working_plugin(tmp_path)
