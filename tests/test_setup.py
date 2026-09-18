@@ -658,6 +658,40 @@ class TestClaudeCodeWirePluginGuard:
         assert not stale_agent.exists()                             # the plugin ships its own
         assert not stale_command.exists()                           # /ormah:maintenance
 
+    def test_plugin_safe_setup_removes_stale_cli_surfaces(self, tmp_path):
+        """Exercise the exact `ormah setup --skip-client-setup` plugin path."""
+        claude_dir = self._seed_working_plugin(tmp_path)
+        stale_agent = claude_dir / "agents" / "ormah-maintenance.md"
+        stale_command = claude_dir / "commands" / "ormah-maintenance.md"
+        for stale in (stale_agent, stale_command):
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("calls mcp__ormah__run_maintenance\n")
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._detected_agents", return_value=[]),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_llm"),
+            patch(
+                "ormah.setup.generate_server_wrapper",
+                return_value=tmp_path / "ormah-server",
+            ),
+            patch("ormah.setup._preload_local_models"),
+            patch("ormah.setup.is_server_running", return_value=True),
+            patch("ormah.setup.restart_with_autostart", return_value=True),
+            patch("ormah.setup.backfill_transcripts"),
+            patch("ormah.setup.play_finale"),
+            patch("ormah.setup._print_setup_summary"),
+            patch("ormah.setup.webbrowser.open"),
+        ):
+            run_setup(skip_client_setup=True)
+
+        settings = json.loads((claude_dir / "settings.json").read_text())
+        assert "hooks" not in settings
+        assert "mcpServers" not in json.loads((tmp_path / ".claude.json").read_text())
+        assert not stale_agent.exists()
+        assert not stale_command.exists()
+
     def test_strip_preserves_third_party_hooks(self, tmp_path):
         claude_dir = self._seed_working_plugin(tmp_path)
         settings = json.loads((claude_dir / "settings.json").read_text())
