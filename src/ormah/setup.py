@@ -2820,29 +2820,41 @@ def _pi_is_wired() -> bool:
     return _pi_extension_registered() and _pi_guidance_installed() and _pi_agent_installed()
 
 
-def _claude_code_wire() -> None:
+def _reconcile_claude_plugin_wiring() -> bool:
+    """Remove CLI surfaces replaced by a working user-scoped Claude plugin."""
+    if not _claude_code_plugin_provides_hooks():
+        return False
+
     # The plugin registers the same UserPromptSubmit/PreCompact/SessionEnd hooks
     # and the same MCP server. Wiring them again in ~/.claude/settings.json runs
     # both copies: the whisper fires twice per human turn, and no merge can dedupe
-    # across the two files. The agent and slash command are namespaced by the
-    # plugin (ormah:maintenance vs ormah-maintenance), so they are not duplicate
-    # registrations — they stay installed, as does CLAUDE.md, which no plugin can
-    # write.
-    if _claude_code_plugin_provides_hooks():
-        _remove_claude_hooks()
-        _remove_mcp_from_json(Path.home() / ".claude.json")
-        info(
-            "Claude Code plugin already provides the hooks and MCP server "
-            "— removed redundant CLI wiring"
-        )
-    else:
+    # across the two files. The plugin also ships the maintenance agent and the
+    # slash command, and the CLI copies must go with the CLI server: they call
+    # `mcp__ormah__run_maintenance`, the name of the server removed just below
+    # (the plugin's is `mcp__plugin_ormah_ormah__run_maintenance`), and
+    # ~/.claude/agents/ resolves ahead of plugin agents, so a stale copy there
+    # shadows the plugin's.
+    _remove_claude_hooks()
+    _remove_mcp_from_json(Path.home() / ".claude.json")
+    _remove_claude_agents()
+    _remove_claude_commands()
+    info(
+        "Claude Code plugin already provides the hooks, MCP server, agent "
+        "and slash command — removed redundant CLI wiring"
+    )
+    return True
+
+
+def _claude_code_wire() -> None:
+    if not _reconcile_claude_plugin_wiring():
         ormah_bin = get_ormah_bin_path()
         configure_claude_hooks(ormah_bin)
         configure_claude_code_mcp(ormah_bin)
+        install_claude_agents()
+        install_claude_commands()
 
+    # No plugin can write the shared guidance block.
     install_claude_md()
-    install_claude_agents()
-    install_claude_commands()
 
 
 def _claude_code_unwire() -> None:
@@ -3119,7 +3131,11 @@ def run_setup(
     else:
         _diagnose_server_failure()
 
-    if not skip_client_setup:
+    if skip_client_setup:
+        # Plugin-safe setup must not install client wiring, but it still needs to
+        # remove stale CLI surfaces that override a working user-scoped plugin.
+        _reconcile_claude_plugin_wiring()
+    else:
         for agent in detected_agents:
             step(f"Hooking up {agent.name}")
             agent.wire_fn()
