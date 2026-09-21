@@ -330,3 +330,22 @@ def test_full_ids_of_a_colliding_pair_resolve_after_a_restart(file_store):
 
     assert restarted.load(first.id).content == first.content
     assert restarted.load(second.id).content == second.content
+
+
+def test_a_short_id_beside_an_unparseable_candidate_is_unresolved(file_store):
+    """A bare Short id is unique only if every file sharing it is known. One that will
+    not parse may be a second node with that Short id, so the parseable one cannot be
+    handed back as the answer. A Full id still resolves: its own file proves it."""
+    from ormah.store.file_store import UnresolvedNodeReference
+
+    live = _collider("a", "Live node", "the node that still parses")
+    file_store.save(live)
+    corrupt = file_store.nodes_dir / f"fact_corrupt_{COLLIDING_SHORT_ID}.md"
+    corrupt.write_text("this is not a node", encoding="utf-8")
+    file_store._id_cache.clear()
+    file_store._cache_built = False
+
+    with pytest.raises(UnresolvedNodeReference):
+        file_store.resolve(COLLIDING_SHORT_ID)
+    assert file_store.load(COLLIDING_SHORT_ID) is None
+    assert file_store.load(live.id).id == live.id
