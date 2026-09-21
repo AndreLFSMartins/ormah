@@ -1115,9 +1115,6 @@ class MemoryEngine:
     @_serialized_memory_operation
     def delete_node(self, node_id: str) -> str | None:
         """Delete a memory node from disk and index. Returns confirmation or None."""
-        if node_id == self.user_node_id:
-            return "Cannot delete the user self node."
-
         # Load full node from disk for audit snapshot. Only a confirmed absence may
         # fall back to the index: an ambiguous Short id or an unparseable file is not
         # one, and the index lookup would pick a row the store could not vouch for.
@@ -1126,9 +1123,11 @@ class MemoryEngine:
         except UnresolvedNodeReference as exc:
             return f"Cannot delete {node_id}: {exc} Nothing was deleted."
         if full_node is None:
-            # Fall back to graph index to check existence
+            # Fall back to graph index to check existence. Exact Full id only:
+            # `get_node` answers a prefix with one arbitrary row of many, and the store
+            # has just confirmed that no file holds this reference.
             node = self.graph.get_node(node_id)
-            if node is None:
+            if node is None or node["id"] != node_id:
                 return None
             title = node.get("title") or node.get("content", "")[:60]
             snapshot = json.dumps(node)
@@ -1139,6 +1138,10 @@ class MemoryEngine:
             snapshot = json.dumps(full_node.model_dump(mode="json"))
             node_type = full_node.type.value
             node_id = full_node.id  # the caller may have passed a Short id
+
+        # After resolution, so a Short id cannot slip past it.
+        if node_id == self.user_node_id:
+            return "Cannot delete the user self node."
 
         # Audit log before deletion
         self._write_audit_log(
