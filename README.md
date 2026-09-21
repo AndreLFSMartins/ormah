@@ -45,6 +45,10 @@ That is what makes Ormah feel like memory instead of search. Search waits to be 
 
 Silence is better than noise. Ormah should whisper, not shout.
 
+Brief, self-contained acknowledgements such as "Thanks, that helps" are kept
+silent, even in an active session. They do not re-run recall using the prior
+question; a thank-you that includes a new command or question still does.
+
 ## Install
 
 ### Desktop App
@@ -190,6 +194,15 @@ and safely refreshes a missing or stale kit when the local key and store ID are
 available. If complete recovery cannot be guaranteed, uninstall stops without
 removing data or integrations. Deleting the preserved files manually can make
 encrypted cloud backups permanently unreadable.
+
+`ormah uninstall` also detects and disables the verified Ormah Desktop login
+item before removing the Python runtime, preventing the desktop from restoring
+that runtime at the next login. The CLI deliberately leaves the application
+bundle/package and its UI data to the operating system: on macOS, quit Ormah
+and move `Ormah.app` to Trash; for a Debian install, run the exact
+`sudo apt remove ...` command printed by uninstall; for AppImage, delete the
+AppImage after quitting it. Uninstall lists every detected desktop remainder
+and never claims full removal while one remains.
 
 Restore on a new machine with:
 
