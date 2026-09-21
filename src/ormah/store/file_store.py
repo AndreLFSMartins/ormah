@@ -240,17 +240,18 @@ class FileStore:
     def _publish(self, node: MemoryNode, tmp: str) -> Path:
         """Move the staged file `tmp` onto this node's path, and return that path.
 
-        `_path_for` proves only that a candidate was free *when it looked*. Two
-        FileStore instances over one directory hold separate locks (`__init__`), and
-        only `MemoryEngine` injects a shared one — `migrations`, `index.db`, `backup`
-        and `cloud.restore` each build their own, and a second process defeats an
-        in-process lock anyway. So between that look and this write another store can
-        take the name, and `os.replace` would drop a live node while both saves report
-        success.
+        `_path_for` proves only that a candidate was free *when it looked*. Inside one
+        process that is enough: the only store that writes the live directory is the
+        server's `MemoryEngine` one, and its lock serializes every save. The other
+        stores in the codebase only read (`backup.rebuild_index`) or work on another
+        directory (`cloud.restore`). The gap is a second process writing the same
+        directory — two servers started against one store — whose lock the first
+        cannot see. Between that look and this write it can take the name, and
+        `os.replace` would drop a live node while both saves report success.
 
-        `os.link` is the atomic create-if-absent primitive `IngestSpool` already
-        publishes with: it fails with EEXIST instead of clobbering. On EEXIST the name
-        is gone, so ask `_path_for` again — it sees the new file and widens past it.
+        `os.link` is an atomic create-if-absent: it fails with EEXIST instead of
+        clobbering. On EEXIST the name is gone, so ask `_path_for` again — it sees the
+        new file and widens past it.
         `os.replace` stays for the one case it is right: this node's own file, and
         `_holds_node` reads that off the file. Asking `_find_file` instead would accept
         a cache hit, which is validated by existence alone — blind to another store
@@ -261,7 +262,9 @@ class FileStore:
         another store that deletes this node and publishes a colliding one inside that
         window loses its node. Closing it takes a cross-process lock the store has never
         had; `test_update_survives_a_steal_between_identity_read_and_replace` is the
-        strict xfail that records it.
+        strict xfail that records it. The same second process also defeats the
+        existence-validated cache hit in `delete`, `soft_delete` and `load`, which
+        can then act on a colliding node that took the freed name.
         """
         for _ in range(_PUBLISH_ATTEMPTS):
             path = self._path_for(node)
