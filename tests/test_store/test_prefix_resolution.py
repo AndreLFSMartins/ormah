@@ -312,3 +312,17 @@ def test_an_unparseable_file_still_confirms_nothing_on_a_cold_cache(file_store):
 
     assert loaded is not None
     assert loaded.id == live.id
+
+
+def test_full_ids_of_a_colliding_pair_resolve_after_a_restart(file_store):
+    """A new FileStore starts with no cache, so only the file contents can tell the
+    two colliders apart: each Full id must come back as its own node."""
+    first = _collider("a", "Collision A", "first colliding node")
+    second = _collider("b", "Collision B", "second colliding node")
+    file_store.save(first)
+    file_store.save(second)
+
+    restarted = type(file_store)(file_store.nodes_dir)
+
+    assert restarted.load(first.id).content == first.content
+    assert restarted.load(second.id).content == second.content
