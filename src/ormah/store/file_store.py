@@ -201,7 +201,7 @@ class FileStore:
         a cache hit, which is validated by existence alone — blind to another store
         having deleted this node and given the freed name to a colliding one.
 
-        Known limit (AndreLFSMartins/ormah#33): the update is still check-then-act.
+        Known limit: the update is still check-then-act.
         Nothing binds the name to the inode between `_holds_node` and `os.replace`, so
         another store that deletes this node and publishes a colliding one inside that
         window loses its node. Closing it takes a cross-process lock the store has never
@@ -259,7 +259,7 @@ class FileStore:
         slug = slugify(node.title or node.content[:60], max_length=40)
         # The Short id is not unique, so type, slug and Short id can all coincide and
         # hand a new node the path of a live one — the save would replace its content
-        # while the filename kept advertising the old title (ADR-0007). Widen the slug
+        # while the filename kept advertising the old title. Widen the slug
         # with the next groups of the Full id until the path is free. `_find_file`
         # above already returned the node's own file, so any hit here holds a
         # different node. The Short id stays the last element of the name: the lookup
@@ -320,7 +320,7 @@ class FileStore:
 
         The glob narrows; it never decides. A filename carries the Short id, which is
         not unique, so the first match may be a stranger's memory — the file has to
-        state its Full id before the store hands it back (ADR-0007). An ambiguous
+        state its Full id before the store hands it back. An ambiguous
         Short id raises `UnresolvedNodeReference`; `_find_file` turns that into None
         with a warning, because the load contract is nullable and the background jobs
         branch only on "is it None" — raising there would trade silent corruption for

@@ -290,7 +290,7 @@ def test_update_does_not_clobber_a_node_that_reused_the_freed_name(tmp_path):
 
 @pytest.mark.xfail(
     strict=True,
-    reason="AndreLFSMartins/ormah#33: nothing binds the name to the inode between "
+    reason="nothing binds the name to the inode between "
     "_holds_node and os.replace, and the store has no cross-process lock",
 )
 def test_update_survives_a_steal_between_identity_read_and_replace(tmp_path):
