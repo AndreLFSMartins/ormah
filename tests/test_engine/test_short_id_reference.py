@@ -87,3 +87,33 @@ def test_delete_of_a_node_whose_file_is_malformed_leaves_the_index_alone(engine)
     assert engine.graph.get_node(target.id) is not None
     assert path.exists()
     assert engine.list_audit_log(operation="delete") == []
+
+
+def test_delete_by_a_prefix_the_store_does_not_resolve_mutates_nothing(engine):
+    """The store resolves only a Full id or an 8-character Short id, so a shorter prefix
+    is a confirmed absence there. The index fallback must not turn it into a target:
+    `get_node` answers a prefix with `LIKE ... LIMIT 1`, one arbitrary row of many."""
+    first = _index_collider(engine, "a", "Collider A")
+    second = _index_collider(engine, "b", "Collider B")
+    files_before = _live_files(engine)
+
+    result = engine.delete_node(COLLIDING_SHORT_ID[:4])
+
+    assert result is None or not result.startswith("Deleted")
+    assert _live_files(engine) == files_before
+    assert engine.graph.get_node(first.id) is not None
+    assert engine.graph.get_node(second.id) is not None
+    assert engine.list_audit_log(operation="delete") == []
+
+
+def test_delete_by_the_self_nodes_short_id_is_refused(engine):
+    """The Self guard must see the Full id the store resolved, not the reference the
+    caller typed: a Short id would otherwise slip past it."""
+    self_id = engine.user_node_id
+
+    result = engine.delete_node(self_id.split("-")[0])
+
+    assert result == "Cannot delete the user self node."
+    assert engine.file_store.load(self_id) is not None
+    assert engine.graph.get_node(self_id) is not None
+    assert engine.list_audit_log(operation="delete") == []
