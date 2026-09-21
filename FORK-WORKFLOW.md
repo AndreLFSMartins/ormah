@@ -78,6 +78,28 @@ the names as they are.
    > git config core.hooksPath "$HOME/.config/ormah/githooks"
    > ```
 
+6. **Upstream-bound work is born in the island and written for r-spade** (since 2026-09-21).
+   - Decide the destination when the issue is created. Going upstream → `/wt-start <n> --base
+     upstream` first. Never implement on `local-main` and cherry-pick into an island later:
+     the commits arrive carrying text written for the fork. The direction is always island →
+     `local-main` (Recipe B), never the reverse.
+   - Code, tests, commit messages and the PR carry **no** fork issue number, no local ADR
+     number and no mention of the council. State the reasoning in words. r-spade merges with
+     merge commits, so the commit messages land on their `main`, not only the PR body — and
+     fork and upstream numbers collide: `Closes #29` meant for fork #29 closes
+     r-spade/ormah#29, an unrelated open issue. PR r-spade/ormah#301 had to be force-pushed
+     with 14 rewritten messages for this.
+   - The link between the two lives on the fork only: a comment on the fork issue,
+     `Upstream PR: r-spade/ormah#<n>`. Close the fork issue by hand after the upstream merge.
+     To close an upstream issue from a commit, qualify it: `Closes r-spade/ormah#<n>`.
+   - The `pre-push` hook enforces it on every non-exempt ref: it blocks a push whose commit
+     messages or added lines carry `AndreLFSMartins/ormah#N`, a closing keyword with a bare
+     `#N`, `ADR-NNNN` or `/council`. Ceiling: a bare `#N` with no closing keyword is not
+     caught, since it cannot be told apart from a real upstream ref. Scenarios:
+     `~/.config/ormah/githooks/test-prepush.sh`.
+   - A fix that started fork-only and later turns out to be upstream-worthy: new island,
+     cherry-pick, clean the text **before the first push**.
+
 ## Recipe A — contribute a change upstream
 
 **Islands are created by `/wt-start`, never by hand.** It fetches `upstream`, cuts the branch from
