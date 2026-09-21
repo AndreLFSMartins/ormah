@@ -1,4 +1,4 @@
-"""Regression tests for issue #29: a Node reference must resolve only to the
+"""Regression tests: a Node reference must resolve only to the
 node it actually names, never to another node whose Short id happens to
 collide with it.
 
@@ -173,7 +173,7 @@ def test_a_read_failure_while_deleting_does_not_leave_the_id_resolvable(file_sto
 
 
 def test_short_id_matching_two_nodes_resolves_to_none_and_warns(file_store, caplog):
-    """An ambiguous Short id resolves to nothing (ADR-0007), loudly."""
+    """An ambiguous Short id resolves to nothing, loudly."""
     first = _collider("a", "Collision A", "first colliding node")
     second = _collider("b", "Collision B", "second colliding node")
     file_store.save(first)
