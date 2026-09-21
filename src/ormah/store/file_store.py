@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 _PUBLISH_ATTEMPTS = 50
 
 
+class UnresolvedNodeReference(LookupError):
+    """The store cannot tell which node a reference names, nor that none does.
+
+    Raised for an ambiguous Short id, and for a reference whose only candidate files
+    will not parse. Neither is absence, so a caller about to mutate state on "not
+    found" must not treat it as one.
+    """
+
+
 def _serialized_store_operation(method):
     @wraps(method)
     def locked(self, *args, **kwargs):
@@ -85,8 +94,22 @@ class FileStore:
 
     @_serialized_store_operation
     def load(self, node_id: str) -> MemoryNode | None:
-        """Load a node by ID. Returns None if not found."""
+        """Load a node by ID. Returns None if not found, or if the reference does not
+        resolve to one node (see `resolve`)."""
         path = self._find_file(node_id)
+        if path is None:
+            return None
+        return self._load_path(path)
+
+    @_serialized_store_operation
+    def resolve(self, node_id: str) -> MemoryNode | None:
+        """Like `load`, but only a confirmed absence returns None.
+
+        Raises `UnresolvedNodeReference` where `load` would fold "could not tell" into
+        None. A caller that removes index rows on None needs the difference; the
+        background jobs keep `load`, whose nullable contract they branch on.
+        """
+        path = self._locate(node_id)
         if path is None:
             return None
         return self._load_path(path)
@@ -331,6 +354,14 @@ class FileStore:
             del self._id_cache[key]
 
     def _find_file(self, node_id: str) -> Path | None:
+        """`_locate`, with an unresolved reference logged and folded into None."""
+        try:
+            return self._locate(node_id)
+        except UnresolvedNodeReference as exc:
+            logger.warning("%s Resolving to nothing.", exc)
+            return None
+
+    def _locate(self, node_id: str) -> Path | None:
         """Find the file for a Node reference — a Full id, or the 8-character Short id
         the Whisper showed the agent.
 
@@ -343,14 +374,17 @@ class FileStore:
         The glob narrows; it never decides. A filename carries the Short id, which is
         not unique, so the first match may be a stranger's memory — the file has to
         state its Full id before the store hands it back (ADR-0007). An ambiguous
-        Short id resolves to nothing, with a warning: the load contract is nullable
-        and the background jobs branch only on "is it None", so raising would trade
-        silent corruption for a crashed sleep cycle.
+        Short id raises `UnresolvedNodeReference`; `_find_file` turns that into None
+        with a warning, because the load contract is nullable and the background jobs
+        branch only on "is it None" — raising there would trade silent corruption for
+        a crashed sleep cycle.
 
         None therefore means *confirmed absent*, never *could not tell*. A file that
         will not parse confirms nothing and is skipped, matching `list_all` and
-        `_build_cache`; an OSError propagates instead, because a caller that reads it
-        as absence goes on to mutate state the file still contradicts.
+        `_build_cache` — but when it was the only candidate, the reference is
+        unresolved, not absent: that file may be this very node. An OSError
+        propagates, because a caller that reads it as absence goes on to mutate state
+        the file still contradicts.
 
         A cache hit stays validated by file existence alone. Re-parsing on every hit
         would destroy the O(1) the cache exists for. A file replaced behind the
@@ -368,6 +402,7 @@ class FileStore:
         #    Width stays at 8: filenames end in the 8-character Short id, so any other
         #    width would force a full directory scan to serve a caller that does not exist.
         short_id = node_id.split("-")[0]
+        unparseable = False
         if len(short_id) == 8:
             confirmed: list[tuple[str, Path]] = []
             for path in sorted(self.nodes_dir.glob(f"*_{short_id}.md")):
@@ -381,6 +416,7 @@ class FileStore:
                     # opened candidates at all, the error surfaced from `load`.
                     raise
                 except Exception:
+                    unparseable = True
                     continue  # a file that will not parse confirms nothing
                 # A bare Short id has no dashes, so the split above is a no-op and
                 # it equals itself — that is what tells the two lookups apart.
@@ -394,13 +430,10 @@ class FileStore:
                 self._id_cache[full_id] = found
                 return found
             if len(confirmed) > 1:
-                logger.warning(
-                    "Node reference %s is an ambiguous Short id: %d nodes share it. "
-                    "Resolving to nothing rather than to an arbitrary one of them.",
-                    node_id,
-                    len(confirmed),
+                raise UnresolvedNodeReference(
+                    f"Node reference {node_id} is an ambiguous Short id: "
+                    f"{len(confirmed)} nodes share it."
                 )
-                return None
 
         # 3. Build full cache once if not already done
         if not self._cache_built:
@@ -409,6 +442,10 @@ class FileStore:
             if cached is not None and cached.exists():
                 return cached
 
+        if unparseable:
+            raise UnresolvedNodeReference(
+                f"Node reference {node_id} matches only files that will not parse."
+            )
         return None
 
     def _build_cache(self) -> None:
