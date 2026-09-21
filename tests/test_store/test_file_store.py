@@ -3,6 +3,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
+import pytest
+
 from ormah.models.node import MemoryNode, NodeType, Tier
 from ormah.store.file_store import FileStore
 
@@ -284,3 +286,35 @@ def test_update_does_not_clobber_a_node_that_reused_the_freed_name(tmp_path):
     assert cold.load(first.id).content == "First memory, edited."
     assert second_path.exists()
     assert len(cold.list_paths()) == 2
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="AndreLFSMartins/ormah#33: nothing binds the name to the inode between "
+    "_holds_node and os.replace, and the store has no cross-process lock",
+)
+def test_update_survives_a_steal_between_identity_read_and_replace(tmp_path):
+    """The identity read proves ownership only at the moment it reads. Inject another
+    store's delete + colliding save right after `_holds_node` says yes: the replace that
+    follows must not destroy the node that took the name.
+    """
+    nodes_dir = tmp_path / "nodes"
+    first, second = _colliding_pair()
+    a = FileStore(nodes_dir)
+    b = FileStore(nodes_dir)
+    a.save(first)
+
+    check = a._holds_node
+
+    def steal_after_check(path, node_id):
+        held = check(path, node_id)
+        if held:
+            assert b.delete(first.id) is True
+            b.save(second)
+        return held
+
+    a._holds_node = steal_after_check
+    first.content = "First memory, edited."
+    a.save(first)
+
+    assert FileStore(nodes_dir).load(second.id) is not None
