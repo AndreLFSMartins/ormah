@@ -381,8 +381,9 @@ class FileStore:
 
         None therefore means *confirmed absent*, never *could not tell*. A file that
         will not parse confirms nothing and is skipped, matching `list_all` and
-        `_build_cache` — but when it was the only candidate, the reference is
-        unresolved, not absent: that file may be this very node. An OSError
+        `_build_cache` — but when it was the only candidate, or the reference is a
+        bare Short id, the reference is unresolved, not absent: that file may be this
+        very node, or a second node sharing the Short id. An OSError
         propagates, because a caller that reads it as absence goes on to mutate state
         the file still contradicts.
 
@@ -424,6 +425,13 @@ class FileStore:
                     node_id == short_id and candidate.short_id == short_id
                 ):
                     confirmed.append((candidate.id, path))
+            if unparseable and node_id == short_id:
+                # A bare Short id is unique only if every file sharing it is known:
+                # the one that will not parse may be a second node with this Short id.
+                raise UnresolvedNodeReference(
+                    f"Node reference {node_id} is a Short id shared with a file "
+                    "that will not parse."
+                )
             if len(confirmed) == 1:
                 full_id, found = confirmed[0]
                 # Keyed by Full id, and written only after the file confirmed it.
