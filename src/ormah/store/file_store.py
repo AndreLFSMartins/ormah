@@ -176,6 +176,13 @@ class FileStore:
         `_holds_node` reads that off the file. Asking `_find_file` instead would accept
         a cache hit, which is validated by existence alone — blind to another store
         having deleted this node and given the freed name to a colliding one.
+
+        Known limit (AndreLFSMartins/ormah#33): the update is still check-then-act.
+        Nothing binds the name to the inode between `_holds_node` and `os.replace`, so
+        another store that deletes this node and publishes a colliding one inside that
+        window loses its node. Closing it takes a cross-process lock the store has never
+        had; `test_update_survives_a_steal_between_identity_read_and_replace` is the
+        strict xfail that records it.
         """
         for _ in range(_PUBLISH_ATTEMPTS):
             path = self._path_for(node)
