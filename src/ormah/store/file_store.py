@@ -19,6 +19,10 @@ from ormah.store.markdown import parse_node, serialize_node
 
 logger = logging.getLogger(__name__)
 
+# ponytail: bounded retry, not a lock. Each attempt costs one lost race against another
+# FileStore over the same directory; 50 reports rather than spins if that ever repeats.
+_PUBLISH_ATTEMPTS = 50
+
 
 def _serialized_store_operation(method):
     @wraps(method)
@@ -51,11 +55,11 @@ class FileStore:
     def save(self, node: MemoryNode) -> Path:
         """Write a node to disk atomically. Returns the file path.
 
-        Writes to a temporary file in the same directory, then uses
-        ``os.replace()`` to atomically swap it into place. This prevents
-        partial/corrupt files if the process crashes mid-write.
+        Writes to a temporary file in the same directory, then publishes it under a
+        name no other node holds (`_publish`). This prevents partial/corrupt files if
+        the process crashes mid-write, and a live node being replaced by a different
+        one that raced for the same filename.
         """
-        path = self._path_for(node)
         text = serialize_node(node)
         fd, tmp = tempfile.mkstemp(
             dir=str(self.nodes_dir), suffix=".tmp", prefix=".ormah_"
@@ -66,7 +70,7 @@ class FileStore:
             os.fsync(fd)
             os.close(fd)
             closed = True
-            os.replace(tmp, str(path))
+            path = self._publish(node, tmp)
         except BaseException:
             if not closed:
                 os.close(fd)
@@ -210,14 +214,106 @@ class FileStore:
         self.save(node)
         return node
 
+    def _publish(self, node: MemoryNode, tmp: str) -> Path:
+        """Move the staged file `tmp` onto this node's path, and return that path.
+
+        `_path_for` proves only that a candidate was free *when it looked*. Two
+        FileStore instances over one directory hold separate locks (`__init__`), and
+        only `MemoryEngine` injects a shared one — `migrations`, `index.db`, `backup`
+        and `cloud.restore` each build their own, and a second process defeats an
+        in-process lock anyway. So between that look and this write another store can
+        take the name, and `os.replace` would drop a live node while both saves report
+        success.
+
+        `os.link` is the atomic create-if-absent primitive `IngestSpool` already
+        publishes with: it fails with EEXIST instead of clobbering. On EEXIST the name
+        is gone, so ask `_path_for` again — it sees the new file and widens past it.
+        `os.replace` stays for the one case it is right: this node's own file, and
+        `_holds_node` reads that off the file. Asking `_find_file` instead would accept
+        a cache hit, which is validated by existence alone — blind to another store
+        having deleted this node and given the freed name to a colliding one.
+
+        Known limit (AndreLFSMartins/ormah#33): the update is still check-then-act.
+        Nothing binds the name to the inode between `_holds_node` and `os.replace`, so
+        another store that deletes this node and publishes a colliding one inside that
+        window loses its node. Closing it takes a cross-process lock the store has never
+        had; `test_update_survives_a_steal_between_identity_read_and_replace` is the
+        strict xfail that records it.
+        """
+        for _ in range(_PUBLISH_ATTEMPTS):
+            path = self._path_for(node)
+            try:
+                os.link(tmp, str(path))
+            except FileExistsError:
+                if self._holds_node(path, node.id):
+                    os.replace(tmp, str(path))  # our own file: an update, not a clobber
+                    return path
+                # Someone else holds the name, and a cache entry may still point here.
+                # Drop it, or `_path_for` keeps handing back this path until the bound
+                # runs out instead of widening past the new file.
+                self._id_cache.pop(node.id, None)
+                continue
+            os.unlink(tmp)
+            return path
+        raise OSError(
+            f"could not reserve a filename for node {node.id} in "
+            f"{_PUBLISH_ATTEMPTS} attempts"
+        )
+
+    def _holds_node(self, path: Path, node_id: str) -> bool:
+        """Whether the file at ``path`` names ``node_id`` as its own Full id.
+
+        Read off the file, never out of `_id_cache`: a cache hit is validated by
+        existence alone, so it cannot tell this node's file from a colliding node that
+        took the name after a delete — and the caller is about to overwrite whatever is
+        there. A file that will not parse names nothing, so it does not own the name.
+        An OSError propagates, as it does in `_find_file`: not knowing is not permission
+        to overwrite.
+        """
+        try:
+            return self._load_path(path).id == node_id
+        except OSError:
+            raise
+        except Exception:
+            return False
+
     def _path_for(self, node: MemoryNode) -> Path:
-        """Compute the file path for a node, reusing existing file if present."""
+        """Compute the file path for a node, reusing existing file if present.
+
+        The path is a *candidate*, not a reservation: only `_publish` decides. See its
+        docstring for why the existence check here cannot be the last word.
+        """
         existing = self._find_file(node.id)
         if existing:
             return existing
         slug = slugify(node.title or node.content[:60], max_length=40)
-        filename = f"{node.type.value}_{slug}_{node.short_id}.md"
-        return self.nodes_dir / filename
+        # The Short id is not unique, so type, slug and Short id can all coincide and
+        # hand a new node the path of a live one — the save would replace its content
+        # while the filename kept advertising the old title (ADR-0007). Widen the slug
+        # with the next groups of the Full id until the path is free. `_find_file`
+        # above already returned the node's own file, so any hit here holds a
+        # different node. The Short id stays the last element of the name: the lookup
+        # globs on that suffix, and a name that dropped it would hide one of two
+        # colliding nodes from the ambiguity check instead of reporting the clash.
+        parts = node.id.split("-")
+        for width in range(len(parts)):
+            extra = "-".join(parts[1 : width + 1])
+            widened = f"{slug}-{extra}" if extra else slug
+            path = self.nodes_dir / f"{node.type.value}_{widened}_{node.short_id}.md"
+            if not path.exists():
+                return path
+        # Full id exhausted: every candidate is taken by a file the lookup did not
+        # confirm (unparseable, or renamed behind the store's back). Number it
+        # rather than overwrite.
+        attempt = 2
+        while True:
+            path = (
+                self.nodes_dir
+                / f"{node.type.value}_{slug}-{attempt}_{node.short_id}.md"
+            )
+            if not path.exists():
+                return path
+            attempt += 1
 
     def _forget(self, path: Path) -> None:
         """Drop every cache entry naming ``path``.
@@ -226,9 +322,10 @@ class FileStore:
         its Short id, so the key cannot be read off the reference. Reading it off
         the file instead would make eviction depend on that read succeeding: a
         transient OSError leaves the entry pointing at a path the caller is about
-        to unlink, and `_path_for` is deterministic, so the next node with the same
-        type, title and Short id lands on exactly that path and inherits the entry
-        through the existence-only cache hit. Comparing paths needs no file at all.
+        to unlink, and the next node with the same type, title and Short id lands on
+        exactly that path — `_path_for` hands out the canonical name whenever it is
+        free, and the unlink just freed it — inheriting the entry through the
+        existence-only cache hit. Comparing paths needs no file at all.
         """
         for key in [k for k, v in self._id_cache.items() if v == path]:
             del self._id_cache[key]
