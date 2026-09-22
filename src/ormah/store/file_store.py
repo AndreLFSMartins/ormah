@@ -247,7 +247,10 @@ class FileStore:
         directory (`cloud.restore`). The gap is a second process writing the same
         directory — two servers started against one store — whose lock the first
         cannot see. Between that look and this write it can take the name, and
-        `os.replace` would drop a live node while both saves report success.
+        `os.replace` would drop a live node while both saves report success. The
+        manual migration CLI (`python -m ormah.store.migrations`) is such a second
+        writer — it builds its own FileStore and calls `save` — so stop the server
+        before running it.
 
         `os.link` is an atomic create-if-absent: it fails with EEXIST instead of
         clobbering. On EEXIST the name is gone, so ask `_path_for` again — it sees the
