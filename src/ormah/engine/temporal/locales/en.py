@@ -8,7 +8,9 @@ from ormah.engine.temporal.locale import StaticPhrase, TemporalLocale
 
 # The leading preposition a phrase removes along with itself: "in the last 3
 # days", "from yesterday". Optional, so the bare phrase still matches.
-_PREP = r"(?:\b(?:in|during|from|over|for)\s+(?:the\s+)?)?"
+# "in", "over" and "for" double as verb particles ("fail over last week"), so
+# they only go when "the" follows.
+_PREP = r"(?:\b(?:during|from)\s+(?:the\s+)?|\b(?:in|over|for)\s+the\s+)?"
 
 
 def _phrase(body: str) -> re.Pattern:

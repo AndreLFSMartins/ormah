@@ -88,6 +88,25 @@ class TestStripConsumesItsOwnLeadingPreposition:
         # The old end-of-residue cleanup left "in the" behind here.
         assert _parser(EN, PT).strip_temporal_phrases(prompt) == residue
 
+    @pytest.mark.parametrize(
+        "prompt, residue",
+        [
+            ("how did we fail over last week under load", "how did we fail over under load"),
+            ("what did we log in yesterday about auth", "what did we log in about auth"),
+            ("what did we look for last week", "what did we look for"),
+        ],
+    )
+    def test_a_verb_particle_without_the_survives(self, prompt, residue):
+        # "in", "over" and "for" double as phrasal-verb particles; only the
+        # "in the last ..." form marks them as the phrase's preposition.
+        assert _parser(EN, PT).strip_temporal_phrases(prompt) == residue
+
+    def test_over_the_goes_with_the_phrase(self):
+        assert (
+            _parser(EN, PT).strip_temporal_phrases("what changed over the last week")
+            == "what changed"
+        )
+
     def test_a_preposition_not_leading_a_phrase_survives(self):
         assert (
             _parser(EN, PT).strip_temporal_phrases("notes from the meeting last week")
