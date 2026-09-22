@@ -155,6 +155,37 @@ class TestClassificationLogic:
         assert "created_after" in intent.search_params
         assert "created_before" in intent.search_params
 
+    def test_temporal_intent_uses_the_injected_parser(self, monkeypatch):
+        """A classifier built with a parser ignores the environment's packs."""
+        from ormah.engine import prompt_classifier
+        from ormah.engine.prompt_classifier import ARCHETYPES
+        from ormah.engine.temporal import TemporalParser, load_locales
+
+        monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en")
+        prompt_classifier._default_parser.cache_clear()
+        dim = 8
+        encoder = ControlledEncoder(dim=dim)
+        temporal_idx = list(ARCHETYPES).index("temporal")
+        encoder.set_batch_results(
+            [
+                _unit_vec(dim, i)
+                for i, cat in enumerate(ARCHETYPES)
+                for _ in ARCHETYPES[cat]
+            ]
+        )
+        classifier = PromptClassifier(
+            encoder, threshold=0.65, temporal_parser=TemporalParser(load_locales(("pt-BR",)))
+        )
+
+        encoder.set_encode_result(_unit_vec(dim, temporal_idx))
+        intent = classifier.classify("mudanças no auth ontem")
+
+        assert intent.categories == ["temporal"]
+        assert intent.search_params["search_query"] == "mudanças no auth"
+        created_before = datetime.fromisoformat(intent.search_params["created_before"])
+        # "ontem" is 48h ago -> 24h ago; the no-phrase default would end now.
+        assert (datetime.now(timezone.utc) - created_before).total_seconds() > 23 * 3600
+
     def test_no_match_returns_general(self):
         """When prompt doesn't match any archetype, return general."""
         dim = 8

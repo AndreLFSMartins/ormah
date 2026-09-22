@@ -7,8 +7,8 @@ import re
 from ormah.engine.temporal.locale import StaticPhrase, TemporalLocale
 
 # The leading contraction a phrase removes along with itself: "na semana
-# passada", "nos últimos 3 dias". Optional, so the bare phrase still matches.
-_PREP = r"(?:\b(?:na|no|nos|nas|em)\s+)?"
+# passada", "dos últimos 3 meses". Optional, so the bare phrase still matches.
+_PREP = r"(?:\b(?:na|no|nos|nas|da|do|dos|das|em)\s+)?"
 
 
 def _phrase(body: str) -> re.Pattern:
@@ -24,10 +24,12 @@ LOCALE = TemporalLocale(
     static_phrases=(
         StaticPhrase(pattern=_bare(r"\bhoje\b"), window=(1, None)),  # 24h atrás -> agora
         StaticPhrase(pattern=_bare(r"\bontem\b"), window=(2, 1)),  # 48h atrás -> 24h atrás
-        # "nesta semana passada" means last week. Declared before the two
+        # "esta/nesta semana passada" means last week. Declared before the two
         # phrases it overlaps, so the strip removes it whole; the longest-match
-        # tie-break makes it beat "nesta semana" for the window.
-        StaticPhrase(pattern=_bare(r"\b(?:nesta|nessa)\s+semana\s+passada\b"), window=(14, 7)),
+        # tie-break makes it beat "esta/nesta semana" for the window.
+        StaticPhrase(
+            pattern=_bare(r"\b(?:esta|essa|nesta|nessa)\s+semana\s+passada\b"), window=(14, 7)
+        ),
         StaticPhrase(pattern=_phrase(r"\bsemana\s+passada\b"), window=(14, 7)),
         StaticPhrase(pattern=_bare(r"\b(?:esta|essa|nesta|nessa)\s+semana\b"), window=(7, None)),
         StaticPhrase(pattern=_phrase(r"\bm[êe]s\s+passado\b"), window=(60, 30)),

@@ -56,6 +56,10 @@ class TestStripConsumesItsOwnLeadingPreposition:
             "o que fizemos nos últimos 3 dias",
             "o que fizemos nas últimas 2 semanas",
             "o que fizemos em semana passada",
+            "o que fizemos do mês passado",
+            "o que fizemos dos últimos 3 meses",
+            "o que fizemos das últimas 2 semanas",
+            "o que fizemos da semana passada",
         ],
     )
     def test_every_sibling_contraction_goes_with_the_phrase(self, prompt):
@@ -128,8 +132,15 @@ class TestRemovalsAreSequentialReSearches:
     def test_overlapping_phrases_do_not_eat_the_topic(self):
         # Collecting spans on the original prompt and deleting them afterwards
         # right-to-left cuts into "discutimos".
+        overlapping = _locale(
+            "xx",
+            (r"\bsemana passada\b", (14, 7)),
+            (r"\besta semana\b", (7, None)),
+        )
         assert (
-            _parser(EN, PT).strip_temporal_phrases("esta semana passada discutimos autenticação")
+            TemporalParser([overlapping]).strip_temporal_phrases(
+                "esta semana passada discutimos autenticação"
+            )
             == "esta discutimos autenticação"
         )
 
@@ -190,12 +201,16 @@ class TestTheLeftmostPhraseSelectsTheWindow:
         assert before - 0.1 < _days_ago(params["created_before"]) < before + 0.1
 
     @BOTH_ORDERS
-    def test_nesta_semana_passada_is_last_week_and_strips_whole(self, locales):
+    @pytest.mark.parametrize("demonstrative", ["esta", "essa", "nesta", "nessa"])
+    def test_demonstrative_semana_passada_is_last_week_and_strips_whole(
+        self, locales, demonstrative
+    ):
         parser = TemporalParser(locales)
-        params = parser.extract_time_params("nesta semana passada")
+        prompt = f"{demonstrative} semana passada"
+        params = parser.extract_time_params(prompt)
         assert 13.9 < _days_ago(params["created_after"]) < 14.1
         assert 6.9 < _days_ago(params["created_before"]) < 7.1
-        assert parser.strip_temporal_phrases("nesta semana passada") == ""
+        assert parser.strip_temporal_phrases(prompt) == ""
 
     def test_the_longest_match_wins_a_tie_at_the_same_offset(self):
         # Declared shorter-first, so declaration order alone would pick 1d.

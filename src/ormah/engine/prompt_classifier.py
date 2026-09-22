@@ -110,6 +110,16 @@ def is_clear_acknowledgement(prompt: str) -> bool:
     return bool(_ACKNOWLEDGEMENT_RE.match(prompt))
 
 
+@lru_cache(maxsize=4)
+def parser_for(codes: tuple[str, ...]) -> TemporalParser:
+    """The parser for the packs named by *codes*, built once per code tuple.
+
+    Callers that hold a ``Settings`` pass its ``temporal_locale_codes``, so the
+    grammar follows the settings they were given, not the environment.
+    """
+    return TemporalParser(load_locales(codes))
+
+
 @lru_cache(maxsize=1)
 def _default_parser() -> TemporalParser:
     """The parser the module-level temporal functions delegate to, built once.
@@ -120,7 +130,7 @@ def _default_parser() -> TemporalParser:
     make ``_default_parser.cache_clear()`` a no-op and would tie the enabled
     grammar to whatever the machine happens to have configured.
     """
-    return TemporalParser(load_locales(Settings().temporal_locale_codes))
+    return parser_for(Settings().temporal_locale_codes)
 
 
 def has_temporal_phrases(prompt: str) -> bool:
@@ -198,9 +208,12 @@ class PromptClassifier:
         self,
         encoder: EmbeddingAdapter,
         threshold: float = 0.65,
+        temporal_parser: TemporalParser | None = None,
     ) -> None:
         self._encoder = encoder
         self._threshold = threshold
+        # None falls back to the packs the environment enables.
+        self._temporal_parser = temporal_parser
         # category -> (n_archetypes, dim) matrix of archetype embeddings
         self._archetype_vecs: dict[str, np.ndarray] | None = None
 
@@ -280,9 +293,10 @@ class PromptClassifier:
 
         # Build merged search_params from all matched categories
         search_params: dict = {}
+        parser = self._temporal_parser or _default_parser()
         if "temporal" in matched:
-            search_params.update(extract_time_params(prompt))
-            stripped = strip_temporal_phrases(prompt)
+            search_params.update(parser.extract_time_params(prompt))
+            stripped = parser.strip_temporal_phrases(prompt)
             if stripped != prompt:
                 search_params["search_query"] = stripped
         if "continuation" in matched:
@@ -290,7 +304,7 @@ class PromptClassifier:
             # no temporal phrase gets, taken from the parser so the two cannot
             # drift apart.
             if "created_after" not in search_params:
-                search_params["created_after"] = extract_time_params("")["created_after"]
+                search_params["created_after"] = parser.extract_time_params("")["created_after"]
 
         return PromptIntent(
             categories=sorted(matched), search_params=search_params, prompt_vec=prompt_vec
