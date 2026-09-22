@@ -24,14 +24,14 @@ LOCALE = TemporalLocale(
     static_phrases=(
         StaticPhrase(pattern=_bare(r"\bhoje\b"), window=(1, None)),  # 24h atrás -> agora
         StaticPhrase(pattern=_bare(r"\bontem\b"), window=(2, 1)),  # 48h atrás -> 24h atrás
-        # "esta/nesta semana passada" means last week. Declared before the two
+        # "esta/nesta/desta semana passada" means last week. Declared before the two
         # phrases it overlaps, so the strip removes it whole; the longest-match
         # tie-break makes it beat "esta/nesta semana" for the window.
         StaticPhrase(
-            pattern=_bare(r"\b(?:esta|essa|nesta|nessa)\s+semana\s+passada\b"), window=(14, 7)
+            pattern=_bare(r"\b(?:esta|essa|nesta|nessa|desta|dessa)\s+semana\s+passada\b"), window=(14, 7)
         ),
         StaticPhrase(pattern=_phrase(r"\bsemana\s+passada\b"), window=(14, 7)),
-        StaticPhrase(pattern=_bare(r"\b(?:esta|essa|nesta|nessa)\s+semana\b"), window=(7, None)),
+        StaticPhrase(pattern=_bare(r"\b(?:esta|essa|nesta|nessa|desta|dessa)\s+semana\b"), window=(7, None)),
         StaticPhrase(pattern=_phrase(r"\bm[êe]s\s+passado\b"), window=(60, 30)),
         StaticPhrase(pattern=_bare(r"\brecentemente\b|\bultimamente\b"), window=(3, None)),
     ),

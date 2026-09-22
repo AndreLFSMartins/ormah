@@ -220,7 +220,7 @@ class TestTheLeftmostPhraseSelectsTheWindow:
         assert before - 0.1 < _days_ago(params["created_before"]) < before + 0.1
 
     @BOTH_ORDERS
-    @pytest.mark.parametrize("demonstrative", ["esta", "essa", "nesta", "nessa"])
+    @pytest.mark.parametrize("demonstrative", ["esta", "essa", "nesta", "nessa", "desta", "dessa"])
     def test_demonstrative_semana_passada_is_last_week_and_strips_whole(
         self, locales, demonstrative
     ):
@@ -290,6 +290,7 @@ class TestWindowArithmetic:
             ("o que aconteceu na semana passada", 14, 7),
             ("what happened this week", 7, 0),
             ("o que fizemos nesta semana", 7, 0),
+            ("as notas desta semana", 7, 0),
             ("what happened last month", 60, 30),
             ("o que fizemos no mês passado", 60, 30),
             ("what changed recently", 3, 0),

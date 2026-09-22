@@ -787,7 +787,7 @@ class MemoryEngine:
     # Additional command-like words for detecting "pure temporal" queries.
     _STOP_WORDS = STOP_WORDS | frozenset({
         "after", "again", "above", "below", "between", "during", "further",
-        "get", "give", "here", "me", "once", "only", "out", "own", "same",
+        "get", "give", "here", "me", "once", "only", "out", "over", "own", "same",
         "show", "tell", "then", "through", "under", "until", "up", "us",
         "while", "work", "worked", "working",
     })
