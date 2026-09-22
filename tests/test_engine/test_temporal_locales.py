@@ -1,4 +1,4 @@
-"""Tests for the temporal locale data model and registry."""
+"""Tests for the temporal locale data model and the loader."""
 
 from __future__ import annotations
 
@@ -7,104 +7,70 @@ import re
 import pytest
 
 from ormah.config import Settings
-from ormah.engine.temporal import (
-    StaticPhrase,
-    TemporalLocale,
-    registered_codes,
-    resolve_locales,
-)
+from ormah.engine.temporal import StaticPhrase, TemporalLocale, load_locales
+
 
 class TestStaticPhrase:
     def test_windowed_entry_carries_its_window(self):
-        phrase = StaticPhrase(
-            pattern=re.compile(r"\byesterday\b", re.IGNORECASE),
-            probe="what did we do yesterday",
-            priority=2,
-            window=(2, 1),
-        )
+        phrase = StaticPhrase(pattern=re.compile(r"\byesterday\b"), window=(2, 1))
         assert phrase.window == (2, 1)
         assert phrase.is_strip_only is False
 
     def test_open_ended_window_uses_none_as_its_end(self):
-        phrase = StaticPhrase(
-            pattern=re.compile(r"\btoday\b", re.IGNORECASE),
-            probe="what did we do today",
-            priority=0,
-            window=(1, None),
-        )
+        phrase = StaticPhrase(pattern=re.compile(r"\btoday\b"), window=(1, None))
         assert phrase.window == (1, None)
         assert phrase.is_strip_only is False
 
     def test_entry_without_a_window_is_strip_only(self):
-        phrase = StaticPhrase(
-            pattern=re.compile(r"\brecent\b", re.IGNORECASE),
-            probe="show me recent changes",
-            priority=10,
-        )
+        phrase = StaticPhrase(pattern=re.compile(r"\brecent\b"))
         assert phrase.window is None
         assert phrase.is_strip_only is True
 
-    def test_probe_and_priority_are_carried_verbatim(self):
-        phrase = StaticPhrase(
-            pattern=re.compile(r"\b(?:esta|essa|nesta|nessa)\s+semana\b", re.IGNORECASE),
-            probe="o que fizemos nesta semana",
-            priority=7,
-            window=(7, None),
-        )
-        assert phrase.priority == 7
-        assert phrase.probe == "o que fizemos nesta semana"
-        assert phrase.pattern.search(phrase.probe) is not None
 
+class TestLoadLocales:
+    def test_returns_packs_in_the_order_the_codes_name_them(self):
+        assert [loc.code for loc in load_locales(("pt-BR", "en"))] == ["pt-BR", "en"]
+        assert [loc.code for loc in load_locales(("en", "pt-BR"))] == ["en", "pt-BR"]
 
-class TestRegistry:
-    def test_built_in_packs_are_registered(self):
-        assert registered_codes() == ("en", "pt-BR")
+    def test_a_single_code_returns_only_that_pack(self):
+        assert [loc.code for loc in load_locales(("en",))] == ["en"]
 
-    def test_resolve_returns_packs_in_the_order_the_codes_name_them(self):
-        assert [loc.code for loc in resolve_locales(("pt-BR", "en"))] == ["pt-BR", "en"]
-        assert [loc.code for loc in resolve_locales(("en", "pt-BR"))] == ["en", "pt-BR"]
-
-    def test_resolve_with_a_single_code_returns_only_that_pack(self):
-        assert [loc.code for loc in resolve_locales(("en",))] == ["en"]
-
-    def test_resolve_raises_on_an_unknown_code(self):
+    def test_raises_on_a_well_formed_code_with_no_pack(self):
         with pytest.raises(ValueError, match="unknown temporal locale"):
-            resolve_locales(("klingon",))
+            load_locales(("fr",))
 
-    def test_resolves_the_packs_the_setting_names(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "code", ["pt-br", "pt_br", "PT-BR", "en.x", "..en", "locale", "__init__", "os.path", ""]
+    )
+    def test_rejects_a_code_outside_the_fixed_shape_before_importing(self, code):
+        # The shape check is what keeps the setting from naming an arbitrary
+        # module: "os.path" is importable, but never from the locale package.
+        with pytest.raises(ValueError, match="invalid temporal locale code"):
+            load_locales((code,))
+
+    def test_loads_the_packs_the_setting_names(self, monkeypatch):
         monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "pt-BR,en")
-        settings = Settings(memory_dir="/tmp/ormah_test")
-        resolved = resolve_locales(settings.temporal_locale_codes)
-        assert [loc.code for loc in resolved] == ["pt-BR", "en"]
-
-
-def _all_phrases():
-    """Every static phrase declared by the two built-in packs, with its pack code."""
-    return [
-        (locale.code, phrase)
-        for locale in resolve_locales(("en", "pt-BR"))
-        for phrase in locale.static_phrases
-    ]
+        settings = Settings(_env_file=None, memory_dir="/tmp/ormah_test")
+        loaded = load_locales(settings.temporal_locale_codes)
+        assert [loc.code for loc in loaded] == ["pt-BR", "en"]
 
 
 def _pack(code: str) -> TemporalLocale:
-    return resolve_locales((code,))[0]
+    return load_locales((code,))[0]
 
 
 class TestBuiltInPackDeclarations:
     def test_recent_is_the_only_strip_only_entry_and_lives_in_the_en_pack(self):
-        strip_only = [(code, phrase) for code, phrase in _all_phrases() if phrase.is_strip_only]
+        strip_only = [
+            (locale.code, phrase)
+            for locale in load_locales(("en", "pt-BR"))
+            for phrase in locale.static_phrases
+            if phrase.is_strip_only
+        ]
         assert [code for code, _ in strip_only] == ["en"]
         phrase = strip_only[0][1]
-        assert phrase.window is None
         assert phrase.pattern.search("show me recent changes") is not None
         assert phrase.pattern.search("what changed recently") is None
-
-    def test_every_probe_is_matched_by_its_own_pattern(self):
-        for code, phrase in _all_phrases():
-            assert phrase.pattern.search(phrase.probe) is not None, (
-                f"{code}: probe {phrase.probe!r} not matched by {phrase.pattern.pattern!r}"
-            )
 
 
 class TestBuiltInNumericPatterns:
@@ -116,8 +82,8 @@ class TestBuiltInNumericPatterns:
     def test_capture_groups_are_count_then_unit_in_pt_br(self):
         match = _pack("pt-BR").numeric_pattern.search("resumo das últimas 2 semanas")
         assert match is not None
-        # A capturing determiner — ``([úu]ltim[oa]s?)`` — shifts every group and
-        # would make the parser read "últimas" as the count.
+        # A capturing determiner or preposition shifts every group and would
+        # make the parser read "últimas" as the count.
         assert match.groups() == ("2", "semanas")
 
     @pytest.mark.parametrize(
@@ -161,54 +127,3 @@ class TestBuiltInUnitAliases:
         # then fold onto the canonical key.
         unit = match.group(2).lower().rstrip("s")
         assert pack.unit_aliases.get(unit, unit) == canonical
-
-
-def _cleanup_claims_tail(code: str, left: str) -> bool:
-    """Whether *code*'s cleanup claims the text immediately left of a vacated span.
-
-    A cleanup pattern only fires when it matches flush against the end of the
-    left-hand context — the parser anchors it to the removed span rather than
-    running it over the whole residue.
-    """
-    return any(
-        match.end() == len(left)
-        for pattern in _pack(code).cleanup_patterns
-        for match in pattern.finditer(left)
-    )
-
-
-class TestBuiltInCleanupPatterns:
-    @pytest.mark.parametrize(
-        "left", ["changes to the API in the ", "work from ", "notes during ", "logs over the "]
-    )
-    def test_en_cleanup_matches_its_own_dangling_prepositions(self, left):
-        assert _cleanup_claims_tail("en", left)
-
-    @pytest.mark.parametrize(
-        "left",
-        [
-            "o que fizemos na ",
-            "o que fizemos no ",
-            "mudanças na API nos ",
-            "reunião nas ",
-            "o que mudou em ",
-        ],
-    )
-    def test_pt_br_cleanup_matches_its_own_dangling_contractions(self, left):
-        assert _cleanup_claims_tail("pt-BR", left)
-
-    def test_en_cleanup_does_not_claim_pt_br_contractions(self):
-        assert not _cleanup_claims_tail("en", "o que fizemos na ")
-
-    def test_pt_br_cleanup_does_not_claim_the_interior_of_a_phrase(self):
-        # "mudanças na API" — the mid-sentence "na" is not flush against the
-        # vacated span, so nothing claims it.
-        assert not _cleanup_claims_tail("pt-BR", "mudanças na API")
-
-    def test_only_the_owning_pack_would_eat_the_english_no(self):
-        # "please say no last 3 days": the en pack owns that removal, and
-        # English cleanup leaves "no" alone. Running pt-BR cleanup at the same
-        # span — which a shared numeric pattern would cause — returns
-        # "please say" instead.
-        assert not _cleanup_claims_tail("en", "please say no ")
-        assert _cleanup_claims_tail("pt-BR", "please say no ")

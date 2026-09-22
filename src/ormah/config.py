@@ -299,8 +299,11 @@ class Settings(BaseSettings):
     # not as a ``list[str]``: pydantic-settings JSON-decodes complex types from
     # the environment and would reject the comma-separated form the ``.env``
     # file uses everywhere else. The setting selects packs; it never carries
-    # grammar.
-    temporal_locales: str = "en,pt-BR"
+    # grammar. English only by default: a PT-BR prompt reaches the whisper
+    # window only through the ``temporal`` intent, which the default English
+    # encoder does not assign to PT-BR text, so PT-BR is opted into together
+    # with a multilingual embedding model.
+    temporal_locales: str = "en"
 
     # --- Validators ---
 
@@ -659,7 +662,7 @@ class Settings(BaseSettings):
     @field_validator("temporal_locales")
     @classmethod
     def _temporal_locales_known(cls, v: str) -> str:
-        parse_locale_codes(v)  # raises on an empty result or an unregistered code
+        parse_locale_codes(v)  # raises on an empty result or a code with no pack
         return v
 
     @property

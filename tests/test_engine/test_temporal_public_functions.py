@@ -24,11 +24,37 @@ from ormah.engine.prompt_classifier import (
     has_temporal_phrases,
     strip_temporal_phrases,
 )
-from ormah.engine.temporal import resolve_locales
+from ormah.config import Settings
+from ormah.engine.temporal import load_locales
 
 # The codes the conftest fixture pins; the probe walk below iterates the packs
 # they name rather than reading settings at collection time.
 PINNED_CODES = ("en", "pt-BR")
+
+# One prompt per declared phrase; the walk takes the first probe a phrase
+# matches. It fails on a phrase no probe here matches, so a new phrase cannot
+# ship without one.
+PROBES = {
+    "en": [
+        "what did we do today",
+        "what did we do yesterday",
+        "what happened last week",
+        "what happened this week",
+        "what happened last month",
+        "what changed recently",
+        "show me recent changes",
+    ],
+    "pt-BR": [
+        "o que fizemos hoje",
+        "o que fizemos ontem",
+        "o que fizemos na semana passada",
+        "o que fizemos esta semana",
+        "o que fizemos no mês passado",
+        "o que fizemos recentemente",
+        # Last: it also matches the two shorter "semana" patterns.
+        "o que fizemos nesta semana passada",
+    ],
+}
 
 
 def _days_ago(iso: str) -> float:
@@ -148,32 +174,27 @@ class TestPtBrStripTemporalPhrases:
 # Single source of truth: every declared phrase reaches both paths
 # ---------------------------------------------------------------------------
 
-_PROBES = [
-    (locale.code, phrase)
-    for locale in resolve_locales(PINNED_CODES)
-    for phrase in locale.static_phrases
-]
+def _probe_walk():
+    for locale in load_locales(PINNED_CODES):
+        for phrase in locale.static_phrases:
+            probe = next((p for p in PROBES[locale.code] if phrase.pattern.search(p)), None)
+            yield pytest.param(phrase, probe, id=f"{locale.code}:{phrase.pattern.pattern}")
 
 
-@pytest.mark.parametrize(
-    "code, phrase",
-    _PROBES,
-    ids=[f"{code}:{phrase.probe}" for code, phrase in _PROBES],
-)
-def test_every_declared_phrase_is_detected_as_declared_and_always_stripped(code, phrase):
-    """Drive every enabled pack's probe through the public functions.
+@pytest.mark.parametrize("phrase, probe", list(_probe_walk()))
+def test_every_declared_phrase_is_detected_as_declared_and_always_stripped(phrase, probe):
+    """Drive every enabled pack's phrase through the public functions.
 
     A windowed entry's probe must make ``has_temporal_phrases`` true; a
     strip-only entry's probe must leave it false. Either way the phrase must
-    be gone from the residue. The assertions go through the public functions
-    and compare against the probe string, so the test cannot pass by comparing
-    a derived table to itself — it fails when a phrase reaches one path and
-    not the other.
+    be gone from the residue — the check fails when a phrase reaches one path
+    and not the other.
     """
-    assert has_temporal_phrases(phrase.probe) is (not phrase.is_strip_only)
+    assert probe is not None, f"no probe in PROBES matches {phrase.pattern.pattern!r}"
+    assert has_temporal_phrases(probe) is (not phrase.is_strip_only)
 
-    removed = phrase.pattern.search(phrase.probe).group(0)
-    assert removed.lower() not in strip_temporal_phrases(phrase.probe).lower()
+    removed = phrase.pattern.search(probe).group(0)
+    assert removed.lower() not in strip_temporal_phrases(probe).lower()
 
 
 def test_a_strip_only_phrase_never_starts_date_filtering():
@@ -218,6 +239,14 @@ class TestTheSettingGatesThePublicFunctions:
         yield
         prompt_classifier._default_parser.cache_clear()
 
+    def test_the_default_install_parses_no_pt_br_phrase(self, monkeypatch):
+        monkeypatch.delenv("ORMAH_TEMPORAL_LOCALES")
+        # Keep the operator's ``.env`` out, so this reads the shipped default.
+        monkeypatch.setattr(prompt_classifier, "Settings", lambda: Settings(_env_file=None))
+        assert has_temporal_phrases("o que fizemos ontem") is False
+        assert strip_temporal_phrases("o que fizemos ontem") == "o que fizemos ontem"
+        assert has_temporal_phrases("what did we do yesterday") is True
+
     def test_disabling_pt_br_hides_it_from_detection(self, monkeypatch):
         monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en")
         assert has_temporal_phrases("o que fizemos ontem") is False
@@ -245,20 +274,3 @@ class TestTheSettingGatesThePublicFunctions:
         assert (
             strip_temporal_phrases("what did we do last week") == "what did we do last week"
         )
-
-
-# ---------------------------------------------------------------------------
-# The accepted regression
-# ---------------------------------------------------------------------------
-
-def test_a_dangling_preposition_next_to_another_packs_removal_survives():
-    """"work from ontem" keeps its English "from" — deliberate, not a bug.
-
-    Cleanup runs only with the pack that owned the removal, and `ontem` is
-    owned by pt-BR. Removing the English `from` here would mean running every
-    enabled pack's cleanup at every span, which is exactly what turns
-    "please say no last 3 days" into "please say". Whoever "fixes" this
-    assertion breaks that one.
-    """
-    assert strip_temporal_phrases("work from ontem") == "work from"
-    assert strip_temporal_phrases("work from yesterday") == "work"

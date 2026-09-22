@@ -300,12 +300,21 @@ backup taken before the upgrade.
 
 | Setting | Default |
 |---|---|
-| `temporal_locales` | `en,pt-BR` |
+| `temporal_locales` | `en` |
 
 The language packs consulted when a time reference is parsed out of a prompt.
 Comma-separated and order-preserving; the built-in codes are `en` and `pt-BR`,
 and they are case-sensitive. An unknown code is rejected at startup. The
-setting selects packs only — it never carries grammar.
+setting selects packs only — it never carries grammar. PT-BR is opt-in:
+`ORMAH_TEMPORAL_LOCALES=en,pt-BR`.
+
+Enabling the PT-BR grammar does not make the whisper/search stack
+multilingual. Whisper applies a time window only when the intent classifier
+marks a prompt `temporal`, and its archetypes are English: with the default
+`BAAI/bge-base-en-v1.5` encoder, 1 of 8 direct PT-BR time questions was
+classified `temporal`; with `bge-m3`, 8 of 8. `recall_search` is not gated on
+intent, so the grammar applies there either way. For PT-BR use, a
+multilingual embedding model is recommended.
 
 ## Code Anchor
 

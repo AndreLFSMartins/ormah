@@ -11,7 +11,7 @@ import numpy as np
 
 from ormah.config import Settings
 from ormah.embeddings.base import EmbeddingAdapter
-from ormah.engine.temporal import TemporalParser, resolve_locales
+from ormah.engine.temporal import TemporalParser, load_locales
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ def _default_parser() -> TemporalParser:
     make ``_default_parser.cache_clear()`` a no-op and would tie the enabled
     grammar to whatever the machine happens to have configured.
     """
-    return TemporalParser(resolve_locales(Settings().temporal_locale_codes))
+    return TemporalParser(load_locales(Settings().temporal_locale_codes))
 
 
 def has_temporal_phrases(prompt: str) -> bool:
