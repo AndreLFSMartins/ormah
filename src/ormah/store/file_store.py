@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 from functools import wraps
 import logging
 import os
@@ -22,6 +23,12 @@ logger = logging.getLogger(__name__)
 # ponytail: bounded retry, not a lock. Each attempt costs one lost race against another
 # FileStore over the same directory; 50 reports rather than spins if that ever repeats.
 _PUBLISH_ATTEMPTS = 50
+
+
+def _numbered_names(prefix: str, short_id: str):
+    """``<prefix>-2_<short_id>.md``, ``-3``, ... without end."""
+    for attempt in itertools.count(2):
+        yield f"{prefix}-{attempt}_{short_id}.md"
 
 
 class UnresolvedNodeReference(LookupError):
@@ -130,10 +137,10 @@ class FileStore:
 
         The deleted_at tombstone in the moved file's frontmatter is both the purge
         clock (#28) and the deletion timestamp sync merge ordering depends on:
-        self-contained, so it survives backup/restore and mtime resets. Written
-        straight to the destination via tmp + fsync + os.replace, so a crash never
-        leaves a partial tombstone — and never leaves a still-live node file in
-        nodes/ already carrying deleted_at. `updated` is deliberately untouched:
+        self-contained, so it survives backup/restore and mtime resets. Staged as
+        tmp + fsync in deleted/, then published under a name no other node's
+        tombstone holds (`_bury`), so a crash never leaves a partial tombstone — and
+        never leaves a still-live node file in nodes/ already carrying deleted_at. `updated` is deliberately untouched:
         deletion ordering uses deleted_at, never updated.
         """
         path = self._find_file(node_id)
@@ -145,7 +152,10 @@ class FileStore:
         post = frontmatter.loads(path.read_text(encoding="utf-8"))
         post["deleted_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         text = frontmatter.dumps(post)
-        dest = deleted_dir / path.name
+        try:
+            node: MemoryNode | None = parse_node(text)
+        except Exception:
+            node = None  # nothing proves which node this file is
 
         fd, tmp = tempfile.mkstemp(dir=str(deleted_dir), suffix=".tmp", prefix=".ormah_")
         closed = False
@@ -157,7 +167,7 @@ class FileStore:
             os.fsync(fd)
             os.close(fd)
             closed = True
-            os.replace(tmp, str(dest))   # atomic publish of the tombstone
+            self._bury(path, node, src=Path(tmp))  # claim a name no other tombstone holds
         except BaseException:
             if not closed:
                 os.close(fd)
@@ -306,6 +316,64 @@ class FileStore:
         except Exception:
             return False
 
+    def _bury(self, path: Path, node: MemoryNode | None, src: Path | None = None) -> Path:
+        """Move the node file at ``path`` into deleted/, and return where it landed.
+
+        A tombstone keeps the node's filename, and that name is not unique: once a
+        node is buried, a colliding node can take the same name in nodes/, and a
+        blind rename of its file would replace the first tombstone. So the move
+        follows `_publish`: walk the node's candidate names and claim one with
+        `os.link`, which fails with EEXIST instead of clobbering. A name held by
+        this node's own earlier tombstone (read off the file) is replaced — one
+        tombstone per node. A file that did not parse names no node, so it never
+        replaces anything and takes a numbered name instead.
+
+        ``src`` is the file to move, when it is not ``path`` itself: `soft_delete`
+        stages the stamped tombstone in deleted/ first, and names it after ``path``.
+        """
+        src = path if src is None else src
+        deleted_dir = self.nodes_dir.parent / "deleted"
+        deleted_dir.mkdir(parents=True, exist_ok=True)
+        if node is not None:
+            names = self._names_for(node)
+        else:
+            prefix, _, short_id = path.stem.rpartition("_")
+            names = itertools.chain([path.name], _numbered_names(prefix, short_id))
+        for name in names:
+            dest = deleted_dir / name
+            try:
+                os.link(src, dest)
+            except FileExistsError:
+                if node is not None and self._holds_node(dest, node.id):
+                    os.replace(src, dest)  # this node's own tombstone
+                    return dest
+                continue
+            os.unlink(src)
+            return dest
+        raise AssertionError("unreachable: the numbered names never run out")
+
+    def _names_for(self, node: MemoryNode):
+        """The filenames a node may take, in order: `_path_for` walks them in nodes/,
+        `_bury` in deleted/.
+
+        The Short id is not unique, so type, slug and Short id can all coincide and
+        hand a new node the path of a live one — the save would replace its content
+        while the filename kept advertising the old title. So after the plain name,
+        the slug widens with the next groups of the Full id. The Short id stays the
+        last element of the name: the lookup globs on that suffix, and a name that
+        dropped it would hide one of two colliding nodes from the ambiguity check
+        instead of reporting the clash. Once the Full id is exhausted, the names are
+        numbered.
+        """
+        slug = slugify(node.title or node.content[:60], max_length=40)
+        prefix = f"{node.type.value}_{slug}"
+        parts = node.id.split("-")
+        for width in range(len(parts)):
+            extra = "-".join(parts[1 : width + 1])
+            widened = f"{prefix}-{extra}" if extra else prefix
+            yield f"{widened}_{node.short_id}.md"
+        yield from _numbered_names(prefix, node.short_id)
+
     def _path_for(self, node: MemoryNode) -> Path:
         """Compute the file path for a node, reusing existing file if present.
 
@@ -315,34 +383,14 @@ class FileStore:
         existing = self._find_file(node.id)
         if existing:
             return existing
-        slug = slugify(node.title or node.content[:60], max_length=40)
-        # The Short id is not unique, so type, slug and Short id can all coincide and
-        # hand a new node the path of a live one — the save would replace its content
-        # while the filename kept advertising the old title. Widen the slug
-        # with the next groups of the Full id until the path is free. `_find_file`
-        # above already returned the node's own file, so any hit here holds a
-        # different node. The Short id stays the last element of the name: the lookup
-        # globs on that suffix, and a name that dropped it would hide one of two
-        # colliding nodes from the ambiguity check instead of reporting the clash.
-        parts = node.id.split("-")
-        for width in range(len(parts)):
-            extra = "-".join(parts[1 : width + 1])
-            widened = f"{slug}-{extra}" if extra else slug
-            path = self.nodes_dir / f"{node.type.value}_{widened}_{node.short_id}.md"
+        # `_find_file` above already returned the node's own file, so any name taken
+        # here holds a different node — or a file the lookup did not confirm
+        # (unparseable, or renamed behind the store's back). Skip it, never overwrite.
+        for name in self._names_for(node):
+            path = self.nodes_dir / name
             if not path.exists():
                 return path
-        # Full id exhausted: every candidate is taken by a file the lookup did not
-        # confirm (unparseable, or renamed behind the store's back). Number it
-        # rather than overwrite.
-        attempt = 2
-        while True:
-            path = (
-                self.nodes_dir
-                / f"{node.type.value}_{slug}-{attempt}_{node.short_id}.md"
-            )
-            if not path.exists():
-                return path
-            attempt += 1
+        raise AssertionError("unreachable: the numbered names never run out")
 
     def _forget(self, path: Path) -> None:
         """Drop every cache entry naming ``path``.
