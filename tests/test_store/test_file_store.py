@@ -154,6 +154,62 @@ def _colliding_pair() -> tuple[MemoryNode, MemoryNode]:
     return make("1111", "First memory."), make("2222", "Second memory.")
 
 
+def _tombstone_ids(file_store) -> list[str]:
+    """Full ids of the tombstones in deleted/ that parse."""
+    ids = []
+    for path in (file_store.nodes_dir.parent / "deleted").glob("*.md"):
+        try:
+            ids.append(file_store._load_path(path).id)
+        except Exception:
+            continue
+    return sorted(ids)
+
+
+def test_soft_delete_does_not_overwrite_another_nodes_tombstone(file_store):
+    """The first node's tombstone takes the canonical name in deleted/. The second
+    node then gets that same name in nodes/ — it is free again there — and its
+    soft-delete must not land on the first tombstone."""
+    first, second = _colliding_pair()
+
+    file_store.save(first)
+    file_store.soft_delete(first.id)
+    file_store.save(second)
+    file_store.soft_delete(second.id)
+
+    assert _tombstone_ids(file_store) == sorted([first.id, second.id])
+
+
+def test_soft_delete_of_the_same_node_again_replaces_its_own_tombstone(file_store):
+    """A node restored to nodes/ and deleted again keeps one tombstone, the new one."""
+    first, _ = _colliding_pair()
+
+    file_store.save(first)
+    file_store.soft_delete(first.id)
+    first.content = "First memory, restored and edited."
+    file_store.save(first)
+    file_store.soft_delete(first.id)
+
+    deleted_dir = file_store.nodes_dir.parent / "deleted"
+    [tombstone] = deleted_dir.glob("*.md")
+    assert file_store._load_path(tombstone).content == "First memory, restored and edited."
+
+
+def test_soft_delete_of_an_unparseable_file_keeps_the_tombstone_it_would_hit(file_store):
+    """A file that will not parse names no node, so it may not replace a tombstone."""
+    first, second = _colliding_pair()
+    file_store.save(first)
+    file_store.soft_delete(first.id)
+    live = file_store.save(second)
+    live.write_text("this is not a node", encoding="utf-8")
+
+    assert file_store.soft_delete(second.id) is True
+
+    deleted_dir = file_store.nodes_dir.parent / "deleted"
+    names = sorted(p.name for p in deleted_dir.glob("*.md"))
+    assert len(names) == 2
+    assert _tombstone_ids(file_store) == [first.id]
+
+
 def test_save_with_colliding_short_id_does_not_overwrite(file_store):
     first, second = _colliding_pair()
 
