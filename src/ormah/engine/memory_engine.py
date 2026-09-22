@@ -1368,7 +1368,7 @@ class MemoryEngine:
     # Additional command-like words for detecting "pure temporal" queries.
     _STOP_WORDS = STOP_WORDS | frozenset({
         "after", "again", "above", "below", "between", "during", "further",
-        "get", "give", "here", "me", "once", "only", "out", "own", "same",
+        "get", "give", "here", "me", "once", "only", "out", "over", "own", "same",
         "show", "tell", "then", "through", "under", "until", "up", "us",
         "while", "work", "worked", "working",
     })
@@ -1397,13 +1397,13 @@ class MemoryEngine:
             and not filters.get("created_after")
             and not filters.get("created_before")
         ):
-            from ormah.engine.prompt_classifier import (
-                extract_time_params, has_temporal_phrases, strip_temporal_phrases,
-            )
-            if has_temporal_phrases(query):
-                time_params = extract_time_params(query)
+            from ormah.engine.prompt_classifier import parser_for
+
+            parser = parser_for(self.settings.temporal_locale_codes)
+            if parser.has_temporal_phrases(query):
+                time_params = parser.extract_time_params(query)
                 filters.update(time_params)
-                stripped_query = strip_temporal_phrases(query)
+                stripped_query = parser.strip_temporal_phrases(query)
                 if stripped_query != query:
                     # A supplied vector belongs to the caller's original
                     # query. Once temporal preprocessing changes that query,
@@ -1533,13 +1533,13 @@ class MemoryEngine:
         query_for_log = query
         # Auto-extract temporal filters from query when none provided
         if not filters.get("created_after") and not filters.get("created_before"):
-            from ormah.engine.prompt_classifier import (
-                extract_time_params, has_temporal_phrases, strip_temporal_phrases,
-            )
-            if has_temporal_phrases(query):
-                time_params = extract_time_params(query)
+            from ormah.engine.prompt_classifier import parser_for
+
+            parser = parser_for(self.settings.temporal_locale_codes)
+            if parser.has_temporal_phrases(query):
+                time_params = parser.extract_time_params(query)
                 filters.update(time_params)
-                query = strip_temporal_phrases(query)
+                query = parser.strip_temporal_phrases(query)
 
         explicit_spaces = filters.get("spaces")
 

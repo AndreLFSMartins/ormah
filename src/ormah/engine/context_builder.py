@@ -122,17 +122,18 @@ class ContextBuilder:
         if not self.engine:
             return None
         try:
-            from ormah.engine.prompt_classifier import PromptClassifier
+            from ormah.engine.prompt_classifier import PromptClassifier, parser_for
 
             hybrid_search = self.engine._get_hybrid_search()
             if hybrid_search is None:
                 return None
             encoder = hybrid_search.encoder
-            threshold = getattr(self.engine, "settings", None)
-            threshold = (
-                threshold.whisper_intent_threshold if threshold else 0.65
+            settings = getattr(self.engine, "settings", None)
+            threshold = settings.whisper_intent_threshold if settings else 0.65
+            temporal_parser = parser_for(settings.temporal_locale_codes) if settings else None
+            self._classifier = PromptClassifier(
+                encoder, threshold=threshold, temporal_parser=temporal_parser
             )
-            self._classifier = PromptClassifier(encoder, threshold=threshold)
             return self._classifier
         except Exception as e:
             logger.warning("Failed to create prompt classifier: %s", e)

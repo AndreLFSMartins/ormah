@@ -304,6 +304,27 @@ backup taken before the upgrade.
 | `claude_maintenance_batch_size` | `25` |
 | `claude_maintenance_cluster_max_chars` | `24000` |
 
+## Temporal Locales
+
+| Setting | Default |
+|---|---|
+| `temporal_locales` | `en` |
+
+The language packs consulted when a time reference is parsed out of a prompt.
+Comma-separated and order-preserving; the built-in codes are `en` and `pt-BR`,
+and they are case-sensitive. An unknown code is rejected at startup. The
+setting selects packs only — it never carries grammar. PT-BR is opt-in:
+`ORMAH_TEMPORAL_LOCALES=en,pt-BR`.
+
+Enabling the PT-BR grammar does not make the whisper/search stack
+multilingual. The PT-BR window and strip reach every search once the pack is
+enabled, because recall parses the query itself. But the whisper treats a
+prompt as a time question (relaxed score floor, no reranker or injection
+gate, recency order) only when the intent classifier marks it `temporal`, and
+its archetypes are English: with the default `BAAI/bge-base-en-v1.5` encoder,
+1 of 8 direct PT-BR time questions was classified `temporal`; with `bge-m3`,
+8 of 8. For PT-BR use, a multilingual embedding model is recommended.
+
 ## Code Anchor
 
 - `src/ormah/config.py`
