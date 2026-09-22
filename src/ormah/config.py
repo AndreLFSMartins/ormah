@@ -299,10 +299,10 @@ class Settings(BaseSettings):
     # not as a ``list[str]``: pydantic-settings JSON-decodes complex types from
     # the environment and would reject the comma-separated form the ``.env``
     # file uses everywhere else. The setting selects packs; it never carries
-    # grammar. English only by default: a PT-BR prompt reaches the whisper
-    # window only through the ``temporal`` intent, which the default English
-    # encoder does not assign to PT-BR text, so PT-BR is opted into together
-    # with a multilingual embedding model.
+    # grammar. English only by default: the whisper's time-question handling
+    # follows the ``temporal`` intent, which the default English encoder does
+    # not assign to PT-BR text, so PT-BR is opted into together with a
+    # multilingual embedding model.
     temporal_locales: str = "en"
 
     # --- Validators ---
