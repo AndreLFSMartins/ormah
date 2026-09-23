@@ -311,9 +311,13 @@ setting selects packs only — it never carries grammar. PT-BR is opt-in:
 Enabling the PT-BR grammar does not make the whisper/search stack
 multilingual. The PT-BR window and strip reach every search once the pack is
 enabled, because recall parses the query itself. But the whisper treats a
-prompt as a time question (relaxed score floor, no reranker or injection
-gate, recency order) only when the intent classifier marks it `temporal`, and
-its archetypes are English: with the default `BAAI/bge-base-en-v1.5` encoder,
+prompt as a time question (relaxed score floor, no post-rerank score floor or
+injection gate, recency order within space priority) only when the intent
+classifier marks it `temporal`. The reranker still runs when enabled;
+temporal intent bypasses the later score floor and injection gate, not
+reranking itself. The
+classifier's archetypes are English: with the default
+`BAAI/bge-base-en-v1.5` encoder,
 1 of 8 direct PT-BR time questions was classified `temporal`; with `bge-m3`,
 8 of 8. For PT-BR use, a multilingual embedding model is recommended.
 
