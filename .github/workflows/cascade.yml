@@ -1,0 +1,28 @@
+# Caller stub for the upward close cascade (issue #22). Canonical template: copy it
+# to .github/workflows/cascade.yml in a participating repository. It runs with that
+# repository's own GITHUB_TOKEN; no secrets are passed.
+# workflow_dispatch lives here, not on the hub: dispatched on the hub, the run would
+# carry the hub's token, which cannot write to this repository.
+name: cascade
+
+on:
+  issues:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to log as the trigger (the run reconciles every open parent)
+        required: true
+        type: number
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  call:
+    uses: AndreLFSMartins/andre-hooks/.github/workflows/reusable-cascade.yml@main
+    with:
+      # fromJSON: workflow_dispatch passes a number input as a string, which the
+      # number-typed workflow_call input rejects before any job starts.
+      issue: ${{ fromJSON(inputs.issue || github.event.issue.number) }}
