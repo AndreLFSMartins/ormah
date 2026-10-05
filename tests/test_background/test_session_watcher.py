@@ -3463,9 +3463,11 @@ def test_park_ceiling_is_monotonic_only_within_one_identity(engine, tmp_path):
     assert handler._state[rel]["frozen_until"] == big
     first_ino = handler._state[rel]["frozen_ino"]
 
-    # replaced by a SMALLER file that is also unparseable
-    jsonl.unlink()
-    _partial_unterminated(jsonl)
+    # replaced by a SMALLER file that is also unparseable. Built beside the original and
+    # renamed over it: an unlink + recreate lets ext4 hand the freed inode straight back.
+    replacement = proj / "tmp.jsonl"
+    _partial_unterminated(replacement)
+    replacement.replace(jsonl)
     _mark_idle(jsonl)
     small = jsonl.stat().st_size
     assert small < big
