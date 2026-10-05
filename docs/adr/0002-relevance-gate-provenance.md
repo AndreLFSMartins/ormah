@@ -13,7 +13,7 @@ the extractor cannot tell **what the user produced** from **what merely passed t
 We add a gate on the **provenance** axis — **Material** (input restated as knowledge; findable in
 docs/code regardless of this conversation) vs **Product** (a decision, correction, discovered bug,
 complaint, outcome the session itself produced, even about an external tool). See
-[CONTEXT.md](../../CONTEXT.md). The **Extractor** labels every candidate `provenance=material|product`
+[GLOSSARY.md](../../GLOSSARY.md). The **Extractor** labels every candidate `provenance=material|product`
 *inside the same extraction call* (no extra LLM call); a trivial deterministic filter drops `material`
 before write. The gate **errs toward keeping Product**: Material recurs (the same fact re-extracts
 later, so a false drop self-heals), but a Product often happens once and never recurs, so dropping it

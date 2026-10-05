@@ -2,7 +2,7 @@
 
 How the graph is curated *after* nodes exist: what gets linked, merged, flagged as contradictory,
 consolidated, decayed and forgotten. Distinct from the **Ingest** seam, which produces the nodes
-(see [`CONTEXT-MAP.md`](../../../CONTEXT-MAP.md)).
+(see [`GLOSSARY-MAP.md`](../../../GLOSSARY-MAP.md)).
 
 ## Language
 

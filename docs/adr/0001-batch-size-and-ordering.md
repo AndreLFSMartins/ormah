@@ -27,7 +27,7 @@ the test calibrates the point on ormah's own extraction prompt and transcript sh
 ## Consequences
 
 - The flush trigger's **size** dimension is bounded by this sweet spot as a ceiling; **age** (~10 min)
-  and **session boundary** (compaction/end) drive freshness. See [CONTEXT.md](../../CONTEXT.md).
+  and **session boundary** (compaction/end) drive freshness. See [GLOSSARY.md](../../GLOSSARY.md).
 - Prompt assembly is **order-sensitive**: conversation delta first, instructions last (Anthropic's
   long-context guidance reports up to +30% quality from this ordering). A later refactor that reorders
   the extraction prompt must preserve delta-first.
