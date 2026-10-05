@@ -1,4 +1,4 @@
-# Ormah — Context Map
+# Ormah — Glossary Map
 
 This repo has more than one bounded context. Each has its own glossary; terms are **not**
 interchangeable across them (a **Cursor** in Ingest and a **Watermark** in Maintenance are both
@@ -6,15 +6,15 @@ interchangeable across them (a **Cursor** in Ingest and a **Watermark** in Maint
 
 | Context | Glossary | Covers |
 |---|---|---|
-| **Ingest & Extraction** | [`CONTEXT.md`](CONTEXT.md) | Turning conversation transcripts into memory nodes: lanes, cursors, batches, the extractor, the relevance gate. |
-| **Maintenance** | [`src/ormah/background/CONTEXT.md`](src/ormah/background/CONTEXT.md) | Curating the graph *after* nodes exist: linking, dedup/merge, conflict detection, consolidation, decay and forgetting. |
+| **Ingest & Extraction** | [`GLOSSARY.md`](GLOSSARY.md) | Turning conversation transcripts into memory nodes: lanes, cursors, batches, the extractor, the relevance gate. |
+| **Maintenance** | [`src/ormah/background/GLOSSARY.md`](src/ormah/background/GLOSSARY.md) | Curating the graph *after* nodes exist: linking, dedup/merge, conflict detection, consolidation, decay and forgetting. |
 
 Decisions live in [`docs/adr/`](docs/adr/) for both contexts — the series is repo-wide, not
 per-context, and is local-only (never reaches an upstream PR).
 
 ## Why the Ingest glossary stays at the root
 
-The skill's multi-context layout puts each `CONTEXT.md` under `src/<context>/`. Maintenance maps
+The skill's multi-context layout puts each `GLOSSARY.md` under `src/<context>/`. Maintenance maps
 cleanly onto `src/ormah/background/`, so its glossary lives there. Ingest does not map onto one
 directory — it spans the session watcher, the hook lane, the API routes and the extraction prompt —
 so its glossary stays at the repo root rather than being filed under a directory that would
