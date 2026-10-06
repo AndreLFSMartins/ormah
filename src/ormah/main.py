@@ -242,6 +242,7 @@ async def lifespan(app: FastAPI):
     app.state.lifecycle_stop_event = threading.Event()
 
     # Start background scheduler if available
+    tracker = None
     try:
         from ormah.background.scheduler import start_scheduler
 
@@ -249,7 +250,6 @@ async def lifespan(app: FastAPI):
         scheduler, tracker = start_scheduler(engine, stop_event=app.state.lifecycle_stop_event)
         app.state.scheduler = scheduler
         app.state.job_tracker = tracker
-        app.state.maintenance_manager = MaintenanceManager(engine, tracker=tracker)
         logger.info("Background scheduler ready.")
     except Exception as e:
         logger.warning("Background scheduler not started: %s", e)
@@ -271,8 +271,8 @@ async def lifespan(app: FastAPI):
 
         app.state.job_tracker = JobTracker()
 
-    if not hasattr(app.state, "maintenance_manager"):
-        app.state.maintenance_manager = MaintenanceManager(engine)
+    # Always bind this lifespan's engine, including when the scheduler is unavailable.
+    app.state.maintenance_manager = MaintenanceManager(engine, tracker=tracker)
 
     # Start hippocampus file watchers
     try:

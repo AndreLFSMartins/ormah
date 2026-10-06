@@ -7,7 +7,7 @@ import math
 import os
 from pathlib import Path
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from ormah.engine.temporal import parse_locale_codes
@@ -478,6 +478,7 @@ class Settings(BaseSettings):
     claude_maintenance_interval_hours: int = 24  # hours between maintenance runs
     claude_maintenance_batch_size: int = 25  # candidates per type per run
     claude_maintenance_cluster_max_chars: int = 24000  # serialized budget per cluster
+    maintenance_timeout_minutes: int = Field(default=30, gt=0)  # analysis reservation
 
     # Temporal locale packs consulted when parsing a time reference out of a
     # prompt. Declared as a plain ``str`` and parsed by the validator below,
