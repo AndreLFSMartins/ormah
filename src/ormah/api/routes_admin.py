@@ -26,6 +26,8 @@ _TASK_RUNNERS = {
     "importance_scorer": ("ormah.background.importance_scorer", "run_importance_scoring"),
     "consolidator": ("ormah.background.consolidator", "run_consolidation"),
     "memory_backup": ("ormah.backup", "run_auto_backup"),
+    "cloud_backup": ("ormah.cloud.jobs", "run_cloud_backup"),
+    "restore_verification": ("ormah.cloud.jobs", "run_restore_verification"),
 }
 
 _TASK_DESCRIPTIONS = {
@@ -36,9 +38,11 @@ _TASK_DESCRIPTIONS = {
     "auto_linker": "Discovers and creates edges between semantically related memories.",
     "auto_cluster": "Groups memories into clusters based on semantic similarity and tags.",
     "consolidator": "Merges or summarizes redundant working-tier memories into consolidated entries.",
-    "decay_manager": "Applies time-based decay to memory importance, demoting stale unused memories.",
+    "decay_manager": "Demotes working memories to archival when FSRS retrievability falls below threshold.",
     "hippocampus": "Scans for structural patterns and promotes frequently accessed working memories to core.",
     "memory_backup": "Creates a local backup of memory source files when one is due.",
+    "cloud_backup": "Encrypts and uploads a due cloud backup without changing the sync head.",
+    "restore_verification": "Downloads, decrypts, rebuilds, and searches the latest cloud backup.",
 }
 
 # Order for sleep cycle (full maintenance pass)
@@ -89,16 +93,18 @@ def _backup_service_from_request(request: Request):
 
 
 def _persist_backup_settings(backup_dir: Path, retention_count: int) -> None:
-    from ormah.setup import _read_env_file, _write_env_file
+    from ormah.cloud.settings import update_settings_env
 
-    env = _read_env_file()
-    env["ORMAH_BACKUP_DIR"] = str(backup_dir)
-    env["ORMAH_BACKUP_RETENTION_COUNT"] = str(retention_count)
-    _write_env_file(env)
+    update_settings_env(
+        {
+            "ORMAH_BACKUP_DIR": str(backup_dir),
+            "ORMAH_BACKUP_RETENTION_COUNT": str(retention_count),
+        }
+    )
 
 
 @router.get("/health")
-async def health(request: Request):
+def health(request: Request):
     tracker = getattr(request.app.state, "job_tracker", None)
     result: dict = {"status": "ok"}
     if tracker is not None:
@@ -109,14 +115,8 @@ async def health(request: Request):
     return result
 
 
-@router.get("/stats")
-async def stats(request: Request):
-    engine = request.app.state.engine
-    return engine.stats()
-
-
 @router.get("/maintenance-status")
-async def maintenance_status(request: Request):
+def maintenance_status(request: Request):
     manager = getattr(request.app.state, "maintenance_manager", None)
     if manager is None:
         return {"status": "idle"}
@@ -124,14 +124,22 @@ async def maintenance_status(request: Request):
 
 
 @router.get("/backup")
-async def backup_status(request: Request):
+def backup_status(request: Request):
     """Return local backup configuration and latest backup metadata."""
     settings, service = _backup_service_from_request(request)
     return _backup_status_payload(settings, service)
 
 
+@router.get("/cloud-status")
+def cloud_status(request: Request):
+    """Return per-store cloud backup and restore-verification health."""
+    from ormah.cloud.state import cloud_status_payload
+
+    return cloud_status_payload(request.app.state.engine.settings)
+
+
 @router.post("/backup/create")
-async def create_backup(request: Request):
+def create_backup(request: Request):
     """Create a manual local backup of source-of-truth memory files."""
     from ormah.backup import BackupError
 
@@ -148,7 +156,7 @@ async def create_backup(request: Request):
 
 
 @router.post("/backup/settings")
-async def update_backup_settings(body: BackupSettingsUpdate, request: Request):
+def update_backup_settings(body: BackupSettingsUpdate, request: Request):
     """Update local backup settings for this server and persist them to config."""
     from ormah.backup import service_from_settings
 
@@ -169,14 +177,14 @@ async def update_backup_settings(body: BackupSettingsUpdate, request: Request):
 
 
 @router.post("/rebuild")
-async def rebuild_index(request: Request):
+def rebuild_index(request: Request):
     engine = request.app.state.engine
     count = engine.rebuild_index()
     return {"status": "rebuilt", "nodes_indexed": count}
 
 
 @router.get("/tasks")
-async def list_tasks(request: Request):
+def list_tasks(request: Request):
     """List all registered background tasks and their next run time."""
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is None:
@@ -194,7 +202,7 @@ async def list_tasks(request: Request):
 
 
 @router.post("/tasks/{task_id}/pause")
-async def pause_task(task_id: str, request: Request):
+def pause_task(task_id: str, request: Request):
     """Pause a background task by ID."""
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is None:
@@ -207,7 +215,7 @@ async def pause_task(task_id: str, request: Request):
 
 
 @router.post("/tasks/{task_id}/resume")
-async def resume_task(task_id: str, request: Request):
+def resume_task(task_id: str, request: Request):
     """Resume a paused background task by ID."""
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is None:
@@ -220,7 +228,7 @@ async def resume_task(task_id: str, request: Request):
 
 
 @router.post("/tasks/pause-all")
-async def pause_all_tasks(request: Request):
+def pause_all_tasks(request: Request):
     """Pause all background tasks."""
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is None:
@@ -231,7 +239,7 @@ async def pause_all_tasks(request: Request):
 
 
 @router.post("/tasks/resume-all")
-async def resume_all_tasks(request: Request):
+def resume_all_tasks(request: Request):
     """Resume all background tasks."""
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is None:
@@ -242,7 +250,7 @@ async def resume_all_tasks(request: Request):
 
 
 @router.post("/tasks/{task_id}/run")
-async def run_task(task_id: str, request: Request):
+def run_task(task_id: str, request: Request):
     """Manually trigger a background task by ID."""
     engine = request.app.state.engine
 
@@ -264,7 +272,7 @@ async def run_task(task_id: str, request: Request):
 
 
 @router.post("/tasks/run-all")
-async def run_all_tasks(request: Request):
+def run_all_tasks(request: Request):
     """Run all background tasks sequentially in sleep-cycle order."""
     import importlib
 

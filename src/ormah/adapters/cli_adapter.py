@@ -26,7 +26,7 @@ def _api(fn):
     try:
         return fn()
     except httpx.ConnectError:
-        print("Ormah server not running. Start it with: ormah server start", file=sys.stderr)
+        print("Ormah server not running. Start it with: ormah server start -d", file=sys.stderr)
         sys.exit(1)
     except httpx.HTTPStatusError as e:
         print(f"Error: {e.response.status_code} {e.response.text}", file=sys.stderr)
@@ -208,15 +208,20 @@ def cmd_outdated(args):
 def cmd_stats(args):
     def call():
         with _client() as c:
-            r = c.get("/admin/stats")
+            r = c.get("/stats")
             r.raise_for_status()
             data = r.json()
+            usage = data.get("usage", {})
+            store = data.get("store", {})
             if args.json:
                 print(json.dumps(data, indent=2))
             else:
-                total = data.get("total_nodes", 0)
-                edges = data.get("total_edges", 0)
-                by_tier = data.get("by_tier", {})
+                total = store.get("total_nodes", 0)
+                edges = store.get("total_edges", 0)
+                by_tier = store.get("by_tier", {})
+                week = usage.get("whispers_used_this_week", 0)
+                used_total = usage.get("whispers_used_total", 0)
+                print(f"Whispers used: {week} this week  ({used_total} total)")
                 print(f"Memories: {total}  Edges: {edges}")
                 for tier, count in sorted(by_tier.items()):
                     print(f"  {tier}: {count}")
@@ -279,9 +284,27 @@ def cmd_whisper_inject(args):
             r = c.post("/agent/whisper", json=body)
             r.raise_for_status()
             text = r.json().get("text", "")
+    except httpx.ConnectError:
+        warning_key = f"server-down-warning:{session_id or 'unknown'}"
+        cursors = _load_cursors()
+        if not cursors.get(warning_key):
+            cursors[warning_key] = True
+            _save_cursors(cursors)
+            print(json.dumps({
+                "systemMessage": (
+                    "Ormah's backend is unavailable. Automatic memory recall and capture "
+                    "are paused. Run `ormah server start -d` to restore it."
+                )
+            }))
+        sys.exit(0)
     except Exception:
         # Server down, timeout, or any error — exit silently
         sys.exit(0)
+
+    warning_key = f"server-down-warning:{session_id or 'unknown'}"
+    cursors = _load_cursors()
+    if cursors.pop(warning_key, None) is not None:
+        _save_cursors(cursors)
 
     if not text.strip():
         text = ""
@@ -435,23 +458,41 @@ def cmd_whisper_store(args):
     if start_offset >= path.stat().st_size:
         sys.exit(0)
 
-    from ormah.transcript.parser import parse_transcript
+    from ormah.transcript.parser import parse_transcript, should_rewind
 
     try:
         result = parse_transcript(path, start_offset=start_offset)
+        if should_rewind(result, start_offset):
+            # Orphan with NO forward progress: a genuine cursor left mid-response by an
+            # older version — re-parse from the start to recover the dropped tail with its
+            # prompt. With forward progress the orphan is a false positive (ADR-0003,
+            # #149): drop the fragment and advance, or every hook fire re-extracts the
+            # whole transcript.
+            original_offset = start_offset
+            start_offset = 0
+            result = parse_transcript(path, start_offset=0)
+            if result.safe_end_offset <= original_offset:
+                # The rewind made no progress: the "orphan" tail is a still-open in-flight
+                # response, not a recoverable one. ADR-0003: a no-progress transcript
+                # parks, it does not re-extract the closed prefix on every hook fire.
+                sys.exit(0)
     except Exception:
         sys.exit(0)
 
+    # Commit only the closed ("safe") payload — content proven complete by a terminal
+    # stop_reason or a following user turn — and advance the cursor to its boundary. Like
+    # the session watcher, this never splits a multi-record response from its prompt if
+    # the hook fires while a response is still being written.
     min_turns = settings.whisper_out_min_turns
-    if result.user_turn_count < min_turns:
+    if result.safe_user_turn_count < min_turns:
         sys.exit(0)
 
-    if not result.conversation.strip():
+    if not result.safe_conversation.strip():
         sys.exit(0)
 
     space = detect_space_from_dir(cwd) if cwd else None
 
-    body: dict = {"content": result.conversation}
+    body: dict = {"content": result.safe_conversation}
     params: dict = {"extra_tags": "whisper-out"}
     if space:
         params["default_space"] = space
@@ -464,8 +505,9 @@ def cmd_whisper_store(args):
         # Server down, timeout, or any error — exit silently, never block compaction
         sys.exit(0)
 
-    # Update cursor only after successful extraction
-    cursors[cursor_key] = result.end_offset
+    # Update cursor only after successful extraction, to the closed boundary so a
+    # still-in-flight trailing response is re-read (with its prompt) on the next run.
+    cursors[cursor_key] = result.safe_end_offset
     _save_cursors(cursors)
 
     sys.exit(0)

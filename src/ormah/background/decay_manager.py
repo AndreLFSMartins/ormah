@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import logging
-import math
 from datetime import datetime, timezone
 
+from ormah import lifecycle
+from ormah.background.memory_lock import serialized_memory_job
 from ormah.models.node import Tier, UpdateNodeRequest
 
 logger = logging.getLogger(__name__)
 
 
+@serialized_memory_job
 def run_decay(engine) -> None:
-    """Auto-demote working nodes whose FSRS retrievability drops below threshold."""
+    """Auto-demote working nodes whose FSRS retrievability drops below threshold.
+
+    Retrievability alone decides (#222/#191). Importance is deliberately not a
+    pre-gate: cumulative access and edge counts could push it permanently above
+    any threshold, pinning a stale node to working forever. Identity (the self
+    node) and core stay protected — core never enters this query.
+    """
     try:
         settings = engine.settings
         now = datetime.now(timezone.utc)
@@ -24,7 +32,7 @@ def run_decay(engine) -> None:
             )
 
         rows = engine.db.conn.execute(
-            "SELECT id, importance, stability, last_review, last_accessed "
+            "SELECT id, stability, last_review, last_accessed "
             "FROM nodes WHERE tier = 'working'"
         ).fetchall()
 
@@ -32,27 +40,37 @@ def run_decay(engine) -> None:
             return
 
         user_node_id = getattr(engine, "user_node_id", None)
-        importance_threshold = settings.decay_importance_threshold
         r_threshold = settings.fsrs_decay_threshold
 
         demoted = 0
         for row in rows:
             if row["id"] == user_node_id:
                 continue
-            # Skip high-importance nodes
-            node_importance = row["importance"] if row["importance"] is not None else 0.5
-            if node_importance >= importance_threshold:
-                continue
 
-            # Compute FSRS retrievability
-            stability = row["stability"] if row["stability"] else 1.0
-            anchor_str = row["last_review"] or row["last_accessed"]
+            # Compute FSRS retrievability through the shared implementation (#221).
+            # Anchor on use, not on the numeric stability update: the per-day
+            # reinforcement cooldown can leave last_review a full window behind
+            # the last use, and an actively used node must not read as stale.
+            anchor_str = row["last_accessed"] or row["last_review"]
             try:
                 anchor = datetime.fromisoformat(anchor_str)
+                days_since = max((now - anchor).total_seconds() / 86400, 0.001)
             except (ValueError, TypeError):
+                logger.warning(
+                    "Decay manager skipped node %s with invalid recency anchor %r",
+                    row["id"][:8],
+                    anchor_str,
+                )
                 continue
-            days_since = max((now - anchor).total_seconds() / 86400, 0.001)
-            retrievability = math.exp(-days_since / stability)
+            # Pass the stored stability raw and let lifecycle own the zero case,
+            # with the SAME fallback reinforcement uses. Hardcoding 1.0 here
+            # while reinforcement falls back to fsrs_initial_stability is how
+            # the two paths silently disagree (council round 3, I3).
+            retrievability = lifecycle.retrievability(
+                days_since,
+                row["stability"],
+                fallback_stability=settings.fsrs_initial_stability,
+            )
 
             if retrievability >= r_threshold:
                 continue

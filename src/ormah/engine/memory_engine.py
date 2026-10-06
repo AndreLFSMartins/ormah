@@ -4,21 +4,27 @@ from __future__ import annotations
 
 import json
 import hashlib
+from collections.abc import Callable
+from contextlib import contextmanager
+from functools import wraps
 import logging
-import math
 import re
+import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ormah import lifecycle
 from ormah.config import Settings
+from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
 from ormah.engine.maintenance_signal import (
-    MAINTENANCE_DUE_SIGNAL,
     is_maintenance_due_signal,
+    maintenance_due_signal,
 )
 from ormah.engine.tier_manager import TierManager
+from ormah.engine.whisper_health import compute_whisper_health
 from ormah.engine.traversal import (
     format_node_with_neighbors,
     format_search_results,
@@ -36,13 +42,24 @@ from ormah.models.node import (
     Tier,
     UpdateNodeRequest,
 )
-from ormah.store.file_store import FileStore
+from ormah.store.file_store import FileStore, UnresolvedNodeReference
+from ormah.text.tokens import STOP_WORDS
 
 logger = logging.getLogger(__name__)
 
 # Edge type factors for spreading activation scoring.
 # Higher factor = tighter structural link = more activation propagated.
 _EMBEDDING_SCHEMA_VERSION = 2
+
+# Issue #220: the only feedback sources that count as confirmed use. Fail-closed —
+# anything not listed here, and every negative signal, does not reinforce.
+# auto_heuristic is excluded pending #218 signal calibration.
+_CONFIRMED_USE_SOURCES = frozenset({"explicit", "implicit", "auto_llm_judge"})
+
+# Lifecycle-model version. 1 = the legacy FSRS seed (previously recorded as the
+# boolean meta key 'fsrs_migrated'); 2 = bounded reinforcement (#221). An integer
+# so a future curve migration can tell which model produced the stored values.
+LIFECYCLE_MODEL_VERSION = 2
 
 
 def _generate_title(content: str, max_chars: int = 60) -> str:
@@ -54,13 +71,6 @@ def _generate_title(content: str, max_chars: int = 60) -> str:
     # Truncate at last word boundary within max_chars
     truncated = first_line[:max_chars].rsplit(" ", 1)[0]
     return truncated + "…" if truncated else first_line[:max_chars]
-
-
-def _embedding_text(title: str | None, content: str, max_content_chars: int = 512) -> str:
-    """Build text for embedding. Truncates content to avoid topic averaging in long docs."""
-    prefix = title or ""
-    truncated = content[:max_content_chars]
-    return f"{prefix} {truncated}".strip()
 
 
 # Edge type factors for spreading activation scoring.
@@ -77,17 +87,28 @@ _EDGE_TYPE_FACTORS: dict[str, float] = {
 }
 
 
+def _serialized_memory_operation(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._memory_operation_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
 class MemoryEngine:
     """Main facade: remember(), recall(), connect(), context()."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.file_store = FileStore(settings.nodes_dir)
+        self.maintenance_is_active: Callable[[], bool] | None = None
+        self._memory_operation_lock = threading.RLock()
+        self.file_store = FileStore(settings.nodes_dir, self._memory_operation_lock)
         self.db = Database(settings.db_path)
         self.db.init_schema()
         self.db.init_vec_table(settings.embedding_dim)
 
-        self.graph = GraphIndex(self.db.conn)
+        self.graph = GraphIndex(self.db)
         self.builder = IndexBuilder(self.db, self.file_store)
         self.tier_manager = TierManager(settings.core_memory_cap)
         self.context_builder = ContextBuilder(self.graph, engine=self)
@@ -96,6 +117,7 @@ class MemoryEngine:
 
         # Lazy-loaded components
         self._hybrid_search = None
+        self._hybrid_search_lock = threading.Lock()
         self._whisper_reranker_available = False
 
     def startup(self) -> None:
@@ -147,13 +169,75 @@ class MemoryEngine:
         self._warmup_reranker()
 
     def _migrate_fsrs(self) -> None:
-        """Seed FSRS stability from access_count on first run, updating both DB and markdown."""
-        fsrs_migrated = self.db.conn.execute(
-            "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
-        ).fetchone()
-        if fsrs_migrated:
+        """Seed FSRS stability once, and record the store's lifecycle-model version."""
+        version = self._lifecycle_model_version()
+        if version >= LIFECYCLE_MODEL_VERSION:
             return
 
+        if version == 0:
+            self._seed_stability_from_access_count()
+
+        with self.db.transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES "
+                "('lifecycle_model_version', ?)",
+                (str(LIFECYCLE_MODEL_VERSION),),
+            )
+            # Keep the legacy flag in sync so rolling back to a binary that only
+            # knows 'fsrs_migrated' does not reseed a store built under #221.
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
+            )
+
+    def _lifecycle_model_version(self) -> int:
+        """Read the store's lifecycle-model version, upgrading the legacy flag.
+
+        Stores written before #221 only carry the boolean 'fsrs_migrated' key,
+        which could say migrated/not-migrated and nothing else; it maps to
+        version 1.
+
+        An ambiguous signal fails closed at 1 (already migrated), because the
+        only action version 0 unlocks is a destructive one: the seed overwrites
+        stability and rewrites the Markdown. Skipping a needed seed leaves
+        defaults in place; running an unneeded one destroys real values. Only
+        the total absence of any signal — no version key, no legacy flag, and
+        no node carrying last_review — returns 0.
+
+        #223 deliberately does not bump this. The version records which
+        reinforcement model wrote a store's stability values; #223 changes a
+        creation default and adds a column, not the model. A bump would not
+        help either way — this is a store-level flag, and a real store spans
+        both eras of nodes.
+        """
+        row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'lifecycle_model_version'"
+        ).fetchone()
+        if row:
+            try:
+                return int(row["value"])
+            except (TypeError, ValueError):
+                return 1
+
+        legacy = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'fsrs_migrated'"
+        ).fetchone()
+        if legacy:
+            return 1
+
+        # No meta at all. SQLite is derived and excluded from backups
+        # (backup.py:331-334), so this is also what a fresh-device restore or a
+        # deleted index looks like — not only a genuinely pre-FSRS store. Ask
+        # the durable source instead: last_review lives in the Markdown
+        # frontmatter (markdown.py:72-73) and is restored on rebuild
+        # (builder.py:161), so any store that ever seeded or reinforced carries
+        # it. Seeding over that would overwrite stability the user actually earned.
+        reviewed = self.db.conn.execute(
+            "SELECT 1 FROM nodes WHERE last_review IS NOT NULL LIMIT 1"
+        ).fetchone()
+        return 1 if reviewed else 0
+
+    def _seed_stability_from_access_count(self) -> None:
+        """Seed FSRS stability from access_count, updating both DB and markdown."""
         rows = self.db.conn.execute(
             "SELECT id, access_count, last_accessed FROM nodes"
         ).fetchall()
@@ -181,9 +265,6 @@ class MemoryEngine:
                             pass
                     self.file_store.save(node)
 
-            conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('fsrs_migrated', '1')"
-            )
         logger.info("FSRS data migration complete: seeded %d nodes from access_count", len(rows))
 
     def _seed_initial_maintenance_grace_period(self) -> None:
@@ -278,6 +359,11 @@ class MemoryEngine:
                             node = self.file_store.load(nid)
                             if node and node.tier == Tier.core and node.type != NodeType.person:
                                 node.tier = Tier.working
+                                # Tier change is a content mutation; the one-time
+                                # completion flag means it never reruns, so an
+                                # unstamped save could lose permanently to a stale
+                                # remote copy under LWW sync.
+                                node.touch_updated()
                                 self.file_store.save(node)
                         logger.info("Migrated %d identity nodes from core to working tier", demoted)
 
@@ -315,6 +401,28 @@ class MemoryEngine:
                     )
                     linked += 1
 
+                # Persist repaired edges to the self node's markdown too — the
+                # edges table is derived and wiped on full_rebuild, and the
+                # completion flag means this repair never reruns.
+                if linked:
+                    self_node = self.file_store.load(self.user_node_id)
+                    if self_node:
+                        existing_targets = {c.target for c in self_node.connections}
+                        added_md = 0
+                        for row in orphaned:
+                            if row["id"] not in existing_targets:
+                                self_node.connections.append(
+                                    Connection(
+                                        target=row["id"],
+                                        edge=EdgeType.defines,
+                                        weight=1.0,
+                                    )
+                                )
+                                added_md += 1
+                        if added_md:
+                            self_node.touch_updated()
+                            self.file_store.save(self_node)
+
                 # Also demote any remaining core preferences (missed by phase 1
                 # because they had no defines edge at that time)
                 demoted = conn.execute(
@@ -343,6 +451,7 @@ class MemoryEngine:
                         node = self.file_store.load(row["id"])
                         if node and node.tier == Tier.core:
                             node.tier = Tier.working
+                            node.touch_updated()
                             self.file_store.save(node)
 
                 if linked:
@@ -369,7 +478,13 @@ class MemoryEngine:
             logger.warning("Embedding model warmup failed: %s", e)
 
     def _warmup_reranker(self) -> None:
-        """Mark whisper reranker availability up front instead of failing per prompt."""
+        """Download/load the whisper reranker before the server becomes ready.
+
+        Model provisioning must not depend on first-run agent onboarding: desktop upgrades can
+        legitimately reuse an existing onboarding marker on a machine whose model cache is empty.
+        A download failure still degrades to conservative embedding-only whisper so local memory
+        remains usable offline.
+        """
         if not self.settings.whisper_reranker_enabled:
             logger.info("Whisper reranker disabled in settings.")
             self._whisper_reranker_available = False
@@ -387,14 +502,11 @@ class MemoryEngine:
                 cache_dir,
             )
             if not model_is_cached(model_name):
-                logger.warning(
-                    "Whisper reranker is enabled but model %s is not cached in %s. "
-                    "Whisper will run without reranking until the model is preloaded.",
+                logger.info(
+                    "Whisper reranker model %s is not cached in %s; downloading...",
                     model_name,
                     cache_dir,
                 )
-                self._whisper_reranker_available = False
-                return
 
             logger.info("Loading whisper reranker...")
             preload_model(model_name)
@@ -407,11 +519,48 @@ class MemoryEngine:
             )
             self._whisper_reranker_available = False
 
+    def _refresh_whisper_reranker_if_cached(self) -> bool:
+        """Load the whisper reranker if setup cached it after server startup.
+
+        The desktop app starts the server before the user clicks "Connect".
+        That setup path can download the reranker after startup, so a one-time
+        startup check is not enough. This method never downloads: it only
+        notices an already-cached model and loads it into the process cache.
+        """
+        if not self.settings.whisper_reranker_enabled:
+            return False
+        if self._whisper_reranker_available:
+            return True
+
+        try:
+            from ormah.embeddings.reranker import model_is_cached, preload_model
+
+            model_name = self.settings.whisper_reranker_model
+            if not model_is_cached(model_name):
+                return False
+
+            logger.info("Whisper reranker found on disk after startup; loading...")
+            preload_model(model_name)
+            self._whisper_reranker_available = True
+            logger.info("Whisper reranker ready.")
+            return True
+        except Exception as e:
+            logger.warning("Whisper reranker refresh failed: %s", e)
+            return False
+
     def shutdown(self) -> None:
         self.db.close()
 
     # --- Core operations ---
 
+    @contextmanager
+    def memory_operation(self):
+        """Exclude a live graph mutation while a full restore is swapping files."""
+
+        with self._memory_operation_lock:
+            yield
+
+    @_serialized_memory_operation
     def remember(self, req: CreateNodeRequest, agent_id: str | None = None) -> tuple[str, str]:
         """Store a new memory. Returns (node_id, formatted_text)."""
         title = req.title
@@ -428,6 +577,7 @@ class MemoryEngine:
             title=title,
             content=req.content,
             confidence=req.confidence,
+            stability=self.settings.fsrs_initial_stability,
         )
 
         # Mark and promote identity nodes
@@ -487,44 +637,74 @@ class MemoryEngine:
         *,
         session_id: str | None = None,
         space: str | None = None,
-    ) -> None:
+        surface: str,
+    ) -> dict[str, int]:
         """Log surfaced memories so submit_feedback can learn from them later."""
         if not node_scores:
-            return
+            return {}
 
         unique_scores: dict[str, float] = {}
         for candidate_node_id, score in node_scores:
             if candidate_node_id and candidate_node_id not in unique_scores:
                 unique_scores[candidate_node_id] = float(score)
         if not unique_scores:
-            return
+            return {}
 
         prompt_hash = hashlib.sha256(prompt_text.encode()).hexdigest()
         prompt_vec_blob = self._encode_feedback_prompt_vec(prompt_text)
         now_iso = datetime.now(timezone.utc).isoformat()
-        with self.db.transaction() as conn:
-            for candidate_node_id, score in unique_scores.items():
-                conn.execute(
-                    """
-                    INSERT INTO whisper_log
-                        (
-                            session_id, space, prompt_hash, prompt_text, prompt_vec,
-                            node_id, score, was_injected, logged_at
-                        )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session_id or "",
-                        space,
-                        prompt_hash,
-                        prompt_text,
-                        prompt_vec_blob,
-                        candidate_node_id,
-                        score,
-                        1,
-                        now_iso,
-                    ),
+        inserted: dict[str, int] = {}
+        try:
+            with self.db.transaction() as conn:
+                retrieval_event_id = self.db.insert_retrieval_event(
+                    conn,
+                    surface=surface,
+                    session_id=session_id or "",
+                    space=space,
+                    prompt_hash=prompt_hash,
+                    prompt_text=prompt_text,
+                    prompt_vec=prompt_vec_blob,
+                    logged_at=now_iso,
                 )
+                for candidate_node_id, score in unique_scores.items():
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO whisper_log
+                            (
+                                session_id, space, prompt_hash, prompt_text, prompt_vec,
+                                node_id, score, was_injected, logged_at, retrieval_event_id
+                            )
+                        VALUES (?, ?, ?, NULL, X'', ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id or "",
+                            space,
+                            prompt_hash,
+                            candidate_node_id,
+                            score,
+                            1,
+                            now_iso,
+                            retrieval_event_id,
+                        ),
+                    )
+                    inserted[candidate_node_id] = int(cursor.lastrowid)
+        except Exception as e:
+            logger.warning("feedback candidate logging failed: %s", e)
+            return {}
+        return inserted
+
+    def _attach_feedback_log_ids(
+        self, results: list[dict[str, Any]], whisper_log_ids: dict[str, int],
+    ) -> list[dict[str, Any]]:
+        if not whisper_log_ids:
+            return results
+        annotated = []
+        for result in results:
+            node_id = result.get("node", {}).get("id")
+            if node_id in whisper_log_ids:
+                result = {**result, "_whisper_log_id": whisper_log_ids[node_id]}
+            annotated.append(result)
+        return annotated
 
     def recall_node(self, node_id: str, session_id: str | None = None) -> str | None:
         """Get a specific node with its neighbors, formatted as text."""
@@ -534,68 +714,155 @@ class MemoryEngine:
 
         resolved_node_id = node["id"]
 
-        # Touch access
-        self._touch_access(resolved_node_id)
-
         edges = self.graph.get_edges_for(resolved_node_id)
         neighbors = self.graph.get_neighbors(resolved_node_id, depth=1)
-        self._log_feedback_candidates(
+        whisper_log_ids = self._log_feedback_candidates(
             f"recall_node:{resolved_node_id}",
             [(resolved_node_id, 1.0)] + [
                 (neighbor["id"], 0.5) for neighbor in neighbors if neighbor.get("id")
             ],
             session_id=session_id,
             space=node.get("space"),
+            surface="recall_node",
         )
-        return format_node_with_neighbors(node, edges, neighbors)
 
-    # Stop words for detecting "pure temporal" queries (no topical signal).
-    _STOP_WORDS = frozenset({
-        "what", "did", "we", "do", "i", "you", "the", "a", "is", "are",
-        "was", "were", "have", "has", "had", "been", "be", "will", "would",
-        "could", "should", "can", "may", "might", "shall", "on", "in", "at",
-        "to", "for", "of", "with", "by", "from", "up", "about", "into",
-        "through", "during", "before", "after", "above", "below", "between",
-        "out", "off", "over", "under", "again", "further", "then", "once",
-        "here", "there", "when", "where", "why", "how", "all", "each",
-        "every", "both", "few", "more", "most", "other", "some", "such",
-        "no", "not", "only", "own", "same", "so", "than", "too", "very",
-        "just", "because", "as", "until", "while", "and", "but", "or",
-        "nor", "if", "that", "which", "who", "whom", "this", "these",
-        "those", "am", "an", "any", "work", "worked", "working",
-        "me", "my", "our", "us", "show", "tell", "give", "get",
+        # Record confirmed use: this is a deliberate single-node fetch.
+        #
+        # Issue #220: claim this node's own event first. _log_feedback_candidates
+        # above created a whisper_log row for it and the formatter hands that id to
+        # the agent, whose instructions say to submit_feedback(+1) with it when the
+        # memory is drawn on. Without the claim, that feedback finds the event
+        # unclaimed and reinforces a second time — one fetch counting twice, on the
+        # most deliberate surface there is. Claiming here makes the later feedback a
+        # no-op and leaves this reinforcement untouched.
+        #
+        # The claim result gates the mutator, and is not merely taken. The row above
+        # is committed by _log_feedback_candidates before this transaction opens, so
+        # in that window a concurrent submit_feedback using the no-whisper_log_id
+        # fallback resolves the same newest row and can claim it first. Reinforcing
+        # regardless would make one fetch count twice — the exact invariant the claim
+        # exists to hold. A lost claim means the winner already reinforced.
+        #
+        # No claim, no reinforcement: reinforcement fires on the claim, never on the
+        # request. When _log_feedback_candidates fails it returns {}, leaving no event
+        # to latch on, and an unlatched reinforcement here would be the request-driven
+        # path this issue removes.
+        #
+        # The mutator stays outside the transaction: it does file I/O, and with
+        # @_serialized_memory_operation calling it inside would take db_lock before
+        # memory_lock, inverting the order every serialized writer uses.
+        target_log_id = whisper_log_ids.get(resolved_node_id)
+        claimed = False
+        if target_log_id is not None:
+            with self.db.transaction() as conn:
+                claimed = self._claim_confirmed_use(
+                    conn,
+                    target_log_id,
+                    resolved_node_id,
+                    signal=1,
+                    source="explicit",
+                )
+        if claimed:
+            # Isolated, and never propagated — the same contract submit_feedback and the
+            # session watcher already implement. The claim is committed and the fetch has
+            # already succeeded, so raising here would cost the agent its answer over a
+            # lifecycle write. At-most-once means the claim stays taken and this
+            # reinforcement is simply a logged miss; a retry would only log a second event.
+            try:
+                self._record_confirmed_use(resolved_node_id)
+            except Exception:
+                logger.exception(
+                    "confirmed-use reinforcement failed for node %s", resolved_node_id
+                )
+        node_for_format = dict(node)
+        if resolved_node_id in whisper_log_ids:
+            node_for_format["_whisper_log_id"] = whisper_log_ids[resolved_node_id]
+        neighbors_for_format = []
+        for neighbor in neighbors:
+            formatted_neighbor = dict(neighbor)
+            neighbor_id = formatted_neighbor.get("id")
+            if neighbor_id in whisper_log_ids:
+                formatted_neighbor["_whisper_log_id"] = whisper_log_ids[neighbor_id]
+            neighbors_for_format.append(formatted_neighbor)
+        return format_node_with_neighbors(node_for_format, edges, neighbors_for_format)
+
+    # Additional command-like words for detecting "pure temporal" queries.
+    _STOP_WORDS = STOP_WORDS | frozenset({
+        "after", "again", "above", "below", "between", "during", "further",
+        "get", "give", "here", "me", "once", "only", "out", "over", "own", "same",
+        "show", "tell", "then", "through", "under", "until", "up", "us",
+        "while", "work", "worked", "working",
     })
 
     def recall_search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
-        touch_access: bool = True, **filters,
+        *, min_relevance: float | None = None,
+        auto_temporal: bool = True, spread_activation: bool = True,
+        query_vec: Any | None = None, **filters,
     ) -> list[dict]:
         """Search memories and return structured results (list of dicts).
 
         Same logic as recall_search but returns raw dicts instead of formatted text.
         Used by the UI and any consumer that needs structured data.
 
-        When *touch_access* is False, access_count and last_accessed are not
-        updated — useful for context loading that shouldn't inflate access stats.
+        *min_relevance* overrides the deliberate-recall floor
+        (settings.recall_min_relevance_score). Whisper passes 0.0: it needs
+        the raw candidate pool because it applies its own floors and an
+        absolute-signal gate downstream.
         """
-        # Auto-extract temporal filters from query when none provided
-        if not filters.get("created_after") and not filters.get("created_before"):
-            from ormah.engine.prompt_classifier import (
-                extract_time_params, has_temporal_phrases, strip_temporal_phrases,
-            )
-            if has_temporal_phrases(query):
-                time_params = extract_time_params(query)
+        # Auto-extract temporal filters from query when none provided. Typed
+        # applicability searches disable this: a standing rule remains relevant
+        # even when the action mentions yesterday or last week.
+        if (
+            auto_temporal
+            and not filters.get("created_after")
+            and not filters.get("created_before")
+        ):
+            from ormah.engine.prompt_classifier import parser_for
+
+            parser = parser_for(self.settings.temporal_locale_codes)
+            if parser.has_temporal_phrases(query):
+                time_params = parser.extract_time_params(query)
                 filters.update(time_params)
-                query = strip_temporal_phrases(query)
+                stripped_query = parser.strip_temporal_phrases(query)
+                if stripped_query != query:
+                    # A supplied vector belongs to the caller's original
+                    # query. Once temporal preprocessing changes that query,
+                    # HybridSearch must encode the effective text itself.
+                    query_vec = None
+                query = stripped_query
 
         explicit_spaces = filters.get("spaces")
 
         search = self._get_hybrid_search()
         if search is not None:
-            results = search.search(query, limit=limit, **filters)
+            # Fetch a wider pool so the space penalty decides what SURVIVES,
+            # not just the order of whatever fit in `limit` — a current-space
+            # match at raw rank 11 can now outlive a penalized cross-space hit.
+            results = search.search(
+                query,
+                limit=limit * 3,
+                query_vec=query_vec,
+                **filters,
+            )
             if default_space and not explicit_spaces:
                 results = self._apply_space_scores(results, default_space)
 
+            # Relevance floor: return fewer results rather than padding to
+            # `limit` with cross-space noise. Recency-vouched supplements
+            # (source="temporal") are exempt — their base score is not
+            # semantic by design. Graph-activated neighbours
+            # (source="activated"/"conflict") also bypass this floor: they are
+            # added by _spread_activation *after* the cut below, so a
+            # graph-vouched node may sit below the relevance floor by design.
+            floor = (
+                min_relevance if min_relevance is not None
+                else self.settings.recall_min_relevance_score
+            )
+            results = [
+                r for r in results
+                if r.get("score", 0) >= floor or r.get("source") == "temporal"
+            ]
             results = results[:limit]
 
             # Detect pure temporal queries (no topical signal after stripping)
@@ -612,17 +879,17 @@ class MemoryEngine:
                     results = self._supplement_temporal(
                         results if not is_pure_temporal else [],
                         limit, created_after, created_before, filters,
+                        default_space=default_space,
                     )
 
-            results = self._spread_activation(results, limit)
-            if touch_access:
-                for r in results:
-                    if r.get("source") not in ("activated", "conflict"):
-                        self._touch_access(r["node"]["id"])
+            if spread_activation:
+                results = self._spread_activation(results, limit)
             return results
 
         # Fallback to FTS only
-        fts_results = self.graph.fts_search(query, limit=limit)
+        # Wider pool so space scores decide survival (no relevance floor
+        # here: raw FTS scores are negated BM25, not on a [0,1] scale).
+        fts_results = self.graph.fts_search(query, limit=limit * 3)
         created_after = filters.get("created_after")
         created_before = filters.get("created_before")
         enriched = []
@@ -644,15 +911,30 @@ class MemoryEngine:
         if created_after and len(enriched) < limit:
             enriched = self._supplement_temporal(
                 enriched, limit, created_after, created_before, filters,
+                default_space=default_space,
             )
 
-        enriched = self._spread_activation(enriched, limit)
-        if touch_access:
-            for r in enriched:
-                if r.get("source") not in ("activated", "conflict"):
-                    self._touch_access(r["node"]["id"])
+        if spread_activation:
+            enriched = self._spread_activation(enriched, limit)
 
         return enriched
+
+    def has_searchable_preferences(self) -> bool:
+        """Return whether the applicability channel has any eligible nodes."""
+        row = self.db.conn.execute(
+            """
+            SELECT 1
+            FROM nodes
+            WHERE type = 'preference'
+              AND tier IN ('core', 'working')
+              AND (
+                  valid_until IS NULL
+                  OR valid_until > strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+              )
+            LIMIT 1
+            """
+        ).fetchone()
+        return row is not None
 
     def recall_search(
         self,
@@ -672,22 +954,29 @@ class MemoryEngine:
         query_for_log = query
         # Auto-extract temporal filters from query when none provided
         if not filters.get("created_after") and not filters.get("created_before"):
-            from ormah.engine.prompt_classifier import (
-                extract_time_params, has_temporal_phrases, strip_temporal_phrases,
-            )
-            if has_temporal_phrases(query):
-                time_params = extract_time_params(query)
+            from ormah.engine.prompt_classifier import parser_for
+
+            parser = parser_for(self.settings.temporal_locale_codes)
+            if parser.has_temporal_phrases(query):
+                time_params = parser.extract_time_params(query)
                 filters.update(time_params)
-                query = strip_temporal_phrases(query)
+                query = parser.strip_temporal_phrases(query)
 
         explicit_spaces = filters.get("spaces")
 
         search = self._get_hybrid_search()
         if search is not None:
-            results = search.search(query, limit=limit, **filters)
+            # Wider pool + space scores + relevance floor, then cut — see
+            # recall_search_structured for rationale.
+            results = search.search(query, limit=limit * 3, **filters)
             if default_space and not explicit_spaces:
                 results = self._apply_space_scores(results, default_space)
 
+            floor = self.settings.recall_min_relevance_score
+            results = [
+                r for r in results
+                if r.get("score", 0) >= floor or r.get("source") == "temporal"
+            ]
             results = results[:limit]
 
             # Detect pure temporal queries
@@ -701,13 +990,11 @@ class MemoryEngine:
                     results = self._supplement_temporal(
                         results if not is_pure_temporal else [],
                         limit, created_after, created_before, filters,
+                        default_space=default_space,
                     )
 
             results = self._spread_activation(results, limit)
-            for r in results:
-                if r.get("source") not in ("activated", "conflict"):
-                    self._touch_access(r["node"]["id"])
-            self._log_feedback_candidates(
+            whisper_log_ids = self._log_feedback_candidates(
                 query_for_log,
                 [
                     (r["node"]["id"], r.get("score", 0.0))
@@ -716,11 +1003,15 @@ class MemoryEngine:
                 ],
                 session_id=session_id,
                 space=default_space,
+                surface="recall_search",
             )
+            results = self._attach_feedback_log_ids(results, whisper_log_ids)
             return format_search_results(results)
 
         # Fallback to FTS only
-        fts_results = self.graph.fts_search(query, limit=limit)
+        # Wider pool so space scores decide survival (no relevance floor
+        # here: raw FTS scores are negated BM25, not on a [0,1] scale).
+        fts_results = self.graph.fts_search(query, limit=limit * 3)
         created_after = filters.get("created_after")
         created_before = filters.get("created_before")
         enriched = []
@@ -742,13 +1033,11 @@ class MemoryEngine:
         if created_after and len(enriched) < limit:
             enriched = self._supplement_temporal(
                 enriched, limit, created_after, created_before, filters,
+                default_space=default_space,
             )
 
         enriched = self._spread_activation(enriched, limit)
-        for r in enriched:
-            if r.get("source") not in ("activated", "conflict"):
-                self._touch_access(r["node"]["id"])
-        self._log_feedback_candidates(
+        whisper_log_ids = self._log_feedback_candidates(
             query_for_log,
             [
                 (r["node"]["id"], r.get("score", 0.0))
@@ -757,10 +1046,13 @@ class MemoryEngine:
             ],
             session_id=session_id,
             space=default_space,
+            surface="recall_search",
         )
 
+        enriched = self._attach_feedback_log_ids(enriched, whisper_log_ids)
         return format_search_results(enriched)
 
+    @_serialized_memory_operation
     def update_node(self, node_id: str, req: UpdateNodeRequest) -> str | None:
         """Update a memory node. Returns formatted confirmation or None."""
         node = self.file_store.load(node_id)
@@ -794,7 +1086,12 @@ class MemoryEngine:
             node.connections.extend(req.add_connections)
             changed_fields.append("connections")
 
-        node.updated = datetime.now(timezone.utc)
+        # No-op guard: a request that changed nothing must not advance
+        # `updated`, or it could beat a real remote edit under LWW sync.
+        if node.model_dump(mode="json") == old_snapshot:
+            return f"Updated [{node.type.value}]: {node.title or node.content[:80]}\nID: {node.id}"
+
+        node.touch_updated()
         path = self.file_store.save(node)
         self.builder.index_single(path)
         self._index_embedding(node)
@@ -817,24 +1114,36 @@ class MemoryEngine:
 
         return f"Updated [{node.type.value}]: {node.title or node.content[:80]}\nID: {node.id}"
 
+    @_serialized_memory_operation
     def delete_node(self, node_id: str) -> str | None:
         """Delete a memory node from disk and index. Returns confirmation or None."""
-        if node_id == self.user_node_id:
-            return "Cannot delete the user self node."
-
-        # Load full node from disk for audit snapshot
-        full_node = self.file_store.load(node_id)
+        # Load full node from disk for audit snapshot. Only a confirmed absence may
+        # fall back to the index: an ambiguous Short id or an unparseable file is not
+        # one, and the index lookup would pick a row the store could not vouch for.
+        try:
+            full_node = self.file_store.resolve(node_id)
+        except UnresolvedNodeReference as exc:
+            return f"Cannot delete {node_id}: {exc} Nothing was deleted."
         if full_node is None:
-            # Fall back to graph index to check existence
+            # Fall back to graph index to check existence. Exact Full id only:
+            # `get_node` answers a prefix with one arbitrary row of many, and the store
+            # has just confirmed that no file holds this reference.
             node = self.graph.get_node(node_id)
-            if node is None:
+            if node is None or node["id"] != node_id:
                 return None
             title = node.get("title") or node.get("content", "")[:60]
             snapshot = json.dumps(node)
+            node_type = node.get("type", "unknown")
+            node_id = node["id"]
         else:
             title = full_node.title or full_node.content[:60]
             snapshot = json.dumps(full_node.model_dump(mode="json"))
-            node = self.graph.get_node(node_id)
+            node_type = full_node.type.value
+            node_id = full_node.id  # the caller may have passed a Short id
+
+        # After resolution, so a Short id cannot slip past it.
+        if node_id == self.user_node_id:
+            return "Cannot delete the user self node."
 
         # Audit log before deletion
         self._write_audit_log(
@@ -854,9 +1163,9 @@ class MemoryEngine:
         # Soft-delete from disk (move to deleted/ directory)
         self.file_store.soft_delete(node_id)
 
-        node_type = full_node.type.value if full_node else node.get("type", "unknown") if node else "unknown"
         return f"Deleted [{node_type}]: {title}\nID: {node_id}"
 
+    @_serialized_memory_operation
     def connect(self, req: ConnectRequest) -> str:
         """Create an edge between two nodes."""
         # Verify both nodes exist
@@ -888,6 +1197,7 @@ class MemoryEngine:
             source_node.connections.append(
                 Connection(target=req.target_id, edge=req.edge, weight=req.weight)
             )
+            source_node.touch_updated()
             self.file_store.save(source_node)
 
         return f"Connected {req.source_id[:8]}... →[{req.edge.value}]→ {req.target_id[:8]}..."
@@ -902,36 +1212,54 @@ class MemoryEngine:
     ) -> str | tuple[str, list[str]]:
         """Get compact whisper context for involuntary recall injection."""
         onboarding = self._maybe_get_onboarding_nudge(space=space)
+
+        # Reranker unavailable (model still downloading on a fresh install,
+        # or load failed): degrade to embedding-only whisper with a raised
+        # (cosine-scale) gate instead of going dark. The raised gate keeps
+        # degraded mode more conservative, never noisier.
         if self.settings.whisper_reranker_enabled and not self._whisper_reranker_available:
-            logger.error(
-                "Whisper reranker is required but unavailable; returning empty whisper context. "
-                "prompt=%r session_id=%r",
+            self._refresh_whisper_reranker_if_cached()
+        reranker_active = (
+            self.settings.whisper_reranker_enabled and self._whisper_reranker_available
+        )
+        if self.settings.whisper_reranker_enabled and not reranker_active:
+            logger.warning(
+                "Whisper reranker unavailable (model not yet loaded?); degrading to "
+                "embedding-only whisper with raised gate. prompt=%r session_id=%r",
                 prompt[:80],
                 session_id,
             )
-            maintenance_due = "" if onboarding else self._maybe_get_maintenance_due_signal()
-            text = "\n\n".join(
-                section for section in (maintenance_due, onboarding) if section
-            )
-            if _return_debug:
-                return text, []
-            return text
 
         result = self.context_builder.build_whisper_context(
             prompt=prompt,
             space=space,
+            user_node_id=self.user_node_id,
             max_nodes=self.settings.whisper_max_nodes,
             min_score=self.settings.whisper_min_relevance_score,
-            reranker_enabled=(
-                self.settings.whisper_reranker_enabled
-                and self._whisper_reranker_available
-            ),
+            candidate_pool_multiplier=self.settings.whisper_candidate_pool_multiplier,
+            injected_content_max_chars=self.settings.whisper_injected_content_max_chars,
+            reranker_enabled=reranker_active,
             reranker_model=self.settings.whisper_reranker_model,
             reranker_min_score=self.settings.whisper_reranker_min_score,
             reranker_blend_alpha=self.settings.whisper_reranker_blend_alpha,
             reranker_max_doc_chars=self.settings.whisper_reranker_max_doc_chars,
             recent_prompts=recent_prompts,
-            injection_gate=self.settings.whisper_injection_gate,
+            # Without the reranker the gate cuts raw_cosine, a weaker
+            # absolute signal — use the higher cosine-scale gate.
+            injection_gate=(
+                self.settings.whisper_injection_gate
+                if reranker_active
+                else self.settings.whisper_injection_gate_no_reranker
+            ),
+            no_overlap_ce_floor=self.settings.whisper_no_overlap_ce_floor,
+            no_overlap_cosine_floor=self.settings.whisper_no_overlap_cosine_floor,
+            preference_applicability_enabled=(
+                self.settings.whisper_preference_applicability_enabled
+            ),
+            preference_applicability_gate=(
+                self.settings.whisper_preference_applicability_gate
+            ),
+            preference_max_nodes=self.settings.whisper_preference_max_nodes,
             topic_shift_enabled=self.settings.whisper_topic_shift_enabled,
             topic_shift_threshold=self.settings.whisper_topic_shift_threshold,
             session_id=session_id,
@@ -950,33 +1278,14 @@ class MemoryEngine:
         return f"{result.rstrip()}\n\n{onboarding}" if result else onboarding
 
     def _maybe_get_maintenance_due_signal(self) -> str:
-        if not getattr(self.settings, "claude_maintenance_enabled", False):
-            return ""
-
-        interval_hours = getattr(self.settings, "claude_maintenance_interval_hours", 24)
-        try:
-            row = self.graph.conn.execute(
-                "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
-            ).fetchone()
-            last_run = row[0] if row else None
-            if not last_run:
-                return MAINTENANCE_DUE_SIGNAL
-
-            parsed_last_run = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-            if parsed_last_run.tzinfo is None:
-                parsed_last_run = parsed_last_run.replace(tzinfo=timezone.utc)
-            elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
-            if elapsed.total_seconds() > interval_hours * 3600:
-                return MAINTENANCE_DUE_SIGNAL
-        except Exception as e:
-            logger.warning("Failed to compute maintenance_due: %s", e)
-        return ""
+        return maintenance_due_signal(self, self.graph.conn)
 
     @staticmethod
     def _strip_maintenance_due_signal(text: str) -> str:
         lines = [line for line in text.splitlines() if not is_maintenance_due_signal(line)]
         return "\n".join(lines).rstrip()
 
+    @_serialized_memory_operation
     def mark_outdated(self, node_id: str, reason: str | None = None) -> str | None:
         """Mark a memory as outdated: set valid_until to now, optionally append reason."""
         node = self.file_store.load(node_id)
@@ -989,7 +1298,7 @@ class MemoryEngine:
         node.valid_until = datetime.now(timezone.utc)
         if reason:
             node.content = node.content.rstrip() + f"\n\n[Outdated: {reason}]"
-        node.updated = datetime.now(timezone.utc)
+        node.touch_updated()
 
         path = self.file_store.save(node)
         self.builder.index_single(path)
@@ -1013,6 +1322,25 @@ class MemoryEngine:
         """Full rebuild of the index from markdown files, including embeddings."""
         count = self.builder.full_rebuild()
         self._reindex_all_embeddings()
+        return count
+
+    @_serialized_memory_operation
+    def reload_restored_graph(self) -> int:
+        """Reload file, identity, and search state after a full memory restore."""
+
+        self.file_store = FileStore(self.settings.nodes_dir, self._memory_operation_lock)
+        self.builder = IndexBuilder(self.db, self.file_store)
+        with self._hybrid_search_lock:
+            self._hybrid_search = None
+        count = self.rebuild_index()
+
+        row = self.db.conn.execute(
+            "SELECT value FROM meta WHERE key = 'user_node_id'"
+        ).fetchone()
+        user_node_id = row["value"] if row is not None else None
+        if user_node_id is not None and self.file_store.load(user_node_id) is None:
+            raise RuntimeError("The restored Self pointer does not exist in the restored graph.")
+        self.user_node_id = user_node_id
         return count
 
     def _reindex_all_embeddings(self) -> None:
@@ -1069,19 +1397,113 @@ class MemoryEngine:
         except Exception as e:
             logger.warning("Failed to reindex embeddings: %s", e)
 
-    def stats(self) -> dict:
-        """Get memory store statistics."""
+    def _usage_stats(
+        self,
+        now: datetime,
+        days: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return tray-facing usage counters and their window metadata."""
+        conn = self.db.conn
+        if days is None:
+            window_days = now.weekday() + 1  # days elapsed in this calendar week
+            cutoff = (now - timedelta(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).isoformat()
+            window_kind = "calendar_week"
+        else:
+            window_days = days
+            cutoff = (now - timedelta(days=days)).isoformat()
+            window_kind = "rolling"
+
+        used_key = "session_id || '|' || prompt_hash || '|' || logged_at"
+        whispers_total = conn.execute(
+            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log WHERE was_injected = 1"
+        ).fetchone()[0]
+        whispers_window = conn.execute(
+            f"SELECT COUNT(DISTINCT {used_key}) FROM whisper_log "
+            "WHERE was_injected = 1 AND logged_at >= ?",
+            (cutoff,),
+        ).fetchone()[0]
+
+        # Exclude system-seeded bootstrap nodes (e.g. the "Self" node) so a
+        # fresh install honestly reads zero memories in the tray.
+        not_system = "source NOT LIKE 'system:%'"
+        memories_total = conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {not_system}"
+        ).fetchone()[0]
+        memories_window = conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {not_system} AND created >= ?", (cutoff,)
+        ).fetchone()[0]
+
+        usage = {
+            "whispers_used_this_week": whispers_window,
+            "whispers_used_total": whispers_total,
+            "memories_this_week": memories_window,
+            "memories_total": memories_total,
+        }
+        window = {
+            "kind": window_kind,
+            "days": window_days,
+            "cutoff": cutoff,
+        }
+        return usage, window
+
+    def _whisper_decision_stats(self, cutoff: str, window_days: int) -> dict[str, Any]:
+        """Return whisper outcome aggregates from whisper_decisions.
+
+        ``whisper_decisions`` records exactly one row per whisper call,
+        including silent outcomes, so silence_rate and injection_rate partition
+        all prompts in the selected stats window.
+        """
+        rows = self.db.conn.execute(
+            "SELECT outcome, COUNT(*) AS n FROM whisper_decisions "
+            "WHERE logged_at >= ? GROUP BY outcome",
+            (cutoff,),
+        ).fetchall()
+        breakdown = {row["outcome"]: row["n"] for row in rows}
+        total = sum(breakdown.values())
+        injected = breakdown.get("injected", 0)
+
+        return {
+            "window_days": window_days,
+            "prompts_total": total,
+            "injection_rate": injected / total if total else None,
+            "silence_rate": (total - injected) / total if total else None,
+            "outcome_breakdown": breakdown,
+        }
+
+    def stats(self, days: int | None = None) -> dict[str, Any]:
+        """Return the canonical stats payload for tray, CLI, UI, and diagnostics."""
+        now = datetime.now(timezone.utc)
         tier_counts = self.graph.count_by_tier()
         total = sum(tier_counts.values())
         edge_count = self.db.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
-        return {
+        store = {
             "total_nodes": total,
             "by_tier": tier_counts,
             "total_edges": edge_count,
         }
+        usage, window = self._usage_stats(now, days=days)
+        whisper_health = compute_whisper_health(self.db.conn, now)
+        whisper_decisions = self._whisper_decision_stats(
+            cutoff=window["cutoff"],
+            window_days=window["days"],
+        )
+
+        return {
+            "generated_at": now.isoformat(),
+            "window": window,
+            "usage": usage,
+            "store": store,
+            "whisper": {
+                "feedback_health": whisper_health,
+                "decisions": whisper_decisions,
+            },
+        }
 
     # --- Merge operations ---
 
+    @_serialized_memory_operation
     def execute_merge(
         self,
         node_id_a: str,
@@ -1111,6 +1533,14 @@ class MemoryEngine:
         if merged_title is not None:
             kept.title = merged_title
 
+        # If the keeper was itself marked superseded by the node it is now absorbing,
+        # the marker has nothing left to point at: redirecting it would write
+        # kept.superseded_by == kept.id, a marker that always resolves live and buries
+        # the node forever. Absorbing the replacement means nothing supersedes it (#223).
+        # Cleared before save/index_single so markdown and the row agree from the start.
+        if kept.superseded_by == removed.id:
+            kept.superseded_by = None
+
         # Snapshot removed node before deletion
         snapshot = removed.model_dump(mode="json")
 
@@ -1121,6 +1551,32 @@ class MemoryEngine:
             (removed.id, removed.id),
         ).fetchall()
         original_edges = [dict(r) for r in edge_rows]
+
+        # Second discovery route for the supersession redirect below, because the
+        # first one reads the index while the promotion gate reads the file, and the
+        # two can diverge: _mark_superseded saves the markdown first and writes the row
+        # second, so a crash in between leaves a marker only in the file. The
+        # consolidator writes the derived_from edge BEFORE calling _mark_superseded, so
+        # inside that window the edge is already there and names the source.
+        #
+        # derived_from on its own proves nothing — it is a general relationship, which
+        # is exactly why #223 narrowed the promotion gate off it. The marker in the file
+        # stays the criterion; the edge only says which files are worth opening, which
+        # keeps this bounded to the consolidation cluster instead of scanning the store.
+        # Read before the transaction: file I/O must not run holding the write lock.
+        marked_in_markdown: set[str] = set()
+        for edge in original_edges:
+            if edge["edge_type"] != EdgeType.derived_from.value:
+                continue
+            if edge["source_id"] != removed.id:
+                continue
+            # Full-id check: FileStore resolves ids through an eight-character filename
+            # prefix and can hand back an unrelated colliding node (#280).
+            candidate = self.file_store.load(edge["target_id"])
+            if candidate is None or candidate.id != edge["target_id"]:
+                continue
+            if candidate.superseded_by == removed.id:
+                marked_in_markdown.add(candidate.id)
 
         # Capture incoming edges for the kept node that aren't in its markdown.
         # index_single calls _remove_node which wipes ALL edges (including
@@ -1140,7 +1596,7 @@ class MemoryEngine:
         # Save kept node, re-index, re-embed
         # NOTE: index_single calls _remove_node internally which wipes edges,
         # so we must remap edges and restore incoming edges AFTER this step.
-        kept.updated = datetime.now(timezone.utc)
+        kept.touch_updated()
         path = self.file_store.save(kept)
         self.builder.index_single(path)
         self._index_embedding(kept)
@@ -1194,6 +1650,32 @@ class MemoryEngine:
                          edge["weight"], edge["created"]),
                     )
 
+            # Consolidation sources marked superseded_by the removed node must follow
+            # it into the keeper. The marker is what blocks their automatic promotion,
+            # and after this merge the keeper is what represents them; left pointing at
+            # the soft-deleted node it reads as dangling, and the next confirmed use
+            # promotes a source back into the whisper-eligible tier (#223, PR #257).
+            #
+            # Union of both routes: the index, and the files named by the derived_from
+            # edges read above. A source found only by the second route has a row whose
+            # marker never landed, so the per-id UPDATE heals that row as it redirects.
+            # The keeper is excluded — its own marker was already cleared above.
+            redirected_sources = sorted(
+                {
+                    r["id"]
+                    for r in conn.execute(
+                        "SELECT id FROM nodes WHERE superseded_by = ?", (removed.id,)
+                    ).fetchall()
+                }
+                | marked_in_markdown
+                - {kept.id}
+            )
+            for source_id in redirected_sources:
+                conn.execute(
+                    "UPDATE nodes SET superseded_by = ? WHERE id = ?",
+                    (kept.id, source_id),
+                )
+
             # Clean up auto-linker checked pairs:
             # - removed node: delete all (node is gone)
             # - kept node: invalidate if content changed (merged_content applied)
@@ -1224,8 +1706,6 @@ class MemoryEngine:
                 ),
             )
 
-        self.file_store.soft_delete(removed.id)
-
         # Update markdown files: rewrite connections from removed→kept
         for node_id in affected_node_ids:
             neighbor = self.file_store.load(node_id)
@@ -1237,15 +1717,40 @@ class MemoryEngine:
                     c.target = kept.id
                     updated = True
             if updated:
+                neighbor.touch_updated()
                 self.file_store.save(neighbor)
+
+        # Markdown side of the supersession redirect: the promotion gate reads the
+        # file, so the row alone is not enough. `updated` advances — unlike
+        # _mark_superseded, nothing else in this path stamps it, and the marker feeds
+        # LWW sync: a stale remote copy would otherwise win and restore the dead pointer.
+        for node_id in redirected_sources:
+            source = self.file_store.load(node_id)
+            # Full-id check: FileStore resolves ids through an eight-character filename
+            # prefix and can hand back an unrelated colliding node (#280).
+            if source is None or source.id != node_id:
+                continue
+            source.superseded_by = kept.id
+            source.touch_updated()
+            self.file_store.save(source)
 
         # Also fix the kept node's own connections that pointed to removed
         reload_kept = self.file_store.load(kept.id)
         if reload_kept:
-            reload_kept.connections = [
-                c for c in reload_kept.connections if c.target != removed.id
-            ]
-            self.file_store.save(reload_kept)
+            pruned = [c for c in reload_kept.connections if c.target != removed.id]
+            if len(pruned) != len(reload_kept.connections):
+                reload_kept.connections = pruned
+                reload_kept.touch_updated()
+                self.file_store.save(reload_kept)
+
+        # Delete the old replacement last. The promotion gate reads superseded_by
+        # from source markdown, not from the index: deleting the removed node before
+        # the redirects above creates a crash window where the row points at the
+        # keeper but the file still points at the now-missing node, so confirmed use
+        # promotes the source even though the keeper represents it. While the
+        # removed node remains live, either the old or new marker safely blocks
+        # promotion.
+        self.file_store.soft_delete(removed.id)
 
         kept_title = kept.title or kept.content[:60]
         removed_title = removed.title or removed.content[:60]
@@ -1255,6 +1760,7 @@ class MemoryEngine:
             f"Merge ID: {merge_id[:8]}"
         )
 
+    @_serialized_memory_operation
     def undo_merge(self, merge_id: str) -> str:
         """Rollback a merge by ID (supports prefix match). Returns confirmation."""
         # Support prefix match
@@ -1273,6 +1779,10 @@ class MemoryEngine:
         # Reconstruct removed node from snapshot
         snapshot = json.loads(row["removed_node_snapshot"])
         node = MemoryNode.model_validate(snapshot)
+        # Restoration is a new mutation event: stamping `updated` lets the live
+        # node outrank the tombstone left in deleted/ during sync merges.
+        node.deleted_at = None
+        node.touch_updated()
         path = self.file_store.save(node)
         self.builder.index_single(path)
         self._index_embedding(node)
@@ -1373,7 +1883,8 @@ class MemoryEngine:
         batches of candidates (link, conflict, merge, consolidation clusters)
         plus a summary string.  Batch sizes are capped: up to *limit_per_batch*
         pairs for link/conflict/merge (default from settings), up to 4 clusters
-        of max 5 nodes each for consolidation.
+        for consolidation (max nodes per cluster from
+        ``settings.consolidation_max_cluster_nodes``).
         """
         from ormah.background.auto_linker import _find_link_candidates
         from ormah.background.conflict_detector import _find_conflict_candidates
@@ -1426,6 +1937,7 @@ class MemoryEngine:
             "summary": summary,
         }
 
+    @_serialized_memory_operation
     def apply_maintenance_results(self, results: dict) -> dict:
         """Apply Claude's maintenance decisions.
 
@@ -1590,22 +2102,101 @@ class MemoryEngine:
             self_node.connections.append(
                 Connection(target=node.id, edge=EdgeType.defines, weight=1.0)
             )
+            self_node.touch_updated()
             self.file_store.save(self_node)
 
-    def _touch_access(self, node_id: str) -> None:
-        """Update access stats and FSRS stability on both disk and DB."""
+    @_serialized_memory_operation
+    def _record_confirmed_use(self, node_id: str) -> None:
+        """Record confirmed use, updating stability only when it is off cooldown.
+
+        Serialized because the cooldown is a check-then-write pair (#221,
+        council round 3): the recall paths that call this are not themselves
+        serialized, so two concurrent recalls would both read a stale
+        last_review and both bump stability. _memory_operation_lock is an
+        RLock, so the call sites that already hold it re-enter safely.
+
+        Lock order: this decorator acquires the memory lock before the body
+        opens db.transaction(), i.e. memory-lock -> db-lock. The inverse order
+        (db-lock -> memory-lock, via file_store calls inside a transaction)
+        exists in _seed_stability_from_access_count, _migrate_identity_tiers,
+        and _ensure_self_node, but all three run only from startup() before the
+        server serves, so the two orders never interleave today. Invariant this
+        depends on: never call file_store inside db.transaction() outside
+        startup().
+        """
         node = self.file_store.load(node_id)
         if node is None:
             return
         now = datetime.now(timezone.utc)
 
-        # FSRS stability update
-        review_anchor = node.last_review or node.last_accessed
-        days_since = max((now - review_anchor).total_seconds() / 86400, 0.001)
-        retrievability = math.exp(-days_since / node.stability)
-        new_stability = node.stability * self.settings.fsrs_stability_growth * (retrievability ** -0.2)
-        node.stability = round(min(new_stability, self.settings.fsrs_max_stability), 2)
-        node.last_review = now
+        # One numeric stability update per node per cooldown window (#221): the
+        # old formula let ten same-session touches compound to ~57x. last_accessed
+        # below still advances on every call, and Task 4 repoints decay and
+        # importance at it, so a node in active use never reads as stale even
+        # though last_review now lags by up to one cooldown window.
+        if lifecycle.reinforcement_due(
+            node.last_review, now, self.settings.fsrs_reinforcement_cooldown_days
+        ):
+            # reinforcement cooldown can leave last_review a full window behind
+            # a use that already landed inside it (PR #239 review comment):
+            # last_accessed is the actual spacing signal, last_review only gates.
+            anchor = node.last_accessed or node.last_review
+            days_since = max((now - anchor).total_seconds() / 86400, 0.0)
+            node.stability = lifecycle.reinforced_stability(
+                node.stability,
+                days_since,
+                growth_factor=self.settings.fsrs_growth_factor,
+                growth_exponent=self.settings.fsrs_growth_exponent,
+                spacing_cap=self.settings.fsrs_spacing_cap,
+                max_stability=self.settings.fsrs_max_stability,
+                initial_stability=self.settings.fsrs_initial_stability,
+            )
+            node.last_review = now
+
+        # Reversible promotion (#223, decided in #191). Deliberately AFTER the
+        # cooldown block: the bounded update runs on the OLD stability first, then
+        # the floor lifts the result. The floor also runs when the cooldown blocked
+        # the numeric update — otherwise a second confirmed use in one day promotes
+        # with S=1, buying a ~29 h lease that the next decay run immediately revokes.
+        # promotion_floor is max() against a constant, so running it on every
+        # promotion cannot push stability past one initial lease.
+        #
+        # superseded_by blocks ONLY consolidation sources. A generic derived_from
+        # target promotes, which is the narrowing #191 asked for over the originally
+        # proposed blanket exclusion.
+        #
+        # And it blocks only while the consolidation node it points at still exists:
+        # a dangling marker (the replacement was deleted — the #192 scenario) would
+        # otherwise bury this memory forever with nothing left standing in for it, so
+        # the next confirmed use un-buries it. The marker itself is NOT cleared —
+        # it is the provenance record, and only the block is lifted. The extra load
+        # is cheap and rare: it runs only for an archival node that carries a marker.
+        #
+        # The id is compared in full, not merely tested for None: FileStore resolves
+        # an id through the eight-character prefix in the filename and returns the
+        # first match without re-checking what it loaded (#280), so a deleted
+        # replacement whose prefix collides with an unrelated node comes back as that
+        # node. `is not None` would read that as live and bury this memory forever.
+        promoted = False
+        if node.tier is Tier.archival:
+            replacement = (
+                self.file_store.load(node.superseded_by)
+                if node.superseded_by is not None
+                else None
+            )
+            superseded_by_live = (
+                replacement is not None and replacement.id == node.superseded_by
+            )
+            if not superseded_by_live:
+                node.stability = lifecycle.promotion_floor(
+                    node.stability, self.settings.fsrs_initial_stability
+                )
+                # Goes through TierManager.promote(), not `node.tier = ...`: this gives
+                # #223's root cause its first production caller and brings the tier-ordering
+                # guard along. promote() calls touch_updated(), so `updated` advances — that
+                # is correct, the tier genuinely changed, and `updated` feeds LWW sync; not
+                # advancing it would let a stale remote copy win and silently re-archive.
+                promoted = self.tier_manager.promote(node, Tier.working)
 
         # Standard access tracking
         node.last_accessed = now
@@ -1614,8 +2205,50 @@ class MemoryEngine:
         self.file_store.save(node)
         with self.db.transaction() as conn:
             conn.execute(
-                "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, last_review = ? WHERE id = ?",
-                (node.access_count, node.last_accessed.isoformat(), node.stability, node.last_review.isoformat(), node_id),
+                "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, "
+                "last_review = ?, tier = ?, updated = ? WHERE id = ?",
+                (
+                    node.access_count,
+                    node.last_accessed.isoformat(),
+                    node.stability,
+                    node.last_review.isoformat() if node.last_review else None,
+                    node.tier.value,
+                    node.updated.isoformat(),
+                    node_id,
+                ),
+            )
+
+        if promoted:
+            # After the transaction: _write_audit_log opens its own, so it cannot
+            # sit inside. Same position update_node places its own audit call.
+            self._write_audit_log(
+                operation="promote",
+                node_id=node_id,
+                detail=json.dumps({"from": "archival", "to": "working"}),
+            )
+
+    @_serialized_memory_operation
+    def _mark_superseded(self, source_id: str, consolidation_id: str) -> None:
+        """Record that *source_id* was replaced by *consolidation_id* (#223).
+
+        Written here rather than through update_node because superseded_by is
+        deliberately absent from UpdateNodeRequest: it is policy state, and no
+        agent sets it. Serialized for the same reason _record_confirmed_use is —
+        this is a load-modify-save pair.
+
+        `updated` is intentionally NOT advanced here: the consolidator's
+        update_node(tier=archival) on the next line already does it, and
+        touch_updated is reserved for content mutations.
+        """
+        node = self.file_store.load(source_id)
+        if node is None:
+            return
+        node.superseded_by = consolidation_id
+        self.file_store.save(node)
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE nodes SET superseded_by = ? WHERE id = ?",
+                (consolidation_id, source_id),
             )
 
     # --- Private helpers ---
@@ -1627,12 +2260,22 @@ class MemoryEngine:
         created_after: str,
         created_before: str | None,
         filters: dict,
+        default_space: str | None = None,
     ) -> list[dict]:
         """Supplement results with SQL-based recent nodes when temporal filters are active.
 
         Fetches nodes directly by ``created`` column, deduplicates against
         existing results, applies type/tier/space filters, and appends to
         the result list up to *limit*.
+
+        Supplements are ordered by (space priority, recency) so temporal
+        recall honours the same current/global/other-space prioritization
+        applied to semantic results (see ``_apply_space_scores``): a newer
+        other-project node cannot outrank an older current-project one. The
+        base score stays a low placeholder (exempt from the relevance floor)
+        — this is prioritization, not scoring — and each result carries a
+        ``_space_factor`` so downstream re-sorts (e.g. whisper's temporal
+        recency sort) keep the same space priority.
         """
         existing_ids = {r["node"]["id"] for r in results}
         needed = limit - len(results)
@@ -1647,10 +2290,11 @@ class MemoryEngine:
         tiers_filter = filters.get("tiers")
         spaces_filter = filters.get("spaces")
 
-        added = 0
+        boost_global = self.settings.space_boost_global
+        boost_other = self.settings.space_boost_other
+
+        candidates: list[tuple[float, dict]] = []
         for node in recent:
-            if added >= needed:
-                break
             if node["id"] in existing_ids:
                 continue
             if types_filter and node["type"] not in types_filter:
@@ -1659,10 +2303,29 @@ class MemoryEngine:
                 continue
             if spaces_filter and node.get("space") not in spaces_filter:
                 continue
-            existing_ids.add(node["id"])
-            # Use a low base score so these don't outrank relevance-matched results
-            results.append({"node": node, "score": 0.001, "source": "temporal"})
-            added += 1
+            space = node.get("space")
+            if not default_space or space == default_space:
+                factor = 1.0
+            elif space is None:
+                factor = boost_global
+            else:
+                factor = boost_other
+            candidates.append((factor, node))
+
+        # Space priority first, recency second: an older current-space node
+        # outranks a newer other-space one.
+        candidates.sort(
+            key=lambda c: (c[0], c[1].get("created") or ""), reverse=True
+        )
+
+        for factor, node in candidates[:needed]:
+            # Low base score so these don't outrank relevance-matched results
+            # and stay exempt from the relevance floor; _space_factor carries
+            # the space prioritization into any downstream re-sort.
+            results.append({
+                "node": node, "score": 0.001, "source": "temporal",
+                "_space_factor": factor,
+            })
 
         return results
 
@@ -1687,6 +2350,10 @@ class MemoryEngine:
                 factor = boost_global
             else:
                 factor = boost_other
+            # Record the factor so the whisper injection gate can re-apply
+            # cross-space demotion to the absolute gate signal (which, unlike
+            # the blended score mutated here, carries no space penalty).
+            r["_space_factor"] = factor
             r["score"] = r.get("score", 0.0) * factor
 
         results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
@@ -1719,7 +2386,8 @@ class MemoryEngine:
         for seed in seeds:
             seed_node = seed["node"] if "node" in seed else seed
             seed_id = seed_node["id"]
-            seed_score = seed.get("score", 1.0)
+            _s = seed.get("score")
+            seed_score = _s if _s is not None else 1.0
 
             edges = self.graph.get_edges_for(seed_id)
 
@@ -1733,7 +2401,8 @@ class MemoryEngine:
                     continue
 
                 edge_type = edge["edge_type"]
-                edge_weight = edge.get("weight", 0.5)
+                _w = edge.get("weight")
+                edge_weight = _w if _w is not None else 0.5
                 type_factor = _EDGE_TYPE_FACTORS.get(edge_type, 0.5)
                 score = seed_score * edge_weight * type_factor * decay
                 candidates.append((neighbor_id, score, edge_type))
@@ -1763,20 +2432,26 @@ class MemoryEngine:
 
         # Merge direct + activated results, sort by score descending
         merged = results + activated_results
-        merged.sort(key=lambda x: x.get("score", 0), reverse=True)
+        merged.sort(key=lambda x: (x.get("score") or 0), reverse=True)
 
         return merged[:limit]
 
     def _get_hybrid_search(self):
+        # Double-checked locking: recall now runs in the Starlette threadpool (#19),
+        # so a lock-free check-then-set let concurrent first-hits each construct a
+        # HybridSearch (#27). The fast path stays lock-free once warmed.
         if self._hybrid_search is not None:
             return self._hybrid_search
-        try:
-            from ormah.embeddings.hybrid_search import HybridSearch
+        with self._hybrid_search_lock:
+            if self._hybrid_search is not None:
+                return self._hybrid_search
+            try:
+                from ormah.embeddings.hybrid_search import HybridSearch
 
-            self._hybrid_search = HybridSearch(self.db, self.settings)
-            return self._hybrid_search
-        except ImportError:
-            return None
+                self._hybrid_search = HybridSearch(self.db, self.settings)
+                return self._hybrid_search
+            except ImportError:
+                return None
 
     def _index_embedding(self, node: MemoryNode) -> None:
         try:
@@ -1857,6 +2532,7 @@ class MemoryEngine:
                             Connection(target=match_id, edge=EdgeType.related_to,
                                        weight=round(similarity, 2))
                         )
+                node.touch_updated()
                 self.file_store.save(node)  # persist auto-linked connections
 
             return links
@@ -1885,6 +2561,7 @@ class MemoryEngine:
 
     # --- Conversation ingestion ---
 
+    @_serialized_memory_operation
     def ingest_conversation(
         self,
         content: str,
@@ -2020,7 +2697,7 @@ class MemoryEngine:
             SELECT node_id
             FROM whisper_log
             WHERE node_id = ?
-            ORDER BY logged_at DESC
+            ORDER BY logged_at DESC, id DESC
             LIMIT 1
             """,
             (node_id,),
@@ -2049,45 +2726,247 @@ class MemoryEngine:
             return None, f"Ambiguous node ID prefix {node_id}; matched {matched}"
         return matches[0]["node_id"], None
 
-    def submit_feedback(self, node_id: str, signal: int, source: str = "explicit") -> str:
-        """Record explicit or implicit feedback signal for a whisper candidate.
+    def _load_feedback_whisper_log_row(
+        self,
+        node_id: str,
+        whisper_log_id: int | None,
+    ) -> tuple[str | None, Any | None, str | None]:
+        if whisper_log_id is not None:
+            row = self.db.conn.execute(
+                """
+                SELECT
+                    wl.id, wl.node_id,
+                    COALESCE(re.prompt_vec, wl.prompt_vec) AS prompt_vec,
+                    COALESCE(re.prompt_text, wl.prompt_text) AS prompt_text,
+                    COALESCE(re.prompt_hash, wl.prompt_hash) AS prompt_hash,
+                    COALESCE(re.session_id, wl.session_id) AS session_id,
+                    COALESCE(re.space, wl.space) AS space
+                FROM whisper_log wl
+                LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id
+                WHERE wl.id = ?
+                """,
+                (whisper_log_id,),
+            ).fetchone()
+            if row is None:
+                return None, None, f"No whisper_log entry found for whisper_log_id {whisper_log_id}"
+            resolved_node_id = row["node_id"]
+            if not node_id or (
+                node_id != resolved_node_id and not resolved_node_id.startswith(node_id)
+            ):
+                return (
+                    None,
+                    None,
+                    f"whisper_log_id {whisper_log_id} belongs to node "
+                    f"{resolved_node_id[:8]}..., not {node_id}",
+                )
+            return resolved_node_id, row, None
 
-        Looks up the most recent whisper_log entry for *node_id*, inserts an
-        affinity row, and (for explicit feedback) marks any open review_log
-        entry as answered.
-        """
         resolved_node_id, error = self._resolve_feedback_node_id(node_id)
         if error is not None:
-            return error
+            return None, None, error
 
         row = self.db.conn.execute(
             """
-            SELECT prompt_vec, prompt_text, session_id, space
-            FROM whisper_log
-            WHERE node_id = ?
-            ORDER BY logged_at DESC
+            SELECT
+                wl.id, wl.node_id,
+                COALESCE(re.prompt_vec, wl.prompt_vec) AS prompt_vec,
+                COALESCE(re.prompt_text, wl.prompt_text) AS prompt_text,
+                COALESCE(re.prompt_hash, wl.prompt_hash) AS prompt_hash,
+                COALESCE(re.session_id, wl.session_id) AS session_id,
+                COALESCE(re.space, wl.space) AS space
+            FROM whisper_log wl
+            LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id
+            WHERE wl.node_id = ?
+            ORDER BY wl.logged_at DESC, wl.id DESC
             LIMIT 1
             """,
             (resolved_node_id,),
         ).fetchone()
 
         if row is None:
-            return f"No whisper_log entry found for node {node_id}"
+            return None, None, f"No whisper_log entry found for node {node_id}"
+        return resolved_node_id, row, None
+
+    def _claim_confirmed_use(
+        self,
+        conn,
+        whisper_log_id: int | None,
+        node_id: str,
+        *,
+        signal: int,
+        source: str,
+    ) -> bool:
+        """Take the at-most-once confirmed-use claim for one (event, node) pair.
+
+        Returns True only for the caller that actually inserts the claim, so a
+        whisper event reinforces at most once no matter how many qualified
+        positives arrive, from how many sources, in what order.
+
+        The claim is a durable monotonic latch, deliberately independent of
+        affinity and signals. affinity is mutable — explicit feedback UPDATEs the
+        single row per (node_id, whisper_log_id) — so deriving confirmation from
+        it makes a +1/-1/+1 cycle confirm twice, and makes a pre-existing
+        auto_heuristic row swallow a later qualified positive. The signals unique
+        key omits polarity and is never updated, so deriving it from there makes
+        -1 followed by +1 never confirm at all.
+
+        Fail-closed: an unqualified signal, a source outside the allowlist, a
+        missing whisper_log_id, or an event that was never injected claims
+        nothing. was_injected = 1 is the provenance test: only a memory the
+        agent actually saw can have been used. Historical held-back events have
+        was_injected = 0, so feedback on them can be relevance evidence but is
+        never use. The other two callers already satisfy this —
+        _log_feedback_candidates hardcodes was_injected = 1 and the session
+        watcher filters on it — so the condition costs them nothing.
+
+        Enforced in SQL rather than by the caller so a future fourth caller
+        cannot reopen the hole. changes() returns 0 both for a non-injected
+        event and for an already-taken claim; both mean "do not reinforce".
+
+        MUST be called inside the caller's transaction. Claiming after the
+        mutator instead would let two concurrent confirmations both pass and
+        both reinforce; @_serialized_memory_operation keeps the read-modify-write
+        correct but cannot enforce once-per-event.
+        """
+        if whisper_log_id is None or signal != 1 or source not in _CONFIRMED_USE_SOURCES:
+            return False
+        conn.execute(
+            """
+            INSERT INTO confirmed_use_claims (whisper_log_id, node_id, claimed_at)
+            SELECT wl.id, ?, datetime('now')
+            FROM whisper_log wl
+            WHERE wl.id = ? AND wl.was_injected = 1
+            ON CONFLICT DO NOTHING
+            """,
+            (node_id, whisper_log_id),
+        )
+        return conn.execute("SELECT changes()").fetchone()[0] == 1
+
+    def submit_feedback(
+        self,
+        node_id: str,
+        signal: int,
+        source: str = "explicit",
+        whisper_log_id: int | None = None,
+    ) -> str:
+        """Record feedback while preventing retention from deleting its event."""
+        with self.db.transaction():
+            resolved_node_id, became_confirmed, message = self._submit_feedback_locked(
+                node_id=node_id,
+                signal=signal,
+                source=source,
+                whisper_log_id=whisper_log_id,
+            )
+        # Reinforcement runs after the transaction commits: db.transaction() holds a
+        # process-level lock for its whole body, and _record_confirmed_use does file
+        # I/O. Calling it inside would also take db_lock before memory_lock, inverting
+        # the order every serialized writer uses.
+        #
+        # Isolated, and never propagated. The affinity and signals rows are already
+        # durably committed and the route returns this value straight to the caller,
+        # so raising here would report a failure for evidence that was recorded. The
+        # contract is at-most-once: the claim stays taken and
+        # this reinforcement is simply lost, as a logged miss.
+        if became_confirmed:
+            try:
+                self._record_confirmed_use(resolved_node_id)
+            except Exception:
+                logger.exception(
+                    "confirmed-use reinforcement failed for node %s", resolved_node_id
+                )
+        return message
+
+    def _submit_feedback_locked(
+        self,
+        node_id: str,
+        signal: int,
+        source: str = "explicit",
+        whisper_log_id: int | None = None,
+    ) -> tuple[str | None, bool, str]:
+        """Record explicit or implicit feedback signal for a whisper candidate.
+
+        When *whisper_log_id* is supplied, feedback attaches to that exact
+        whisper/recall event after verifying the event belongs to *node_id*.
+        Without it, Ormah keeps the legacy compatibility fallback of using the
+        most recent whisper_log row for the resolved node ID. That fallback is
+        not exact and callers should pass whisper_log_id whenever it is shown.
+        """
+        resolved_node_id, row, error = self._load_feedback_whisper_log_row(
+            node_id, whisper_log_id,
+        )
+        if error is not None:
+            return None, False, error
+        assert resolved_node_id is not None
+        assert row is not None
 
         prompt_vec = row["prompt_vec"]
         prompt_text = row["prompt_text"]
+        prompt_hash = row["prompt_hash"]
         session_id = row["session_id"]
         space = row["space"]
+        whisper_log_id = row["id"]
 
         with self.db.transaction() as conn:
+            became_confirmed = self._claim_confirmed_use(
+                conn,
+                whisper_log_id,
+                resolved_node_id,
+                signal=signal,
+                source=source,
+            )
             conn.execute(
                 """
                 INSERT INTO affinity
-                    (prompt_vec, prompt_text, node_id, signal, source, confirmed_at, space, session_id)
-                VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?)
-                ON CONFLICT (node_id, session_id) DO NOTHING
+                    (
+                        prompt_vec, prompt_text, node_id, signal, source,
+                        confirmed_at, space, session_id, whisper_log_id
+                    )
+                VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+                ON CONFLICT DO NOTHING
                 """,
-                (prompt_vec, prompt_text, resolved_node_id, signal, source, space, session_id),
+                (
+                    prompt_vec,
+                    prompt_text,
+                    resolved_node_id,
+                    signal,
+                    source,
+                    space,
+                    session_id,
+                    whisper_log_id,
+                ),
+            )
+            if source == "explicit":
+                conn.execute(
+                    """
+                    UPDATE affinity
+                    SET signal = ?, source = ?, confirmed_at = datetime('now')
+                    WHERE node_id = ? AND whisper_log_id = ?
+                    """,
+                    (signal, source, resolved_node_id, whisper_log_id),
+                )
+            conn.execute(
+                """
+                INSERT INTO signals
+                    (
+                        whisper_log_id, node_id, signal_type, polarity, strength,
+                        source, session_id, surface, space, prompt_hash, evidence, created
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    whisper_log_id,
+                    resolved_node_id,
+                    "feedback_submitted",
+                    signal,
+                    1.0,
+                    source,
+                    session_id,
+                    "submit_feedback",
+                    space,
+                    prompt_hash,
+                    json.dumps({"source": source}),
+                ),
             )
             if source != "implicit":
                 conn.execute(
@@ -2102,7 +2981,11 @@ class MemoryEngine:
                     (resolved_node_id,),
                 )
 
-        return f"Feedback recorded for node {resolved_node_id[:8]}..."
+        return (
+            resolved_node_id,
+            became_confirmed,
+            f"Feedback recorded for node {resolved_node_id[:8]}...",
+        )
 
     def _is_duplicate_memory(self, content: str) -> bool:
         """Check if a very similar memory already exists using vector search."""

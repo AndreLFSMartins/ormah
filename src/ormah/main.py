@@ -13,9 +13,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from ormah.api.middleware import AgentMiddleware
+from ormah.api.local_auth import load_or_create_local_admin_token
+from ormah.api.routes_account import router as account_router
 from ormah.api.routes_admin import router as admin_router
 from ormah.api.routes_agent import router as agent_router
 from ormah.api.routes_ingest import router as ingest_router
+from ormah.api.routes_protection import router as protection_router
+from ormah.api.routes_stats import router as stats_router
 from ormah.api.routes_ui import router as ui_router
 from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.config import settings
@@ -30,7 +34,7 @@ setup_logging(
 )
 logger = logging.getLogger(__name__)
 
-_RESERVED_API_PREFIXES = {"agent", "admin", "ingest", "ui"}
+_RESERVED_API_PREFIXES = {"agent", "admin", "ingest", "stats", "ui"}
 _LOCAL_CORS_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
 
 
@@ -44,17 +48,38 @@ except PackageNotFoundError:
     APP_VERSION = "0.0.0"
 
 
+def _initialize_local_admin(app: FastAPI) -> None:
+    """Enable sensitive local routes without making them a core-server dependency."""
+    try:
+        app.state.local_admin_token = load_or_create_local_admin_token()
+    except (OSError, RuntimeError):
+        app.state.local_admin_token = None
+        logger.warning(
+            "Local account and billing routes are disabled because their capability "
+            "could not be secured."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting ormah server on port %d...", settings.port)
+    _initialize_local_admin(app)
     logger.info("Initializing memory engine...")
     engine = MemoryEngine(settings)
     engine.startup()
     app.state.engine = engine
+    from ormah.cloud.operations import (
+        ProtectionOperationCoordinator,
+        resume_interrupted_enable,
+    )
+
+    app.state.protection_operations = ProtectionOperationCoordinator()
+    resume_interrupted_enable(engine, app.state.protection_operations)
     logger.info("Memory engine ready.")
 
     # Start background scheduler if available
+    tracker = None
     try:
         from ormah.background.scheduler import start_scheduler
 
@@ -62,13 +87,12 @@ async def lifespan(app: FastAPI):
         scheduler, tracker = start_scheduler(engine)
         app.state.scheduler = scheduler
         app.state.job_tracker = tracker
-        app.state.maintenance_manager = MaintenanceManager(engine, tracker=tracker)
         logger.info("Background scheduler ready.")
     except Exception as e:
         logger.warning("Background scheduler not started: %s", e)
 
-    if not hasattr(app.state, "maintenance_manager"):
-        app.state.maintenance_manager = MaintenanceManager(engine)
+    # Always bind this lifespan's engine, including when the scheduler is unavailable.
+    app.state.maintenance_manager = MaintenanceManager(engine, tracker=tracker)
 
     # Start hippocampus file watchers
     try:
@@ -79,16 +103,34 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Hippocampus watchers not started: %s", e)
 
-    # Start session watcher for Claude Code transcripts
+    # Start session watcher for agent transcripts
     try:
         from ormah.background.session_watcher import start_session_watcher, stop_session_watcher
 
-        session_observers = start_session_watcher(engine)
-        app.state.session_watcher_observers = session_observers
+        session_watches = start_session_watcher(engine)
+        app.state.session_watcher_observers = session_watches
+        if hasattr(app.state, "scheduler"):
+            from ormah.background.scheduler import register_session_reconcile_job
+            register_session_reconcile_job(
+                app.state.scheduler, app.state.job_tracker, session_watches,
+                engine.settings.session_watcher_reconcile_interval_minutes,
+            )
     except Exception as e:
         logger.warning("Session watcher not started: %s", e)
 
     yield
+
+    # Unschedule the reconcile job before stopping the watchers, to shrink the window where
+    # a tick recreates an Observer that nothing then stops. remove_job() only cancels future
+    # triggers, not an already-running tick, so a single in-flight tick can still recreate one
+    # Observer; that leaked daemon thread dies with the process (same tradeoff as the engine
+    # connection below). Fully closing it would require shutting the scheduler down before the
+    # watchers, which the bind-sensitive shutdown order avoids.
+    if hasattr(app.state, "scheduler"):
+        try:
+            app.state.scheduler.remove_job("session_reconcile")
+        except Exception:
+            pass
 
     # Shutdown — stop session watcher first
     if hasattr(app.state, "session_watcher_observers"):
@@ -98,9 +140,11 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "hippocampus_observers"):
         stop_hippocampus(app.state.hippocampus_observers)
 
-    # Shutdown — wait for running jobs to finish (up to 10s)
+    # Shutdown — wait for running jobs to finish
     if hasattr(app.state, "scheduler"):
         app.state.scheduler.shutdown(wait=True)
+    if hasattr(app.state, "protection_operations"):
+        app.state.protection_operations.shutdown(wait=True)
     engine.shutdown()
     logger.info("Ormah stopped")
 
@@ -124,6 +168,9 @@ app.add_middleware(AgentMiddleware)
 
 app.include_router(agent_router)
 app.include_router(admin_router)
+app.include_router(account_router)
+app.include_router(protection_router)
+app.include_router(stats_router)
 app.include_router(ui_router)
 app.include_router(ingest_router)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import stat
 import subprocess
 from contextlib import ExitStack
@@ -21,22 +22,44 @@ from ormah.server_manager import (
     is_server_running,
 )
 from ormah.setup import (
+    CloudRecoveryPreflightError,
     CODEX_AGENTS_SENTINEL_END,
     CODEX_AGENTS_SENTINEL_START,
     CLAUDE_MD_SENTINEL_END,
     CLAUDE_MD_SENTINEL_START,
+    PI_AGENTS_MD_SENTINEL_END,
+    PI_AGENTS_MD_SENTINEL_START,
+    DESKTOP_BUNDLE_IDENTIFIER,
+    DESKTOP_PRODUCT_NAME,
+    _atomic_write,
+    _claude_code_is_wired,
+    _claude_code_plugin_provides_hooks,
+    _claude_code_wire,
+    _discover_transcripts,
+    _get_agent,
+    _disable_desktop_autostart,
+    _inspect_desktop_installation,
+    _is_ormah_hook,
+    _merge_hooks,
     _merge_json_file,
+    _pi_is_wired,
     _preload_local_models,
     _print_setup_summary,
+    _prepare_cloud_recovery,
     _remove_codex_hooks,
     _remove_codex_md_block,
     _remove_codex_mcp_config,
+    _remove_config_preserving_cloud_recovery,
     _read_env_file,
     _remove_codex_agents,
     _remove_claude_hooks,
     _remove_claude_md_block,
     _remove_fastembed_cache,
     _remove_mcp_from_json,
+    _remove_pi_agents,
+    _remove_pi_extension,
+    _remove_pi_md_block,
+    _strip_ormah_hooks,
     _write_env_file,
     configure_claude_hooks,
     configure_claude_code_mcp,
@@ -45,13 +68,35 @@ from ormah.setup import (
     configure_codex_hooks,
     configure_codex_mcp,
     configure_llm,
+    configure_pi_extension,
     generate_server_wrapper,
     install_claude_md,
     install_codex_agents,
     install_codex_md,
+    install_pi_agents,
+    install_pi_md,
     run_setup,
     run_uninstall,
 )
+
+
+class TestDiscoverTranscripts:
+    def test_skips_subagent_transcripts(self, tmp_path):
+        """Backfill discovery must not surface subagent scratch transcripts."""
+        projects = tmp_path / ".claude" / "projects"
+        primary = projects / "-Users-alice-Code-myproject" / "abc123.jsonl"
+        subagent = projects / "-Users-alice-Code-myproject" / "abc123" / "subagents" / "agent-x.jsonl"
+        primary.parent.mkdir(parents=True)
+        subagent.parent.mkdir(parents=True)
+        primary.write_text("{}\n")
+        subagent.write_text("{}\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            found = _discover_transcripts()
+
+        paths = [p for p, _ in found]
+        assert primary in paths
+        assert subagent not in paths
 
 
 # --- server_manager tests ---
@@ -114,7 +159,12 @@ class TestPlistTemplate:
         assert "<string>com.ormah.server</string>" in rendered
         assert "<string>/home/user/.config/ormah/ormah-server</string>" in rendered
         assert "<key>RunAtLoad</key><true/>" in rendered
-        assert "<key>KeepAlive</key><true/>" in rendered
+        # KeepAlive must only respawn on failure — a clean exit (e.g. the port
+        # is already owned by another server) must not trigger a respawn loop.
+        compact = rendered.replace(" ", "").replace("\n", "")
+        assert "<key>KeepAlive</key><true/>" not in compact
+        assert "<key>SuccessfulExit</key><false/>" in compact
+        assert "<key>ThrottleInterval</key>" in compact
         assert "StandardOutPath" not in rendered
         assert "StandardErrorPath" not in rendered
 
@@ -248,6 +298,31 @@ class TestConfigureClaudeHooks:
         assert data["allowedTools"] == ["bash"]
         assert "hooks" in data
 
+    def test_non_object_hooks_section_left_unchanged(self, tmp_path, capsys):
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_text(json.dumps({"theme": "dark", "hooks": []}) + "\n")
+        before = settings_path.read_text()
+
+        with patch("ormah.setup.os.path.expanduser", return_value=str(settings_path)):
+            configure_claude_hooks("/abs/ormah")
+
+        assert settings_path.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+    def test_preserves_top_level_keys(self, tmp_path):
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_text(
+            json.dumps({"theme": "dark", "permissions": {"allow": ["x"]}}) + "\n"
+        )
+
+        with patch("ormah.setup.os.path.expanduser", return_value=str(settings_path)):
+            configure_claude_hooks("/abs/ormah")
+
+        data = json.loads(settings_path.read_text())
+        assert data["theme"] == "dark"
+        assert data["permissions"] == {"allow": ["x"]}
+        assert "UserPromptSubmit" in data["hooks"]
+
 
 class TestConfigureClaudeCodeMcp:
     def test_writes_mcp_config_to_claude_json(self, tmp_path):
@@ -324,6 +399,460 @@ class TestConfigureClaudeCodeMcp:
             "/usr/local/bin/claude", "mcp", "add", "ormah", "--scope", "user",
             "--", "/usr/local/bin/ormah", "mcp",
         ]
+
+
+REALISTIC_HOOKS_JSON = {
+    "hooks": {
+        "UserPromptSubmit": [
+            {"hooks": [{
+                "type": "command",
+                "command": "${CLAUDE_PLUGIN_ROOT}/bin/ormah-whisper-inject",
+                "timeout": 10,
+            }]}
+        ]
+    }
+}
+REALISTIC_MCP_JSON = {
+    "mcpServers": {"ormah": {"type": "stdio", "command": "${CLAUDE_PLUGIN_ROOT}/bin/ormah-mcp"}}
+}
+
+
+class TestClaudeCodePluginProvidesHooks:
+    def _enable(self, tmp_path: Path, value=True, key: str = "ormah@ormah") -> None:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        (claude_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {key: value}}, indent=2) + "\n"
+        )
+
+    def _install(self, tmp_path: Path, *, scope: str = "user", with_hooks: bool = True,
+                 with_mcp: bool | None = None, key: str = "ormah@ormah",
+                 install_path: Path | None = None, hooks_content: dict | None = None,
+                 mcp_content: dict | None = None) -> Path:
+        # with_mcp mirrors with_hooks by default, so every existing call site
+        # (none of which pass with_mcp) keeps its current install-dir behavior.
+        if with_mcp is None:
+            with_mcp = with_hooks
+        plugins_dir = tmp_path / ".claude" / "plugins"
+        plugins_dir.mkdir(parents=True, exist_ok=True)
+        target = install_path if install_path is not None else plugins_dir / "cache" / "ormah" / "ormah" / "0.13.3"
+        if with_hooks:
+            (target / "hooks").mkdir(parents=True, exist_ok=True)
+            content = hooks_content if hooks_content is not None else REALISTIC_HOOKS_JSON
+            (target / "hooks" / "hooks.json").write_text(json.dumps(content) + "\n")
+        if with_mcp:
+            target.mkdir(parents=True, exist_ok=True)
+            content = mcp_content if mcp_content is not None else REALISTIC_MCP_JSON
+            (target / ".mcp.json").write_text(json.dumps(content) + "\n")
+        (plugins_dir / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {key: [{"scope": scope, "installPath": str(target), "version": "0.13.3"}]},
+        }, indent=2) + "\n")
+        return target
+
+    def test_true_when_enabled_and_installed_with_hooks(self, tmp_path):
+        self._enable(tmp_path)
+        self._install(tmp_path)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is True
+
+    def test_true_for_any_marketplace_name(self, tmp_path):
+        self._enable(tmp_path, key="ormah@some-other-market")
+        self._install(tmp_path, key="ormah@some-other-market")
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is True
+
+    def test_false_when_enabled_but_not_installed(self, tmp_path):
+        """A stale enabled flag must never license deleting the working wiring."""
+        self._enable(tmp_path)
+        # no installed_plugins.json at all
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_registry_lists_plugin_but_install_path_is_gone(self, tmp_path):
+        self._enable(tmp_path)
+        self._install(tmp_path, install_path=tmp_path / "vanished", with_hooks=False)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_install_exists_but_hooks_json_is_missing(self, tmp_path):
+        """An interrupted update can leave the dir without its hooks manifest."""
+        self._enable(tmp_path)
+        target = self._install(tmp_path, with_hooks=False)
+        target.mkdir(parents=True, exist_ok=True)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_mcp_manifest_is_missing(self, tmp_path):
+        """Hooks alone don't prove the plugin also ships the MCP server it
+        licenses stripping — an interrupted update can leave hooks.json
+        behind without .mcp.json."""
+        self._enable(tmp_path)
+        self._install(tmp_path, with_mcp=False)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_installed_but_disabled(self, tmp_path):
+        self._enable(tmp_path, value=False)
+        self._install(tmp_path)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_plugin_is_project_scoped(self, tmp_path):
+        """Deliberate: the CLI hooks are global and serve every other project.
+        Stripping them for a one-project plugin would break the whisper there."""
+        self._enable(tmp_path)
+        self._install(tmp_path, scope="project")
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_for_another_plugin(self, tmp_path):
+        self._enable(tmp_path, key="superpowers@claude-plugins-official")
+        self._install(tmp_path, key="superpowers@claude-plugins-official")
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_fails_open_on_corrupt_registry(self, tmp_path):
+        self._enable(tmp_path)
+        plugins_dir = tmp_path / ".claude" / "plugins"
+        plugins_dir.mkdir(parents=True)
+        (plugins_dir / "installed_plugins.json").write_text("{not json")
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_fails_open_on_missing_settings(self, tmp_path):
+        self._install(tmp_path)
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_enabled_key_does_not_match_installed_key(self, tmp_path):
+        """The enabled key must be matched to the SAME registry key. A stale
+        but healthy ormah@old-market install must not license stripping when
+        the actually-enabled plugin (ormah@new-market) is broken."""
+        self._enable(tmp_path, key="ormah@new-market")
+        plugins_dir = tmp_path / ".claude" / "plugins"
+        plugins_dir.mkdir(parents=True, exist_ok=True)
+        broken_path = tmp_path / "vanished"  # never created -> no manifests
+        good_path = plugins_dir / "cache" / "ormah" / "old-market" / "0.1.0"
+        (good_path / "hooks").mkdir(parents=True, exist_ok=True)
+        (good_path / "hooks" / "hooks.json").write_text(json.dumps({"hooks": {}}) + "\n")
+        (good_path / ".mcp.json").write_text(json.dumps({"mcpServers": {}}) + "\n")
+        (plugins_dir / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {
+                "ormah@new-market": [
+                    {"scope": "user", "installPath": str(broken_path), "version": "1.0.0"}
+                ],
+                "ormah@old-market": [
+                    {"scope": "user", "installPath": str(good_path), "version": "0.1.0"}
+                ],
+            },
+        }, indent=2) + "\n")
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_hooks_manifest_is_empty_object(self, tmp_path):
+        """An interrupted update can leave hooks.json parseable but empty."""
+        self._enable(tmp_path)
+        self._install(tmp_path, hooks_content={"hooks": {}})
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_mcp_manifest_has_no_ormah_server(self, tmp_path):
+        """An interrupted update can leave .mcp.json parseable but empty."""
+        self._enable(tmp_path)
+        self._install(tmp_path, mcp_content={"mcpServers": {}})
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_mcp_manifest_has_empty_ormah_entry(self, tmp_path):
+        """An ormah key without a runnable command must not license stripping CLI MCP."""
+        self._enable(tmp_path)
+        self._install(tmp_path, mcp_content={"mcpServers": {"ormah": {}}})
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_mcp_manifest_uses_non_plugin_command(self, tmp_path):
+        """The replacement MCP must be the plugin wrapper command."""
+        self._enable(tmp_path)
+        self._install(
+            tmp_path,
+            mcp_content={"mcpServers": {"ormah": {"command": "/usr/bin/ormah"}}},
+        )
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+    def test_false_when_hooks_manifest_has_only_third_party_hook(self, tmp_path):
+        """Proves the check inspects ormah's own hooks, not just any hook."""
+        self._enable(tmp_path)
+        self._install(tmp_path, hooks_content={
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/other-tool run"}]}
+                ]
+            }
+        })
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_plugin_provides_hooks() is False
+
+
+class TestClaudeCodeWirePluginGuard:
+    def _seed_working_plugin(self, tmp_path: Path, *, enabled: bool = True, scope: str = "user") -> Path:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        install_path = claude_dir / "plugins" / "cache" / "ormah" / "ormah" / "0.13.3"
+        (install_path / "hooks").mkdir(parents=True)
+        (install_path / "hooks" / "hooks.json").write_text(json.dumps(REALISTIC_HOOKS_JSON) + "\n")
+        (install_path / ".mcp.json").write_text(json.dumps(REALISTIC_MCP_JSON) + "\n")
+        (claude_dir / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {"ormah@ormah": [
+                {"scope": scope, "installPath": str(install_path), "version": "0.13.3"}
+            ]},
+        }, indent=2) + "\n")
+        (claude_dir / "settings.json").write_text(json.dumps({
+            "enabledPlugins": {"ormah@ormah": enabled},
+            "theme": "dark",
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/ormah whisper inject", "timeout": 10}]}
+                ],
+                "SessionEnd": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/ormah whisper store", "timeout": 300}]}
+                ],
+            },
+        }, indent=2) + "\n")
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "mcpServers": {"ormah": {"type": "stdio", "command": "/usr/bin/ormah", "args": ["mcp"]}}
+        }, indent=2) + "\n")
+        return claude_dir
+
+    def _run_plugin_safe_setup(self, tmp_path: Path) -> None:
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._detected_agents", return_value=[]),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_llm"),
+            patch(
+                "ormah.setup.generate_server_wrapper",
+                return_value=tmp_path / "ormah-server",
+            ),
+            patch("ormah.setup._preload_local_models"),
+            patch("ormah.setup.is_server_running", return_value=True),
+            patch("ormah.setup.restart_with_autostart", return_value=True),
+            patch("ormah.setup.backfill_transcripts"),
+            patch("ormah.setup.play_finale"),
+            patch("ormah.setup._print_setup_summary"),
+            patch("ormah.setup.webbrowser.open"),
+        ):
+            run_setup(skip_client_setup=True)
+
+    def test_working_plugin_strips_hooks_and_mcp_and_writes_no_wiring(self, tmp_path):
+        claude_dir = self._seed_working_plugin(tmp_path)
+        # Left behind by a pre-plugin `ormah setup`. Both call the CLI-registered
+        # `ormah` MCP server this very run removes, and ~/.claude/agents/ shadows
+        # the plugin's own agent — so they must go, not be rewritten.
+        stale_agent = claude_dir / "agents" / "ormah-maintenance.md"
+        stale_command = claude_dir / "commands" / "ormah-maintenance.md"
+        for stale in (stale_agent, stale_command):
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("calls mcp__ormah__run_maintenance\n")
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.configure_claude_code_mcp") as configure_mcp,
+            patch("ormah.setup.install_claude_md") as install_md,
+        ):
+            _claude_code_wire()
+
+        settings = json.loads((claude_dir / "settings.json").read_text())
+        assert "hooks" not in settings                              # both ormah hooks stripped
+        assert settings["enabledPlugins"] == {"ormah@ormah": True}  # untouched
+        assert settings["theme"] == "dark"                          # co-tenant keys survive
+        assert "mcpServers" not in json.loads((tmp_path / ".claude.json").read_text())
+
+        configure_hooks.assert_not_called()
+        configure_mcp.assert_not_called()
+        install_md.assert_called_once()                             # no plugin can write CLAUDE.md
+        assert not stale_agent.exists()                             # the plugin ships its own
+        assert not stale_command.exists()                           # /ormah:maintenance
+
+    def test_plugin_safe_setup_removes_stale_cli_surfaces(self, tmp_path):
+        """Exercise the exact `ormah setup --skip-client-setup` plugin path."""
+        claude_dir = self._seed_working_plugin(tmp_path)
+        stale_agent = claude_dir / "agents" / "ormah-maintenance.md"
+        stale_command = claude_dir / "commands" / "ormah-maintenance.md"
+        for stale in (stale_agent, stale_command):
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("calls mcp__ormah__run_maintenance\n")
+
+        self._run_plugin_safe_setup(tmp_path)
+        self._run_plugin_safe_setup(tmp_path)  # repeated plugin repair is idempotent
+
+        settings = json.loads((claude_dir / "settings.json").read_text())
+        assert "hooks" not in settings
+        assert "mcpServers" not in json.loads((tmp_path / ".claude.json").read_text())
+        assert not stale_agent.exists()
+        assert not stale_command.exists()
+
+    @pytest.mark.parametrize(
+        ("enabled", "scope"),
+        [(False, "user"), (True, "project")],
+        ids=["disabled-user-plugin", "project-scoped-plugin"],
+    )
+    def test_plugin_safe_setup_preserves_cli_surfaces_without_user_plugin(
+        self,
+        tmp_path,
+        enabled,
+        scope,
+    ):
+        """Only a working user-scoped plugin licenses deleting global CLI wiring."""
+        claude_dir = self._seed_working_plugin(tmp_path, enabled=enabled, scope=scope)
+        stale_agent = claude_dir / "agents" / "ormah-maintenance.md"
+        stale_command = claude_dir / "commands" / "ormah-maintenance.md"
+        for stale in (stale_agent, stale_command):
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("calls mcp__ormah__run_maintenance\n")
+        settings_before = (claude_dir / "settings.json").read_text()
+        mcp_before = (tmp_path / ".claude.json").read_text()
+
+        self._run_plugin_safe_setup(tmp_path)
+
+        assert (claude_dir / "settings.json").read_text() == settings_before
+        assert (tmp_path / ".claude.json").read_text() == mcp_before
+        assert stale_agent.exists()
+        assert stale_command.exists()
+
+    def test_strip_preserves_third_party_hooks(self, tmp_path):
+        claude_dir = self._seed_working_plugin(tmp_path)
+        settings = json.loads((claude_dir / "settings.json").read_text())
+        settings["hooks"]["UserPromptSubmit"][0]["hooks"].append(
+            {"type": "command", "command": "/usr/bin/other-tool run"}
+        )
+        (claude_dir / "settings.json").write_text(json.dumps(settings, indent=2) + "\n")
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.install_claude_md"),
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+        ):
+            _claude_code_wire()
+
+        hooks = json.loads((claude_dir / "settings.json").read_text())["hooks"]
+        surviving = hooks["UserPromptSubmit"][0]["hooks"]
+        assert len(surviving) == 1
+        assert surviving[0]["command"] == "/usr/bin/other-tool run"
+
+    def test_enabled_but_uninstalled_plugin_wires_normally(self, tmp_path):
+        """A stale enabled flag must not cost the user the whisper."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"ormah@ormah": True}}, indent=2) + "\n"
+        )  # no installed_plugins.json
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.configure_claude_code_mcp") as configure_mcp,
+            patch("ormah.setup.install_claude_agents") as install_agents,
+            patch("ormah.setup.install_claude_commands") as install_commands,
+            patch("ormah.setup.install_claude_md"),
+        ):
+            _claude_code_wire()
+
+        configure_hooks.assert_called_once_with("/usr/bin/ormah")
+        configure_mcp.assert_called_once_with("/usr/bin/ormah")
+        install_agents.assert_called_once()  # no plugin: the CLI copies stay
+        install_commands.assert_called_once()
+
+    def test_project_scoped_plugin_wires_normally(self, tmp_path):
+        """Deliberate: the CLI hooks are global and serve every other project."""
+        self._seed_working_plugin(tmp_path, scope="project")
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.configure_claude_code_mcp"),
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+            patch("ormah.setup.install_claude_md"),
+        ):
+            _claude_code_wire()
+
+        configure_hooks.assert_called_once_with("/usr/bin/ormah")
+
+    def test_plugin_disabled_wires_normally(self, tmp_path):
+        self._seed_working_plugin(tmp_path, enabled=False)
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.configure_claude_code_mcp"),
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+            patch("ormah.setup.install_claude_md"),
+        ):
+            _claude_code_wire()
+
+        configure_hooks.assert_called_once_with("/usr/bin/ormah")
+
+    def test_unreadable_settings_wires_normally(self, tmp_path):
+        """Fail-open: an unparseable config must not silently disable the whisper."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text("{not json")
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.configure_claude_code_mcp"),
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+            patch("ormah.setup.install_claude_md"),
+        ):
+            _claude_code_wire()
+
+        configure_hooks.assert_called_once_with("/usr/bin/ormah")
+
+    def test_fresh_plugin_install_removes_nothing(self, tmp_path):
+        """Working plugin, no CLI wiring ever done — the guard is idempotent."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        install_path = claude_dir / "plugins" / "cache" / "ormah" / "ormah" / "0.13.3"
+        (install_path / "hooks").mkdir(parents=True)
+        (install_path / "hooks" / "hooks.json").write_text(json.dumps(REALISTIC_HOOKS_JSON) + "\n")
+        (install_path / ".mcp.json").write_text(json.dumps(REALISTIC_MCP_JSON) + "\n")
+        (claude_dir / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {"ormah@ormah": [
+                {"scope": "user", "installPath": str(install_path), "version": "0.13.3"}
+            ]},
+        }, indent=2) + "\n")
+        (claude_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"ormah@ormah": True}}, indent=2) + "\n"
+        )
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup.configure_claude_hooks") as configure_hooks,
+            patch("ormah.setup.install_claude_md") as install_md,
+            patch("ormah.setup.install_claude_agents"),
+            patch("ormah.setup.install_claude_commands"),
+        ):
+            _claude_code_wire()
+
+        assert json.loads((claude_dir / "settings.json").read_text()) == {
+            "enabledPlugins": {"ormah@ormah": True}
+        }
+        configure_hooks.assert_not_called()
+        install_md.assert_called_once()
 
 
 class TestConfigureClaudeDesktop:
@@ -536,7 +1065,40 @@ class TestConfigureCodexHooks:
 
         hooks_data = json.loads(hooks_path.read_text())
         assert "UserPromptSubmit" in hooks_data["hooks"]
-        assert hooks_data["hooks"]["Stop"][0]["hooks"][0]["command"] == "/abs/path/ormah whisper store"
+        stop_cmds = [h["command"] for m in hooks_data["hooks"]["Stop"] for h in m["hooks"]]
+        assert "/abs/path/ormah whisper store" in stop_cmds
+        assert "/bin/other" in stop_cmds  # co-tenant preserved
+
+    def test_non_object_hooks_section_no_false_success(self, tmp_path, capsys):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({"hooks": "bad"}) + "\n")
+        before = hooks_path.read_text()
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path), \
+             patch("ormah.setup._enable_codex_feature") as enable:
+            configure_codex_hooks("/abs/ormah")
+
+        assert hooks_path.read_text() == before
+        enable.assert_not_called()
+        assert "Codex hooks installed" not in capsys.readouterr().out
+
+    def test_non_list_event_no_false_success(self, tmp_path, capsys):
+        """Non-list value on a claimed event (e.g. Stop) must leave file unchanged."""
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({"hooks": {"Stop": "bad"}}) + "\n")
+        before = hooks_path.read_text()
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path), \
+             patch("ormah.setup._enable_codex_feature") as enable:
+            configure_codex_hooks("/abs/ormah")
+
+        assert hooks_path.read_text() == before
+        enable.assert_not_called()
+        assert "Codex hooks installed" not in capsys.readouterr().out
 
 
 class TestRunSetup:
@@ -550,8 +1112,9 @@ class TestRunSetup:
             stack.enter_context(patch("ormah.setup.configure_llm"))
             stack.enter_context(patch("ormah.setup._preload_local_models"))
             stack.enter_context(patch("ormah.setup.is_server_running", return_value=False))
-            mock_install = stack.enter_context(patch("ormah.setup.install_autostart"))
-            stack.enter_context(patch("ormah.setup.wait_for_server", return_value=False))
+            mock_restart = stack.enter_context(
+                patch("ormah.setup.restart_with_autostart", return_value=False)
+            )
             mock_diagnose = stack.enter_context(patch("ormah.setup._diagnose_server_failure"))
             mock_backfill = stack.enter_context(patch("ormah.setup.backfill_transcripts"))
             mock_finale = stack.enter_context(patch("ormah.setup.play_finale"))
@@ -562,7 +1125,11 @@ class TestRunSetup:
                 run_setup(skip_client_setup=True)
 
         assert exc_info.value.code == 1
-        mock_install.assert_called_once_with("/abs/path/ormah", wrapper_path=str(tmp_path / "ormah-server"))
+        mock_restart.assert_called_once_with(
+            "/abs/path/ormah",
+            wrapper_path=str(tmp_path / "ormah-server"),
+            show_progress=True,
+        )
         mock_diagnose.assert_called_once()
         mock_backfill.assert_not_called()
         mock_finale.assert_not_called()
@@ -590,6 +1157,9 @@ class TestRunSetup:
             )
             stack.enter_context(patch("ormah.setup._preload_local_models"))
             stack.enter_context(patch("ormah.setup.is_server_running", return_value=True))
+            mock_restart = stack.enter_context(
+                patch("ormah.setup.restart_with_autostart", return_value=True)
+            )
             mock_maintenance_prompt = stack.enter_context(patch("ormah.setup.configure_agent_maintenance"))
             mock_configure_llm = stack.enter_context(patch("ormah.setup.configure_llm"))
             mock_claude_hooks = stack.enter_context(patch("ormah.setup.configure_claude_hooks"))
@@ -602,6 +1172,9 @@ class TestRunSetup:
             mock_codex_md = stack.enter_context(patch("ormah.setup.install_codex_md"))
             mock_codex_agents = stack.enter_context(patch("ormah.setup.install_codex_agents"))
             mock_claude_desktop = stack.enter_context(patch("ormah.setup.configure_claude_desktop"))
+            mock_pi_extension = stack.enter_context(patch("ormah.setup.configure_pi_extension"))
+            mock_pi_md = stack.enter_context(patch("ormah.setup.install_pi_md"))
+            mock_pi_agents = stack.enter_context(patch("ormah.setup.install_pi_agents"))
             stack.enter_context(patch("ormah.setup.backfill_transcripts"))
             stack.enter_context(patch("ormah.setup.play_finale"))
             stack.enter_context(patch("ormah.setup._print_setup_summary"))
@@ -620,10 +1193,16 @@ class TestRunSetup:
         mock_codex_md.assert_not_called()
         mock_codex_agents.assert_not_called()
         mock_claude_desktop.assert_not_called()
+        mock_pi_extension.assert_not_called()
+        mock_pi_md.assert_not_called()
+        mock_pi_agents.assert_not_called()
+        mock_restart.assert_called_once_with(
+            "/abs/path/ormah",
+            wrapper_path=str(tmp_path / "ormah-server"),
+            show_progress=True,
+        )
 
     def test_update_restarts_existing_server(self, tmp_path, capsys):
-        from ormah.server_manager import _StopServerResult
-
         wrapper = tmp_path / "ormah-server"
         with ExitStack() as stack:
             stack.enter_context(patch("ormah.setup.get_ormah_bin_path", return_value="/abs/path/ormah"))
@@ -632,14 +1211,9 @@ class TestRunSetup:
             stack.enter_context(patch("ormah.setup.generate_server_wrapper", return_value=wrapper))
             stack.enter_context(patch("ormah.setup._preload_local_models"))
             stack.enter_context(patch("ormah.setup.is_server_running", return_value=True))
-            mock_stop = stack.enter_context(
-                patch(
-                    "ormah.setup._stop_running_server",
-                    return_value=_StopServerResult(found=True, stopped=True),
-                )
+            mock_restart = stack.enter_context(
+                patch("ormah.setup.restart_with_autostart", return_value=True)
             )
-            mock_install = stack.enter_context(patch("ormah.setup.install_autostart"))
-            mock_wait = stack.enter_context(patch("ormah.setup.wait_for_server", return_value=True))
             stack.enter_context(patch("ormah.setup.backfill_transcripts"))
             stack.enter_context(patch("ormah.setup.play_finale"))
             stack.enter_context(patch("ormah.setup._print_setup_summary"))
@@ -647,9 +1221,11 @@ class TestRunSetup:
 
             run_setup(update=True, skip_client_setup=True)
 
-        mock_stop.assert_called_once()
-        mock_install.assert_called_once_with("/abs/path/ormah", wrapper_path=str(wrapper))
-        mock_wait.assert_called_once_with(show_progress=True)
+        mock_restart.assert_called_once_with(
+            "/abs/path/ormah",
+            wrapper_path=str(wrapper),
+            show_progress=True,
+        )
 
         out = capsys.readouterr().out
         assert "Restarting server" in out
@@ -665,6 +1241,23 @@ class TestClaudePluginManifest:
         )
 
         assert plugin_manifest["version"] == pyproject["project"]["version"]
+
+
+class TestPiPluginPackage:
+    def test_package_json_declares_pi_extension(self):
+        root = Path(__file__).resolve().parents[1]
+        pkg = json.loads((root / "integrations" / "pi-plugin" / "package.json").read_text())
+        assert pkg["name"] == "ormah-pi"
+        assert "./ormah-pi.ts" in pkg["pi"]["extensions"]
+
+    def test_pi_resources_shipped(self):
+        root = Path(__file__).resolve().parents[1]
+        assert (root / "src" / "ormah" / "pi_instructions.md").exists()
+        assert (root / "src" / "ormah" / "agents" / "ormah-pi-maintenance.md").exists()
+
+    def test_entry_file_exists(self):
+        root = Path(__file__).resolve().parents[1]
+        assert (root / "integrations" / "pi-plugin" / "ormah-pi.ts").exists()
 
 
 class TestClaudePluginDocs:
@@ -725,6 +1318,28 @@ class TestClaudePluginDocs:
 
         assert 'subagent_type="ormah-maintenance"' in content
         assert "run_in_background=True" in content
+
+    def test_maintenance_agent_binds_the_plugin_scoped_tool_only(self):
+        """The plugin's `.mcp.json` names the server `ormah`, so Claude Code exposes
+        its tools as `mcp__plugin_ormah_ormah__*`. `mcp__ormah__*` is the CLI-registered
+        server, which plugin-mode setup removes."""
+        root = Path(__file__).resolve().parents[1]
+        content = (
+            root / "integrations" / "claude-plugin" / "agents" / "ormah-maintenance.md"
+        ).read_text()
+        frontmatter = content.split("---")[1]
+
+        assert "tools: mcp__plugin_ormah_ormah__run_maintenance" in frontmatter
+        assert "mcp__ormah__run_maintenance" not in content
+
+    def test_cli_channel_agent_keeps_the_cli_tool_name(self):
+        """Not a copy of the plugin agent: `install_claude_agents()` ships this one for
+        installs without the plugin, where the server really is named `ormah`."""
+        root = Path(__file__).resolve().parents[1]
+        content = (root / "src" / "ormah" / "agents" / "ormah-maintenance.md").read_text()
+
+        assert "mcp__ormah__run_maintenance" in content
+        assert "mcp__plugin_ormah_ormah__" not in content
 
 
 # --- CLI tests ---
@@ -802,13 +1417,17 @@ class TestCliEntryPoint:
             patch("ormah.setup.WRAPPER_PATH", wrapper),
             patch("ormah.setup.generate_server_wrapper", return_value=wrapper),
             patch("ormah.server_manager.get_ormah_bin_path", return_value="/abs/path/ormah"),
-            patch("ormah.server_manager.install_autostart"),
-            patch("ormah.server_manager.wait_for_server", return_value=False),
+            patch("ormah.server_manager.restart_with_autostart", return_value=False) as restart,
             pytest.raises(SystemExit) as exc_info,
         ):
             main()
 
         assert exc_info.value.code == 1
+        restart.assert_called_once_with(
+            "/abs/path/ormah",
+            wrapper_path=str(wrapper),
+            show_progress=True,
+        )
 
     def test_claude_md_install_defaults_to_auto_scope(self):
         from ormah.cli import main
@@ -829,6 +1448,26 @@ class TestCliEntryPoint:
         ):
             main()
             mock_install.assert_called_once_with(scope="user", cwd=Path.cwd())
+
+    def test_pi_md_install_defaults_to_user_scope(self):
+        from ormah.cli import main
+
+        with (
+            patch("sys.argv", ["ormah", "pi-md", "install"]),
+            patch("ormah.setup.install_pi_md") as mock_install,
+        ):
+            main()
+            mock_install.assert_called_once_with(scope="user", cwd=Path.cwd())
+
+    def test_pi_md_install_project_scope(self):
+        from ormah.cli import main
+
+        with (
+            patch("sys.argv", ["ormah", "pi-md", "install", "--scope", "project"]),
+            patch("ormah.setup.install_pi_md") as mock_install,
+        ):
+            main()
+            mock_install.assert_called_once_with(scope="project", cwd=Path.cwd())
 
     def test_server_status_when_not_running(self):
         from ormah.cli import main
@@ -881,6 +1520,110 @@ class TestEnvFile:
             _write_env_file({"SECRET": "value"})
         file_mode = stat.S_IMODE(env_path.stat().st_mode)
         assert file_mode == 0o600
+
+
+class TestWriteEnvPreservation:
+    def test_atomic_write_preserves_relative_symlink(self, tmp_path):
+        target = tmp_path / "managed.env"
+        target.write_text("A=old\n")
+        target.chmod(0o644)
+        link = tmp_path / ".env"
+        link.symlink_to(target.name)
+
+        _atomic_write(str(link), "A=new\n", mode=0o600)
+
+        assert link.is_symlink()
+        assert link.read_text() == "A=new\n"
+        assert target.read_text() == "A=new\n"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    def test_preserves_comments_and_manual_key(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# header comment\nMANUAL_KEY=keep\n\nORMAH_X=old\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"MANUAL_KEY": "keep", "ORMAH_X": "new"})
+        text = env_path.read_text()
+        assert "# header comment" in text
+        assert "MANUAL_KEY=keep" in text
+        assert "ORMAH_X=new" in text
+        assert "ORMAH_X=old" not in text
+
+    def test_removed_key_dropped_comments_kept(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# keep me\nDROP=1\nKEEP=2\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"KEEP": "2"})
+        text = env_path.read_text()
+        assert "# keep me" in text
+        assert "KEEP=2" in text
+        assert "DROP" not in text
+
+    def test_new_key_appended(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# c\nA=1\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"A": "1", "B": "2"})
+        lines = [ln for ln in env_path.read_text().splitlines() if ln.strip()]
+        assert lines[-1] == "B=2"
+        assert "# c" in env_path.read_text()
+
+    def test_nonexistent_file_writes_dict_order(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"A": "1", "B": "2"})
+        assert env_path.read_text() == "A=1\nB=2\n"
+
+    def test_untouched_key_with_inline_comment_preserved(self, tmp_path):
+        from ormah.setup import _read_env_file, _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("MANUAL=val  # keep this note\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            env = _read_env_file()
+            _write_env_file(env)
+        assert "# keep this note" in env_path.read_text()
+
+    def test_configure_llm_flow_preserves_block_comment(self, tmp_path):
+        from ormah.setup import _read_env_file, _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("# my ormah config\nORMAH_LLM_PROVIDER=none\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            env = _read_env_file()
+            env["ORMAH_LLM_PROVIDER"] = "ollama"
+            _write_env_file(env)
+        text = env_path.read_text()
+        assert "# my ormah config" in text
+        assert "ORMAH_LLM_PROVIDER=ollama" in text
+
+    def test_duplicate_keys_collapsed(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("DUP=1\nDUP=2\n")
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"DUP": "2"})
+        text = env_path.read_text()
+        assert text.count("DUP=") == 1
+        assert "DUP=2" in text
+
+    def test_existing_file_mode_forced_to_600(self, tmp_path):
+        from ormah.setup import _write_env_file
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("A=1\n")
+        env_path.chmod(0o644)
+        with patch("ormah.setup.ENV_PATH", env_path), patch("ormah.setup.ENV_DIR", tmp_path):
+            _write_env_file({"A": "1"})
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
 
 # --- Server wrapper tests ---
@@ -1394,7 +2137,7 @@ class TestConfigureAgentMaintenance:
             patch("ormah.setup.ENV_DIR", tmp_path),
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
-            result = configure_agent_maintenance(has_claude_code=True, has_codex=False)
+            result = configure_agent_maintenance([_get_agent("claude_code")])
 
         assert result is True
         assert "ORMAH_CLAUDE_MAINTENANCE_ENABLED=true" in env_path.read_text()
@@ -1422,7 +2165,7 @@ class TestConfigureAgentMaintenance:
             patch("ormah.setup.ENV_DIR", tmp_path),
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
-            result = configure_agent_maintenance(has_claude_code=False, has_codex=True)
+            result = configure_agent_maintenance([_get_agent("codex")])
 
         assert result is True
         assert "ORMAH_CLAUDE_MAINTENANCE_ENABLED=true" in env_path.read_text()
@@ -1442,7 +2185,9 @@ class TestConfigureAgentMaintenance:
             patch("ormah.setup.ENV_DIR", tmp_path),
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
-            result = configure_agent_maintenance(has_claude_code=True, has_codex=True)
+            result = configure_agent_maintenance(
+                [_get_agent("claude_code"), _get_agent("codex")]
+            )
 
         assert result is False
         assert not env_path.exists()
@@ -1450,6 +2195,276 @@ class TestConfigureAgentMaintenance:
         captured = capsys.readouterr()
         assert "Claude Code or Codex" in captured.out
         assert "Skipped automatic maintenance" in captured.out
+
+    def test_enables_pi_maintenance(self, tmp_path, monkeypatch, capsys):
+        env_path = tmp_path / ".env"
+        monkeypatch.setattr("builtins.input", lambda _: "")
+
+        with (
+            patch("ormah.setup.ENV_PATH", env_path),
+            patch("ormah.setup.ENV_DIR", tmp_path),
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+        ):
+            result = configure_agent_maintenance([_get_agent("pi")])
+
+        assert result is True
+        env = env_path.read_text()
+        assert "ORMAH_CLAUDE_MAINTENANCE_ENABLED=true" in env
+        assert "ORMAH_PI_MAINTENANCE_ENABLED" not in env
+
+        captured = capsys.readouterr()
+        assert "Pi" in captured.out
+
+
+class TestInstallPiMd:
+    def test_respects_pi_agent_dir_override(self, tmp_path, monkeypatch):
+        pi_dir = tmp_path / "custom-pi-agent"
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(pi_dir))
+
+        install_pi_md()
+        install_pi_agents()
+
+        assert (pi_dir / "AGENTS.md").exists()
+        assert (pi_dir / "agents" / "ormah-maintenance.md").exists()
+
+    def test_creates_new_file(self, tmp_path, capsys):
+        agents_md = tmp_path / ".pi" / "agent" / "AGENTS.md"
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_pi_md()
+
+        content = agents_md.read_text()
+        assert PI_AGENTS_MD_SENTINEL_START in content
+        assert PI_AGENTS_MD_SENTINEL_END in content
+        assert "# Ormah Memory System" in content
+        assert "ormah_remember" in content
+
+        captured = capsys.readouterr()
+        assert "Instructions added to ~/.pi/agent/AGENTS.md" in captured.out
+
+    def test_appends_to_existing_content(self, tmp_path):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        agents_md = pi_dir / "AGENTS.md"
+        agents_md.write_text("# My existing instructions\n\nDo things my way.\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_pi_md()
+
+        content = agents_md.read_text()
+        assert content.startswith("# My existing instructions\n\nDo things my way.\n")
+        assert PI_AGENTS_MD_SENTINEL_START in content
+        assert "# Ormah Memory System" in content
+
+    def test_idempotent_replace(self, tmp_path):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        agents_md = pi_dir / "AGENTS.md"
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_pi_md()
+            first = agents_md.read_text()
+            install_pi_md()
+            second = agents_md.read_text()
+
+        assert first == second
+
+    def test_project_scope_writes_to_project_agents_md(self, tmp_path, capsys):
+        with patch("ormah.setup.Path.cwd", return_value=tmp_path):
+            install_pi_md(scope="project")
+
+        project_agents_md = tmp_path / "AGENTS.md"
+        content = project_agents_md.read_text()
+        assert PI_AGENTS_MD_SENTINEL_START in content
+        assert PI_AGENTS_MD_SENTINEL_END in content
+        assert "# Ormah Memory System" in content
+
+        captured = capsys.readouterr()
+        assert "Instructions added to ./AGENTS.md" in captured.out
+
+
+class TestClaudeCodeIsWired:
+    def _write_settings(self, tmp_path: Path, data: dict) -> Path:
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        settings_path = claude_dir / "settings.json"
+        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+        return settings_path
+
+    def test_detects_cli_hooks_when_no_mcp_entry_exists(self, tmp_path):
+        """Regression: the hooks branch read entry.get("command") off the matcher
+        dict, so it never matched; only the .claude.json MCP fallback could
+        return True. No ~/.claude.json here, so the fallback cannot rescue it."""
+        self._write_settings(tmp_path, {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/ormah whisper inject", "timeout": 10}]}
+                ]
+            }
+        })
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is True
+
+    def test_third_party_hook_is_not_mistaken_for_ormah(self, tmp_path):
+        self._write_settings(tmp_path, {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/usr/bin/other-tool whisper inject"}]}
+                ]
+            }
+        })
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is False
+
+    def test_falls_back_to_mcp_entry_when_no_hooks(self, tmp_path):
+        self._write_settings(tmp_path, {"hooks": {}})
+        (tmp_path / ".claude.json").write_text(
+            json.dumps({"mcpServers": {"ormah": {"command": "/usr/bin/ormah", "args": ["mcp"]}}}) + "\n"
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is True
+
+    def test_malformed_matcher_does_not_raise(self, tmp_path):
+        self._write_settings(tmp_path, {
+            "hooks": {"UserPromptSubmit": ["not-a-dict", {"no_hooks_key": True}, {"hooks": "not-a-list"}]}
+        })
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is False
+
+    def test_plugin_providing_hooks_counts_as_wired(self, tmp_path):
+        """The plugin provides the hooks and MCP server; without this the UI
+        would report a working install as not wired once Task 4 strips the CLI
+        wiring."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        (claude_dir / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"ormah@ormah": True}}, indent=2) + "\n"
+        )
+        install_path = claude_dir / "plugins" / "cache" / "ormah" / "ormah" / "0.13.3"
+        (install_path / "hooks").mkdir(parents=True)
+        (install_path / "hooks" / "hooks.json").write_text(json.dumps(REALISTIC_HOOKS_JSON) + "\n")
+        (install_path / ".mcp.json").write_text(json.dumps(REALISTIC_MCP_JSON) + "\n")
+        (claude_dir / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {"ormah@ormah": [
+                {"scope": "user", "installPath": str(install_path), "version": "0.13.3"}
+            ]},
+        }, indent=2) + "\n")
+        # no ormah hooks in settings.json, no ~/.claude.json — the plugin is the only wiring
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is True
+
+    def test_enabled_but_uninstalled_plugin_alone_is_not_wired(self, tmp_path):
+        """Nothing would actually fire — reporting 'wired' would be a lie."""
+        self._write_settings(tmp_path, {"enabledPlugins": {"ormah@ormah": True}})
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _claude_code_is_wired() is False
+
+
+class TestInstallPiAgents:
+    def test_creates_agent_file(self, tmp_path, capsys):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_pi_agents()
+
+        agent_file = tmp_path / ".pi" / "agent" / "agents" / "ormah-maintenance.md"
+        content = agent_file.read_text()
+        assert "ormah_run_maintenance" in content
+        assert "name: ormah-maintenance" in content
+
+        captured = capsys.readouterr()
+        assert "Pi" in captured.out
+
+    def test_overwrites_existing_agent_file(self, tmp_path):
+        agent_dir = tmp_path / ".pi" / "agent" / "agents"
+        agent_dir.mkdir(parents=True)
+        agent_file = agent_dir / "ormah-maintenance.md"
+        agent_file.write_text("# old\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            install_pi_agents()
+
+        content = agent_file.read_text()
+        assert "ormah_run_maintenance" in content
+        assert "# old" not in content
+
+
+class TestConfigurePiExtension:
+    def test_partial_wiring_never_reports_connected(self, tmp_path):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        (pi_dir / "settings.json").write_text(
+            json.dumps({"packages": ["npm:ormah-pi"]})
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            assert _pi_is_wired() is False
+
+            (pi_dir / "AGENTS.md").write_text(
+                f"{PI_AGENTS_MD_SENTINEL_START}\n{PI_AGENTS_MD_SENTINEL_END}\n"
+            )
+            assert _pi_is_wired() is False
+
+            agents_dir = pi_dir / "agents"
+            agents_dir.mkdir()
+            (agents_dir / "ormah-maintenance.md").write_text(
+                "Use ormah_run_maintenance."
+            )
+            assert _pi_is_wired() is True
+
+    def test_detects_extension_via_settings_packages(self, tmp_path, capsys):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        (pi_dir / "settings.json").write_text(json.dumps({"packages": ["npm:ormah-pi"]}))
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            configure_pi_extension("/abs/path/ormah")
+
+        captured = capsys.readouterr()
+        assert "ormah-pi extension detected" in captured.out
+
+    def test_installs_extension_when_missing(self, tmp_path, capsys):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+
+        def install(*_args, **_kwargs):
+            (pi_dir / "settings.json").write_text(
+                json.dumps({"packages": ["npm:ormah-pi"]})
+            )
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._find_binary", return_value="/usr/bin/pi"),
+            patch("ormah.setup.subprocess.run", side_effect=install) as mock_run,
+        ):
+            configure_pi_extension("/abs/path/ormah")
+
+        captured = capsys.readouterr()
+        assert "ormah-pi extension installed" in captured.out
+        mock_run.assert_called_once_with(
+            ["/usr/bin/pi", "install", "npm:ormah-pi"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def test_install_failure_is_reported(self, tmp_path):
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._find_binary", return_value="/usr/bin/pi"),
+            patch(
+                "ormah.setup.subprocess.run",
+                return_value=MagicMock(returncode=1, stdout="", stderr="not found"),
+            ),
+            pytest.raises(RuntimeError, match="not found"),
+        ):
+            configure_pi_extension("/abs/path/ormah")
 
 
 # --- Uninstall tests ---
@@ -1506,6 +2521,30 @@ class TestRemoveClaudeHooks:
         hooks = result["hooks"]["UserPromptSubmit"][0]["hooks"]
         assert len(hooks) == 1
         assert hooks[0]["command"] == "/usr/bin/other-tool run"
+
+    def test_preserves_untouched_empty_and_missing_hooks_matchers(self, tmp_path):
+        data = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"matcher": "empty", "hooks": []},
+                    {"hooks": [{"command": "/usr/bin/ormah whisper inject"}]},
+                ],
+                "PreToolUse": [{"matcher": "Write"}],
+            }
+        }
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings_path = claude_dir / "settings.json"
+        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()
+
+        result = json.loads(settings_path.read_text())
+        assert result["hooks"] == {
+            "UserPromptSubmit": [{"matcher": "empty", "hooks": []}],
+            "PreToolUse": [{"matcher": "Write"}],
+        }
 
     def test_no_settings_file_is_noop(self, tmp_path, capsys):
         claude_dir = tmp_path / ".claude"
@@ -1597,6 +2636,35 @@ class TestRemoveMcpFromJson:
         result = json.loads(config.read_text())
         assert result == original
 
+    def test_write_is_atomic(self, tmp_path):
+        """~/.claude.json holds the user's whole Claude Code config, and a later
+        change makes this path run on every setup --update for plugin users. A
+        bare write_text truncates it on a crash mid-write."""
+        config = tmp_path / "claude.json"
+        config.write_text(json.dumps({
+            "mcpServers": {
+                "ormah": {"command": "/bin/ormah", "args": ["mcp"]},
+                "other": {"command": "/bin/other"},
+            }
+        }, indent=2) + "\n")
+
+        with patch("ormah.setup._atomic_write") as atomic_write:
+            _remove_mcp_from_json(config)
+
+        atomic_write.assert_called_once()
+        written_path = atomic_write.call_args[0][0]
+        assert str(written_path) == str(config)
+        payload = json.loads(atomic_write.call_args[0][1])
+        assert payload["mcpServers"] == {"other": {"command": "/bin/other"}}
+
+    def test_corrupt_file_is_left_untouched(self, tmp_path):
+        config = tmp_path / "claude.json"
+        config.write_text("{not json")
+
+        _remove_mcp_from_json(config)
+
+        assert config.read_text() == "{not json"
+
 
 class TestRemoveCodexMcpConfig:
     def test_removes_ormah_block(self, tmp_path):
@@ -1650,6 +2718,29 @@ class TestRemoveCodexHooks:
         result = json.loads(hooks_path.read_text())
         assert result["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == "/usr/bin/other-tool run"
         assert "Stop" not in result["hooks"]
+
+    def test_preserves_untouched_empty_and_missing_hooks_matchers(self, tmp_path):
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps({
+            "hooks": {
+                "Stop": [
+                    {"matcher": "empty", "hooks": []},
+                    {"hooks": [{"command": "/usr/bin/ormah whisper store"}]},
+                ],
+                "PreToolUse": [{"matcher": "Write"}],
+            }
+        }, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_codex_hooks()
+
+        result = json.loads(hooks_path.read_text())
+        assert result["hooks"] == {
+            "Stop": [{"matcher": "empty", "hooks": []}],
+            "PreToolUse": [{"matcher": "Write"}],
+        }
 
     def test_noop_when_missing(self, tmp_path):
         with patch("ormah.setup.Path.home", return_value=tmp_path):
@@ -1771,9 +2862,398 @@ class TestRemoveClaudeMdBlock:
         assert "skipping" in captured.out.lower()
 
 
+class TestRemovePiMdBlock:
+    def test_removes_sentinel_block(self, tmp_path):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        agents_md = pi_dir / "AGENTS.md"
+        agents_md.write_text(
+            "# Before\n\n"
+            f"{PI_AGENTS_MD_SENTINEL_START}\normah instructions\n{PI_AGENTS_MD_SENTINEL_END}\n"
+            "\n# After\n"
+        )
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_pi_md_block()
+
+        content = agents_md.read_text()
+        assert PI_AGENTS_MD_SENTINEL_START not in content
+        assert PI_AGENTS_MD_SENTINEL_END not in content
+        assert "ormah instructions" not in content
+        assert "# Before" in content
+        assert "# After" in content
+
+    def test_noop_when_file_missing(self, tmp_path, capsys):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_pi_md_block()
+
+        captured = capsys.readouterr()
+        assert "skipping" in captured.out.lower()
+
+    def test_noop_when_no_sentinels(self, tmp_path, capsys):
+        pi_dir = tmp_path / ".pi" / "agent"
+        pi_dir.mkdir(parents=True)
+        agents_md = pi_dir / "AGENTS.md"
+        agents_md.write_text("# Just some content\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_pi_md_block()
+
+        assert agents_md.read_text() == "# Just some content\n"
+        captured = capsys.readouterr()
+        assert "skipping" in captured.out.lower()
+
+
+class TestRemovePiAgents:
+    def test_removes_agent_file(self, tmp_path, capsys):
+        agent_dir = tmp_path / ".pi" / "agent" / "agents"
+        agent_dir.mkdir(parents=True)
+        agent_file = agent_dir / "ormah-maintenance.md"
+        agent_file.write_text("# old\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_pi_agents()
+
+        assert not agent_file.exists()
+        captured = capsys.readouterr()
+        assert "Removed" in captured.out
+
+    def test_noop_when_missing(self, tmp_path, capsys):
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_pi_agents()
+
+        captured = capsys.readouterr()
+        assert "Removed" not in captured.out
+
+
+class TestRemovePiExtension:
+    def test_removes_only_ormah_entries(self, tmp_path):
+        settings_path = tmp_path / ".pi" / "agent" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "packages": ["npm:ormah-pi", "npm:other-package"],
+                    "extensions": [{"source": "/tmp/custom-extension.ts"}],
+                    "theme": "dark",
+                }
+            )
+        )
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._find_binary", return_value="/usr/bin/pi"),
+            patch(
+                "ormah.setup.subprocess.run",
+                return_value=MagicMock(returncode=0, stdout="", stderr=""),
+            ) as mock_run,
+        ):
+            _remove_pi_extension()
+
+        assert json.loads(settings_path.read_text()) == {
+            "packages": ["npm:other-package"],
+            "extensions": [{"source": "/tmp/custom-extension.ts"}],
+            "theme": "dark",
+        }
+        mock_run.assert_called_once_with(
+            ["/usr/bin/pi", "remove", "npm:ormah-pi"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def test_scrubs_settings_when_pi_binary_is_missing(self, tmp_path):
+        settings_path = tmp_path / ".pi" / "agent" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(
+            json.dumps({"extensions": ["/checkout/integrations/pi-plugin/ormah-pi.ts"]})
+        )
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._find_binary", return_value=None),
+        ):
+            _remove_pi_extension()
+
+        assert json.loads(settings_path.read_text()) == {}
+
+
 class TestRunUninstall:
-    def _patch_all(self, mock_uninstall_autostart, mock_hooks, mock_mcp, mock_md, mock_rmtree, mock_run):
-        """Shared patcher helper — not used directly, see individual tests."""
+    @pytest.fixture(autouse=True)
+    def _isolate_uninstall_from_real_home(self, tmp_path):
+        """Keep uninstall tests from touching the developer's real Ormah install."""
+        fake_settings = MagicMock()
+        fake_settings.memory_dir = tmp_path / ".local" / "share" / "ormah" / "memory"
+        fake_settings.embedding_model = "BAAI/bge-base-en-v1.5"
+        fake_settings.whisper_reranker_model = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.config.settings", fake_settings),
+            patch("ormah.setup._get_running_server_data_dir", return_value=None),
+            patch("ormah.setup.platform.system", return_value="Other"),
+            patch(
+                "ormah.setup.MACOS_SYSTEM_APPLICATIONS_DIR",
+                tmp_path / "system-applications",
+            ),
+        ):
+            yield
+
+    @staticmethod
+    def _safe_uninstall_operations():
+        stack = ExitStack()
+        for target in (
+            "ormah.server_manager.uninstall_autostart",
+            "ormah.setup._remove_claude_hooks",
+            "ormah.setup._remove_codex_hooks",
+            "ormah.setup._remove_mcp_registration",
+            "ormah.setup._remove_pi_extension",
+            "ormah.setup._remove_claude_md_block",
+            "ormah.setup._remove_codex_md_block",
+            "ormah.setup._remove_codex_agents",
+            "ormah.setup._remove_claude_agents",
+            "ormah.setup._remove_claude_commands",
+            "ormah.setup._remove_pi_md_block",
+            "ormah.setup._remove_pi_agents",
+            "ormah.setup._remove_fastembed_cache",
+        ):
+            stack.enter_context(patch(target))
+        return stack
+
+    @staticmethod
+    def _make_macos_desktop(home: Path, applications: Path):
+        app = applications / "Ormah.app"
+        app.mkdir(parents=True)
+        support = home / "Library" / "Application Support" / DESKTOP_BUNDLE_IDENTIFIER
+        webkit = home / "Library" / "WebKit" / DESKTOP_BUNDLE_IDENTIFIER
+        support.mkdir(parents=True)
+        webkit.mkdir(parents=True)
+        launch_agent = home / "Library" / "LaunchAgents" / "Ormah.plist"
+        launch_agent.parent.mkdir(parents=True)
+        launch_agent.write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": DESKTOP_PRODUCT_NAME,
+                    "ProgramArguments": [
+                        str(app / "Contents" / "MacOS" / "ormah-desktop")
+                    ],
+                    "RunAtLoad": True,
+                }
+            )
+        )
+        return app, support, webkit, launch_agent
+
+    def test_macos_hybrid_disables_real_login_item_and_keeps_app_data(
+        self, tmp_path, capsys
+    ):
+        applications = tmp_path / "Jane Smith Applications"
+        app, support, webkit, launch_agent = self._make_macos_desktop(
+            tmp_path, applications
+        )
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            run_uninstall(yes=True)
+
+        assert not launch_agent.exists()
+        assert app.exists()
+        assert support.exists()
+        assert webkit.exists()
+        output = capsys.readouterr().out
+        assert "Disabled Ormah Desktop autostart" in output
+        assert "move Ormah.app to Trash" in output
+        assert "Ormah Desktop remains installed" in output
+        assert "Ormah has been uninstalled" not in output
+
+    def test_linux_hybrid_disables_autostart_and_reports_debian_package(
+        self, tmp_path, capsys
+    ):
+        autostart = tmp_path / ".config" / "autostart" / "Ormah.desktop"
+        autostart.parent.mkdir(parents=True)
+        autostart.write_text(
+            "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Ormah\n"
+            "Comment=Ormahstartup script\nExec=/usr/bin/ormah-desktop \n"
+            "StartupNotify=false\nTerminal=false",
+            encoding="utf-8",
+        )
+
+        def run_command(args, **_kwargs):
+            if args[0] == "dpkg-query":
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="ormah: /usr/bin/ormah-desktop\n", stderr=""
+                )
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Linux"),
+            patch("subprocess.run", side_effect=run_command),
+        ):
+            run_uninstall(yes=True)
+
+        assert not autostart.exists()
+        output = capsys.readouterr().out
+        assert "Disabled Ormah Desktop autostart" in output
+        assert "sudo apt remove ormah" in output
+        assert "Ormah Desktop remains installed" in output
+
+    def test_linux_hybrid_reports_appimage_and_user_integration(
+        self, tmp_path, capsys
+    ):
+        appimage = tmp_path / "Apps" / "Ormah.AppImage"
+        appimage.parent.mkdir()
+        appimage.write_bytes(b"appimage")
+        autostart = tmp_path / ".config" / "autostart" / "Ormah.desktop"
+        autostart.parent.mkdir(parents=True)
+        autostart.write_text(
+            "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Ormah\n"
+            f"Comment=Ormahstartup script\nExec={appimage} \n"
+            "StartupNotify=false\nTerminal=false",
+            encoding="utf-8",
+        )
+        menu = tmp_path / ".local" / "share" / "applications" / "ormah.desktop"
+        menu.parent.mkdir(parents=True)
+        menu.write_text(
+            f'[Desktop Entry]\nName=Ormah\nExec="{appimage}"\n',
+            encoding="utf-8",
+        )
+        icon = (
+            tmp_path
+            / ".local"
+            / "share"
+            / "icons"
+            / "hicolor"
+            / "128x128"
+            / "apps"
+            / "ormah-desktop.png"
+        )
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"icon")
+
+        def run_command(args, **_kwargs):
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Linux"),
+            patch("subprocess.run", side_effect=run_command),
+        ):
+            run_uninstall(yes=True)
+
+        assert not autostart.exists()
+        assert appimage.exists()
+        assert menu.exists()
+        assert icon.exists()
+        output = capsys.readouterr().out
+        assert str(appimage) in output
+        assert str(menu) in output
+        assert str(icon) in output
+        assert "Delete the Ormah AppImage" in output
+
+    @pytest.mark.parametrize(
+        "contents",
+        [b"not a plist", b'<?xml version="1.0"?><plist><dict><key>broken</key>'],
+    )
+    def test_malformed_macos_login_item_is_reported_not_removed(
+        self, tmp_path, contents
+    ):
+        launch_agent = tmp_path / "Library" / "LaunchAgents" / "Ormah.plist"
+        launch_agent.parent.mkdir(parents=True)
+        launch_agent.write_bytes(contents)
+
+        state = _inspect_desktop_installation("Darwin")
+        _disable_desktop_autostart(state)
+
+        assert launch_agent.read_bytes() == contents
+        assert state.unrecognized_autostart == launch_agent
+
+    def test_symlinked_linux_autostart_is_never_removed(self, tmp_path):
+        target = tmp_path / "not-ormah.desktop"
+        target.write_text("important\n", encoding="utf-8")
+        autostart = tmp_path / ".config" / "autostart" / "Ormah.desktop"
+        autostart.parent.mkdir(parents=True)
+        autostart.symlink_to(target)
+
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+            state = _inspect_desktop_installation("Linux")
+        _disable_desktop_autostart(state)
+
+        assert autostart.is_symlink()
+        assert target.read_text(encoding="utf-8") == "important\n"
+        assert state.unrecognized_autostart == autostart
+
+    def test_unrecognized_autostart_aborts_before_backend_cleanup(
+        self, tmp_path, capsys
+    ):
+        launch_agent = tmp_path / "Library" / "LaunchAgents" / "Ormah.plist"
+        launch_agent.parent.mkdir(parents=True)
+        launch_agent.write_text("not an Ormah plist\n", encoding="utf-8")
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("subprocess.run") as run_command,
+        ):
+            run_uninstall(yes=True)
+
+        run_command.assert_not_called()
+        assert launch_agent.exists()
+        assert "cancelled before removing the backend" in capsys.readouterr().out
+
+    def test_autostart_permission_failure_aborts_before_backend_cleanup(
+        self, tmp_path, capsys
+    ):
+        applications = tmp_path / "system-applications"
+        _, _, _, launch_agent = self._make_macos_desktop(tmp_path, applications)
+        real_unlink = Path.unlink
+
+        def deny_autostart(path, *args, **kwargs):
+            if path == launch_agent:
+                raise PermissionError("permission denied")
+            return real_unlink(path, *args, **kwargs)
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch.object(Path, "unlink", autospec=True, side_effect=deny_autostart),
+            patch("subprocess.run") as run_command,
+        ):
+            run_uninstall(yes=True)
+
+        run_command.assert_not_called()
+        assert launch_agent.exists()
+        assert "cancelled before removing the backend" in capsys.readouterr().out
+
+    def test_recovery_preflight_failure_leaves_desktop_autostart_enabled(
+        self, tmp_path, capsys
+    ):
+        from ormah.cloud.keys import init_key
+
+        applications = tmp_path / "system-applications"
+        _, _, _, launch_agent = self._make_macos_desktop(tmp_path, applications)
+        init_key(tmp_path / ".config" / "ormah" / "cloud.key")
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+        ):
+            run_uninstall(yes=True)
+
+        assert launch_agent.exists()
+        assert "cancelled before removing" in capsys.readouterr().out
+
+    def test_desktop_constants_match_tauri_configuration(self):
+        config_path = Path(__file__).parents[1] / "desktop" / "src-tauri" / "tauri.conf.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        assert config["productName"] == DESKTOP_PRODUCT_NAME
+        assert config["identifier"] == DESKTOP_BUNDLE_IDENTIFIER
 
     def test_cancels_on_first_no(self, monkeypatch, capsys):
         monkeypatch.setattr("builtins.input", lambda _: "n")
@@ -1802,11 +3282,14 @@ class TestRunUninstall:
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_codex_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
             patch("ormah.setup._remove_claude_md_block"),
             patch("ormah.setup._remove_codex_md_block"),
             patch("ormah.setup._remove_codex_agents"),
             patch("ormah.setup._remove_claude_agents"),
             patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_pi_md_block"),
+            patch("ormah.setup._remove_pi_agents"),
             patch("shutil.rmtree"),
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
         ):
@@ -1835,11 +3318,14 @@ class TestRunUninstall:
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_codex_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
             patch("ormah.setup._remove_claude_md_block"),
             patch("ormah.setup._remove_codex_md_block"),
             patch("ormah.setup._remove_codex_agents"),
             patch("ormah.setup._remove_claude_agents"),
             patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_pi_md_block"),
+            patch("ormah.setup._remove_pi_agents"),
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
         ):
             run_uninstall(yes=True)
@@ -1848,8 +3334,258 @@ class TestRunUninstall:
         assert not cache_dir.exists()
         assert not config_dir.exists()
 
+    @pytest.mark.parametrize("filename", ["cloud.key", "ormah-recovery-kit.md"])
+    def test_config_cleanup_preserves_each_cloud_recovery_file(self, tmp_path, filename):
+        config_dir = tmp_path / ".config" / "ormah"
+        config_dir.mkdir(parents=True)
+        recovery_file = config_dir / filename
+        recovery_file.write_text("recovery material\n")
+        recovery_file.chmod(0o600)
+        (config_dir / ".env").write_text("ORMAH_ACCOUNT_TOKEN=secret\n")
+        nested = config_dir / "generated"
+        nested.mkdir()
+        (nested / "state.json").write_text("{}\n")
+
+        preserved = _remove_config_preserving_cloud_recovery(config_dir)
+
+        assert preserved == (recovery_file,)
+        assert recovery_file.read_text() == "recovery material\n"
+        assert stat.S_IMODE(recovery_file.stat().st_mode) == 0o600
+        assert list(config_dir.iterdir()) == [recovery_file]
+
+    def test_uninstall_preserves_cloud_recovery_material_with_yes(self, tmp_path, capsys):
+        share_dir = tmp_path / ".local" / "share" / "ormah"
+        cache_dir = tmp_path / ".cache" / "ormah"
+        config_dir = tmp_path / ".config" / "ormah"
+        for directory in (share_dir, cache_dir, config_dir):
+            directory.mkdir(parents=True)
+
+        from ormah.cloud.keys import get_or_create_store_id, init_key, write_recovery_kit
+
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        memory_dir = share_dir / "memory"
+        init_key(key_path)
+        store_id = get_or_create_store_id(memory_dir)
+        write_recovery_kit(store_id, key_path=key_path, kit_path=kit_path)
+        key_content = key_path.read_text()
+        kit_content = kit_path.read_text()
+        (config_dir / ".env").write_text("ORMAH_ACCOUNT_TOKEN=secret\n")
+
+        with (
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_codex_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_codex_md_block"),
+            patch("ormah.setup._remove_codex_agents"),
+            patch("ormah.setup._remove_claude_agents"),
+            patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_pi_md_block"),
+            patch("ormah.setup._remove_pi_agents"),
+            patch("ormah.setup._remove_fastembed_cache"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            run_uninstall(yes=True)
+
+        assert not share_dir.exists()
+        assert not cache_dir.exists()
+        assert key_path.read_text() == key_content
+        assert kit_path.read_text() == kit_content
+        assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(kit_path.stat().st_mode) == 0o600
+        assert {path.name for path in config_dir.iterdir()} == {
+            "cloud.key",
+            "ormah-recovery-kit.md",
+        }
+        output = capsys.readouterr().out.lower()
+        assert "preserved cloud recovery material" in output
+        assert "permanently unreadable" in output
+
+    def test_recovery_preflight_regenerates_missing_kit(self, tmp_path):
+        from ormah.cloud.keys import (
+            extract_store_id,
+            get_or_create_store_id,
+            init_key,
+            load_identity_strings,
+        )
+
+        config_dir = tmp_path / ".config" / "ormah"
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        memory_dir = tmp_path / "memory"
+        init_key(key_path)
+        store_id = get_or_create_store_id(memory_dir)
+
+        result = _prepare_cloud_recovery(config_dir, [memory_dir])
+
+        assert result.kit_regenerated is True
+        assert result.paths == (key_path, kit_path)
+        assert load_identity_strings(kit_path) == load_identity_strings(key_path)
+        assert extract_store_id(str(kit_path)) == store_id
+        assert stat.S_IMODE(kit_path.stat().st_mode) == 0o600
+
+    def test_recovery_preflight_refreshes_stale_kit_after_rotation(self, tmp_path):
+        from ormah.cloud.keys import (
+            _rotate_key_without_recovery_kit,
+            get_or_create_store_id,
+            init_key,
+            load_identity_strings,
+            write_recovery_kit,
+        )
+
+        config_dir = tmp_path / ".config" / "ormah"
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        memory_dir = tmp_path / "memory"
+        init_key(key_path)
+        store_id = get_or_create_store_id(memory_dir)
+        write_recovery_kit(store_id, key_path=key_path, kit_path=kit_path)
+        _rotate_key_without_recovery_kit(key_path)
+
+        result = _prepare_cloud_recovery(config_dir, [memory_dir])
+
+        assert result.kit_regenerated is True
+        assert load_identity_strings(kit_path) == load_identity_strings(key_path)
+
+    def test_recovery_preflight_accepts_complete_kit_without_key_file(self, tmp_path):
+        from ormah.cloud.keys import get_or_create_store_id, init_key, write_recovery_kit
+
+        config_dir = tmp_path / ".config" / "ormah"
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        memory_dir = tmp_path / "memory"
+        init_key(key_path)
+        store_id = get_or_create_store_id(memory_dir)
+        write_recovery_kit(store_id, key_path=key_path, kit_path=kit_path)
+        original = kit_path.read_bytes()
+        key_path.unlink()
+
+        result = _prepare_cloud_recovery(config_dir, [memory_dir])
+
+        assert result.paths == (kit_path,)
+        assert result.kit_regenerated is False
+        assert kit_path.read_bytes() == original
+
+    def test_recovery_preflight_refuses_key_without_store_id(self, tmp_path):
+        from ormah.cloud.keys import init_key
+
+        config_dir = tmp_path / ".config" / "ormah"
+        init_key(config_dir / "cloud.key")
+
+        with pytest.raises(CloudRecoveryPreflightError, match="no store ID"):
+            _prepare_cloud_recovery(config_dir, [tmp_path / "memory"])
+
+    def test_recovery_preflight_refuses_mismatched_store(self, tmp_path):
+        from ormah.cloud.keys import get_or_create_store_id, init_key, write_recovery_kit
+
+        config_dir = tmp_path / ".config" / "ormah"
+        key_path = config_dir / "cloud.key"
+        kit_path = config_dir / "ormah-recovery-kit.md"
+        memory_a = tmp_path / "memory-a"
+        memory_b = tmp_path / "memory-b"
+        init_key(key_path)
+        store_a = get_or_create_store_id(memory_a)
+        store_b = get_or_create_store_id(memory_b)
+        write_recovery_kit(store_b, key_path=key_path, kit_path=kit_path)
+        original = kit_path.read_bytes()
+
+        with pytest.raises(CloudRecoveryPreflightError, match="does not match"):
+            _prepare_cloud_recovery(config_dir, [memory_a])
+
+        assert store_a != store_b
+        assert kit_path.read_bytes() == original
+
+    def test_recovery_preflight_refuses_multiple_store_ids(self, tmp_path):
+        from ormah.cloud.keys import get_or_create_store_id, init_key
+
+        config_dir = tmp_path / ".config" / "ormah"
+        init_key(config_dir / "cloud.key")
+        memory_a = tmp_path / "memory-a"
+        memory_b = tmp_path / "memory-b"
+        get_or_create_store_id(memory_a)
+        get_or_create_store_id(memory_b)
+
+        with pytest.raises(CloudRecoveryPreflightError, match="Multiple cloud store IDs"):
+            _prepare_cloud_recovery(config_dir, [memory_a, memory_b])
+
+    def test_uninstall_aborts_before_changes_when_recovery_is_incomplete(
+        self, tmp_path, capsys
+    ):
+        from ormah.cloud.keys import init_key
+
+        config_dir = tmp_path / ".config" / "ormah"
+        key_path = config_dir / "cloud.key"
+        init_key(key_path)
+
+        with patch("ormah.server_manager.uninstall_autostart") as mock_daemon:
+            run_uninstall(yes=True)
+
+        mock_daemon.assert_not_called()
+        assert key_path.is_file()
+        output = capsys.readouterr().out
+        assert "Uninstall cancelled before removing any data or integrations" in output
+
+    def test_warns_about_cloud_key_before_interactive_confirmation(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        config_dir = tmp_path / ".config" / "ormah"
+        config_dir.mkdir(parents=True)
+        key_path = config_dir / "cloud.key"
+        key_path.write_text("AGE-SECRET-KEY-TEST\n")
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        with patch("ormah.server_manager.uninstall_autostart") as mock_daemon:
+            run_uninstall(yes=False)
+
+        mock_daemon.assert_not_called()
+        assert key_path.exists()
+        output = capsys.readouterr().out.lower()
+        assert "uninstall will not delete it" in output
+        assert "permanently unreadable" in output
+
     def test_graceful_uv_failure(self, capsys):
         with (
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_codex_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_codex_md_block"),
+            patch("ormah.setup._remove_codex_agents"),
+            patch("ormah.setup._remove_claude_agents"),
+            patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_pi_md_block"),
+            patch("ormah.setup._remove_pi_agents"),
+            patch("shutil.rmtree"),
+            patch("ormah.setup._remove_uv_tool_install_files", return_value=False),
+            patch("subprocess.run", side_effect=Exception("uv not found")),
+        ):
+            run_uninstall(yes=True)  # must not raise
+
+        captured = capsys.readouterr()
+        assert "uv tool uninstall ormah" in captured.out
+
+    def test_uv_failure_removes_desktop_tool_install_files(self, tmp_path):
+        shim = tmp_path / ".local" / "bin" / "ormah"
+        shim.parent.mkdir(parents=True)
+        shim.write_text("#!/bin/sh\n")
+        shim.chmod(0o755)
+
+        tool_dir = tmp_path / ".local" / "share" / "uv" / "tools" / "ormah"
+        (tool_dir / "bin").mkdir(parents=True)
+        (tool_dir / "bin" / "ormah").write_text("#!/bin/sh\n")
+
+        fake_settings = MagicMock()
+        fake_settings.memory_dir = tmp_path / ".local" / "share" / "ormah" / "memory"
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.config.settings", fake_settings),
+            patch("ormah.setup._get_running_server_data_dir", return_value=None),
             patch("ormah.server_manager.uninstall_autostart"),
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_codex_hooks"),
@@ -1859,13 +3595,42 @@ class TestRunUninstall:
             patch("ormah.setup._remove_codex_agents"),
             patch("ormah.setup._remove_claude_agents"),
             patch("ormah.setup._remove_claude_commands"),
-            patch("shutil.rmtree"),
-            patch("subprocess.run", side_effect=Exception("uv not found")),
+            patch("ormah.setup._remove_fastembed_cache"),
+            patch("subprocess.run", side_effect=FileNotFoundError("uv")),
         ):
-            run_uninstall(yes=True)  # must not raise
+            run_uninstall(yes=True)
 
-        captured = capsys.readouterr()
-        assert "uv tool uninstall ormah" in captured.out
+        assert not shim.exists()
+        assert not tool_dir.exists()
+
+    def test_successful_uv_uninstall_still_removes_stale_command_shim(self, tmp_path):
+        shim = tmp_path / ".local" / "bin" / "ormah"
+        shim.parent.mkdir(parents=True)
+        shim.write_text("#!/bin/sh\n")
+        shim.chmod(0o755)
+
+        fake_settings = MagicMock()
+        fake_settings.memory_dir = tmp_path / ".local" / "share" / "ormah" / "memory"
+
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.config.settings", fake_settings),
+            patch("ormah.setup._get_running_server_data_dir", return_value=None),
+            patch("ormah.server_manager.uninstall_autostart"),
+            patch("ormah.setup._remove_claude_hooks"),
+            patch("ormah.setup._remove_codex_hooks"),
+            patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_claude_md_block"),
+            patch("ormah.setup._remove_codex_md_block"),
+            patch("ormah.setup._remove_codex_agents"),
+            patch("ormah.setup._remove_claude_agents"),
+            patch("ormah.setup._remove_claude_commands"),
+            patch("ormah.setup._remove_fastembed_cache"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            run_uninstall(yes=True)
+
+        assert not shim.exists()
 
     def test_eof_on_first_prompt_cancels(self, monkeypatch, capsys):
         def raise_eof(_):
@@ -1933,7 +3698,8 @@ class TestRemoveFastembedCache:
         # cache_dir itself is removed when empty
         assert not tmp_path.exists()
 
-    def test_uses_default_fastembed_cache_dir(self, tmp_path):
+    def test_uses_default_fastembed_cache_dir(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FASTEMBED_CACHE_PATH")
         cache_dir = tmp_path / ".local" / "share" / "ormah" / "models"
         model_dir = cache_dir / "models--qdrant--bge-base-en-v1.5-onnx-q"
         model_dir.mkdir(parents=True)
@@ -2026,6 +3792,7 @@ class TestUninstallMemoryDirResolution:
             patch("ormah.server_manager.uninstall_autostart"),
             patch("ormah.setup._remove_claude_hooks"),
             patch("ormah.setup._remove_mcp_registration"),
+            patch("ormah.setup._remove_pi_extension"),
             patch("ormah.setup._remove_claude_md_block"),
             patch("ormah.setup._remove_fastembed_cache"),
             patch("subprocess.run", return_value=MagicMock(returncode=0)),
@@ -2236,3 +4003,378 @@ class TestStopRunningServer:
             main()
 
         assert exc_info.value.code == 1
+
+
+class TestMergeHooks:
+    ORMAH = {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/x/ormah whisper inject"}]}]
+    }
+
+    def test_preserves_cotenant_under_same_event(self):
+        existing = {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "other-tool"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m["hooks"]]
+        assert "other-tool" in cmds
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_idempotent_no_duplicate_ormah(self):
+        once = _merge_hooks({}, self.ORMAH)
+        twice = _merge_hooks(once, self.ORMAH)
+        cmds = [h["command"] for m in twice["UserPromptSubmit"] for h in m["hooks"]]
+        assert cmds.count("/x/ormah whisper inject") == 1
+
+    def test_leaves_unclaimed_events_untouched(self):
+        existing = {"PreToolUse": [{"hooks": [{"type": "command", "command": "rtk hook claude"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        assert merged["PreToolUse"] == existing["PreToolUse"]
+
+    def test_substring_collision_not_stripped(self):
+        existing = {"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": "/opt/whisper inject-backup run"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m["hooks"]]
+        assert "/opt/whisper inject-backup run" in cmds
+
+    def test_preserves_matcher_without_hooks_key(self):
+        # matcher dict with no "hooks" key must survive the merge unchanged
+        existing = {"UserPromptSubmit": [{"matcher": "Write"}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        # user's hooks-less matcher is still present
+        assert {"matcher": "Write"} in merged["UserPromptSubmit"]
+        # ormah's matcher is also appended
+        cmds = [
+            h["command"]
+            for m in merged["UserPromptSubmit"]
+            if isinstance(m, dict)
+            for h in m.get("hooks", [])
+        ]
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_preserves_matcher_with_only_nonormah_hooks(self):
+        # regression guard: a matcher whose hooks are all non-ormah survives unchanged
+        existing = {"UserPromptSubmit": [{"hooks": [{"command": "/bin/other"}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m.get("hooks", [])]
+        assert "/bin/other" in cmds
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_preserves_malformed_non_dict_hook_entry(self):
+        # a matcher whose hooks list contains a malformed (non-dict) entry must not crash
+        existing = {"UserPromptSubmit": [{"hooks": ["malformed-string-entry"]}]}
+        merged = _merge_hooks(existing, self.ORMAH)  # must NOT raise
+        # the malformed entry is preserved
+        all_hooks = [h for m in merged["UserPromptSubmit"] if isinstance(m, dict) for h in m.get("hooks", [])]
+        assert "malformed-string-entry" in all_hooks
+        # ormah's hook is also appended
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] if isinstance(m, dict) for h in m.get("hooks", []) if isinstance(h, dict)]
+        assert "/x/ormah whisper inject" in cmds
+
+    def test_non_string_command_preserved(self):
+        # a hook with a non-string command is neither Ormah nor crash-worthy —
+        # it must be preserved and the merge must succeed
+        existing = {"UserPromptSubmit": [{"hooks": [{"command": 123}]}]}
+        merged = _merge_hooks(existing, self.ORMAH)  # must not raise
+        preserved = [
+            h
+            for m in merged["UserPromptSubmit"]
+            if isinstance(m, dict)
+            for h in m.get("hooks", [])
+        ]
+        assert {"command": 123} in preserved
+
+    def test_drops_matcher_emptied_of_only_ormah_hooks(self):
+        # a matcher that held ONLY ormah hooks should be dropped after stripping,
+        # not left as {"hooks": []} — ormah's own fresh matcher is then appended
+        existing = {
+            "UserPromptSubmit": [{"hooks": [{"command": "/x/ormah whisper inject"}]}]
+        }
+        merged = _merge_hooks(existing, self.ORMAH)
+        # exactly one occurrence of the inject command (from ormah's appended matcher)
+        cmds = [h["command"] for m in merged["UserPromptSubmit"] for h in m.get("hooks", [])]
+        assert cmds.count("/x/ormah whisper inject") == 1
+        # no matcher left with an empty hooks list
+        empty_hook_matchers = [
+            m for m in merged["UserPromptSubmit"]
+            if isinstance(m, dict) and m.get("hooks") == []
+        ]
+        assert empty_hook_matchers == []
+
+
+class TestStripOrmahHooks:
+    def test_preserves_malformed_inner_hooks_verbatim(self):
+        existing = {
+            "UserPromptSubmit": [
+                {"hooks": 5},
+                {"hooks": "not-a-list"},
+                {"matcher": "missing"},
+            ]
+        }
+
+        cleaned, changed = _strip_ormah_hooks(existing)
+
+        assert changed is False
+        assert cleaned == existing
+
+    def test_removes_ormah_hook_without_rewriting_untouched_matchers(self):
+        untouched = {"matcher": "empty", "hooks": []}
+        existing = {
+            "UserPromptSubmit": [
+                untouched,
+                {
+                    "hooks": [
+                        {"command": "/x/ormah whisper inject"},
+                        {"command": "/bin/other"},
+                    ]
+                },
+            ]
+        }
+
+        cleaned, changed = _strip_ormah_hooks(existing)
+
+        assert changed is True
+        assert cleaned["UserPromptSubmit"] == [
+            untouched,
+            {"hooks": [{"command": "/bin/other"}]},
+        ]
+
+
+class TestIsOrmahHook:
+    def test_non_string_command_returns_false(self):
+        assert _is_ormah_hook({"command": 123}) is False
+        assert _is_ormah_hook({"command": ["a", "b"]}) is False
+        assert _is_ormah_hook({"command": {"x": 1}}) is False
+
+    def test_matches_real_ormah_hook(self):
+        assert _is_ormah_hook({"command": "/usr/bin/ormah whisper inject"})
+        assert _is_ormah_hook({"command": "/abs/path/ormah whisper store"})
+
+    def test_matches_plugin_wrapper_form(self):
+        assert _is_ormah_hook({"command": "/x/plugin/bin/ormah-whisper-inject"})
+        assert _is_ormah_hook({"command": "/x/plugin/bin/ormah-whisper-store"})
+
+    def test_rejects_substring_collision(self):
+        assert not _is_ormah_hook({"command": "/opt/whisper inject-backup run"})
+        assert not _is_ormah_hook({"command": "tools/whisper store-archive"})
+
+    def test_rejects_malformed_command(self):
+        assert not _is_ormah_hook({"command": ""})
+        assert not _is_ormah_hook({})
+        assert not _is_ormah_hook({"command": "unterminated 'quote"})
+
+    def test_non_dict_entry_returns_false(self):
+        assert _is_ormah_hook("a string") is False
+        assert _is_ormah_hook(123) is False
+        assert _is_ormah_hook(None) is False
+        assert _is_ormah_hook(["list"]) is False
+
+
+class TestRemoveClaudeHooksPluginWrapper:
+    def test_removes_plugin_wrapper_hook(self, tmp_path):
+        data = {"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": "/x/plugin/bin/ormah-whisper-inject"}]}
+        ]}}
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path):
+            _remove_claude_hooks()
+
+        result = json.loads((claude_dir / "settings.json").read_text())
+        cmds = [
+            h["command"]
+            for m in result.get("hooks", {}).get("UserPromptSubmit", [])
+            for h in m["hooks"]
+        ]
+        assert "/x/plugin/bin/ormah-whisper-inject" not in cmds
+
+
+class TestConfigureClaudeHooksMerge:
+    def test_preserves_existing_userpromptsubmit_hook(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+        import json
+
+        sp = tmp_path / "settings.json"
+        sp.write_text(
+            json.dumps(
+                {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "other-tool"}]}]}}
+            )
+        )
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        data = json.loads(sp.read_text())
+        cmds = [h["command"] for m in data["hooks"]["UserPromptSubmit"] for h in m["hooks"]]
+        assert "other-tool" in cmds
+        assert "/abs/ormah whisper inject" in cmds
+
+    def test_rerun_does_not_duplicate(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+        import json
+
+        sp = tmp_path / "settings.json"
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+            configure_claude_hooks("/abs/ormah")
+        data = json.loads(sp.read_text())
+        cmds = [h["command"] for m in data["hooks"]["UserPromptSubmit"] for h in m["hooks"]]
+        assert cmds.count("/abs/ormah whisper inject") == 1
+
+    def test_preserves_existing_precompact_and_sessionend(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+        import json
+
+        sp = tmp_path / "settings.json"
+        sp.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreCompact": [
+                            {"hooks": [{"type": "command", "command": "other-precompact"}]}
+                        ],
+                        "SessionEnd": [
+                            {"hooks": [{"type": "command", "command": "other-sessionend"}]}
+                        ],
+                    }
+                }
+            )
+        )
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        data = json.loads(sp.read_text())
+        pre = [h["command"] for m in data["hooks"]["PreCompact"] for h in m["hooks"]]
+        end = [h["command"] for m in data["hooks"]["SessionEnd"] for h in m["hooks"]]
+        assert "other-precompact" in pre and "/abs/ormah whisper store" in pre
+        assert "other-sessionend" in end and "/abs/ormah whisper store" in end
+
+    def test_corrupt_json_left_unchanged_and_no_false_success(self, tmp_path, capsys):
+        from ormah.setup import configure_claude_hooks
+
+        sp = tmp_path / "settings.json"
+        sp.write_text('{ "theme": "dark", BROKEN')
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+    def test_non_object_json_left_unchanged(self, tmp_path):
+        from ormah.setup import configure_claude_hooks
+
+        sp = tmp_path / "settings.json"
+        sp.write_text('["not", "an", "object"]')
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+
+    def test_non_list_event_left_unchanged(self, tmp_path, capsys):
+        """Non-list value on a claimed event (nested schema drift) must leave file unchanged."""
+        from ormah.setup import configure_claude_hooks
+
+        sp = tmp_path / "settings.json"
+        sp.write_text(json.dumps({"theme": "dark", "hooks": {"UserPromptSubmit": {"oops": 1}}}) + "\n")
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+    def test_uniterable_matcher_hooks_fail_closed(self, tmp_path, capsys):
+        """A non-iterable 'hooks' value inside a matcher triggers the backstop:
+        file is left unchanged, no success message printed."""
+        sp = tmp_path / "settings.json"
+        sp.write_text(json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": 5}]}}) + "\n")
+        before = sp.read_text()
+        with patch("ormah.setup.os.path.expanduser", return_value=str(sp)):
+            configure_claude_hooks("/abs/ormah")
+        assert sp.read_text() == before
+        assert "Whisper hooks installed" not in capsys.readouterr().out
+
+
+class TestConfigureCodexHooksMerge:
+    def test_preserves_existing_stop_hook(self, tmp_path):
+        import json
+
+        from ormah.setup import configure_codex_hooks
+
+        codex = tmp_path / ".codex"
+        codex.mkdir()
+        hp = codex / "hooks.json"
+        hp.write_text(
+            json.dumps(
+                {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other-stop"}]}]}}
+            )
+        )
+        with patch("ormah.setup.Path.home", return_value=tmp_path), patch(
+            "ormah.setup._enable_codex_feature"
+        ):
+            configure_codex_hooks("/abs/ormah")
+        data = json.loads(hp.read_text())
+        cmds = [h["command"] for m in data["hooks"]["Stop"] for h in m["hooks"]]
+        assert "other-stop" in cmds
+        assert "/abs/ormah whisper store" in cmds
+
+    def test_rerun_does_not_duplicate(self, tmp_path):
+        import json
+
+        from ormah.setup import configure_codex_hooks
+
+        with patch("ormah.setup.Path.home", return_value=tmp_path), patch(
+            "ormah.setup._enable_codex_feature"
+        ):
+            configure_codex_hooks("/abs/ormah")
+            configure_codex_hooks("/abs/ormah")
+        data = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
+        cmds = [h["command"] for m in data["hooks"]["UserPromptSubmit"] for h in m["hooks"]]
+        assert cmds.count("/abs/ormah whisper inject") == 1
+
+    def test_corrupt_hooks_json_no_false_success(self, tmp_path, capsys):
+        from ormah.setup import configure_codex_hooks
+
+        codex = tmp_path / ".codex"
+        codex.mkdir()
+        hp = codex / "hooks.json"
+        hp.write_text("{ BROKEN")
+        before = hp.read_text()
+        with patch("ormah.setup.Path.home", return_value=tmp_path), patch(
+            "ormah.setup._enable_codex_feature"
+        ) as enable:
+            configure_codex_hooks("/abs/ormah")
+        assert hp.read_text() == before  # unchanged
+        enable.assert_not_called()  # feature flag NOT enabled on abort
+        assert "Codex hooks installed" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("template", [
+    "src/ormah/agents/ormah-maintenance.md",
+    "src/ormah/agents/ormah-pi-maintenance.md",
+    "integrations/claude-plugin/agents/ormah-maintenance.md",
+    "integrations/pi-plugin/agents/ormah-maintenance.md",
+])
+def test_maintenance_templates_show_explicit_receipt_protocol(template):
+    import json
+    from pathlib import Path
+
+    from ormah.adapters.tool_schemas import TOOLS
+
+    content = (Path(__file__).resolve().parents[1] / template).read_text()
+    example = json.loads(content.split("```json\n", 1)[1].split("```", 1)[0])
+    schema = next(tool["parameters"] for tool in TOOLS if tool["name"] == "run_maintenance")
+    assert "job_id" in schema["properties"]
+    assert example["job_id"]
+    assert set(example["results"]) == {"edges", "merges", "consolidations"}
+    assert "30 minutes" in content
+    assert "discard stale analysis" in content
+    assert "busy" in content
+
+
+def test_codex_maintenance_template_requires_receipt_and_terminal_handling():
+    import tomllib
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "src/ormah/agents/ormah-maintenance.toml"
+    instructions = tomllib.loads(path.read_text())["developer_instructions"]
+    assert '{"job_id": "<receipt>", "results": {}}' in instructions
+    assert "30 minutes" in instructions
+    assert "discard stale analysis" in instructions
+    assert "On busy" in instructions

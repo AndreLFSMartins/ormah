@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from ormah.models.node import CreateNodeRequest
 
 _LLM_PATCH = "ormah.background.llm_client.llm_generate"
 

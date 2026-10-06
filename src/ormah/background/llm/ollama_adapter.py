@@ -15,20 +15,41 @@ class OllamaAdapter(LLMAdapter):
         model: str,
         base_url: str = "http://localhost:11434",
         timeout: int = 60,
+        num_predict: int = 4096,
     ) -> None:
         self.model = model
         self.base_url = base_url
         self.timeout = timeout
+        self.num_predict = num_predict
 
-    def generate(self, prompt: str, json_mode: bool = True) -> str | None:
+    def generate(
+        self,
+        prompt: str,
+        json_mode: bool = True,
+        *,
+        response_format: dict | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str | None:
         import httpx
+
+        options: dict = {"num_predict": max_tokens or self.num_predict}
+        if temperature is not None:
+            options["temperature"] = temperature
 
         payload: dict = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            # Disable thinking: reasoning tokens consume the num_predict budget
+            # and on large transcripts starve the JSON, yielding empty/truncated
+            # extractions. Non-thinking models ignore this flag.
+            "think": False,
+            "options": options,
         }
-        if json_mode:
+        if response_format and response_format.get("type") == "json_schema":
+            payload["format"] = response_format.get("json_schema", {}).get("schema", "json")
+        elif json_mode:
             payload["format"] = "json"
 
         try:

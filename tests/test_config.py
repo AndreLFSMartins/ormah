@@ -9,10 +9,18 @@ from ormah.config import Settings
 
 
 def _settings(**overrides) -> Settings:
-    """Create settings with overrides, using a temp dir for memory_dir."""
+    """Create settings with overrides, using a temp dir for memory_dir.
+
+    ``_env_file=None`` cuts the operator's ``~/.config/ormah/.env`` and any
+    local ``.env`` out of the construction. Without it a default assertion
+    reads whatever the machine running the suite happens to have configured:
+    ``ORMAH_TEMPORAL_LOCALES=en,pt-BR`` in that file turns
+    ``test_temporal_locales_default_is_english_only`` red. Setting the variable
+    instead would stop that test exercising the default at all.
+    """
     defaults = {"memory_dir": "/tmp/ormah_test"}
     defaults.update(overrides)
-    return Settings(**defaults)
+    return Settings(_env_file=None, **defaults)
 
 
 # --- Port ---
@@ -67,6 +75,22 @@ def test_timeout_zero():
         _settings(llm_timeout_seconds=0)
 
 
+def test_llm_num_predict_default():
+    s = _settings()
+    assert s.llm_num_predict == 4096
+
+
+def test_llm_num_predict_env(monkeypatch):
+    monkeypatch.setenv("ORMAH_LLM_NUM_PREDICT", "1024")
+    s = _settings()
+    assert s.llm_num_predict == 1024
+
+
+def test_llm_num_predict_zero():
+    with pytest.raises(ValidationError, match="llm_num_predict must be >= 1"):
+        _settings(llm_num_predict=0)
+
+
 # --- Embedding dim ---
 
 def test_embedding_dim_zero():
@@ -98,9 +122,38 @@ def test_backup_interval_zero():
         _settings(backup_interval_hours=0)
 
 
+def test_cloud_backup_interval_zero():
+    with pytest.raises(ValidationError, match="cloud_backup_interval_hours must be >= 1"):
+        _settings(cloud_backup_interval_hours=0)
+
+
+def test_cloud_api_url_default_uses_the_owned_production_domain():
+    assert Settings.model_fields["cloud_api_url"].default == "https://api.ormah.me"
+
+
 def test_backup_retention_zero():
     with pytest.raises(ValidationError, match="backup_retention_count must be >= 1"):
         _settings(backup_retention_count=0)
+
+
+def test_whisper_log_cleanup_defaults():
+    s = _settings()
+    assert s.whisper_log_rejected_retention_days == 30
+    assert s.whisper_log_cleanup_interval_hours == 24
+    assert s.whisper_log_cleanup_batch_size == 1000
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "whisper_log_rejected_retention_days",
+        "whisper_log_cleanup_interval_hours",
+        "whisper_log_cleanup_batch_size",
+    ],
+)
+def test_whisper_log_cleanup_settings_must_be_positive(field):
+    with pytest.raises(ValidationError, match="whisper log cleanup settings must be >= 1"):
+        _settings(**{field: 0})
 
 
 # --- Core cap ---
@@ -198,3 +251,155 @@ def test_affinity_defaults():
     assert s.affinity_max_boost == 0.15
     assert s.affinity_implicit_weight == 0.8
     assert s.whisper_exploration_enabled is True
+    assert s.feedback_llm_judge_enabled is False
+    assert s.feedback_llm_judge_min_confidence == 0.75
+
+
+def test_feedback_llm_judge_min_confidence_range():
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(feedback_llm_judge_min_confidence=1.5)
+
+
+# --- Consolidation limits (#89) ---
+
+def test_consolidation_max_clusters_negative():
+    with pytest.raises(ValidationError, match="consolidation_max_clusters_per_run must be >= 0"):
+        _settings(consolidation_max_clusters_per_run=-1)
+
+
+def test_consolidation_min_cluster_size_below_two():
+    with pytest.raises(ValidationError, match="consolidation_min_cluster_size must be >= 2"):
+        _settings(consolidation_min_cluster_size=1)
+
+
+def test_consolidation_threshold_out_of_range():
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=1.5)
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=-0.1)
+
+
+def test_consolidation_threshold_non_finite():
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=float("nan"))
+    with pytest.raises(ValidationError, match="threshold must be 0"):
+        _settings(consolidation_cluster_threshold=float("inf"))
+
+
+def test_consolidation_max_nodes_zero_rejected():
+    # The destructive misconfig Codex flagged: max_nodes=0 slips past the
+    # runtime guard and emits single-node clusters. Reject it at construction.
+    with pytest.raises(ValidationError, match="consolidation_max_cluster_nodes"):
+        _settings(consolidation_max_cluster_nodes=0)
+
+
+def test_consolidation_inverted_bounds_rejected():
+    with pytest.raises(ValidationError, match="consolidation_max_cluster_nodes"):
+        _settings(consolidation_min_cluster_size=3, consolidation_max_cluster_nodes=2)
+
+
+# --- Session watcher reconcile (#34) ---
+
+def test_reconcile_interval_default_is_five():
+    assert _settings().session_watcher_reconcile_interval_minutes == 5
+
+
+def test_reconcile_interval_must_be_positive():
+    with pytest.raises(ValidationError):
+        _settings(session_watcher_reconcile_interval_minutes=0)
+
+
+def test_reconcile_cap_default_is_fifty():
+    assert _settings().session_watcher_reconcile_max_per_tick == 50
+
+
+def test_reconcile_cap_must_be_positive():
+    with pytest.raises(ValidationError):
+        _settings(session_watcher_reconcile_max_per_tick=0)
+
+
+# --- Session watcher per-tick time budget (council-pr F2) ---
+
+def test_reconcile_max_seconds_default():
+    assert _settings().session_watcher_reconcile_max_seconds == 30.0
+
+
+def test_reconcile_max_seconds_rejects_zero():
+    with pytest.raises(ValidationError, match="session_watcher_reconcile_max_seconds must be > 0"):
+        _settings(session_watcher_reconcile_max_seconds=0)
+
+
+def test_reconcile_max_seconds_rejects_negative():
+    with pytest.raises(ValidationError, match="session_watcher_reconcile_max_seconds must be > 0"):
+        _settings(session_watcher_reconcile_max_seconds=-1.0)
+
+
+# --- Importance recency half-life ---
+
+def test_importance_recency_half_life_must_be_positive():
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be > 0"):
+        _settings(importance_recency_half_life_days=0.0)
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be > 0"):
+        _settings(importance_recency_half_life_days=-14.0)
+
+
+def test_importance_recency_half_life_must_be_finite():
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be finite"):
+        _settings(importance_recency_half_life_days=float("inf"))
+    with pytest.raises(ValidationError, match="importance_recency_half_life_days must be finite"):
+        _settings(importance_recency_half_life_days=float("nan"))
+
+
+def test_importance_recency_half_life_accepts_the_default():
+    assert _settings().importance_recency_half_life_days == 14.0
+
+
+# --- Temporal locales ---
+
+def test_temporal_locales_default_is_english_only(monkeypatch):
+    monkeypatch.delenv("ORMAH_TEMPORAL_LOCALES", raising=False)
+    s = _settings()
+    assert s.temporal_locales == "en"
+    assert s.temporal_locale_codes == ("en",)
+
+
+def test_temporal_locales_env_splits_and_trims(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en, pt-BR")
+    s = _settings()
+    assert s.temporal_locale_codes == ("en", "pt-BR")
+
+
+def test_temporal_locales_env_preserves_the_order_it_names(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "pt-BR,en")
+    s = _settings()
+    assert s.temporal_locale_codes == ("pt-BR", "en")
+
+
+def test_temporal_locales_env_dedupes_keeping_first_seen_order(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "pt-BR,en,pt-BR")
+    s = _settings()
+    assert s.temporal_locale_codes == ("pt-BR", "en")
+
+
+def test_temporal_locales_env_rejects_an_unknown_code(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en,fr")
+    with pytest.raises(ValidationError, match="unknown temporal locale"):
+        _settings()
+
+
+def test_temporal_locales_env_is_case_sensitive(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en,pt-br")
+    with pytest.raises(ValidationError, match="invalid temporal locale code"):
+        _settings()
+
+
+def test_temporal_locales_env_rejects_an_empty_value(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "")
+    with pytest.raises(ValidationError, match="must name at least one locale"):
+        _settings()
+
+
+def test_temporal_locales_env_rejects_only_separators(monkeypatch):
+    monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", ",")
+    with pytest.raises(ValidationError, match="must name at least one locale"):
+        _settings()

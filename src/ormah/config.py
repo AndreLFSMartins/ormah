@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
+
+from ormah.engine.temporal import parse_locale_codes
 
 
 _ENV_FILES = [
@@ -35,6 +38,14 @@ class Settings(BaseSettings):
     backup_interval_hours: int = 24
     backup_retention_count: int = 10
 
+    # Encrypted cloud backups (paid tier). Client-side keys; nothing readable
+    # ever leaves the machine. Off by default until an account is configured.
+    cloud_backup_enabled: bool = False
+    cloud_backup_interval_hours: int = 24
+    cloud_api_url: str = "https://api.ormah.me"
+    account_token: str | None = None
+    account_email: str | None = None
+
     # Embeddings
     embedding_provider: str = "local"  # "local", "ollama", "litellm"
     embedding_model: str = "BAAI/bge-base-en-v1.5"
@@ -45,6 +56,7 @@ class Settings(BaseSettings):
     llm_model: str = "claude-haiku-4-5-20251001"
     llm_base_url: str = "http://localhost:11434"
     llm_timeout_seconds: int = 60
+    llm_num_predict: int = 4096
     llm_api_key_env_var: str | None = None
     llm_inherit_api_key: bool = False
 
@@ -62,22 +74,31 @@ class Settings(BaseSettings):
     hippocampus_enabled: bool = True
     hippocampus_ignore_patterns: list[str] = []
 
-    # Session watcher (auto-ingest Claude Code transcripts)
+    # Session watcher (auto-ingest agent transcripts; default path is Claude Code)
     session_watcher_enabled: bool = False
     session_watcher_dir: Path = Path("~/.claude/projects")
     session_watcher_debounce_seconds: float = 60.0
     session_watcher_min_turns: int = 5
     session_watcher_lookback_hours: int = 72
+    session_watcher_idle_threshold: float = 30.0
+    session_watcher_reconcile_interval_minutes: int = 5
+    session_watcher_reconcile_max_per_tick: int = 50
+    session_watcher_reconcile_max_seconds: float = 30.0
 
     # Tier limits
     core_memory_cap: int = 50
     working_decay_days: int = 14  # Deprecated: superseded by FSRS-based decay
 
     # FSRS spaced repetition decay
-    fsrs_initial_stability: float = 1.0    # days; starting stability for new nodes
+    fsrs_initial_stability: float = 5.814   # days; -7 / ln(0.3) — a seven-day unused lease
     fsrs_decay_threshold: float = 0.3      # R below this = decay candidate
-    fsrs_stability_growth: float = 1.5     # base multiplier on access
     fsrs_max_stability: float = 365.0      # cap at 1 year
+    # Bounded reinforcement (#221/#191): S' = S * (1 + g * S^-w * spacing).
+    # Initial policy values, not fitted — deliberately configurable.
+    fsrs_growth_factor: float = 0.5        # g; size of one reinforcement step
+    fsrs_growth_exponent: float = 0.5      # w; damps the step as stability rises
+    fsrs_spacing_cap: float = 2.0          # ceiling on the R^-0.2 spacing factor
+    fsrs_reinforcement_cooldown_days: float = 1.0  # min days between numeric updates
 
     # Search
     fts_weight: float = 0.4
@@ -120,6 +141,7 @@ class Settings(BaseSettings):
     auto_link_similarity_threshold: float = 0.65
     auto_link_cross_space_penalty: float = 0.1  # subtracted from similarity for cross-space pairs
     auto_link_max_edges_per_run: int = 500
+    auto_link_max_nodes_per_run: int = 500  # cursor batch: nodes scanned per run
 
     # Auto-merge
     auto_merge_threshold: float = 0.85
@@ -137,7 +159,10 @@ class Settings(BaseSettings):
     # Importance: recency half-life (separate from search recency)
     importance_recency_half_life_days: float = 14.0
 
-    # Decay: skip nodes above this importance
+    # Decay gate removed in #222: working->archival now depends on retrievability
+    # alone, because cumulative access and edge counts could push importance
+    # permanently above any threshold. Kept because it is a documented setting;
+    # bounded forgetting (#28/#31) reintroduces a reader as the deletion protection gate.
     decay_importance_threshold: float = 0.5
 
     # Whisper-out (involuntary storage on compaction / session end)
@@ -148,13 +173,39 @@ class Settings(BaseSettings):
     # Whisper nudge (periodic reminder to use ormah)
     whisper_nudge_interval: int = 10  # Nudge every N prompts (0 = disabled)
 
+    # --- Score contract ------------------------------------------------
+    # Two kinds of scores flow through retrieval; every threshold below
+    # documents which kind it cuts:
+    #   RANK-RELATIVE (ordering only): the blended hybrid `score` — RRF is
+    #     min-max normalized per query, so any query's best candidate scores
+    #     ~1.0 regardless of absolute quality. Absolute thresholds on it are
+    #     meaningless across queries; use it only to order candidates.
+    #   ABSOLUTE (gating): `ce_absolute` (cross-encoder score linearly
+    #     rescaled from [-12, +6] to [0, 1]) and `raw_cosine` (pre-penalty
+    #     vector similarity). Safe to compare against fixed thresholds.
+
     # Whisper (involuntary recall)
     whisper_max_nodes: int = 6
+    # Pre-rerank noise trim: a candidate reaches the reranker if either its
+    # RANK-RELATIVE blended score or its ABSOLUTE raw cosine clears this.
+    # Its job is only to spare the cross-encoder obvious junk — the absolute
+    # injection gate does the real cutting after reranking.
     whisper_min_relevance_score: float = 0.45
+    # Candidate pool fed to the reranker/gate = whisper_max_nodes * this
+    # multiplier. Retrieve-then-rerank needs a deep pool so the cross-encoder
+    # can rescue memories the bi-encoder under-ranked; final injection is
+    # still capped at whisper_max_nodes.
+    whisper_candidate_pool_multiplier: int = 5
+    # Max characters of node content injected for the top full-content
+    # whispers; truncated at a word boundary. Full content stays one
+    # recall_node call away (the whisper framing says so).
+    whisper_injected_content_max_chars: int = 600
 
     # Whisper reranking (cross-encoder with linear-rescale blended scoring)
     whisper_reranker_enabled: bool = True
     whisper_reranker_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
+    # Post-affinity-boost floor on the RANK-RELATIVE blended score; defines
+    # which candidates enter whisper_log and the exploration pool.
     whisper_reranker_min_score: float = 0.40
     whisper_reranker_blend_alpha: float = 0.6
     whisper_reranker_max_doc_chars: int = 512
@@ -170,8 +221,40 @@ class Settings(BaseSettings):
     whisper_topic_shift_enabled: bool = True
     whisper_topic_shift_threshold: float = 0.75  # cosine sim above this = same topic
 
-    # Whisper injection gate (minimum blended score to justify injection)
-    whisper_injection_gate: float = 0.50
+    # Whisper injection gate — cuts the ABSOLUTE gate score (ce_absolute
+    # when the reranker ran, raw_cosine otherwise, plus any affinity delta).
+    # 0.45 on the ce_absolute scale ≙ raw cross-encoder score −3.9: real
+    # paraphrase matches land around raw −3 (≈0.49) while true noise sits
+    # below raw −5 (≤0.39); tuned against eval/whisper (gate sweep, 2026-07).
+    whisper_injection_gate: float = 0.45
+
+    # Topical-filter vouchers for candidates sharing NO token with the prompt
+    # (the fail-closed path): such a candidate survives only with an ABSOLUTE
+    # relevance signal. The CE floor matches the injection gate (its added
+    # value is keeping no-overlap junk out of the exploration pool); the
+    # cosine floor applies when the reranker didn't run.
+    whisper_no_overlap_ce_floor: float = 0.45
+    whisper_no_overlap_cosine_floor: float = 0.70
+
+    # Standing preferences are applicability rules, not passages that answer
+    # the prompt. A separate typed retrieval channel asks the reranker whether
+    # each preference applies to the current action, then merges at most two.
+    whisper_preference_applicability_enabled: bool = True
+    whisper_preference_applicability_gate: float = 0.40
+    whisper_preference_max_nodes: int = 2
+
+    # Injection gate when the reranker did not run (unavailable, still
+    # downloading, or disabled): the gate then cuts raw_cosine, a weaker
+    # absolute signal, so demand a higher bar — degraded mode is more
+    # conservative, never noisier. COSINE scale (bge noise floor ~0.5).
+    whisper_injection_gate_no_reranker: float = 0.60
+
+    # Deliberate recall floor: results below this are dropped rather than
+    # padding to `limit` (recency-vouched temporal supplements exempt).
+    # Cuts the RANK-RELATIVE blended score — pragmatic: observed cross-space
+    # padding noise scores ~0.30 while relevant results score 0.6+. More
+    # permissive than whisper's gate by design; recall is a deliberate act.
+    recall_min_relevance_score: float = 0.35
 
     # Affinity boost (adaptive feedback loop)
     affinity_similarity_threshold: float = 0.70
@@ -179,6 +262,16 @@ class Settings(BaseSettings):
     affinity_max_boost: float = 0.15
     affinity_implicit_weight: float = 0.8
     whisper_exploration_enabled: bool = True
+    feedback_llm_judge_enabled: bool = False
+    feedback_llm_judge_min_confidence: float = 0.75
+
+    # Candidate diagnostics are high-volume. Prompt payloads are normalized
+    # separately, while stale rejected rows with no feedback references are
+    # pruned in bounded background batches. Injected rows are retained for
+    # all-time whisper health and exact feedback history.
+    whisper_log_rejected_retention_days: int = 30
+    whisper_log_cleanup_interval_hours: int = 24
+    whisper_log_cleanup_batch_size: int = 1000
 
     # Space prioritization
     space_boost_global: float = 1.0
@@ -189,11 +282,29 @@ class Settings(BaseSettings):
 
     # Consolidation
     consolidation_interval_minutes: int = 1440
+    # Consolidator per-run limits (#89) — defaults preserve the previous
+    # hardcoded behavior exactly.
+    consolidation_max_clusters_per_run: int = 10
+    consolidation_min_cluster_size: int = 2
+    consolidation_cluster_threshold: float = 0.6
+    consolidation_max_cluster_nodes: int = 5
 
     # Claude-in-the-loop maintenance
     claude_maintenance_enabled: bool = False
     claude_maintenance_interval_hours: int = 24  # hours between maintenance runs
     claude_maintenance_batch_size: int = 25  # candidates per type per run
+    maintenance_timeout_minutes: int = Field(default=30, gt=0)  # analysis reservation
+
+    # Temporal locale packs consulted when parsing a time reference out of a
+    # prompt. Declared as a plain ``str`` and parsed by the validator below,
+    # not as a ``list[str]``: pydantic-settings JSON-decodes complex types from
+    # the environment and would reject the comma-separated form the ``.env``
+    # file uses everywhere else. The setting selects packs; it never carries
+    # grammar. English only by default: the whisper's time-question handling
+    # follows the ``temporal`` intent, which the default English encoder does
+    # not assign to PT-BR text, so PT-BR is opted into together with a
+    # multilingual embedding model.
+    temporal_locales: str = "en"
 
     # --- Validators ---
 
@@ -262,6 +373,13 @@ class Settings(BaseSettings):
             raise ValueError(f"llm_timeout_seconds must be >= 1, got {v}")
         return v
 
+    @field_validator("llm_num_predict")
+    @classmethod
+    def _llm_num_predict_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"llm_num_predict must be >= 1, got {v}")
+        return v
+
     @field_validator("embedding_dim")
     @classmethod
     def _embedding_dim_positive(cls, v: int) -> int:
@@ -295,6 +413,33 @@ class Settings(BaseSettings):
             raise ValueError(f"session_watcher_debounce_seconds must be >= 10.0, got {v}")
         return v
 
+    @field_validator("session_watcher_reconcile_interval_minutes")
+    @classmethod
+    def _session_watcher_reconcile_min(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"session_watcher_reconcile_interval_minutes must be >= 1, got {v}"
+            )
+        return v
+
+    @field_validator("session_watcher_reconcile_max_per_tick")
+    @classmethod
+    def _session_watcher_reconcile_cap_min(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"session_watcher_reconcile_max_per_tick must be >= 1, got {v}"
+            )
+        return v
+
+    @field_validator("session_watcher_reconcile_max_seconds")
+    @classmethod
+    def _session_watcher_reconcile_max_seconds_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(
+                f"session_watcher_reconcile_max_seconds must be > 0, got {v}"
+            )
+        return v
+
     @field_validator("decay_interval_hours")
     @classmethod
     def _decay_hours_positive(cls, v: int) -> int:
@@ -309,11 +454,29 @@ class Settings(BaseSettings):
             raise ValueError(f"backup_interval_hours must be >= 1, got {v}")
         return v
 
+    @field_validator("cloud_backup_interval_hours")
+    @classmethod
+    def _cloud_backup_interval_hours_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"cloud_backup_interval_hours must be >= 1, got {v}")
+        return v
+
     @field_validator("backup_retention_count")
     @classmethod
     def _backup_retention_count_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"backup_retention_count must be >= 1, got {v}")
+        return v
+
+    @field_validator(
+        "whisper_log_rejected_retention_days",
+        "whisper_log_cleanup_interval_hours",
+        "whisper_log_cleanup_batch_size",
+    )
+    @classmethod
+    def _whisper_log_cleanup_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"whisper log cleanup settings must be >= 1, got {v}")
         return v
 
     @field_validator("core_memory_cap")
@@ -344,11 +507,46 @@ class Settings(BaseSettings):
             raise ValueError(f"rrf_min_spread_ratio must be 0–1, got {v}")
         return v
 
-    @field_validator("similarity_threshold", "auto_link_similarity_threshold", "auto_merge_threshold")
+    @field_validator(
+        "similarity_threshold",
+        "auto_link_similarity_threshold",
+        "auto_merge_threshold",
+        "feedback_llm_judge_min_confidence",
+        "consolidation_cluster_threshold",
+        "whisper_preference_applicability_gate",
+    )
     @classmethod
     def _threshold_range(cls, v: float) -> float:
+        # `not 0 <= v <= 1` also rejects NaN/inf.
         if not 0 <= v <= 1:
             raise ValueError(f"threshold must be 0–1, got {v}")
+        return v
+
+    @field_validator("consolidation_max_clusters_per_run")
+    @classmethod
+    def _consolidation_max_clusters_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"consolidation_max_clusters_per_run must be >= 0, got {v}")
+        return v
+
+    @field_validator("consolidation_min_cluster_size")
+    @classmethod
+    def _consolidation_min_cluster_size_range(cls, v: int) -> int:
+        if v < 2:
+            raise ValueError(f"consolidation_min_cluster_size must be >= 2, got {v}")
+        return v
+
+    @field_validator("consolidation_max_cluster_nodes")
+    @classmethod
+    def _consolidation_max_cluster_nodes_range(cls, v: int, info) -> int:
+        # Below min_cluster_size, no cluster can ever be emitted; at/above it the
+        # runtime guard still applies. Reject the impossible config up front.
+        min_size = info.data.get("consolidation_min_cluster_size", 2)
+        if v < min_size:
+            raise ValueError(
+                f"consolidation_max_cluster_nodes ({v}) must be >= "
+                f"consolidation_min_cluster_size ({min_size})"
+            )
         return v
 
     @field_validator("activation_decay")
@@ -386,11 +584,59 @@ class Settings(BaseSettings):
             raise ValueError(f"threshold must be 0–1, got {v}")
         return v
 
-    @field_validator("fsrs_initial_stability", "fsrs_stability_growth")
+    @field_validator(
+        "fsrs_initial_stability",
+        "fsrs_max_stability",
+        "fsrs_growth_factor",
+        "fsrs_growth_exponent",
+        "fsrs_spacing_cap",
+        "fsrs_reinforcement_cooldown_days",
+    )
+    @classmethod
+    def _fsrs_finite(cls, v: float) -> float:
+        # The bounds checks below cannot do this: every `v <= 0` / `v < 1` /
+        # `v < 0` comparison is False for NaN, so NaN passes all of them, and
+        # infinity satisfies them outright. A NaN growth factor propagates NaN
+        # into stability, which is then serialized into the Markdown frontmatter;
+        # a NaN cooldown raises inside timedelta.
+        if not math.isfinite(v):
+            raise ValueError(f"FSRS parameter must be finite, got {v}")
+        return v
+
+    @field_validator(
+        "fsrs_initial_stability",
+        "fsrs_growth_factor",
+        "fsrs_growth_exponent",
+    )
     @classmethod
     def _fsrs_positive(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"FSRS parameter must be > 0, got {v}")
+        return v
+
+    @field_validator("importance_recency_half_life_days")
+    @classmethod
+    def _importance_half_life_positive(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError(f"importance_recency_half_life_days must be finite, got {v}")
+        if v <= 0:
+            raise ValueError(f"importance_recency_half_life_days must be > 0, got {v}")
+        return v
+
+    @field_validator("fsrs_spacing_cap")
+    @classmethod
+    def _fsrs_spacing_cap_min(cls, v: float) -> float:
+        # Below 1 the spacing factor would shrink stability on use.
+        if v < 1:
+            raise ValueError(f"fsrs_spacing_cap must be >= 1, got {v}")
+        return v
+
+    @field_validator("fsrs_reinforcement_cooldown_days")
+    @classmethod
+    def _fsrs_cooldown_non_negative(cls, v: float) -> float:
+        # 0 is valid: it disables the cooldown.
+        if v < 0:
+            raise ValueError(f"fsrs_reinforcement_cooldown_days must be >= 0, got {v}")
         return v
 
     @field_validator("fsrs_max_stability")
@@ -413,6 +659,17 @@ class Settings(BaseSettings):
         if v < 1:
             raise ValueError(f"interval must be >= 1 minute, got {v}")
         return v
+
+    @field_validator("temporal_locales")
+    @classmethod
+    def _temporal_locales_known(cls, v: str) -> str:
+        parse_locale_codes(v)  # raises on an empty result or a code with no pack
+        return v
+
+    @property
+    def temporal_locale_codes(self) -> tuple[str, ...]:
+        """The enabled locale codes, ordered, trimmed and de-duplicated."""
+        return parse_locale_codes(self.temporal_locales)
 
     @property
     def llm_enabled(self) -> bool:

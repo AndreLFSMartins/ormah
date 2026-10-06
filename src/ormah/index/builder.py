@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -32,13 +31,26 @@ class IndexBuilder:
             except Exception:
                 pass  # table may not exist
 
+        # Mass reindex re-allocates seq from the durable counter; clear the watermark so the
+        # rebuilt store is reprocessed even if the counter was also reset (wiped meta).
+        self.db.conn.execute("DELETE FROM meta WHERE key = 'auto_link_watermark'")
+
         # Two-pass: nodes first, then edges (to satisfy FK constraints)
         paths = list(self.file_store.list_paths())
+        hashes: dict[Path, str] = {}
+        for path in paths:
+            try:
+                hashes[path] = self.file_store.file_hash(path)
+            except Exception as e:
+                logger.warning("Failed to hash %s: %s", path, e)
+
         count = 0
         with self.db.transaction():
             for path in paths:
+                if path not in hashes:
+                    continue
                 try:
-                    self._index_file_nodes_only(path)
+                    self._index_file_nodes_only(path, hashes[path])
                     count += 1
                 except Exception as e:
                     logger.warning("Failed to index %s: %s", path, e)
@@ -64,19 +76,33 @@ class IndexBuilder:
         indexed_ids = set(indexed.keys())
         disk_ids: set[str] = set()
 
+        # FileStore calls take L_mem. Complete them before the write transaction so no builder
+        # path requests L_mem while holding L_db, the reverse of the order used by memory jobs.
+        paths = self.file_store.list_paths()
+        hashes: dict[Path, str] = {}
+        for path in paths:
+            try:
+                hashes[path] = self.file_store.file_hash(path)
+            except Exception as e:
+                # A file removed between listing and hashing. This used to be swallowed by the
+                # per-path try inside the loop; keep it non-fatal rather than killing the job.
+                logger.warning("Failed to hash %s: %s", path, e)
+
         with self.db.transaction():
-            for path in self.file_store.list_paths():
+            for path in paths:
+                if path not in hashes:
+                    continue  # hashing failed above; already logged
                 try:
-                    file_hash = self.file_store.file_hash(path)
+                    file_hash = hashes[path]
                     node = parse_node(path.read_text(encoding="utf-8"))
                     disk_ids.add(node.id)
 
                     if node.id not in indexed:
-                        self._index_file(path)
+                        self._index_file(path, file_hash)
                         added += 1
                     elif indexed[node.id] != file_hash:
                         self._remove_node(node.id, keep_vectors=True)
-                        self._index_file(path)
+                        self._index_file(path, file_hash)
                         updated += 1
                 except Exception as e:
                     logger.warning("Failed to process %s: %s", path, e)
@@ -91,20 +117,20 @@ class IndexBuilder:
     def index_single(self, path: Path) -> None:
         """Index or re-index a single file."""
         node = parse_node(path.read_text(encoding="utf-8"))
+        file_hash = self.file_store.file_hash(path)
         with self.db.transaction():
             self._remove_node(node.id)
-            self._index_file(path)
+            self._index_file(path, file_hash)
 
-    def _index_file(self, path: Path) -> None:
+    def _index_file(self, path: Path, file_hash: str) -> None:
         """Index a single markdown file into the database (nodes + edges)."""
-        self._index_file_nodes_only(path)
+        self._index_file_nodes_only(path, file_hash)
         self._index_file_edges(path)
 
-    def _index_file_nodes_only(self, path: Path) -> None:
+    def _index_file_nodes_only(self, path: Path, file_hash: str) -> None:
         """Index node, tags, and FTS from a markdown file (no edges)."""
         text = path.read_text(encoding="utf-8")
         node = parse_node(text)
-        file_hash = self.file_store.file_hash(path)
         conn = self.db.conn
 
         conn.execute(
@@ -112,9 +138,9 @@ class IndexBuilder:
             INSERT OR REPLACE INTO nodes
             (id, type, tier, source, space, title, content, created, updated,
              last_accessed, access_count, confidence, importance,
-             valid_until, stability, last_review, file_path, file_hash)
+             valid_until, stability, last_review, superseded_by, file_path, file_hash)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?)
             """,
             (
                 node.id,
@@ -133,9 +159,23 @@ class IndexBuilder:
                 node.valid_until.isoformat() if node.valid_until else None,
                 node.stability,
                 node.last_review.isoformat() if node.last_review else None,
+                node.superseded_by,
                 str(path),
                 file_hash,
             ),
+        )
+
+        # Durable monotonic change-sequence (council v2 crit#1): allocate the next seq from
+        # meta.node_seq_next — never decreases, independent of current rows, unlike MAX(seq)+1
+        # which is non-monotonic across INSERT OR REPLACE. Every content (re)write lands the node
+        # at the head, so reindex/import/restore re-enter the delta regardless of frontmatter
+        # timestamps. Metadata-only UPDATEs elsewhere do not pass through here.
+        row = conn.execute("SELECT value FROM meta WHERE key = 'node_seq_next'").fetchone()
+        next_seq = int(row[0]) if row else 1
+        conn.execute("UPDATE nodes SET seq = ? WHERE id = ?", (next_seq, node.id))
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_seq_next', ?)",
+            (str(next_seq + 1),),
         )
 
         # Tags

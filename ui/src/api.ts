@@ -18,6 +18,12 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return res.json();
 }
 
+async function del<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`DELETE ${path}: ${res.status}`);
+  return res.json();
+}
+
 export function fetchGraph(): Promise<GraphData> {
   return get("/ui/graph");
 }
@@ -46,7 +52,7 @@ export function fetchInsights(): Promise<InsightsData> {
 }
 
 export function fetchStats(): Promise<Record<string, unknown>> {
-  return get("/admin/stats");
+  return get("/stats");
 }
 
 export interface AdminTask {
@@ -76,12 +82,32 @@ export interface BackupStatus {
   latest: BackupInfo | null;
 }
 
+export interface CloudStatus {
+  enabled: boolean;
+  store_id: string | null;
+  interval_hours: number;
+  entitlement: "active" | "grace" | "expired" | "none";
+  last_upload_at: string | null;
+  last_upload_snapshot_id: string | null;
+  last_upload_error: string | null;
+  last_upload_age_seconds: number | null;
+  last_verify_at: string | null;
+  last_verify_ok: boolean | null;
+  last_verify_snapshot_id: string | null;
+  last_verify_error: string | null;
+  warnings: string[];
+}
+
 export function fetchAdminTasks(): Promise<{ tasks: AdminTask[] }> {
   return get("/admin/tasks");
 }
 
 export function fetchBackupStatus(): Promise<BackupStatus> {
   return get("/admin/backup");
+}
+
+export function fetchCloudStatus(): Promise<CloudStatus> {
+  return get("/admin/cloud-status");
 }
 
 export function createBackup(): Promise<{
@@ -124,4 +150,36 @@ export function pauseAllTasks(): Promise<{ status: string }> {
 
 export function resumeAllTasks(): Promise<{ status: string }> {
   return post("/admin/tasks/resume-all");
+}
+
+// ---- Agents -----------------------------------------------------------------
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  detected: boolean;
+  wired: boolean;
+  platform: string[] | null;
+  available_on_current_os: boolean;
+}
+
+export interface SetupResult {
+  wired: string[];
+  errors: Record<string, string>;
+}
+
+export function fetchAgentClients(): Promise<AgentInfo[]> {
+  return get("/agent/clients");
+}
+
+export function runAgentSetup(): Promise<SetupResult> {
+  return post("/agent/setup");
+}
+
+export function wireAgent(agentId: string): Promise<SetupResult> {
+  return post(`/agent/setup/${agentId}`);
+}
+
+export function unwireAgent(agentId: string): Promise<{ unwired: string[]; errors: Record<string, string> }> {
+  return del(`/agent/setup/${agentId}`);
 }

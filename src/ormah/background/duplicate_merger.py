@@ -7,6 +7,8 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from ormah.background.memory_lock import serialized_memory_job
+
 logger = logging.getLogger(__name__)
 
 # Multi-signal weights
@@ -107,7 +109,7 @@ def _llm_check_duplicate(settings, node_row, other_row) -> dict | None:
     Returns parsed dict with keys is_duplicate, merged_title, merged_content,
     reason — or None if the LLM is unavailable or returns invalid output.
     """
-    from ormah.background.llm_client import llm_generate
+    from ormah.background.llm_client import extract_json, llm_generate
 
     prompt = _LLM_DUPLICATE_PROMPT.format(
         title_a=node_row["title"] or "(untitled)",
@@ -123,7 +125,7 @@ def _llm_check_duplicate(settings, node_row, other_row) -> dict | None:
         return None
 
     try:
-        result = json.loads(raw)
+        result = json.loads(extract_json(raw))
         if "is_duplicate" not in result:
             return None
         return result
@@ -143,7 +145,7 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
     """
     try:
         from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore
+        from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
         settings = engine.settings
         encoder = get_encoder(settings)
@@ -164,7 +166,14 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
             if not text:
                 continue
 
-            query_vec = encoder.encode(text)
+            query_vec = stored_or_encoded(
+                vec_store,
+                encoder,
+                node["id"],
+                node["title"],
+                node["content"],
+                settings.embedding_max_content_chars,
+            )
             similar = vec_store.search(query_vec, limit=6)
 
             for match in similar:
@@ -230,6 +239,7 @@ def _find_merge_candidates(engine, limit: int = 8) -> list[dict]:
         return []
 
 
+@serialized_memory_job
 def run_duplicate_detection(engine) -> None:
     """Find near-duplicate nodes and create merge proposals.
 
@@ -240,7 +250,7 @@ def run_duplicate_detection(engine) -> None:
     """
     try:
         from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore
+        from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
         settings = engine.settings
         encoder = get_encoder(settings)
@@ -263,7 +273,14 @@ def run_duplicate_detection(engine) -> None:
             if not text:
                 continue
 
-            query_vec = encoder.encode(text)
+            query_vec = stored_or_encoded(
+                vec_store,
+                encoder,
+                node["id"],
+                node["title"],
+                node["content"],
+                settings.embedding_max_content_chars,
+            )
             # Fetch more candidates since we use a lower embedding pre-filter
             similar = vec_store.search(query_vec, limit=6)
 

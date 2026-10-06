@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 
-import pytest
 
 from ormah.engine.tier_manager import TierManager
 from ormah.models.node import MemoryNode, NodeType, Tier
@@ -43,3 +41,15 @@ def test_enforce_core_cap_demotes_least_important():
     assert len(demoted) == 1
     assert demoted[0].id == "node-low"
     assert demoted[0].tier == Tier.working
+
+
+def test_promote_returns_true_upward_and_false_sideways():
+    """#223 relies on this guard: a working node must not be re-promoted."""
+    manager = TierManager()
+
+    node = MemoryNode(type=NodeType.fact, content="c", tier=Tier.archival)
+    assert manager.promote(node, Tier.working) is True
+    assert node.tier is Tier.working
+
+    assert manager.promote(node, Tier.working) is False
+    assert node.tier is Tier.working

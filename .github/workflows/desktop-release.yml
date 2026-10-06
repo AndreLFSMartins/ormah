@@ -1,0 +1,276 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            uv_asset: uv-aarch64-apple-darwin.tar.gz
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            uv_asset: uv-x86_64-unknown-linux-gnu.tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#desktop-v}"
+          CONF_VERSION=$(python3 -c "import json; print(json.load(open('desktop/src-tauri/tauri.conf.json'))['version'])")
+          if [ "$TAG_VERSION" != "$CONF_VERSION" ]; then
+            echo "Tag desktop-v$TAG_VERSION does not match tauri.conf.json version $CONF_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Verify bundled Ormah release
+        shell: bash
+        run: |
+          PY_VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)
+          PYPI_VERSION=$(curl -fsSL https://pypi.org/pypi/ormah/json | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')
+          if [ "$PY_VERSION" != "$PYPI_VERSION" ]; then
+            echo "Desktop embeds ormah $PY_VERSION, but PyPI latest is $PYPI_VERSION" >&2
+            echo "Publish the Python release before tagging the desktop app." >&2
+            exit 1
+          fi
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Download uv sidecar
+        shell: bash
+        run: |
+          URL="https://github.com/astral-sh/uv/releases/latest/download/${{ matrix.uv_asset }}"
+          curl -fsSL "$URL" | tar -xz -C /tmp
+          mkdir -p desktop/src-tauri/binaries
+          cp /tmp/uv-${{ matrix.target }}/uv "desktop/src-tauri/binaries/uv-${{ matrix.target }}"
+          chmod +x "desktop/src-tauri/binaries/uv-${{ matrix.target }}"
+
+      - name: Build desktop UI
+        working-directory: desktop/ui
+        run: npm ci && npm run build
+
+      - name: Generate app icons
+        working-directory: desktop/src-tauri
+        run: cargo tauri icon icons/icon.png
+
+      # `cargo tauri build` signs with whatever identity is in the keychain
+      # search path but does not import a certificate itself — that's a
+      # separate, explicit step. The keychain is scoped to this one job on an
+      # ephemeral runner, so its unlock password only needs to be unique for
+      # the run, not a secret in its own right.
+      - name: Import Apple Developer certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
+          rm certificate.p12
+
+      # Notarization authenticates with an App Store Connect API key (JWT signed
+      # locally), not the Apple ID + app-specific-password flow — the latter
+      # routes through an interactive-auth endpoint that fails intermittently on
+      # CI runners (NSURLErrorDomain -1009 "no network route" during upload).
+      - name: Stage App Store Connect API key
+        if: runner.os == 'macOS'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: echo "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+
+      # macos-14 runners have a known mDNSResponder bug: sustained network
+      # activity (notarytool's long-poll against Apple's notary API) exhausts
+      # the resolver's connection pool and it wedges, so every DNS lookup
+      # after that fails with "no network route" — this reproduced twice,
+      # ~48min in, regardless of notarization auth method, which is what
+      # points at the runner's DNS rather than our credentials. Periodically
+      # restarting the resolver during the build keeps it from wedging.
+      # See https://github.com/actions/runner-images/issues/9628
+      - name: Start DNS resolver keepalive
+        if: runner.os == 'macOS'
+        run: |
+          ( while true; do
+              sleep 180
+              sudo dscacheutil -flushcache
+              sudo killall -HUP mDNSResponder 2>/dev/null || true
+            done ) &
+          echo "DNS_KEEPALIVE_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Build and bundle (macOS)
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+        run: cargo tauri build --target ${{ matrix.target }}
+
+      # tauri-bundler notarizes and staples the .app, then builds the .dmg
+      # around it and code-signs the dmg container — but never submits the
+      # dmg itself for notarization. Without this, Gatekeeper rejects the
+      # downloaded dmg on open (spctl: "Unnotarized Developer ID") even
+      # though the .app inside is validly notarized.
+      - name: Notarize and staple dmg (macOS)
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+        run: |
+          DMG=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -name '*.dmg')
+          xcrun notarytool submit "$DMG" --key-id "$APPLE_API_KEY" --key "$APPLE_API_KEY_PATH" --issuer "$APPLE_API_ISSUER" --wait
+          xcrun stapler staple "$DMG"
+
+      - name: Stop DNS resolver keepalive
+        if: runner.os == 'macOS' && always()
+        run: kill "$DNS_KEEPALIVE_PID" 2>/dev/null || true
+
+      - name: Build and bundle (Linux)
+        if: runner.os == 'Linux'
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --target ${{ matrix.target }}
+
+      # Tauri generates updater signatures for AppImage automatically, but a
+      # desktop installed from our .deb identifies itself as a Debian bundle
+      # and must receive a signed .deb from the update feed.
+      - name: Sign Debian updater artifact
+        if: runner.os == 'Linux'
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          DEB=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/deb" -name '*.deb' | head -1)
+          [ -s "$DEB" ] || { echo "missing Debian artifact" >&2; exit 1; }
+          cargo tauri signer sign "$DEB"
+          [ -s "$DEB.sig" ] || { echo "missing Debian updater signature" >&2; exit 1; }
+
+      - name: Upload artifacts (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ormah-${{ matrix.target }}
+          path: |
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz*
+
+      - name: Upload artifacts (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ormah-${{ matrix.target }}
+          path: |
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage*
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Attach artifacts to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/**/*.dmg
+            dist/**/*.AppImage*
+            dist/**/*.deb
+            dist/**/*.app.tar.gz*
+
+      # The updater feed lives on a rolling prerelease so its URL is stable and
+      # it can never hijack GitHub's "/releases/latest" (prereleases are
+      # excluded), which alternates between desktop and Python releases.
+      - name: Publish latest.json to rolling desktop-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#desktop-v}"
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
+          REPO="${{ github.repository }}"
+          gh release view "$GITHUB_REF_NAME" -R "$REPO" --json body --jq .body > release-notes.txt
+
+          APPIMAGE=$(find dist -name '*.AppImage' | head -1)
+          DEB=$(find dist -name '*.deb' | head -1)
+          APPTAR=$(find dist -name '*.app.tar.gz' | head -1)
+          for f in "$APPIMAGE" "$APPIMAGE.sig" "$DEB" "$DEB.sig" "$APPTAR" "$APPTAR.sig"; do
+            [ -s "$f" ] || { echo "missing updater artifact: $f" >&2; exit 1; }
+          done
+
+          python3 - "$VERSION" "$BASE_URL" "$APPIMAGE" "$DEB" "$APPTAR" release-notes.txt > latest.json <<'EOF'
+          import json, pathlib, sys
+          from datetime import datetime, timezone
+          version, base_url, appimage, deb, apptar, notes_path = sys.argv[1:7]
+          def entry(path):
+              p = pathlib.Path(path)
+              return {
+                  "signature": pathlib.Path(path + ".sig").read_text().strip(),
+                  "url": f"{base_url}/{p.name}",
+              }
+          print(json.dumps({
+              "version": version,
+              "notes": pathlib.Path(notes_path).read_text().strip(),
+              "pub_date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "platforms": {
+                  "linux-x86_64-deb": entry(deb),
+                  "linux-x86_64": entry(appimage),
+                  "darwin-aarch64": entry(apptar),
+              },
+          }, indent=2))
+          EOF
+          cat latest.json
+
+          if gh release view desktop-latest -R "$REPO" > /dev/null 2>&1; then
+            gh release upload desktop-latest latest.json --clobber -R "$REPO"
+          else
+            gh release create desktop-latest latest.json -R "$REPO" \
+              --prerelease \
+              --title "Desktop updater feed" \
+              --notes "Rolling release holding latest.json for the desktop auto-updater. Download the app from the versioned desktop-v* releases instead."
+          fi

@@ -1,4 +1,4 @@
-.PHONY: help dev server ui-dev ui-build install test restart clean logs smoke release
+.PHONY: help dev server ui-dev ui-build install test restart clean logs smoke release eval
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -37,6 +37,15 @@ test: ## Run the test suite
 lint: ## Run ruff linter
 	ruff check src/ tests/
 
+# Local eval gate. Bars are set just under the honest baseline measured
+# 2026-07-06 with production-faithful floors (whisper: f1 0.69, suppression
+# 0.95 @ 100 prompts; recall: recall@8 0.99, f1 0.57, fp_rate 0.64 @ 25
+# cases) so real regressions fail while run-to-run jitter passes.
+# Corpora are local-only (gitignored).
+eval: ## Run whisper + recall evals with fail-below bars
+	uv run python -m ormah.cli eval whisper run --fail-below f1=0.65,suppression=0.90
+	uv run python -m ormah.cli eval recall run --fail-below recall@8=0.90,f1=0.50,fp_rate=0.75
+
 clean: ## Remove build artifacts
 	rm -rf src/ormah/ui_dist ui/node_modules/.vite
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
@@ -45,7 +54,7 @@ clean: ## Remove build artifacts
 logs: ## Tail the server logs (if running in background)
 	@echo "Server runs with stdout logging. Use 'make server' in foreground to see logs."
 
-release: ## Build and publish the wheel to PyPI (fresh UI build, no sdist upload)
+release: ## Local fallback: build and publish the wheel to PyPI (fresh UI build, no sdist upload)
 	rm -rf dist/
 	cd ui && npm ci && npm run build
 	uv build --wheel --out-dir dist

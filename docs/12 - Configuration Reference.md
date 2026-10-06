@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Verified against the current repository state on 2026-04-26.
+Verified against the current repository state on 2026-06-09.
 
 All settings live in `src/ormah/config.py` and use the `ORMAH_` prefix.
 
@@ -59,10 +59,15 @@ for manual backup workflows.
 | `llm_model` | `claude-haiku-4-5-20251001` |
 | `llm_base_url` | `http://localhost:11434` |
 | `llm_timeout_seconds` | `60` |
+| `llm_num_predict` | `4096` |
 | `llm_api_key_env_var` | unset |
 | `llm_inherit_api_key` | `false` |
 
-Note: setup may persist different values in `.env`. For remote providers, Ormah stores only key policy, such as `ORMAH_LLM_API_KEY_ENV_VAR=ANTHROPIC_API_KEY`; it does not store API key values.
+Note: setup may persist different values in `.env`. For remote providers, Ormah stores only key policy, such as `ORMAH_LLM_API_KEY_ENV_VAR=ANTHROPIC_API_KEY`; it does not store API key values. `llm_num_predict` maps to Ollama's `options.num_predict` request field.
+
+Cheap JSON-capable models are usually enough for classification-style background jobs such
+as feedback judging. Good starting points are local `llama3.2` through Ollama, or remote
+low-cost models such as `gpt-4o-mini` or Claude Haiku through LiteLLM.
 
 ## Background Intervals
 
@@ -97,6 +102,26 @@ Operational note: default-enabled does not mean active without configured watch 
 | `session_watcher_debounce_seconds` | `60.0` |
 | `session_watcher_min_turns` | `5` |
 | `session_watcher_lookback_hours` | `72` |
+| `session_watcher_idle_threshold` | `30.0` |
+
+`session_watcher_dir` is the primary watch directory and remains the historical Claude Code
+default. When it is left at the default, Ormah also watches `~/.codex/sessions` if that
+directory exists.
+
+### Feedback signal mining
+
+| Setting | Default |
+|---|---|
+| `feedback_llm_judge_enabled` | `false` |
+| `feedback_llm_judge_min_confidence` | `0.75` |
+
+The session watcher always records free/local heuristic feedback signals for injected
+whispers. When `feedback_llm_judge_enabled` is true and `llm_provider != "none"`, it also
+asks the configured LLM to judge ambiguous turns. Confident `used` verdicts become positive
+affinity; confident `irrelevant` verdicts become negative affinity; uncertain or
+low-confidence verdicts remain observational `signals` rows only. The judge requests
+compact JSON Schema output when available and falls back to JSON-object mode for providers
+that reject schema output.
 
 ## Search
 
@@ -158,6 +183,10 @@ Important note: current search applies tier as a multiplicative factor after con
 | `importance_recency_half_life_days` | `14.0` |
 | `decay_importance_threshold` | `0.5` |
 
+`decay_importance_threshold` no longer affects `working -> archival` decay, which
+depends on retrievability alone (#222). It remains a documented setting with no
+effect in this version; bounded forgetting reintroduces a consumer.
+
 ## Whisper-Out and Nudge
 
 | Setting | Default |
@@ -210,9 +239,54 @@ Important note: current search applies tier as a multiplicative factor after con
 | `working_decay_days` | `14` |
 | `fsrs_initial_stability` | `1.0` |
 | `fsrs_decay_threshold` | `0.3` |
-| `fsrs_stability_growth` | `1.5` |
 | `fsrs_max_stability` | `365.0` |
+| `fsrs_growth_factor` | `0.5` |
+| `fsrs_growth_exponent` | `0.5` |
+| `fsrs_spacing_cap` | `2.0` |
+| `fsrs_reinforcement_cooldown_days` | `1.0` |
 | `ingest_max_content_chars` | `100000` |
+
+Reinforcement is bounded and diminishing (#221):
+
+```text
+spacing = min(R^-0.2, fsrs_spacing_cap)
+S'      = min(S * (1 + fsrs_growth_factor * S^-fsrs_growth_exponent * spacing),
+              fsrs_max_stability)
+```
+
+`fsrs_spacing_cap` keeps a very old memory from reaching the ceiling in a single
+use, and `fsrs_growth_exponent` shrinks each step as stability rises — roughly 74
+eligible updates take a node from `1.0` to `fsrs_max_stability`.
+`fsrs_reinforcement_cooldown_days` allows at most one numeric stability update per
+node per window; use still advances `last_accessed` on every event.
+`fsrs_reinforcement_cooldown_days = 0` is a legal value that disables the cooldown
+entirely, which allows unbounded-feeling growth within a single session — 74
+recalls in one sitting reach `fsrs_max_stability`. This reproduces #221's
+user-visible symptom and is currently legal and undocumented outside this note.
+
+Because of that, `last_review` can lag real use by a full cooldown window, and any
+job that treats it as a recency signal will read an actively used memory as stale.
+Decay and importance therefore anchor on `last_accessed`. If you add a consumer
+that anchors on `last_review` instead, keep
+`fsrs_reinforcement_cooldown_days < -ln(fsrs_decay_threshold) x stability`
+(about `1.2` days at the default threshold and an initial stability of `1.0`), or
+that consumer will treat the cooldown lag as decay.
+`fsrs_stability_growth` was removed in #221: it was a base multiplier, and the new
+`fsrs_growth_factor` is an additive term with different semantics.
+
+Upgrading does not rescale `stability` values written by the old unbounded
+formula. Only future growth is bounded; a memory the old formula pushed to
+`fsrs_max_stability` stays there and will not decay for roughly
+`-ln(fsrs_decay_threshold) x fsrs_max_stability` days of disuse (about 440 at
+the defaults). Correcting existing values would require a rescaling migration,
+deliberately not done here.
+
+Downgrading to a build older than #221 after upgrading is **not supported**. The
+store records which lifecycle model wrote its `stability` values, and an older
+binary does not know that key: it keeps writing with the unbounded formula while
+leaving the version marker at the newer value, so a later upgrade trusts a marker
+that no longer describes the data. Roll the binary back only together with a
+backup taken before the upgrade.
 
 ## Agent-Backed Maintenance
 
@@ -221,6 +295,39 @@ Important note: current search applies tier as a multiplicative factor after con
 | `claude_maintenance_enabled` | `false` |
 | `claude_maintenance_interval_hours` | `24` |
 | `claude_maintenance_batch_size` | `25` |
+| `maintenance_timeout_minutes` | `30` |
+
+`ORMAH_MAINTENANCE_TIMEOUT_MINUTES` is a positive integer, in minutes. It limits
+agent analysis starting when batches become ready. Preparation already reserves
+maintenance; server-side application keeps the reservation until success or failure,
+even past the analysis deadline. Polling never extends the deadline. Expiry releases
+abandoned analysis and restores `maintenance_due` if the existing interval is overdue.
+Only successful application records `last_maintenance_run`.
+
+## Temporal Locales
+
+| Setting | Default |
+|---|---|
+| `temporal_locales` | `en` |
+
+The language packs consulted when a time reference is parsed out of a prompt.
+Comma-separated and order-preserving; the built-in codes are `en` and `pt-BR`,
+and they are case-sensitive. An unknown code is rejected at startup. The
+setting selects packs only — it never carries grammar. PT-BR is opt-in:
+`ORMAH_TEMPORAL_LOCALES=en,pt-BR`.
+
+Enabling the PT-BR grammar does not make the whisper/search stack
+multilingual. The PT-BR window and strip reach every search once the pack is
+enabled, because recall parses the query itself. But the whisper treats a
+prompt as a time question (relaxed score floor, no post-rerank score floor or
+injection gate, recency order within space priority) only when the intent
+classifier marks it `temporal`. The reranker still runs when enabled;
+temporal intent bypasses the later score floor and injection gate, not
+reranking itself. The
+classifier's archetypes are English: with the default
+`BAAI/bge-base-en-v1.5` encoder,
+1 of 8 direct PT-BR time questions was classified `temporal`; with `bge-m3`,
+8 of 8. For PT-BR use, a multilingual embedding model is recommended.
 
 ## Code Anchor
 

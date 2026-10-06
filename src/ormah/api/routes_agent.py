@@ -8,8 +8,9 @@ import time
 from collections import deque
 from typing import Literal
 
+import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.models.node import ConnectRequest, CreateNodeRequest, UpdateNodeRequest
@@ -38,7 +39,7 @@ class TextResponse(BaseModel):
 
 
 @router.post("/remember", response_model=TextResponse)
-async def remember(
+def remember(
     req: CreateNodeRequest,
     request: Request,
     default_space: str | None = Query(None, description="Fallback space if not set in body"),
@@ -53,7 +54,7 @@ async def remember(
 
 
 @router.post("/recall", response_model=TextResponse)
-async def recall_search(
+def recall_search(
     req: SearchQuery,
     request: Request,
     default_space: str | None = Query(None, description="Default space for result prioritization"),
@@ -76,7 +77,7 @@ async def recall_search(
 
 
 @router.get("/recall/{node_id}", response_model=TextResponse)
-async def recall_node(
+def recall_node(
     node_id: str,
     request: Request,
     session_id: str | None = Query(
@@ -93,7 +94,7 @@ async def recall_node(
 
 
 @router.post("/update/{node_id}", response_model=TextResponse)
-async def update_node(node_id: str, req: UpdateNodeRequest, request: Request):
+def update_node(node_id: str, req: UpdateNodeRequest, request: Request):
     """Update an existing memory."""
     engine = request.app.state.engine
     text = engine.update_node(node_id, req)
@@ -103,7 +104,7 @@ async def update_node(node_id: str, req: UpdateNodeRequest, request: Request):
 
 
 @router.delete("/recall/{node_id}", response_model=TextResponse)
-async def delete_node(node_id: str, request: Request):
+def delete_node(node_id: str, request: Request):
     """Delete a memory by ID."""
     engine = request.app.state.engine
     text = engine.delete_node(node_id)
@@ -113,7 +114,7 @@ async def delete_node(node_id: str, request: Request):
 
 
 @router.post("/connect", response_model=TextResponse)
-async def connect(req: ConnectRequest, request: Request):
+def connect(req: ConnectRequest, request: Request):
     """Create a connection between two memories."""
     engine = request.app.state.engine
     text = engine.connect(req)
@@ -122,7 +123,14 @@ async def connect(req: ConnectRequest, request: Request):
 
 @router.post("/whisper", response_model=TextResponse)
 async def whisper(request: Request):
-    """Build compact whisper context for involuntary recall injection."""
+    """Build compact whisper context for involuntary recall injection.
+
+    Must stay ``async def``: the ``_session_buffers`` mutation below runs on the
+    event loop with no ``await`` in between, so asyncio serializes it across
+    concurrent requests. Converting this to a sync ``def`` would move it to the
+    threadpool and expose ``_session_buffers`` to a data race — guard it with a
+    lock first if you ever do.
+    """
     body = await request.json()
     prompt = body.get("prompt", "")
     space = body.get("space")
@@ -137,6 +145,17 @@ async def whisper(request: Request):
         now = time.time()
         gap_seconds = settings.whisper_session_gap_minutes * 60
         buf_size = settings.whisper_context_buffer_size
+
+        # Evict dead sessions: a session whose newest prompt is older than
+        # the session gap will never contribute recent_prompts again, but
+        # previously stayed in the dict forever (slow leak on long-running
+        # servers). Runs on the event loop, so no lock is needed.
+        dead = [
+            sid for sid, b in _session_buffers.items()
+            if sid != session_id and (not b or (now - b[-1][1]) > gap_seconds)
+        ]
+        for sid in dead:
+            del _session_buffers[sid]
 
         buf = _session_buffers.get(session_id)
         if buf is None:
@@ -154,9 +173,11 @@ async def whisper(request: Request):
         # Append current prompt to the buffer
         buf.append((prompt.strip(), now))
 
-    text = engine.get_whisper_context(
-        prompt=prompt, space=space, recent_prompts=recent_prompts,
-        session_id=session_id,
+    text = await anyio.to_thread.run_sync(
+        lambda: engine.get_whisper_context(
+            prompt=prompt, space=space, recent_prompts=recent_prompts,
+            session_id=session_id,
+        )
     )
     return TextResponse(text=text)
 
@@ -165,16 +186,18 @@ class FeedbackRequest(BaseModel):
     node_id: str
     signal: Literal[1, -1]
     source: Literal["explicit", "implicit"] = "explicit"
+    whisper_log_id: int | None = None
 
 
 @router.post("/feedback", response_model=TextResponse)
-async def submit_feedback(request: Request, body: FeedbackRequest):
+def submit_feedback(request: Request, body: FeedbackRequest):
     """Record explicit or implicit feedback signal for a whisper candidate."""
     engine = request.app.state.engine
     text = engine.submit_feedback(
         node_id=body.node_id,
         signal=body.signal,
         source=body.source,
+        whisper_log_id=body.whisper_log_id,
     )
     return TextResponse(text=text)
 
@@ -184,7 +207,7 @@ class MarkOutdatedBody(BaseModel):
 
 
 @router.post("/outdated/{node_id}", response_model=TextResponse)
-async def mark_outdated(node_id: str, request: Request, body: MarkOutdatedBody | None = None):
+def mark_outdated(node_id: str, request: Request, body: MarkOutdatedBody | None = None):
     """Mark a memory as outdated."""
     engine = request.app.state.engine
     reason = body.reason if body else None
@@ -194,8 +217,54 @@ async def mark_outdated(node_id: str, request: Request, body: MarkOutdatedBody |
     return TextResponse(text=text, node_id=node_id)
 
 
+@router.get("/clients")
+def get_clients():
+    """List all supported agents with detection and wired status.
+
+    Returns a list of {id, name, detected, wired, platform, available_on_current_os}.
+    Pure filesystem checks — no wiring, no side effects.
+    """
+    from ormah.setup import list_agents
+
+    return list_agents()
+
+
+@router.post("/setup")
+def run_setup():
+    """Wire ormah hooks/MCP for every detected agent on this machine.
+
+    Runs non-interactively and returns {wired, errors, warnings} so the UI can
+    show which agents were connected and surface any failures.
+    """
+    from ormah.setup import run_setup_json
+
+    return run_setup_json()
+
+
+@router.post("/setup/{agent_id}")
+def wire_one(agent_id: str):
+    """Wire ormah into a single agent by id."""
+    from ormah.setup import wire_agent
+
+    try:
+        return wire_agent(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.delete("/setup/{agent_id}")
+def unwire_one(agent_id: str):
+    """Remove ormah hooks/MCP/instructions for a single agent."""
+    from ormah.setup import unwire_agent
+
+    try:
+        return unwire_agent(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @router.get("/insights")
-async def get_insights(request: Request):
+def get_insights(request: Request):
     """Get belief evolutions and conflicting ideas detected by the system."""
     engine = request.app.state.engine
     conn = engine.db.conn
@@ -235,7 +304,7 @@ async def get_insights(request: Request):
 
 
 @router.get("/proposals")
-async def get_proposals(request: Request):
+def get_proposals(request: Request):
     """Get pending proposals with enriched source node details."""
     engine = request.app.state.engine
     rows = engine.db.conn.execute(
@@ -275,7 +344,7 @@ async def get_proposals(request: Request):
 
 
 @router.post("/proposals/{proposal_id}")
-async def resolve_proposal(proposal_id: str, body: ResolveProposalRequest, request: Request):
+def resolve_proposal(proposal_id: str, body: ResolveProposalRequest, request: Request):
     """Approve or reject a proposal. Executes merge on approval."""
     engine = request.app.state.engine
     from datetime import datetime, timezone
@@ -333,35 +402,40 @@ async def resolve_proposal(proposal_id: str, body: ResolveProposalRequest, reque
 
 class MaintenanceRequest(BaseModel):
     results: dict | None = None
-    job_id: str | None = None
+    job_id: str | None = Field(default=None, min_length=1)
 
 
 @router.get("/maintenance")
-async def get_maintenance_status(request: Request, job_id: str | None = Query(None)):
+def get_maintenance_status(request: Request, job_id: str = Query(..., min_length=1)):
     """Get current maintenance job status and any ready results."""
     manager = _maintenance_manager(request)
     return manager.get_status(job_id=job_id)
 
 
 @router.post("/maintenance")
-async def run_maintenance(request: Request, body: MaintenanceRequest, response: Response):
+def run_maintenance(request: Request, body: MaintenanceRequest, response: Response):
     """Claude-in-the-loop maintenance: get pending work or apply Claude's decisions.
 
-    Phase 1 — call with no body (or ``{}``):
-        Starts background batch generation and returns job status immediately.
+    Phase 1 — send ``{}``:
+        Reserve background preparation, or return busy without another assignment.
+        With only ``job_id``, observe that assignment's current status instead.
 
-    Phase 2 — call with ``{"results": {...}}``:
+    Phase 2 — call with ``{"job_id": "...", "results": {...}}``:
         Starts background application of Claude's decisions and returns job status immediately.
     """
     manager = _maintenance_manager(request)
     try:
-        if body.results is not None:
+        if "results" in body.model_fields_set:
+            if body.results is None:
+                raise ValueError("results must be an object (use {} for empty decisions)")
             payload = manager.submit_results(body.results, job_id=body.job_id)
             response.status_code = 202
             return payload
 
+        if body.job_id:
+            return manager.get_status(job_id=body.job_id)
         payload = manager.start_phase1()
-        response.status_code = 200 if payload["status"] == "awaiting_results" else 202
+        response.status_code = 200 if payload["status"] == "busy" else 202
         return payload
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -372,7 +446,7 @@ async def run_maintenance(request: Request, body: MaintenanceRequest, response: 
 
 
 @router.get("/merges")
-async def list_merges(
+def list_merges(
     request: Request,
     limit: int = Query(20, description="Maximum number of merges to return"),
 ):
@@ -383,7 +457,7 @@ async def list_merges(
 
 
 @router.get("/audit")
-async def list_audit_log(
+def list_audit_log(
     request: Request,
     limit: int = Query(20, description="Maximum number of entries to return"),
     node_id: str | None = Query(None, description="Filter by node ID"),
@@ -395,7 +469,7 @@ async def list_audit_log(
 
 
 @router.post("/merges/{merge_id}/undo", response_model=TextResponse)
-async def undo_merge(merge_id: str, request: Request):
+def undo_merge(merge_id: str, request: Request):
     """Undo a merge by ID."""
     engine = request.app.state.engine
     text = engine.undo_merge(merge_id)

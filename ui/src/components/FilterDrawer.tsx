@@ -4,6 +4,7 @@ import type { Edge, EdgeType, MemoryNode, NodeType, Tier } from "../types";
 
 interface Props {
   open: boolean;
+  onClose: () => void;
   filters: Filters;
   allSpaces: string[];
   nodes: MemoryNode[];
@@ -28,6 +29,7 @@ const EDGE_TYPES: EdgeType[] = [
 
 export default function FilterDrawer({
   open,
+  onClose,
   filters,
   allSpaces,
   nodes,
@@ -46,6 +48,10 @@ export default function FilterDrawer({
 
   return (
     <div className={`side-panel filter-drawer ${open ? "open" : ""}`}>
+      <div className="side-panel-header">
+        <div className="review-title">settings</div>
+        <button className="node-detail-close" onClick={onClose}>×</button>
+      </div>
       <div className="filter-section">
         <div className="filter-section-title">appearance</div>
         <div className="theme-toggle" role="group" aria-label="Theme">

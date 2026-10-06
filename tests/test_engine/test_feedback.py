@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ormah.models.node import CreateNodeRequest, NodeType, Tier
+from ormah.models.node import CreateNodeRequest, NodeType
 
 
 @pytest.fixture

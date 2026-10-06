@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ormah.index.db import Database
+
+from ormah.text.tokens import IDENTITY_TOKENS, STOP_WORDS
 
 logger = logging.getLogger(__name__)
 
@@ -15,8 +20,19 @@ _NOT_EXPIRED = "(n.valid_until IS NULL OR n.valid_until > strftime('%Y-%m-%dT%H:
 class GraphIndex:
     """Graph queries on the SQLite index."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self.conn = conn
+    def __init__(self, db: "Database | sqlite3.Connection") -> None:
+        # Hold the Database (not a captured connection) and resolve ``conn`` per
+        # access so every thread reads through its own thread-local connection.
+        # Sharing one sqlite3.Connection across the request threadpool is a data
+        # race — it raises SQLITE_MISUSE ("bad parameter or other API misuse")
+        # and returns corrupted rows under concurrent load. A raw Connection is
+        # still accepted (legacy/tests) and used directly.
+        self._db = db
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        db = self._db
+        return db.conn if hasattr(db, "conn") else db
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
@@ -187,20 +203,8 @@ class GraphIndex:
         return [dict(r) for r in rows]
 
 
-_STOP_WORDS = frozenset({
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "need", "dare", "ought",
-    "user", "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
-    "they", "them", "this", "that", "these", "those", "am", "not", "no",
-    "nor", "so", "if", "or", "and", "but", "for", "of", "to", "in",
-    "on", "at", "by", "with", "from", "as", "into", "about", "what",
-    "which", "who", "whom", "when", "where", "why", "how", "all", "any",
-    "each", "every", "both", "few", "more", "most", "other", "some",
-    "such", "than", "too", "very", "just", "because", "also",
-})
-
-_IDENTITY_TOKENS = frozenset({"user", "i", "me", "my", "we", "our", "you", "your"})
+_STOP_WORDS = STOP_WORDS
+_IDENTITY_TOKENS = IDENTITY_TOKENS
 
 
 def _sanitize_fts_query(query: str) -> list[str]:

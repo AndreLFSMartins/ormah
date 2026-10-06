@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ormah.config import Settings
 from ormah.models.node import CreateNodeRequest, NodeType, Tier
 
 
@@ -126,3 +127,113 @@ class TestConsolidation:
         # Completes without error
 
 
+def test_consolidation_settings_defaults(tmp_path):
+    s = Settings(memory_dir=tmp_path)
+    assert s.consolidation_max_clusters_per_run == 10
+    assert s.consolidation_min_cluster_size == 2
+    assert s.consolidation_cluster_threshold == 0.6
+    assert s.consolidation_max_cluster_nodes == 5
+
+
+def test_consolidation_settings_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORMAH_CONSOLIDATION_MAX_CLUSTERS_PER_RUN", "3")
+    s = Settings(memory_dir=tmp_path)
+    assert s.consolidation_max_clusters_per_run == 3
+
+
+def test_run_consolidation_uses_settings_cap(engine, monkeypatch):
+    from ormah.background import consolidator
+
+    engine.settings.llm_provider = "ollama"
+    engine.settings.consolidation_max_clusters_per_run = 3
+    seen = {}
+
+    def fake_find(eng, limit):
+        seen["limit"] = limit
+        return []
+
+    monkeypatch.setattr(consolidator, "_find_consolidation_clusters", fake_find)
+    consolidator.run_consolidation(engine)
+    assert seen["limit"] == 3
+
+
+def test_inverted_cluster_bounds_returns_empty_and_warns(consolidation_engine, caplog):
+    from ormah.background.consolidator import _find_consolidation_clusters
+
+    engine, _ids = consolidation_engine
+    engine.settings.consolidation_max_cluster_nodes = 1
+    engine.settings.consolidation_min_cluster_size = 2
+
+    with caplog.at_level("WARNING"):
+        clusters = _find_consolidation_clusters(engine)
+
+    assert clusters == []
+    assert "consolidation_max_cluster_nodes" in caplog.text
+
+
+def test_consolidation_marks_sources_as_superseded(engine):
+    from ormah.background.consolidator import _apply_consolidation
+    from ormah.models.node import CreateNodeRequest, Tier
+
+    a, _ = engine.remember(CreateNodeRequest(content="source one about pytest fixtures"))
+    b, _ = engine.remember(CreateNodeRequest(content="source two about pytest fixtures"))
+
+    new_id = _apply_consolidation(engine, [a, b], "Pytest fixtures", "merged body", "fact")
+
+    for source_id in (a, b):
+        node = engine.file_store.load(source_id)
+        assert node.tier is Tier.archival
+        assert node.superseded_by == new_id
+
+
+def test_the_marker_survives_in_the_index_after_consolidation(engine):
+    """Regression for the INSERT OR REPLACE column drop (Task 3): update_node
+    re-indexes the file one line after the marker is written."""
+    from ormah.background.consolidator import _apply_consolidation
+    from ormah.models.node import CreateNodeRequest
+
+    a, _ = engine.remember(CreateNodeRequest(content="source one about ruff config"))
+    b, _ = engine.remember(CreateNodeRequest(content="source two about ruff config"))
+
+    new_id = _apply_consolidation(engine, [a, b], "Ruff config", "merged body", "fact")
+
+    row = engine.db.conn.execute(
+        "SELECT superseded_by FROM nodes WHERE id = ?", (a,)
+    ).fetchone()
+    assert row["superseded_by"] == new_id
+
+
+def test_a_superseded_source_does_not_come_back_on_confirmed_use(engine):
+    """The end-to-end point of #223's exception: consolidation sources stay buried."""
+    from ormah.background.consolidator import _apply_consolidation
+    from ormah.models.node import CreateNodeRequest, Tier
+
+    a, _ = engine.remember(CreateNodeRequest(content="source one about sqlite vec"))
+    b, _ = engine.remember(CreateNodeRequest(content="source two about sqlite vec"))
+    _apply_consolidation(engine, [a, b], "sqlite-vec", "merged body", "fact")
+
+    engine._record_confirmed_use(a)
+
+    assert engine.file_store.load(a).tier is Tier.archival
+
+
+def test_marking_precedes_demotion_so_a_crash_leaves_working_plus_marked(engine, monkeypatch):
+    """Inject a demotion failure and assert the node ended working + marked,
+    NOT archival + unmarked — the promotable node we must never create."""
+    from ormah.background.consolidator import _apply_consolidation
+    from ormah.models.node import CreateNodeRequest, Tier
+
+    a, _ = engine.remember(CreateNodeRequest(content="source one about apscheduler"))
+    b, _ = engine.remember(CreateNodeRequest(content="source two about apscheduler"))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("demotion failed")
+
+    monkeypatch.setattr(engine, "update_node", boom)
+
+    with pytest.raises(RuntimeError):
+        _apply_consolidation(engine, [a, b], "APScheduler", "merged body", "fact")
+
+    node = engine.file_store.load(a)
+    assert node.tier is Tier.working
+    assert node.superseded_by is not None

@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 from ormah.background.llm import normalize_conflict_type
+from ormah.background.memory_lock import serialized_memory_job
 from ormah.models.node import Connection, EdgeType
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,7 @@ def _llm_check_conflict(settings, node_row, other_row) -> dict | None:
     Returns parsed dict or None if the LLM is unavailable or returns
     invalid output.
     """
-    from ormah.background.llm_client import llm_generate
+    from ormah.background.llm_client import extract_json, llm_generate
 
     def _get(row, key, default="unknown"):
         try:
@@ -87,7 +88,7 @@ def _llm_check_conflict(settings, node_row, other_row) -> dict | None:
         return None
 
     try:
-        result = json.loads(raw)
+        result = json.loads(extract_json(raw))
         if "conflict" not in result:
             return None
         if "type" in result:
@@ -111,7 +112,7 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
     """
     try:
         from ormah.embeddings.encoder import get_encoder
-        from ormah.embeddings.vector_store import VectorStore
+        from ormah.embeddings.vector_store import VectorStore, stored_or_encoded
 
         settings = engine.settings
         encoder = get_encoder(settings)
@@ -141,7 +142,14 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
             if not text:
                 continue
 
-            query_vec = encoder.encode(text)
+            query_vec = stored_or_encoded(
+                vec_store,
+                encoder,
+                node["id"],
+                node["title"],
+                node["content"],
+                settings.embedding_max_content_chars,
+            )
             similar = vec_store.search(query_vec, limit=15)
 
             for match in similar:
@@ -205,6 +213,7 @@ def _find_conflict_candidates(engine, limit: int = 8) -> list[dict]:
         return []
 
 
+@serialized_memory_job
 def run_conflict_detection(engine) -> None:
     """Find potentially contradicting nodes and create edges."""
     try:
@@ -273,6 +282,7 @@ def run_conflict_detection(engine) -> None:
                 if mem_node is None:
                     continue
                 mem_node.connections.extend(new_connections)
+                mem_node.touch_updated()
                 engine.file_store.save(mem_node)
             except Exception as e:
                 logger.debug("Failed to persist conflict edge to markdown for %s: %s", nid[:8], e)

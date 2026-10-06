@@ -5,9 +5,12 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
+from ormah.background.memory_lock import serialized_memory_job
+
 logger = logging.getLogger(__name__)
 
 
+@serialized_memory_job
 def run_auto_cluster(engine) -> None:
     """Assign unassigned nodes to spaces based on their connections."""
     try:
@@ -46,16 +49,19 @@ def run_auto_cluster(engine) -> None:
             node = engine.file_store.load(node_id)
             if node:
                 node.space = most_common
+                node.touch_updated()
                 engine.file_store.save(node)
 
             assigned += 1
 
         if updates:
-            with engine.db.transaction() as conn:
-                for space_val, node_id in updates:
-                    conn.execute(
-                        "UPDATE nodes SET space = ? WHERE id = ?", (space_val, node_id)
-                    )
+            chunk_size = 100
+            for i in range(0, len(updates), chunk_size):
+                with engine.db.transaction() as conn:
+                    for space_val, node_id in updates[i : i + chunk_size]:
+                        conn.execute(
+                            "UPDATE nodes SET space = ? WHERE id = ?", (space_val, node_id)
+                        )
         if assigned:
             logger.info("Auto-cluster assigned %d nodes to spaces", assigned)
 

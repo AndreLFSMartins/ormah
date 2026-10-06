@@ -364,49 +364,47 @@ class TestSpaceScoring:
 # ---------------------------------------------------------------------------
 
 
-class TestSpreadingActivationAccessIsolation:
-    """Verify that _touch_access is only called for direct search matches,
-    not for nodes injected by spreading activation."""
+def _lifecycle(engine, node_id):
+    """The four lifecycle fields, from the markdown file and the SQLite row."""
+    node = engine.file_store.load(node_id)
+    row = engine.db.conn.execute(
+        "SELECT access_count, last_accessed, stability, last_review FROM nodes WHERE id = ?",
+        (node_id,),
+    ).fetchone()
+    fields = ("access_count", "last_accessed", "stability", "last_review")
+    return {
+        "file": tuple(getattr(node, f) for f in fields),
+        "db": tuple(row[f] for f in fields),
+    }
 
-    def test_touch_access_skips_activated_nodes(self, engine):
-        """Spreading activation results (source=activated/conflict) must not
-        get their access_count bumped."""
-        # Create three nodes via the engine
+
+class TestSearchDoesNotTouchLifecycle:
+    """Issue #220: search writes no lifecycle fields, for any result source.
+
+    This class replaces TestSpreadingActivationAccessIsolation, which asserted
+    that direct matches WERE touched while activated/conflict nodes were not.
+    Direct matches are no longer touched either, so the distinction is gone.
+    """
+
+    def test_direct_activated_and_conflict_results_are_all_untouched(self, engine):
         from ormah.models.node import CreateNodeRequest
 
         id_a, _ = engine.remember(CreateNodeRequest(
-            content="Alpha direct match node",
-            title="Alpha",
-            type="fact",
-            tier="working",
+            content="Alpha direct match node", title="Alpha", type="fact", tier="working",
         ))
         id_b, _ = engine.remember(CreateNodeRequest(
-            content="Beta neighbor node",
-            title="Beta",
-            type="fact",
-            tier="working",
+            content="Beta neighbor node", title="Beta", type="fact", tier="working",
         ))
         id_c, _ = engine.remember(CreateNodeRequest(
-            content="Gamma direct match node",
-            title="Gamma",
-            type="fact",
-            tier="working",
+            content="Gamma conflicting node", title="Gamma", type="fact", tier="working",
         ))
 
-        # Record initial access counts
-        node_a = engine.file_store.load(id_a)
-        node_b = engine.file_store.load(id_b)
-        node_c = engine.file_store.load(id_c)
-        initial_a = node_a.access_count
-        initial_b = node_b.access_count
-        initial_c = node_c.access_count
-
-        # Mock _spread_activation to inject B as an activated neighbor
-        original_spread = engine._spread_activation
+        before = {
+            node_id: _lifecycle(engine, node_id) for node_id in (id_a, id_b, id_c)
+        }
 
         def mock_spread(results, limit):
-            out = original_spread(results, limit)
-            # Inject B as if it were pulled in by spreading activation from A
+            out = list(results)
             out.append({
                 "node": engine.graph.get_node(id_b),
                 "score": 0.5,
@@ -414,63 +412,9 @@ class TestSpreadingActivationAccessIsolation:
                 "activated_by": id_a,
                 "activation_edge": "related_to",
             })
-            return out
-
-        # Mock hybrid search to return A and C as direct matches
-        def mock_search(query, limit=10, **filters):
-            return [
-                {"node": engine.graph.get_node(id_a), "score": 1.0, "source": "hybrid"},
-                {"node": engine.graph.get_node(id_c), "score": 0.8, "source": "hybrid"},
-            ]
-
-        search_obj = engine._get_hybrid_search()
-        if search_obj is not None:
-            with patch.object(search_obj, "search", side_effect=mock_search), \
-                 patch.object(engine, "_spread_activation", side_effect=mock_spread):
-                engine.recall_search_structured("test query", limit=10)
-        else:
-            # FTS-only path
-            engine.graph.fts_search = MagicMock(return_value=[
-                {"id": id_a, "score": 5.0},
-                {"id": id_c, "score": 4.0},
-            ])
-            with patch.object(engine, "_spread_activation", side_effect=mock_spread):
-                engine.recall_search_structured("test query", limit=10)
-
-        # Verify: A and C should have access_count incremented
-        node_a_after = engine.file_store.load(id_a)
-        node_c_after = engine.file_store.load(id_c)
-        assert node_a_after.access_count == initial_a + 1
-        assert node_c_after.access_count == initial_c + 1
-
-        # B (activated neighbor) should NOT have access_count incremented
-        node_b_after = engine.file_store.load(id_b)
-        assert node_b_after.access_count == initial_b
-
-    def test_touch_access_skips_conflict_nodes(self, engine):
-        """Nodes with source=conflict should also be skipped."""
-        from ormah.models.node import CreateNodeRequest
-
-        id_a, _ = engine.remember(CreateNodeRequest(
-            content="Statement one",
-            title="Statement",
-            type="fact",
-            tier="working",
-        ))
-        id_conflict, _ = engine.remember(CreateNodeRequest(
-            content="Contradicting statement",
-            title="Contradiction",
-            type="fact",
-            tier="working",
-        ))
-
-        initial_conflict = engine.file_store.load(id_conflict).access_count
-
-        def mock_spread(results, limit):
-            out = list(results)
             out.append({
-                "node": engine.graph.get_node(id_conflict),
-                "score": 0.3,
+                "node": engine.graph.get_node(id_c),
+                "score": 0.4,
                 "source": "conflict",
                 "activated_by": id_a,
                 "activation_edge": "contradicts",
@@ -478,9 +422,7 @@ class TestSpreadingActivationAccessIsolation:
             return out
 
         def mock_search(query, limit=10, **filters):
-            return [
-                {"node": engine.graph.get_node(id_a), "score": 1.0, "source": "hybrid"},
-            ]
+            return [{"node": engine.graph.get_node(id_a), "score": 1.0, "source": "hybrid"}]
 
         search_obj = engine._get_hybrid_search()
         if search_obj is not None:
@@ -488,11 +430,12 @@ class TestSpreadingActivationAccessIsolation:
                  patch.object(engine, "_spread_activation", side_effect=mock_spread):
                 engine.recall_search_structured("test query", limit=10)
         else:
-            engine.graph.fts_search = MagicMock(return_value=[
-                {"id": id_a, "score": 5.0},
-            ])
+            engine.graph.fts_search = MagicMock(return_value=[{"id": id_a, "score": 5.0}])
             with patch.object(engine, "_spread_activation", side_effect=mock_spread):
                 engine.recall_search_structured("test query", limit=10)
 
-        node_conflict_after = engine.file_store.load(id_conflict)
-        assert node_conflict_after.access_count == initial_conflict
+        assert _lifecycle(engine, id_a) == before[id_a], (
+            "the direct match was touched — search must not confirm use"
+        )
+        assert _lifecycle(engine, id_b) == before[id_b], "an activated neighbour was touched"
+        assert _lifecycle(engine, id_c) == before[id_c], "a conflict neighbour was touched"

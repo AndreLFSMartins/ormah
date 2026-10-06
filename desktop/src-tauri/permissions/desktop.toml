@@ -1,0 +1,48 @@
+[[permission]]
+identifier = "desktop-bootstrap"
+description = "Allows the bundled bootstrap UI to manage the local runtime."
+commands.allow = [
+  "setup_agents",
+  "fetch_stats",
+  "detect_agents",
+  "open_graph_cmd",
+  "graph_url",
+  "start_server",
+  "stop_server",
+  "server_status",
+  "retry_runtime_setup",
+  "desktop_bridge_info",
+]
+
+[[permission]]
+identifier = "desktop-product-bridge"
+description = "Allows the local Ormah product UI to invoke the narrow account and protection bridge."
+commands.allow = [
+  "desktop_bridge_info",
+  "account_status",
+  "request_account_code",
+  "verify_account_code",
+  "logout_account",
+  "billing_offer",
+  "protection_status",
+  "remote_snapshot",
+  "create_protection_intent",
+  "bind_protection_intent",
+  "cancel_protection_intent",
+  "enable_protection",
+  "disable_protection",
+  "backup_now",
+  "verify_now",
+  "operation_status",
+  "prepare_restore",
+  "confirm_restore",
+  "cancel_restore",
+  "import_recovery_kit",
+  "open_checkout",
+  "open_billing_portal",
+  "save_recovery_kit",
+  "open_printable_recovery_kit",
+  "desktop_update_status",
+  "check_desktop_update",
+  "install_desktop_update",
+]

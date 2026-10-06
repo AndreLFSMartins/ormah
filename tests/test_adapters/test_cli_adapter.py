@@ -354,8 +354,17 @@ def test_outdated_no_reason(monkeypatch):
 
 def test_stats_text(monkeypatch):
     def handler(request):
-        assert "/admin/stats" in str(request.url)
-        return _mock_response({"total_nodes": 42, "by_tier": {"core": 5, "working": 30, "archival": 7}, "total_edges": 18})
+        url = str(request.url)
+        if "/stats" in url:
+            return _mock_response({
+                "store": {
+                    "total_nodes": 42,
+                    "by_tier": {"core": 5, "working": 30, "archival": 7},
+                    "total_edges": 18,
+                },
+                "usage": {"whispers_used_this_week": 7, "whispers_used_total": 42},
+            })
+        return _mock_response({}, status_code=404)
 
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
@@ -367,13 +376,22 @@ def test_stats_text(monkeypatch):
     assert "42" in out
     assert "18" in out
     assert "core: 5" in out
+    assert "7" in out  # whispers_used_this_week
 
 
 def test_stats_json(monkeypatch):
-    response_data = {"total_nodes": 42, "by_tier": {"core": 5}, "total_edges": 18}
-
     def handler(request):
-        return _mock_response(response_data)
+        url = str(request.url)
+        if "/stats" in url:
+            return _mock_response({
+                "store": {
+                    "total_nodes": 42,
+                    "by_tier": {"core": 5},
+                    "total_edges": 18,
+                },
+                "usage": {"whispers_used_this_week": 3, "whispers_used_total": 10},
+            })
+        return _mock_response({}, status_code=404)
 
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
@@ -383,7 +401,8 @@ def test_stats_json(monkeypatch):
     code, out, err = _run_cli(["stats", "--json"], monkeypatch)
     assert code == 0
     parsed = json.loads(out)
-    assert parsed["total_nodes"] == 42
+    assert parsed["store"]["total_nodes"] == 42
+    assert parsed["usage"]["whispers_used_this_week"] == 3
 
 
 # --- error handling ---
@@ -401,6 +420,7 @@ def test_server_not_running(monkeypatch):
     code, out, err = _run_cli(["status"], monkeypatch)
     assert code == 1
     assert "not running" in err
+    assert "ormah server start -d" in err
 
 
 def test_http_error(monkeypatch):
@@ -461,9 +481,19 @@ def test_whisper_inject_malformed_json(monkeypatch):
     assert out.strip() == ""
 
 
-def test_whisper_inject_server_down(monkeypatch):
+def test_whisper_inject_server_down_warns_once_and_rearms(monkeypatch, tmp_path):
+    cursor_file = tmp_path / "whisper-cursors.json"
+    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_FILE", cursor_file)
+    monkeypatch.setattr("ormah.adapters.cli_adapter._WHISPER_CURSOR_DIR", tmp_path)
+    monkeypatch.setattr("ormah.config.settings.whisper_nudge_interval", 0)
+    monkeypatch.setattr("ormah.config.settings.whisper_out_enabled", False)
+
+    server_up = False
+
     def handler(request):
-        raise httpx.ConnectError("Connection refused")
+        if not server_up:
+            raise httpx.ConnectError("Connection refused")
+        return _mock_response({"text": ""})
 
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(
@@ -475,9 +505,29 @@ def test_whisper_inject_server_down(monkeypatch):
         lambda path: "proj",
     )
     hook_input = json.dumps({"prompt": "hello", "cwd": "/path/to/proj", "session_id": "test"})
+
+    # The first failure is visible to the user.
+    code, out, err = _run_cli(["whisper", "inject"], monkeypatch, stdin_text=hook_input)
+    assert code == 0
+    parsed = json.loads(out)
+    assert "backend is unavailable" in parsed["systemMessage"]
+    assert "ormah server start -d" in parsed["systemMessage"]
+
+    # Repeated prompts during the same outage do not spam the session.
     code, out, err = _run_cli(["whisper", "inject"], monkeypatch, stdin_text=hook_input)
     assert code == 0
     assert out.strip() == ""
+
+    # A successful request clears the throttle so a later outage warns again.
+    server_up = True
+    code, out, err = _run_cli(["whisper", "inject"], monkeypatch, stdin_text=hook_input)
+    assert code == 0
+    assert out.strip() == ""
+
+    server_up = False
+    code, out, err = _run_cli(["whisper", "inject"], monkeypatch, stdin_text=hook_input)
+    assert code == 0
+    assert "systemMessage" in json.loads(out)
 
 
 def test_whisper_inject_empty_context(monkeypatch):

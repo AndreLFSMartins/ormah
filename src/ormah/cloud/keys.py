@@ -1,0 +1,624 @@
+"""Key lifecycle, store identity, and the recovery kit (E08 §1, §5).
+
+The key file keeps every identity ever generated — the current one first,
+older ones retained below so pre-rotation bundles stay decryptable forever.
+Nothing here is ever destructive; there is no ``--force``.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import stat
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from ormah.cloud.crypto import (
+    CloudCryptoError,
+    generate_identity,
+    identity_from_str,
+    identity_to_str,
+)
+
+logger = logging.getLogger(__name__)
+
+CONFIG_DIR = Path.home() / ".config" / "ormah"
+KEY_PATH = CONFIG_DIR / "cloud.key"
+RECOVERY_KIT_PATH = CONFIG_DIR / "ormah-recovery-kit.md"
+STORE_ID_NAME = ".store_id"
+RECOVERY_KIT_FORMAT_VERSION = 1
+MAX_RECOVERY_KIT_BYTES = 256 * 1024
+
+
+class CloudKeyError(RuntimeError):
+    """Raised for key-file lifecycle failures."""
+
+
+@dataclass(frozen=True)
+class RecoveryImportPlan:
+    """A fully validated recovery import, ready to apply without conflicts."""
+
+    identity_strings: tuple[str, ...]
+    installed_identity_strings: tuple[str, ...]
+    store_id: str | None
+    key_path: Path
+    memory_dir: Path
+    store_id_status: str
+    key_status: str
+
+
+@dataclass(frozen=True)
+class RecoveryImportResult:
+    """The independently observable outcomes of a recovery import."""
+
+    identity_strings: tuple[str, ...]
+    store_id: str | None
+    store_id_status: str
+    key_status: str
+
+
+def _atomic_write_0600(path: Path, text: str) -> None:
+    from ormah.setup import _atomic_write
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(str(path), text, mode=0o600)
+
+
+# --- Key file ---
+
+
+def key_file_exists(key_path: Path | None = None) -> bool:
+    key_path = KEY_PATH if key_path is None else key_path
+    return key_path.expanduser().is_file()
+
+
+def load_identity_strings(key_path: Path | None = None) -> list[str]:
+    """All identity strings in the key file, current first."""
+    key_path = (KEY_PATH if key_path is None else key_path).expanduser()
+    if not key_path.is_file():
+        raise CloudKeyError(
+            f"No cloud key found at {key_path}. Run `ormah cloud init` first."
+        )
+    strings = [
+        line.strip()
+        for line in key_path.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("AGE-SECRET-KEY-")
+    ]
+    if not strings:
+        raise CloudKeyError(f"Cloud key file {key_path} contains no identities.")
+    return strings
+
+
+def load_identities(key_path: Path | None = None) -> list:
+    """All identities for decryption, current first."""
+    return [identity_from_str(s) for s in load_identity_strings(key_path)]
+
+
+def current_recipient(key_path: Path | None = None):
+    """The encryption recipient (public key of the current identity)."""
+    return load_identities(key_path)[0].to_public()
+
+
+def _serialize_key_file(identity_strings: list[str], rotated: bool) -> str:
+    """Current identity first; older identities retained below it."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [
+        "# Ormah cloud encryption identities (age). KEEP THIS FILE SAFE.",
+        "# The first identity encrypts new bundles; all of them decrypt.",
+        "# Never delete old identities — older backups still need them.",
+        f"# current since {now}" + (" (rotation)" if rotated else ""),
+        identity_strings[0],
+    ]
+    for old in identity_strings[1:]:
+        lines.append("# retained pre-rotation identity")
+        lines.append(old)
+    return "\n".join(lines) + "\n"
+
+
+def init_key(key_path: Path | None = None) -> str:
+    """Generate the first identity. Refuses if a key file already exists."""
+    key_path = (KEY_PATH if key_path is None else key_path).expanduser()
+    if key_path.is_file():
+        raise CloudKeyError(
+            f"A cloud key already exists at {key_path}. "
+            "To get a new encryption key, run `ormah cloud rotate-key` — "
+            "it keeps old identities so existing backups stay readable."
+        )
+    identity_str = identity_to_str(generate_identity())
+    _atomic_write_0600(key_path, _serialize_key_file([identity_str], rotated=False))
+    return identity_str
+
+
+def _read_import_source(source: str) -> str:
+    """Load a path-or-text import source exactly once."""
+    source_path = Path(source).expanduser()
+    try:
+        return source_path.read_text(encoding="utf-8") if source_path.is_file() else source
+    except OSError:
+        # Raw recovery-kit text can exceed the platform's maximum path length.
+        # `source` is documented to accept either form, so a failed path probe
+        # must fall back to parsing it as text.
+        return source
+
+
+def _identity_strings_from_text(text: str) -> list[str]:
+    strings = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith("AGE-SECRET-KEY-")
+    ]
+    if not strings:
+        raise CloudKeyError("No age identities found in the provided key material.")
+    if len(set(strings)) != len(strings):
+        raise CloudKeyError("The provided key material contains duplicate age identities.")
+    for string in strings:
+        try:
+            identity_from_str(string)
+        except CloudCryptoError as exc:
+            raise CloudKeyError(
+                "The provided key material contains an invalid age identity."
+            ) from exc
+    return strings
+
+
+def import_key(source: str, key_path: Path | None = None) -> list[str]:
+    """Install identities into a missing key file.
+
+    This low-level helper preserves its original fresh-key-only contract. Full
+    recovery-kit imports must use ``plan_recovery_import`` followed by
+    ``apply_recovery_import`` so the store identity is preflighted too.
+    """
+    key_path = (KEY_PATH if key_path is None else key_path).expanduser()
+    if key_path.exists() or key_path.is_symlink():
+        raise CloudKeyError(
+            f"A cloud key already exists at {key_path}; refusing to overwrite. "
+            "Move it aside first if you really mean to replace it."
+        )
+    strings = _identity_strings_from_text(_read_import_source(source))
+    _atomic_write_0600(key_path, _serialize_key_file(strings, rotated=False))
+    return strings
+
+
+def _rotate_key_without_recovery_kit(key_path: Path | None = None) -> str:
+    """Test/migration helper; product rotation must update the recovery kit first."""
+    key_path = KEY_PATH if key_path is None else key_path
+    existing = load_identity_strings(key_path)
+    new_identity = identity_to_str(generate_identity())
+    _atomic_write_0600(
+        key_path.expanduser(),
+        _serialize_key_file([new_identity, *existing], rotated=True),
+    )
+    return new_identity
+
+
+def rotate_key_and_recovery_kit(
+    store_id: str,
+    *,
+    key_path: Path | None = None,
+    kit_path: Path | None = None,
+    account_email: str | None = None,
+) -> tuple[str, Path]:
+    """Rotate the active identity without leaving recovery material behind.
+
+    The recovery kit is installed first and contains both the prospective new
+    identity and every existing identity. If the process stops before the key
+    file is replaced, the old active identity is still present in that kit. A
+    failure can therefore make the files temporarily disagree, but cannot make
+    a successfully used encryption identity unrecoverable.
+    """
+
+    key_path = (KEY_PATH if key_path is None else key_path).expanduser()
+    kit_path = (RECOVERY_KIT_PATH if kit_path is None else kit_path).expanduser()
+    _ensure_recovery_kit_can_be_rewritten(kit_path)
+    existing = load_identity_strings(key_path)
+    new_identity = identity_to_str(generate_identity())
+    identity_strings = [new_identity, *existing]
+
+    _atomic_write_0600(
+        kit_path,
+        _serialize_recovery_kit(store_id, identity_strings, account_email),
+    )
+    _atomic_write_0600(
+        key_path,
+        _serialize_key_file(identity_strings, rotated=True),
+    )
+    return new_identity, kit_path
+
+
+# --- store_id (E08 §1) ---
+
+
+def _validate_store_id(value: str) -> str:
+    """Strict store-id validator: RFC 4122 UUIDv4 only (E08 §1)."""
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as e:
+        raise CloudKeyError(f"Invalid store id (not a UUID): {value!r}") from e
+    if parsed.version != 4 or parsed.variant != uuid.RFC_4122:
+        raise CloudKeyError(
+            f"Invalid store id (must be an RFC 4122 UUIDv4): {value!r}"
+        )
+    return str(parsed)
+
+
+def get_or_create_store_id(memory_dir: Path) -> str:
+    """UUIDv4 per memory store, persisted at <memory_dir>/.store_id."""
+    memory_dir = memory_dir.expanduser()
+    store_path = memory_dir / STORE_ID_NAME
+    if store_path.is_file():
+        value = store_path.read_text(encoding="utf-8").strip()
+        try:
+            return _validate_store_id(value)
+        except CloudKeyError as e:
+            raise CloudKeyError(f"Corrupt store id at {store_path}: {value!r}") from e
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    store_id = str(uuid.uuid4())
+    store_path.write_text(store_id + "\n", encoding="utf-8")
+    return store_id
+
+
+def extract_store_id_from_text(text: str) -> str | None:
+    """Pull the store id out of already-loaded recovery-kit material.
+
+    Fails closed: an explicit ``store_id:`` line that does not carry a valid
+    UUIDv4 raises — a damaged kit must abort the import, not silently mint a
+    new namespace. Returns None only when the material genuinely contains no
+    store identifier (e.g. a bare key file).
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("store_id:"):
+            candidate = stripped.split(":", 1)[1].strip()
+            try:
+                return _validate_store_id(candidate)
+            except CloudKeyError as e:
+                raise CloudKeyError(
+                    f"Recovery kit carries a malformed store id ({candidate!r}). "
+                    "Refusing to import — continuing would mint a new namespace "
+                    "and orphan the existing backups. Fix the kit's store_id line "
+                    "(or restore an undamaged copy of the kit) and retry."
+                ) from e
+    # Older kits carried the store id as a bare UUID line.
+    for line in text.splitlines():
+        stripped = line.strip()
+        if len(stripped) == 36:
+            try:
+                return _validate_store_id(stripped)
+            except CloudKeyError:
+                continue  # arbitrary 36-char line, not a store id claim
+    return None
+
+
+def extract_store_id(source: str) -> str | None:
+    """Pull the store id out of recovery-kit material (path or raw text)."""
+    return extract_store_id_from_text(_read_import_source(source))
+
+
+def install_store_id(memory_dir: Path, store_id: str) -> str:
+    """Install a store id from a recovery kit on a fresh machine.
+
+    The store id is the remote namespace (E08 §1) — a restore that generates
+    a new one would orphan every existing backup. Fails if a *different* id
+    is already installed; installing the same id is a no-op.
+    """
+    store_id = _validate_store_id(store_id)
+    memory_dir = memory_dir.expanduser()
+    store_path = memory_dir / STORE_ID_NAME
+    if store_path.is_symlink():
+        raise CloudKeyError(f"Cloud store id must not be a symlink: {store_path}")
+    if store_path.is_file():
+        existing = store_path.read_text(encoding="utf-8").strip()
+        if existing == store_id:
+            return store_id
+        raise CloudKeyError(
+            f"This memory store already has store id {existing}, but the recovery "
+            f"kit carries {store_id}. Refusing to overwrite — restoring into a "
+            "store that belongs to a different remote namespace would orphan its "
+            "backups. Use a fresh ORMAH_MEMORY_DIR or remove .store_id deliberately."
+        )
+    _atomic_write_0600(store_path, store_id + "\n")
+    return store_id
+
+
+def _existing_store_id(memory_dir: Path) -> str | None:
+    """Read and strictly validate the installed store id without changing it."""
+    store_path = memory_dir.expanduser() / STORE_ID_NAME
+    if not store_path.exists() and not store_path.is_symlink():
+        return None
+    if store_path.is_symlink():
+        raise CloudKeyError(
+            f"Cloud store id must not be a symlink: {store_path}. No files were changed."
+        )
+    if not store_path.is_file():
+        raise CloudKeyError(
+            f"Cloud store id is not a readable file: {store_path}. No files were changed."
+        )
+    value = store_path.read_text(encoding="utf-8").strip()
+    try:
+        return _validate_store_id(value)
+    except CloudKeyError as exc:
+        raise CloudKeyError(
+            f"Corrupt store id at {store_path}: {value!r}. No files were changed."
+        ) from exc
+
+
+def plan_recovery_import(
+    source: str,
+    memory_dir: Path,
+    key_path: Path | None = None,
+) -> RecoveryImportPlan:
+    """Preflight a recovery-kit import before changing the key or store id.
+
+    The source is read and parsed once. Existing keyrings may retain identities
+    from rotation, but must already contain every identity carried by the kit.
+    """
+    key_path = (KEY_PATH if key_path is None else key_path).expanduser()
+    memory_dir = memory_dir.expanduser()
+    text = _read_import_source(source)
+    identity_strings = tuple(_identity_strings_from_text(text))
+    store_id = extract_store_id_from_text(text)
+
+    existing_store_id = _existing_store_id(memory_dir)
+    if store_id is not None and existing_store_id is not None and existing_store_id != store_id:
+        raise CloudKeyError(
+            f"This memory store already has store id {existing_store_id}, but the recovery "
+            f"kit carries {store_id}. Refusing to overwrite — restoring into a store that "
+            "belongs to a different remote namespace would orphan its backups. No files were "
+            "changed."
+        )
+
+    key_exists = key_path.exists() or key_path.is_symlink()
+    if key_path.is_symlink():
+        raise CloudKeyError(
+            f"Cloud key must not be a symlink: {key_path}. No files were changed."
+        )
+    if key_exists and not key_path.is_file():
+        raise CloudKeyError(f"Cloud key is not a readable file: {key_path}. No files were changed.")
+    if key_exists:
+        existing_identities = load_identity_strings(key_path)
+        # Validate existing material as well; a malformed key must not be silently
+        # treated as a compatible keyring.
+        if len(set(existing_identities)) != len(existing_identities):
+            raise CloudKeyError(
+                f"The existing cloud key contains duplicate identities: {key_path}. "
+                "No files were changed."
+            )
+        try:
+            for identity in existing_identities:
+                identity_from_str(identity)
+        except CloudCryptoError as exc:
+            raise CloudKeyError(
+                f"The existing cloud key is invalid: {key_path}. No files were changed."
+            ) from exc
+        if os.name != "nt" and stat.S_IMODE(key_path.stat().st_mode) & 0o077:
+            raise CloudKeyError(
+                f"Cloud key permissions are too broad at {key_path}; run `chmod 600 {key_path}` "
+                "and retry. No files were changed."
+            )
+        if any(identity not in existing_identities for identity in identity_strings):
+            raise CloudKeyError(
+                "The recovery kit contains an identity that is not present in the existing "
+                "cloud key. Refusing to merge or replace key material implicitly. No files "
+                "were changed. To replace it deliberately, preserve the existing key first, "
+                "then move it aside and retry."
+            )
+        key_status = "already_matched"
+        installed_identity_strings = tuple(existing_identities)
+    else:
+        key_status = "installed"
+        installed_identity_strings = identity_strings
+
+    if store_id is None and existing_store_id is None:
+        # Bare key material is still supported. Generate its namespace during
+        # preflight so the subsequent store/key writes have the same conflict
+        # guarantees as a full recovery kit.
+        store_id = str(uuid.uuid4())
+        store_id_status = "generated"
+    elif store_id is None:
+        store_id = existing_store_id
+        store_id_status = "already_present"
+    else:
+        store_id_status = "already_matched" if existing_store_id is not None else "installed"
+
+    return RecoveryImportPlan(
+        identity_strings=identity_strings,
+        installed_identity_strings=installed_identity_strings,
+        store_id=store_id,
+        key_path=key_path,
+        memory_dir=memory_dir,
+        store_id_status=store_id_status,
+        key_status=key_status,
+    )
+
+
+def apply_recovery_import(plan: RecoveryImportPlan) -> RecoveryImportResult:
+    """Apply a preflighted import and report each resource's actual outcome."""
+    if plan.store_id_status in {"installed", "generated"}:
+        try:
+            install_store_id(plan.memory_dir, plan.store_id or "")
+        except (CloudKeyError, OSError) as exc:
+            raise CloudKeyError(
+                "Recovery import failed before installing either resource. "
+                f"Store ID: not installed; recovery key: not installed. {exc}"
+            ) from exc
+
+    if plan.key_status == "installed":
+        try:
+            _atomic_write_0600(
+                plan.key_path,
+                _serialize_key_file(list(plan.identity_strings), rotated=False),
+            )
+        except OSError as exc:
+            store_outcome = {
+                "installed": "installed",
+                "generated": "generated",
+                "already_matched": "already matched",
+                "already_present": "already present",
+            }.get(plan.store_id_status, "unchanged")
+            store_was_written = plan.store_id_status in {"installed", "generated"}
+            completion = (
+                "Recovery import partially completed."
+                if store_was_written
+                else "Recovery import failed without changing files."
+            )
+            raise CloudKeyError(
+                f"{completion} "
+                f"Store ID: {store_outcome}; recovery key: not installed. {exc}"
+            ) from exc
+
+    return RecoveryImportResult(
+        identity_strings=plan.identity_strings,
+        store_id=plan.store_id,
+        store_id_status=plan.store_id_status,
+        key_status=plan.key_status,
+    )
+
+
+# --- Recovery kit ---
+
+
+def extract_recovery_kit_format_version(text: str) -> int | None:
+    """Return one declared kit format version, or None for a legacy kit."""
+
+    claims = [
+        line.strip().split(":", 1)[1].strip()
+        for line in text.splitlines()
+        if line.strip().startswith("format_version:")
+    ]
+    if not claims:
+        return None
+    if len(claims) != 1:
+        raise CloudKeyError("Recovery kit contains multiple format versions.")
+    try:
+        version = int(claims[0])
+    except ValueError as exc:
+        raise CloudKeyError("Recovery kit format version is invalid.") from exc
+    if version < 1:
+        raise CloudKeyError("Recovery kit format version is invalid.")
+    return version
+
+
+def _ensure_recovery_kit_can_be_rewritten(kit_path: Path) -> None:
+    """Prevent an older client from discarding a newer kit envelope."""
+
+    if not kit_path.exists():
+        return
+    try:
+        if not kit_path.is_file() or kit_path.stat().st_size > MAX_RECOVERY_KIT_BYTES:
+            raise CloudKeyError("The existing recovery kit is invalid.")
+        version = extract_recovery_kit_format_version(kit_path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        raise CloudKeyError("The existing recovery kit is invalid.") from exc
+    if version is not None and version > RECOVERY_KIT_FORMAT_VERSION:
+        raise CloudKeyError(
+            "The recovery kit was created by a newer Ormah version; update Ormah before "
+            "regenerating or rotating recovery material."
+        )
+
+
+def validate_recovery_kit_destination(
+    plan: RecoveryImportPlan,
+    kit_path: Path | None = None,
+) -> Path:
+    """Ensure refreshing the canonical kit cannot discard unrelated recovery material."""
+
+    kit_path = (RECOVERY_KIT_PATH if kit_path is None else kit_path).expanduser()
+    _ensure_recovery_kit_can_be_rewritten(kit_path)
+    if not kit_path.exists():
+        return kit_path
+
+    text = kit_path.read_text(encoding="utf-8")
+    existing_store_id = extract_store_id_from_text(text)
+    if existing_store_id is not None and existing_store_id != plan.store_id:
+        raise CloudKeyError(
+            f"The existing recovery kit belongs to store {existing_store_id}, but this "
+            f"import targets {plan.store_id}. Refusing to overwrite unrelated recovery "
+            "material. No files were changed."
+        )
+
+    raw_identities = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith("AGE-SECRET-KEY-")
+    ]
+    if raw_identities:
+        try:
+            existing_identities = _identity_strings_from_text(text)
+        except CloudKeyError as exc:
+            raise CloudKeyError(
+                "The existing recovery kit contains invalid key material and was not "
+                "overwritten. No files were changed."
+            ) from exc
+        if any(
+            identity not in plan.installed_identity_strings
+            for identity in existing_identities
+        ):
+            raise CloudKeyError(
+                "The existing recovery kit contains an identity that is not present in the "
+                "planned cloud key. Refusing to overwrite unrelated recovery material. "
+                "No files were changed."
+            )
+    return kit_path
+
+
+def _serialize_recovery_kit(
+    store_id: str,
+    identity_strings: list[str],
+    account_email: str | None,
+) -> str:
+    if account_email is not None and account_email.splitlines() != [account_email]:
+        raise CloudKeyError("The account email cannot be represented safely in the recovery kit.")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    identities_block = "\n".join(identity_strings)
+    return f"""# Ormah Recovery Kit
+
+format_version: {RECOVERY_KIT_FORMAT_VERSION}
+Generated: {now}
+
+> **Anyone with this file can read your backups; without it, nobody can —
+> including us. Store it offline** (print it, or keep it on a USB drive in a
+> drawer). Do not store it in the same cloud account it protects.
+
+## Your encryption identities (all of them — order matters, current first)
+
+```
+{identities_block}
+```
+
+## Your store id
+
+```
+store_id: {store_id}
+```
+
+## Account
+
+Email: {account_email or "<your ormah account email>"}
+
+## Restore on a fresh machine
+
+1. Install ormah, then log in:  `ormah account login`
+2. Import this kit's keys:      `ormah cloud init --import-key <path-to-this-file>`
+3. Restore your memory graph:   `ormah backup restore --cloud`
+
+That's the whole procedure. Every identity listed above is needed to read
+backups made before key rotations — never trim this list.
+"""
+
+
+def write_recovery_kit(
+    store_id: str,
+    key_path: Path | None = None,
+    kit_path: Path | None = None,
+    account_email: str | None = None,
+) -> Path:
+    """(Re)generate the versioned recovery kit with every identity."""
+
+    kit_path = (RECOVERY_KIT_PATH if kit_path is None else kit_path).expanduser()
+    _ensure_recovery_kit_can_be_rewritten(kit_path)
+    identity_strings = load_identity_strings(key_path)
+    kit = _serialize_recovery_kit(store_id, identity_strings, account_email)
+    _atomic_write_0600(kit_path, kit)
+    return kit_path
