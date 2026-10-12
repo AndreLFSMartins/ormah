@@ -244,7 +244,7 @@ def test_undo_removes_remapped_edges(engine):
 
 
 def test_undo_does_not_delete_a_preexisting_collided_edge(engine):
-    """Undo must not delete an edge undo never created (Codex council finding, #123).
+    """Undo must not delete an edge undo never created (#123).
 
     C declares BOTH C->A and C->B with the SAME edge_type in its own markdown. During the
     merge, the remap loop for B->A skips the INSERT because C->A already exists (the
