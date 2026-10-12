@@ -45,6 +45,7 @@ def parse_node(text: str) -> MemoryNode:
         last_review=_parse_dt(meta["last_review"]) if meta.get("last_review") else None,
         valid_until=valid_until,
         deleted_at=deleted_at,
+        superseded_by=meta.get("superseded_by"),
         space=meta.get("space"),
         tags=meta.get("tags", []),
         connections=connections,
@@ -75,6 +76,8 @@ def serialize_node(node: MemoryNode) -> str:
         meta["valid_until"] = _format_dt(node.valid_until)
     if node.deleted_at is not None:
         meta["deleted_at"] = _format_dt(node.deleted_at)
+    if node.superseded_by is not None:
+        meta["superseded_by"] = node.superseded_by
     if node.title:
         meta["title"] = node.title
     if node.space:

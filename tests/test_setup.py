@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import stat
 import subprocess
 from contextlib import ExitStack
@@ -28,12 +29,16 @@ from ormah.setup import (
     CLAUDE_MD_SENTINEL_START,
     PI_AGENTS_MD_SENTINEL_END,
     PI_AGENTS_MD_SENTINEL_START,
+    DESKTOP_BUNDLE_IDENTIFIER,
+    DESKTOP_PRODUCT_NAME,
     _atomic_write,
     _claude_code_is_wired,
     _claude_code_plugin_provides_hooks,
     _claude_code_wire,
     _discover_transcripts,
     _get_agent,
+    _disable_desktop_autostart,
+    _inspect_desktop_installation,
     _is_ormah_hook,
     _merge_hooks,
     _merge_json_file,
@@ -622,15 +627,41 @@ class TestClaudeCodeWirePluginGuard:
         }, indent=2) + "\n")
         return claude_dir
 
+    def _run_plugin_safe_setup(self, tmp_path: Path) -> None:
+        with (
+            patch("ormah.setup.Path.home", return_value=tmp_path),
+            patch("ormah.setup._detected_agents", return_value=[]),
+            patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
+            patch("ormah.setup.configure_llm"),
+            patch(
+                "ormah.setup.generate_server_wrapper",
+                return_value=tmp_path / "ormah-server",
+            ),
+            patch("ormah.setup._preload_local_models"),
+            patch("ormah.setup.is_server_running", return_value=True),
+            patch("ormah.setup.restart_with_autostart", return_value=True),
+            patch("ormah.setup.backfill_transcripts"),
+            patch("ormah.setup.play_finale"),
+            patch("ormah.setup._print_setup_summary"),
+            patch("ormah.setup.webbrowser.open"),
+        ):
+            run_setup(skip_client_setup=True)
+
     def test_working_plugin_strips_hooks_and_mcp_and_writes_no_wiring(self, tmp_path):
         claude_dir = self._seed_working_plugin(tmp_path)
+        # Left behind by a pre-plugin `ormah setup`. Both call the CLI-registered
+        # `ormah` MCP server this very run removes, and ~/.claude/agents/ shadows
+        # the plugin's own agent — so they must go, not be rewritten.
+        stale_agent = claude_dir / "agents" / "ormah-maintenance.md"
+        stale_command = claude_dir / "commands" / "ormah-maintenance.md"
+        for stale in (stale_agent, stale_command):
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("calls mcp__ormah__run_maintenance\n")
 
         with (
             patch("ormah.setup.Path.home", return_value=tmp_path),
             patch("ormah.setup.configure_claude_hooks") as configure_hooks,
             patch("ormah.setup.configure_claude_code_mcp") as configure_mcp,
-            patch("ormah.setup.install_claude_agents") as install_agents,
-            patch("ormah.setup.install_claude_commands") as install_commands,
             patch("ormah.setup.install_claude_md") as install_md,
         ):
             _claude_code_wire()
@@ -643,10 +674,55 @@ class TestClaudeCodeWirePluginGuard:
 
         configure_hooks.assert_not_called()
         configure_mcp.assert_not_called()
-        # not duplicate registrations — the plugin namespaces these
-        install_md.assert_called_once()
-        install_agents.assert_called_once()
-        install_commands.assert_called_once()
+        install_md.assert_called_once()                             # no plugin can write CLAUDE.md
+        assert not stale_agent.exists()                             # the plugin ships its own
+        assert not stale_command.exists()                           # /ormah:maintenance
+
+    def test_plugin_safe_setup_removes_stale_cli_surfaces(self, tmp_path):
+        """Exercise the exact `ormah setup --skip-client-setup` plugin path."""
+        claude_dir = self._seed_working_plugin(tmp_path)
+        stale_agent = claude_dir / "agents" / "ormah-maintenance.md"
+        stale_command = claude_dir / "commands" / "ormah-maintenance.md"
+        for stale in (stale_agent, stale_command):
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("calls mcp__ormah__run_maintenance\n")
+
+        self._run_plugin_safe_setup(tmp_path)
+        self._run_plugin_safe_setup(tmp_path)  # repeated plugin repair is idempotent
+
+        settings = json.loads((claude_dir / "settings.json").read_text())
+        assert "hooks" not in settings
+        assert "mcpServers" not in json.loads((tmp_path / ".claude.json").read_text())
+        assert not stale_agent.exists()
+        assert not stale_command.exists()
+
+    @pytest.mark.parametrize(
+        ("enabled", "scope"),
+        [(False, "user"), (True, "project")],
+        ids=["disabled-user-plugin", "project-scoped-plugin"],
+    )
+    def test_plugin_safe_setup_preserves_cli_surfaces_without_user_plugin(
+        self,
+        tmp_path,
+        enabled,
+        scope,
+    ):
+        """Only a working user-scoped plugin licenses deleting global CLI wiring."""
+        claude_dir = self._seed_working_plugin(tmp_path, enabled=enabled, scope=scope)
+        stale_agent = claude_dir / "agents" / "ormah-maintenance.md"
+        stale_command = claude_dir / "commands" / "ormah-maintenance.md"
+        for stale in (stale_agent, stale_command):
+            stale.parent.mkdir(parents=True, exist_ok=True)
+            stale.write_text("calls mcp__ormah__run_maintenance\n")
+        settings_before = (claude_dir / "settings.json").read_text()
+        mcp_before = (tmp_path / ".claude.json").read_text()
+
+        self._run_plugin_safe_setup(tmp_path)
+
+        assert (claude_dir / "settings.json").read_text() == settings_before
+        assert (tmp_path / ".claude.json").read_text() == mcp_before
+        assert stale_agent.exists()
+        assert stale_command.exists()
 
     def test_strip_preserves_third_party_hooks(self, tmp_path):
         claude_dir = self._seed_working_plugin(tmp_path)
@@ -682,14 +758,16 @@ class TestClaudeCodeWirePluginGuard:
             patch("ormah.setup.get_ormah_bin_path", return_value="/usr/bin/ormah"),
             patch("ormah.setup.configure_claude_hooks") as configure_hooks,
             patch("ormah.setup.configure_claude_code_mcp") as configure_mcp,
-            patch("ormah.setup.install_claude_agents"),
-            patch("ormah.setup.install_claude_commands"),
+            patch("ormah.setup.install_claude_agents") as install_agents,
+            patch("ormah.setup.install_claude_commands") as install_commands,
             patch("ormah.setup.install_claude_md"),
         ):
             _claude_code_wire()
 
         configure_hooks.assert_called_once_with("/usr/bin/ormah")
         configure_mcp.assert_called_once_with("/usr/bin/ormah")
+        install_agents.assert_called_once()  # no plugin: the CLI copies stay
+        install_commands.assert_called_once()
 
     def test_project_scoped_plugin_wires_normally(self, tmp_path):
         """Deliberate: the CLI hooks are global and serve every other project."""
@@ -1240,6 +1318,28 @@ class TestClaudePluginDocs:
 
         assert 'subagent_type="ormah-maintenance"' in content
         assert "run_in_background=True" in content
+
+    def test_maintenance_agent_binds_the_plugin_scoped_tool_only(self):
+        """The plugin's `.mcp.json` names the server `ormah`, so Claude Code exposes
+        its tools as `mcp__plugin_ormah_ormah__*`. `mcp__ormah__*` is the CLI-registered
+        server, which plugin-mode setup removes."""
+        root = Path(__file__).resolve().parents[1]
+        content = (
+            root / "integrations" / "claude-plugin" / "agents" / "ormah-maintenance.md"
+        ).read_text()
+        frontmatter = content.split("---")[1]
+
+        assert "tools: mcp__plugin_ormah_ormah__run_maintenance" in frontmatter
+        assert "mcp__ormah__run_maintenance" not in content
+
+    def test_cli_channel_agent_keeps_the_cli_tool_name(self):
+        """Not a copy of the plugin agent: `install_claude_agents()` ships this one for
+        installs without the plugin, where the server really is named `ormah`."""
+        root = Path(__file__).resolve().parents[1]
+        content = (root / "src" / "ormah" / "agents" / "ormah-maintenance.md").read_text()
+
+        assert "mcp__ormah__run_maintenance" in content
+        assert "mcp__plugin_ormah_ormah__" not in content
 
 
 # --- CLI tests ---
@@ -2894,11 +2994,266 @@ class TestRunUninstall:
             patch("ormah.setup.Path.home", return_value=tmp_path),
             patch("ormah.config.settings", fake_settings),
             patch("ormah.setup._get_running_server_data_dir", return_value=None),
+            patch("ormah.setup.platform.system", return_value="Other"),
+            patch(
+                "ormah.setup.MACOS_SYSTEM_APPLICATIONS_DIR",
+                tmp_path / "system-applications",
+            ),
         ):
             yield
 
-    def _patch_all(self, mock_uninstall_autostart, mock_hooks, mock_mcp, mock_md, mock_rmtree, mock_run):
-        """Shared patcher helper — not used directly, see individual tests."""
+    @staticmethod
+    def _safe_uninstall_operations():
+        stack = ExitStack()
+        for target in (
+            "ormah.server_manager.uninstall_autostart",
+            "ormah.setup._remove_claude_hooks",
+            "ormah.setup._remove_codex_hooks",
+            "ormah.setup._remove_mcp_registration",
+            "ormah.setup._remove_pi_extension",
+            "ormah.setup._remove_claude_md_block",
+            "ormah.setup._remove_codex_md_block",
+            "ormah.setup._remove_codex_agents",
+            "ormah.setup._remove_claude_agents",
+            "ormah.setup._remove_claude_commands",
+            "ormah.setup._remove_pi_md_block",
+            "ormah.setup._remove_pi_agents",
+            "ormah.setup._remove_fastembed_cache",
+        ):
+            stack.enter_context(patch(target))
+        return stack
+
+    @staticmethod
+    def _make_macos_desktop(home: Path, applications: Path):
+        app = applications / "Ormah.app"
+        app.mkdir(parents=True)
+        support = home / "Library" / "Application Support" / DESKTOP_BUNDLE_IDENTIFIER
+        webkit = home / "Library" / "WebKit" / DESKTOP_BUNDLE_IDENTIFIER
+        support.mkdir(parents=True)
+        webkit.mkdir(parents=True)
+        launch_agent = home / "Library" / "LaunchAgents" / "Ormah.plist"
+        launch_agent.parent.mkdir(parents=True)
+        launch_agent.write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": DESKTOP_PRODUCT_NAME,
+                    "ProgramArguments": [
+                        str(app / "Contents" / "MacOS" / "ormah-desktop")
+                    ],
+                    "RunAtLoad": True,
+                }
+            )
+        )
+        return app, support, webkit, launch_agent
+
+    def test_macos_hybrid_disables_real_login_item_and_keeps_app_data(
+        self, tmp_path, capsys
+    ):
+        applications = tmp_path / "Jane Smith Applications"
+        app, support, webkit, launch_agent = self._make_macos_desktop(
+            tmp_path, applications
+        )
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            run_uninstall(yes=True)
+
+        assert not launch_agent.exists()
+        assert app.exists()
+        assert support.exists()
+        assert webkit.exists()
+        output = capsys.readouterr().out
+        assert "Disabled Ormah Desktop autostart" in output
+        assert "move Ormah.app to Trash" in output
+        assert "Ormah Desktop remains installed" in output
+        assert "Ormah has been uninstalled" not in output
+
+    def test_linux_hybrid_disables_autostart_and_reports_debian_package(
+        self, tmp_path, capsys
+    ):
+        autostart = tmp_path / ".config" / "autostart" / "Ormah.desktop"
+        autostart.parent.mkdir(parents=True)
+        autostart.write_text(
+            "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Ormah\n"
+            "Comment=Ormahstartup script\nExec=/usr/bin/ormah-desktop \n"
+            "StartupNotify=false\nTerminal=false",
+            encoding="utf-8",
+        )
+
+        def run_command(args, **_kwargs):
+            if args[0] == "dpkg-query":
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="ormah: /usr/bin/ormah-desktop\n", stderr=""
+                )
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Linux"),
+            patch("subprocess.run", side_effect=run_command),
+        ):
+            run_uninstall(yes=True)
+
+        assert not autostart.exists()
+        output = capsys.readouterr().out
+        assert "Disabled Ormah Desktop autostart" in output
+        assert "sudo apt remove ormah" in output
+        assert "Ormah Desktop remains installed" in output
+
+    def test_linux_hybrid_reports_appimage_and_user_integration(
+        self, tmp_path, capsys
+    ):
+        appimage = tmp_path / "Apps" / "Ormah.AppImage"
+        appimage.parent.mkdir()
+        appimage.write_bytes(b"appimage")
+        autostart = tmp_path / ".config" / "autostart" / "Ormah.desktop"
+        autostart.parent.mkdir(parents=True)
+        autostart.write_text(
+            "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Ormah\n"
+            f"Comment=Ormahstartup script\nExec={appimage} \n"
+            "StartupNotify=false\nTerminal=false",
+            encoding="utf-8",
+        )
+        menu = tmp_path / ".local" / "share" / "applications" / "ormah.desktop"
+        menu.parent.mkdir(parents=True)
+        menu.write_text(
+            f'[Desktop Entry]\nName=Ormah\nExec="{appimage}"\n',
+            encoding="utf-8",
+        )
+        icon = (
+            tmp_path
+            / ".local"
+            / "share"
+            / "icons"
+            / "hicolor"
+            / "128x128"
+            / "apps"
+            / "ormah-desktop.png"
+        )
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"icon")
+
+        def run_command(args, **_kwargs):
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Linux"),
+            patch("subprocess.run", side_effect=run_command),
+        ):
+            run_uninstall(yes=True)
+
+        assert not autostart.exists()
+        assert appimage.exists()
+        assert menu.exists()
+        assert icon.exists()
+        output = capsys.readouterr().out
+        assert str(appimage) in output
+        assert str(menu) in output
+        assert str(icon) in output
+        assert "Delete the Ormah AppImage" in output
+
+    @pytest.mark.parametrize(
+        "contents",
+        [b"not a plist", b'<?xml version="1.0"?><plist><dict><key>broken</key>'],
+    )
+    def test_malformed_macos_login_item_is_reported_not_removed(
+        self, tmp_path, contents
+    ):
+        launch_agent = tmp_path / "Library" / "LaunchAgents" / "Ormah.plist"
+        launch_agent.parent.mkdir(parents=True)
+        launch_agent.write_bytes(contents)
+
+        state = _inspect_desktop_installation("Darwin")
+        _disable_desktop_autostart(state)
+
+        assert launch_agent.read_bytes() == contents
+        assert state.unrecognized_autostart == launch_agent
+
+    def test_symlinked_linux_autostart_is_never_removed(self, tmp_path):
+        target = tmp_path / "not-ormah.desktop"
+        target.write_text("important\n", encoding="utf-8")
+        autostart = tmp_path / ".config" / "autostart" / "Ormah.desktop"
+        autostart.parent.mkdir(parents=True)
+        autostart.symlink_to(target)
+
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+            state = _inspect_desktop_installation("Linux")
+        _disable_desktop_autostart(state)
+
+        assert autostart.is_symlink()
+        assert target.read_text(encoding="utf-8") == "important\n"
+        assert state.unrecognized_autostart == autostart
+
+    def test_unrecognized_autostart_aborts_before_backend_cleanup(
+        self, tmp_path, capsys
+    ):
+        launch_agent = tmp_path / "Library" / "LaunchAgents" / "Ormah.plist"
+        launch_agent.parent.mkdir(parents=True)
+        launch_agent.write_text("not an Ormah plist\n", encoding="utf-8")
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch("subprocess.run") as run_command,
+        ):
+            run_uninstall(yes=True)
+
+        run_command.assert_not_called()
+        assert launch_agent.exists()
+        assert "cancelled before removing the backend" in capsys.readouterr().out
+
+    def test_autostart_permission_failure_aborts_before_backend_cleanup(
+        self, tmp_path, capsys
+    ):
+        applications = tmp_path / "system-applications"
+        _, _, _, launch_agent = self._make_macos_desktop(tmp_path, applications)
+        real_unlink = Path.unlink
+
+        def deny_autostart(path, *args, **kwargs):
+            if path == launch_agent:
+                raise PermissionError("permission denied")
+            return real_unlink(path, *args, **kwargs)
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+            patch.object(Path, "unlink", autospec=True, side_effect=deny_autostart),
+            patch("subprocess.run") as run_command,
+        ):
+            run_uninstall(yes=True)
+
+        run_command.assert_not_called()
+        assert launch_agent.exists()
+        assert "cancelled before removing the backend" in capsys.readouterr().out
+
+    def test_recovery_preflight_failure_leaves_desktop_autostart_enabled(
+        self, tmp_path, capsys
+    ):
+        from ormah.cloud.keys import init_key
+
+        applications = tmp_path / "system-applications"
+        _, _, _, launch_agent = self._make_macos_desktop(tmp_path, applications)
+        init_key(tmp_path / ".config" / "ormah" / "cloud.key")
+
+        with (
+            self._safe_uninstall_operations(),
+            patch("ormah.setup.platform.system", return_value="Darwin"),
+        ):
+            run_uninstall(yes=True)
+
+        assert launch_agent.exists()
+        assert "cancelled before removing" in capsys.readouterr().out
+
+    def test_desktop_constants_match_tauri_configuration(self):
+        config_path = Path(__file__).parents[1] / "desktop" / "src-tauri" / "tauri.conf.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+
+        assert config["productName"] == DESKTOP_PRODUCT_NAME
+        assert config["identifier"] == DESKTOP_BUNDLE_IDENTIFIER
 
     def test_cancels_on_first_no(self, monkeypatch, capsys):
         monkeypatch.setattr("builtins.input", lambda _: "n")
@@ -3362,7 +3717,20 @@ class TestRemoveFastembedCache:
 
 
 class TestPreloadLocalModels:
+    @pytest.fixture(autouse=True)
+    def isolate_model_caches(self, monkeypatch, tmp_path):
+        from ormah.embeddings import local_adapter, reranker
+
+        monkeypatch.setattr(local_adapter, "_model_cache", {})
+        monkeypatch.setattr(reranker, "_model_cache", {})
+        monkeypatch.setattr(local_adapter, "get_fastembed_cache_dir", lambda: tmp_path)
+        monkeypatch.setattr(reranker, "get_fastembed_cache_dir", lambda: tmp_path)
+
     def test_preloads_embedding_and_reranker_into_shared_cache(self, tmp_path):
+        from threading import current_thread
+
+        from ormah.embeddings import local_adapter, reranker
+
         fake_settings = MagicMock()
         fake_settings.embedding_provider = "local"
         fake_settings.embedding_model = "BAAI/bge-base-en-v1.5"
@@ -3375,10 +3743,30 @@ class TestPreloadLocalModels:
             patch("fastembed.TextEmbedding") as embed_cls,
             patch("fastembed.rerank.cross_encoder.TextCrossEncoder") as reranker_cls,
         ):
-            _preload_local_models()
+            threads = []
 
-        embed_cls.assert_called_once_with("BAAI/bge-base-en-v1.5", cache_dir=str(tmp_path))
-        reranker_cls.assert_called_once_with("Xenova/ms-marco-MiniLM-L-6-v2", cache_dir=str(tmp_path))
+            def record_thread(mock):
+                def construct(*args, **kwargs):
+                    threads.append(current_thread().name)
+                    return mock.return_value
+                return construct
+
+            embed_cls.side_effect = record_thread(embed_cls)
+            reranker_cls.side_effect = record_thread(reranker_cls)
+            _preload_local_models()
+            _preload_local_models()
+            assert local_adapter.LocalAdapter(fake_settings.embedding_model).model is embed_cls.return_value
+            assert reranker.preload_model(fake_settings.whisper_reranker_model) is reranker_cls.return_value
+            assert len(local_adapter._model_cache) == len(reranker._model_cache) == 1
+            assert len(threads) == 2
+            assert all(name.startswith("ormah-inference") for name in threads)
+
+        embed_cls.assert_called_once_with(
+            "BAAI/bge-base-en-v1.5", cache_dir=str(tmp_path), enable_cpu_mem_arena=False,
+        )
+        reranker_cls.assert_called_once_with(
+            "Xenova/ms-marco-MiniLM-L-6-v2", cache_dir=str(tmp_path), enable_cpu_mem_arena=False,
+        )
 
     def test_skips_reranker_preload_when_disabled(self, tmp_path):
         fake_settings = MagicMock()
@@ -3417,6 +3805,7 @@ class TestPreloadLocalModels:
         reranker_cls.assert_called_once_with(
             "Xenova/ms-marco-MiniLM-L-6-v2",
             cache_dir=str(tmp_path),
+            enable_cpu_mem_arena=False,
         )
 
 
@@ -3988,3 +4377,38 @@ class TestConfigureCodexHooksMerge:
         assert hp.read_text() == before  # unchanged
         enable.assert_not_called()  # feature flag NOT enabled on abort
         assert "Codex hooks installed" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("template", [
+    "src/ormah/agents/ormah-maintenance.md",
+    "src/ormah/agents/ormah-pi-maintenance.md",
+    "integrations/claude-plugin/agents/ormah-maintenance.md",
+    "integrations/pi-plugin/agents/ormah-maintenance.md",
+])
+def test_maintenance_templates_show_explicit_receipt_protocol(template):
+    import json
+    from pathlib import Path
+
+    from ormah.adapters.tool_schemas import TOOLS
+
+    content = (Path(__file__).resolve().parents[1] / template).read_text()
+    example = json.loads(content.split("```json\n", 1)[1].split("```", 1)[0])
+    schema = next(tool["parameters"] for tool in TOOLS if tool["name"] == "run_maintenance")
+    assert "job_id" in schema["properties"]
+    assert example["job_id"]
+    assert set(example["results"]) == {"edges", "merges", "consolidations"}
+    assert "30 minutes" in content
+    assert "discard stale analysis" in content
+    assert "busy" in content
+
+
+def test_codex_maintenance_template_requires_receipt_and_terminal_handling():
+    import tomllib
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "src/ormah/agents/ormah-maintenance.toml"
+    instructions = tomllib.loads(path.read_text())["developer_instructions"]
+    assert '{"job_id": "<receipt>", "results": {}}' in instructions
+    assert "30 minutes" in instructions
+    assert "discard stale analysis" in instructions
+    assert "On busy" in instructions

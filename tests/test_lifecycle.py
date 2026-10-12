@@ -115,3 +115,37 @@ def test_reinforcement_is_due_once_the_cooldown_elapses():
 def test_a_zero_cooldown_always_allows_reinforcement():
     now = datetime.now(timezone.utc)
     assert lifecycle.reinforcement_due(now, now, 0.0) is True
+
+
+def test_default_initial_stability_gives_a_seven_day_unused_lease():
+    """-7/ln(0.3) = 5.8140852, rounded to 5.814 in config."""
+    from ormah.config import Settings
+
+    initial = Settings().fsrs_initial_stability
+    assert initial == 5.814
+    # 6.5 days unused: still retrievable. 7.5 days: a decay candidate.
+    assert lifecycle.retrievability(6.5, initial) > 0.3
+    assert lifecycle.retrievability(7.5, initial) < 0.3
+
+
+def test_rounded_default_crosses_threshold_just_under_seven_days():
+    """5.814 x 1.2039728 = 6.99990 days, ~8.8 s before the 7-day mark.
+
+    Pinned deliberately: an assertion of `> 0.3` at t = 7.0 would FAIL.
+    """
+    assert lifecycle.retrievability(7.0, 5.814) < 0.3
+    assert lifecycle.retrievability(6.99, 5.814) > 0.3
+
+
+def test_promotion_floor_never_reduces_stability():
+    """Equality at 50.0, not `>= 5.814` — with `>=` a min/max swap passes."""
+    assert lifecycle.promotion_floor(50.0, 5.814) == 50.0
+
+
+def test_promotion_floor_lifts_a_below_floor_stability():
+    assert lifecycle.promotion_floor(2.0, 5.814) == 5.814
+
+
+def test_promotion_floor_is_idempotent():
+    once = lifecycle.promotion_floor(1.0, 5.814)
+    assert lifecycle.promotion_floor(once, 5.814) == once
