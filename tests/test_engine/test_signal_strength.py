@@ -130,7 +130,7 @@ def test_recompute_survives_malformed_evidence():
     assert ss.strength_from_evidence("implicit", 0, None) == 0.0
 
 
-# --- Non-finite and out-of-range evidence (#218, Codex peer 2026-08-26) ---------
+# --- Non-finite and out-of-range evidence (#218) --------------------------------
 #
 # The migration runs on every startup. json.loads accepts NaN and Infinity by
 # default and returns an unbounded int for a large integer literal; SQLite stores a

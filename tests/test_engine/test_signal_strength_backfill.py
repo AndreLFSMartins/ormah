@@ -150,7 +150,7 @@ def test_rescan_repairs_a_legacy_row_written_after_the_stamp(engine):
 
     A rollback then re-upgrade, or the second unmanaged server process this project
     already knows about (#238), inserts pre-ladder values into a table the stamp
-    declares migrated. Council peer finding, /council-pr of 2026-08-26.
+    declares migrated.
     """
     _rerun(engine)
 
@@ -210,7 +210,7 @@ def test_a_poisoned_evidence_row_cannot_block_startup(engine):
     The migration runs at every startup and writes into signals.strength, which is
     REAL NOT NULL. SQLite stores a NaN REAL as NULL, so binding one raises
     IntegrityError — and with an every-boot migration that failure is permanent,
-    not a one-time hiccup. Codex peer finding, /council-pr of 2026-08-26.
+    not a one-time hiccup.
     """
     poisoned = _seed(
         engine,

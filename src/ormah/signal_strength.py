@@ -86,8 +86,6 @@ def _as_float(value: object, default: float = 0.0) -> float:
       raise ``IntegrityError`` inside the migration, and since the migration runs
       at every boot, a single poisoned historical row would stop the server from
       ever starting again.
-
-    Reported by the Codex peer, /council-pr of 2026-08-26.
     """
     try:
         result = float(value)  # type: ignore[arg-type]
