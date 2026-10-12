@@ -404,3 +404,18 @@ def test_reindex_keeps_the_incumbent_canonical_direction(engine):
     assert len(rows) == 1, "the pair must be represented by exactly one canonical row"
     assert rows[0]["source_id"] == id_a, "reindexing B flipped the canonical direction"
     assert rows[0]["weight"] == 0.2, "A's weight, not B's 0.9 — the incumbent's row is the one kept"
+def test_reindex_preserves_superseded_by(engine):
+    """INSERT OR REPLACE drops omitted columns to their DEFAULT — the marker must be
+    in the column list, or the consolidator's own update_node wipes it (#223)."""
+    from ormah.models.node import CreateNodeRequest
+
+    node_id, _ = engine.remember(CreateNodeRequest(content="a source about to be superseded"))
+
+    node = engine.file_store.load(node_id)
+    node.superseded_by = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    engine.builder.index_single(engine.file_store.save(node))
+
+    row = engine.db.conn.execute(
+        "SELECT superseded_by FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+    assert row["superseded_by"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

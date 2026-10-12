@@ -271,6 +271,43 @@ def test_negative_feedback_never_confirms(engine, source):
     )
 
 
+@pytest.mark.parametrize(
+    "signal,source,was_injected,should_promote",
+    [
+        (1, "explicit", 1, True),
+        (1, "auto_heuristic", 1, False),
+        (-1, "explicit", 1, False),
+        (1, "explicit", 0, False),
+    ],
+)
+def test_only_qualified_positives_promote(engine, signal, source, was_injected, should_promote):
+    """#223: promotion needs a qualified positive on an event the agent actually saw."""
+    from ormah.models.node import Tier
+
+    node_id = _make_nodes(engine, count=1)[0]
+
+    # Seed the whisper-log event BEFORE demoting: _seed_whisper_log goes through
+    # recall_search, and an archival node scores below the relevance floor, so no
+    # row would be created. The matrix is about signal/source/was_injected, not
+    # about ranking — seeding first keeps the event identical either way.
+    if was_injected:
+        whisper_log_id = _seed_whisper_log(engine, node_id)
+    else:
+        whisper_log_id = _seed_held_back_whisper_log(engine, node_id)
+
+    node = engine.file_store.load(node_id)
+    node.tier = Tier.archival
+    engine.builder.index_single(engine.file_store.save(node))
+
+    engine.submit_feedback(node_id, signal=signal, source=source, whisper_log_id=whisper_log_id)
+
+    expected = Tier.working if should_promote else Tier.archival
+    assert engine.file_store.load(node_id).tier is expected, (
+        f"signal={signal} source={source} was_injected={was_injected}: "
+        f"expected {expected}, got {engine.file_store.load(node_id).tier}"
+    )
+
+
 # --- Idempotency contracts (second council round: the latch, not affinity) ---
 
 def test_replaying_the_same_positive_feedback_confirms_once(engine):
@@ -515,15 +552,15 @@ def test_recall_node_does_not_reinforce_without_an_event_to_claim(engine):
     )
 
 
-# --- Review relevance is not confirmed use (2026-08-16 council round) -------
+# --- Held-back relevance is not confirmed use (2026-08-16 council round) ----
 
 def _seed_held_back_whisper_log(engine, node_id, prompt="what about caching?"):
-    """Insert the kind of event the session-start review hands to the agent.
+    """Insert a historical event for a memory whisper held back.
 
-    _find_review_candidate selects rows with was_injected = 0 — memories Ormah
-    held back and never surfaced — and _REVIEW_FRAMING hands that id to the
-    agent asking for source="implicit" feedback. _seed_whisper_log cannot be
-    used here: it goes through recall_search, which writes was_injected = 1.
+    The automatic retrospective review producer is retired, but existing
+    was_injected = 0 rows remain valid feedback provenance. _seed_whisper_log
+    cannot be used here: it goes through recall_search, which writes
+    was_injected = 1.
 
     logged_at is a Python ISO timestamp, not SQLite's datetime('now'), because
     _log_feedback_candidates writes ISO and the fallback orders by this column
@@ -545,15 +582,12 @@ def _seed_held_back_whisper_log(engine, node_id, prompt="what about caching?"):
     return cursor.lastrowid
 
 
-def test_review_relevance_feedback_does_not_confirm_use(engine):
+def test_held_back_relevance_feedback_does_not_confirm_use(engine):
     """Contract 11: judging a held-back memory relevant is not using it.
 
-    The review path deliberately surfaces an event with was_injected = 0 and
-    asks "would this have been useful?" — a relevance adjudication, not a use.
-    _claim_confirmed_use allowlists "implicit" and checks no provenance, so the
-    claim is taken and the lifecycle advances on a memory the agent never saw.
-    That is fabricated retention entering through the review door, which is what
-    issue #220 exists to close.
+    Historical feedback may still be attached to a was_injected = 0 event, but
+    the memory was never shown to the agent. Treating the judgment as use would
+    fabricate retention, which issue #220 forbids.
     """
     ids = _make_nodes(engine, count=1)
     target = ids[0]

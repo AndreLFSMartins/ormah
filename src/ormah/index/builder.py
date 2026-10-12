@@ -138,9 +138,9 @@ class IndexBuilder:
             INSERT INTO nodes
             (id, type, tier, source, space, title, content, created, updated,
              last_accessed, access_count, confidence, importance,
-             valid_until, stability, last_review, file_path, file_hash)
+             valid_until, stability, last_review, superseded_by, file_path, file_hash)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 type = excluded.type,
                 tier = excluded.tier,
@@ -157,6 +157,7 @@ class IndexBuilder:
                 valid_until = excluded.valid_until,
                 stability = excluded.stability,
                 last_review = excluded.last_review,
+                superseded_by = excluded.superseded_by,
                 file_path = excluded.file_path,
                 file_hash = excluded.file_hash
             """,
@@ -177,6 +178,7 @@ class IndexBuilder:
                 node.valid_until.isoformat() if node.valid_until else None,
                 node.stability,
                 node.last_review.isoformat() if node.last_review else None,
+                node.superseded_by,
                 str(path),
                 file_hash,
             ),

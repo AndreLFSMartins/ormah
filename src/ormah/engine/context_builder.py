@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from ormah.embeddings.runtime import inference_request
+
 import hashlib
 import logging
 import re
 from datetime import datetime, timezone
+from threading import Lock
 
 import numpy as np
 
-from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
+from ormah.engine.maintenance_signal import maintenance_due_signal
+from ormah.engine.prompt_classifier import PromptIntent, is_clear_acknowledgement
 from ormah.index.graph import GraphIndex
 from ormah.text.tokens import distinctive_tokens
 
@@ -22,18 +26,6 @@ _WHISPER_FRAMING = (
     "to get the full content and related memories."
 )
 
-
-_REVIEW_FRAMING = (
-    "\n\n## Ormah: one thing to review when you get a chance\n"
-    "In a recent session, the user was working on:\n"
-    "\"{prompt_snippet}\"\n\n"
-    "Ormah held back this memory because it wasn't confident it was relevant:\n"
-    "\"{title}\" — {content}  (id: {node_id}, whisper_log_id: {whisper_log_id})\n\n"
-    "When you can judge it, call submit_feedback(node_id=\"{node_id}\", "
-    "whisper_log_id={whisper_log_id}, signal=1 for yes, "
-    "signal=-1 for no, source=\"implicit\"). Skip if it's not a good moment — "
-    "this won't be surfaced again for 14 days."
-)
 
 _PREFERENCE_APPLICABILITY_PREFIX = "Relevant user preference for this action: "
 
@@ -66,108 +58,6 @@ def _has_topical_overlap(prompt_tokens: set[str], node: dict) -> bool:
         part for part in (node.get("title"), node.get("content")) if isinstance(part, str)
     )
     return bool(prompt_tokens & _topic_tokens(node_text))
-
-
-def _find_review_candidate(conn, threshold: float) -> dict | None:
-    """Find a gated-out whisper candidate eligible for session-start review.
-
-    Applies three Python-side filters after SQL eligibility query:
-    1. No strong affinity signal (cosine sim < threshold against existing affinity rows)
-    2. Not recently surfaced (no review_log row within 14 days)
-    3. Not exhausted (fewer than 3 unanswered review_log rows)
-    """
-    try:
-        rows = conn.execute(
-            """
-            WITH ranked AS (
-              SELECT
-                wl.node_id, wl.score, wl.session_id,
-                COALESCE(re.space, wl.space) AS space,
-                COALESCE(re.prompt_text, wl.prompt_text) AS prompt_text,
-                wl.id AS whisper_log_id,
-                COALESCE(re.prompt_vec, wl.prompt_vec) AS prompt_vec,
-                n.title, n.content,
-                ROW_NUMBER() OVER (PARTITION BY wl.node_id ORDER BY wl.score DESC) AS rn
-              FROM whisper_log wl
-              LEFT JOIN retrieval_events re ON re.id = wl.retrieval_event_id
-              JOIN nodes n ON n.id = wl.node_id
-              WHERE wl.was_injected = 0
-                AND wl.decision_stage IN ('injection_gate', 'candidate_cap', 'legacy')
-                AND wl.logged_at > datetime('now', '-7 days')
-                AND NOT EXISTS (
-                  SELECT 1 FROM whisper_log wl2
-                  WHERE wl2.node_id = wl.node_id
-                    AND wl2.was_injected = 1
-                    AND wl2.logged_at > datetime('now', '-7 days')
-                )
-            )
-            SELECT
-              node_id, score, session_id, space, prompt_text, whisper_log_id,
-              prompt_vec, title, content
-            FROM ranked
-            WHERE rn = 1
-            ORDER BY score DESC
-            LIMIT 20
-            """
-        ).fetchall()
-    except Exception as e:
-        logger.warning("_find_review_candidate SQL failed: %s", e)
-        return None
-
-    for row in rows:
-        node_id = row["node_id"]
-        candidate_prompt_vec_blob = row["prompt_vec"]
-
-        # Step 2a: No strong affinity signal
-        try:
-            affinity_rows = conn.execute(
-                "SELECT prompt_vec FROM affinity WHERE node_id = ?", (node_id,)
-            ).fetchall()
-            if affinity_rows and candidate_prompt_vec_blob:
-                candidate_vec = np.frombuffer(candidate_prompt_vec_blob, dtype=np.float32)
-                candidate_norm = float(np.linalg.norm(candidate_vec))
-                skip = False
-                if candidate_norm > 0:
-                    for arow in affinity_rows:
-                        aff_vec = np.frombuffer(arow["prompt_vec"], dtype=np.float32)
-                        aff_norm = float(np.linalg.norm(aff_vec))
-                        if aff_norm > 0:
-                            sim = float(np.dot(candidate_vec, aff_vec) / (candidate_norm * aff_norm))
-                            if sim >= threshold:
-                                skip = True
-                                break
-                if skip:
-                    continue
-        except Exception as e:
-            logger.warning("Affinity check failed for node %s: %s", node_id, e)
-
-        # Step 2b: Not recently surfaced
-        try:
-            recently = conn.execute(
-                "SELECT 1 FROM review_log WHERE node_id = ? AND surfaced_at > datetime('now', '-14 days') LIMIT 1",
-                (node_id,),
-            ).fetchone()
-            if recently:
-                continue
-        except Exception as e:
-            logger.warning("review_log recency check failed for node %s: %s", node_id, e)
-            continue
-
-        # Step 2c: Not exhausted
-        try:
-            unanswered_count = conn.execute(
-                "SELECT COUNT(*) FROM review_log WHERE node_id = ? AND answered = 0",
-                (node_id,),
-            ).fetchone()[0]
-            if unanswered_count >= 3:
-                continue
-        except Exception as e:
-            logger.warning("review_log exhaustion check failed for node %s: %s", node_id, e)
-            continue
-
-        return dict(row)
-
-    return None
 
 
 def _gate_score(r: dict) -> float:
@@ -227,6 +117,7 @@ class ContextBuilder:
         self.graph = graph
         self.engine = engine
         self._classifier = None  # lazy-init PromptClassifier
+        self._classifier_lock = Lock()
 
     def _get_classifier(self):
         """Get or create the prompt intent classifier (uses engine's encoder)."""
@@ -234,22 +125,26 @@ class ContextBuilder:
             return self._classifier
         if not self.engine:
             return None
-        try:
-            from ormah.engine.prompt_classifier import PromptClassifier
+        with self._classifier_lock:
+            if self._classifier is not None:
+                return self._classifier
+            try:
+                from ormah.engine.prompt_classifier import PromptClassifier, parser_for
 
-            hybrid_search = self.engine._get_hybrid_search()
-            if hybrid_search is None:
+                hybrid_search = self.engine._get_hybrid_search()
+                if hybrid_search is None:
+                    return None
+                encoder = hybrid_search.encoder
+                settings = getattr(self.engine, "settings", None)
+                threshold = settings.whisper_intent_threshold if settings else 0.65
+                temporal_parser = parser_for(settings.temporal_locale_codes) if settings else None
+                self._classifier = PromptClassifier(
+                    encoder, threshold=threshold, temporal_parser=temporal_parser
+                )
+                return self._classifier
+            except Exception as e:
+                logger.warning("Failed to create prompt classifier: %s", e)
                 return None
-            encoder = hybrid_search.encoder
-            threshold = getattr(self.engine, "settings", None)
-            threshold = (
-                threshold.whisper_intent_threshold if threshold else 0.65
-            )
-            self._classifier = PromptClassifier(encoder, threshold=threshold)
-            return self._classifier
-        except Exception as e:
-            logger.warning("Failed to create prompt classifier: %s", e)
-            return None
 
     def _topic_was_served(
         self,
@@ -326,6 +221,7 @@ class ContextBuilder:
         except Exception as e:
             logger.warning("whisper_decisions write failed: %s", e)
 
+    @inference_request("general")
     def build_whisper_context(
         self,
         prompt: str,
@@ -383,6 +279,28 @@ class ContextBuilder:
             self._log_decision(
                 session_id=session_id, space=space, prompt=prompt,
                 intent=None, outcome="silent_short",
+            )
+            if _return_debug:
+                return "", _injected_ids
+            return ""
+
+        # This control must run before classifier/enrichment: an embedding
+        # classifier can mistake a clear acknowledgement for a continuation,
+        # which would attach the prior substantive prompt to this turn and
+        # re-inject already served context. The same small predicate also
+        # keeps silence correct if the classifier/model is unavailable.
+        if is_clear_acknowledgement(prompt):
+            intent = PromptIntent(categories=["acknowledgement"])
+            logger.info(
+                "Whisper diagnostics: prompt=%r acknowledgement_intent -> skip",
+                prompt_snippet,
+            )
+            self._log_decision(
+                session_id=session_id,
+                space=space,
+                prompt=prompt,
+                intent=intent,
+                outcome="silent_acknowledgement",
             )
             if _return_debug:
                 return "", _injected_ids
@@ -527,7 +445,7 @@ class ContextBuilder:
         }
         if intent is not None:
             # Extract search_query override before merging (it's not a
-            # recall_search_structured kwarg — it overrides our local query).
+            # _search_structured kwarg — it overrides our local query).
             intent_search_query = intent.search_params.pop("search_query", None)
             search_kwargs.update(intent.search_params)
             if intent_search_query is not None:
@@ -565,10 +483,75 @@ class ContextBuilder:
         if effective_query_vec is not None:
             search_kwargs["query_vec"] = effective_query_vec
 
+        # Affinity is prompt-specific, so keep its rows and computed deltas
+        # local to this whisper call. The preference channel can then reuse a
+        # delta computed for a candidate in the ordinary channel without
+        # applying it twice or carrying feedback into a later request.
+        affinity_rows_cache: dict[str, list[dict]] = {}
+        affinity_boost_cache: dict[str, float] = {}
+        affinity_unavailable = False
+
+        def _apply_affinity_boost(results: list[dict]) -> list[dict]:
+            """Apply the current raw-prompt affinity delta once per candidate.
+
+            The marker makes this helper safe if a caller passes an already
+            adjusted candidate. Lookup/compute errors are intentionally
+            propagated so each channel can retain its established unadjusted
+            fallback independently.
+            """
+            nonlocal affinity_unavailable
+            if not results or prompt_vec is None or affinity_unavailable:
+                return results
+
+            unadjusted = [
+                result for result in results if not result.get("_affinity_applied")
+            ]
+            if not unadjusted:
+                return results
+
+            from ormah.engine.affinity import batch_fetch_affinity, compute_affinity_boost
+
+            node_ids = list(dict.fromkeys(result["node"]["id"] for result in unadjusted))
+            missing_ids = [node_id for node_id in node_ids if node_id not in affinity_rows_cache]
+            if missing_ids:
+                try:
+                    rows_by_node = batch_fetch_affinity(self.graph.conn, missing_ids)
+                    for node_id in missing_ids:
+                        affinity_rows_cache[node_id] = rows_by_node.get(node_id, [])
+                except Exception:
+                    affinity_unavailable = True
+                    raise
+
+            try:
+                for node_id in node_ids:
+                    if node_id not in affinity_boost_cache:
+                        affinity_boost_cache[node_id] = compute_affinity_boost(
+                            prompt_vec,
+                            node_id,
+                            affinity_rows_cache[node_id],
+                            self.engine.settings,
+                        )
+            except Exception:
+                affinity_unavailable = True
+                raise
+
+            return [
+                result
+                if result.get("_affinity_applied")
+                else {
+                    **result,
+                    "score": result["score"] + affinity_boost_cache[result["node"]["id"]],
+                    "_pre_boost_score": result["score"],
+                    "_affinity_boost": affinity_boost_cache[result["node"]["id"]],
+                    "_affinity_applied": True,
+                }
+                for result in results
+            ]
+
         # Always run search — even for identity-only queries, search finds
         # location/work/study nodes that graph neighbors alone miss.
         try:
-            search_results = self.engine.recall_search_structured(**search_kwargs)
+            search_results = self.engine._search_structured(**search_kwargs)
         except Exception as e:
             logger.warning("Whisper search failed: %s", e)
             self._log_decision(
@@ -678,24 +661,7 @@ class ContextBuilder:
         pre_gate_candidates: list[dict] = []
         if not has_temporal and reranker_enabled and search_results and prompt_vec is not None:
             try:
-                from ormah.engine.affinity import batch_fetch_affinity, compute_affinity_boost
-
-                node_ids = [r["node"]["id"] for r in search_results]
-                affinity_rows_map = batch_fetch_affinity(self.graph.conn, node_ids)
-                boosted = []
-                for r in search_results:
-                    nid = r["node"]["id"]
-                    rows = affinity_rows_map.get(nid, [])
-                    boost = compute_affinity_boost(prompt_vec, nid, rows, self.engine.settings)
-                    boosted.append({
-                        **r,
-                        "score": r["score"] + boost,
-                        "_pre_boost_score": r["score"],
-                        # Tagged separately so the (absolute-signal) gate can
-                        # include learned feedback without inheriting the
-                        # rank-relative blended score.
-                        "_affinity_boost": boost,
-                    })
+                boosted = _apply_affinity_boost(search_results)
                 # Apply 0.40 floor AFTER boost (spec: reranker_min_score is now a post-boost floor).
                 # Use the reranker_min_score parameter (passed from engine.settings); fall back to 0.40.
                 effective_floor = reranker_min_score if reranker_min_score > 0.0 else 0.40
@@ -886,7 +852,7 @@ class ContextBuilder:
                 from ormah.embeddings.reranker import rerank
 
                 existing_ids = {r["node"]["id"] for r in search_results}
-                preference_candidates = self.engine.recall_search_structured(
+                preference_candidates = self.engine._search_structured(
                     query=preference_query,
                     limit=max_nodes * max(candidate_pool_multiplier, 1),
                     default_space=space,
@@ -913,6 +879,20 @@ class ContextBuilder:
                     {**r, "source": "preference_applicability"}
                     for r in applicability_results
                 ]
+                try:
+                    # Preferences use the same raw prompt context as ordinary
+                    # candidates. Apply feedback before their applicability
+                    # gate and sort again so the cap selects by adjusted
+                    # evidence rather than the raw reranker order.
+                    applicability_results = _apply_affinity_boost(applicability_results)
+                except Exception as e:
+                    # A missing vector or affinity failure must not make the
+                    # separate preference channel disappear.
+                    logger.warning(
+                        "Preference affinity boost failed, using unmodified scores: %s",
+                        e,
+                    )
+                applicability_results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
                 _record_candidate_versions(applicability_results)
                 for result in applicability_results:
                     trace = candidate_trace[result["node"]["id"]]
@@ -1004,7 +984,7 @@ class ContextBuilder:
                     )
                     for node_id, trace in candidate_trace.items():
                         r = trace["latest"]
-                        score = r.get("_pre_boost_score", r.get("score", 0.0))
+                        score = r.get("score", 0.0)
                         was_injected = 1 if node_id in injected_ids else 0
                         cursor = conn.execute(
                             "INSERT INTO whisper_log "
@@ -1082,63 +1062,9 @@ class ContextBuilder:
             bool(result),
         )
 
-        # Maintenance due signal: fires once per interval regardless of node creation rate.
-        # Self-limiting: apply_maintenance_results records last_maintenance_run, silencing
-        # the signal for claude_maintenance_interval_hours.
-        if self.engine is not None:
-            settings = getattr(self.engine, "settings", None)
-            if settings and getattr(settings, "claude_maintenance_enabled", False):
-                interval_hours = getattr(settings, "claude_maintenance_interval_hours", 24)
-                try:
-                    row = self.graph.conn.execute(
-                        "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
-                    ).fetchone()
-                    last_run = row[0] if row else None
-                    due = True
-                    if last_run:
-                        parsed_last_run = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-                        if parsed_last_run.tzinfo is None:
-                            parsed_last_run = parsed_last_run.replace(tzinfo=timezone.utc)
-                        elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
-                        due = elapsed.total_seconds() > interval_hours * 3600
-                    if due:
-                        result = (
-                            f"{result}\n{MAINTENANCE_DUE_SIGNAL}"
-                            if result
-                            else MAINTENANCE_DUE_SIGNAL
-                        )
-                except Exception as e:
-                    logger.warning("Failed to compute maintenance_due: %s", e)
-
-        # First-message review: surface a gated-out whisper candidate for feedback.
-        # recent_prompts is None only on the first message of a session (buffer just created).
-        if recent_prompts is None and self.engine is not None:
-            settings = getattr(self.engine, "settings", None)
-            try:
-                threshold = getattr(settings, "affinity_similarity_threshold", 0.70) if settings else 0.70
-                candidate = _find_review_candidate(self.graph.conn, threshold)
-                if candidate:
-                    current_session_id = session_id or ""
-                    with self.engine.db.transaction() as conn:
-                        conn.execute(
-                            "INSERT INTO review_log (node_id, session_id, surfaced_at) VALUES (?, ?, datetime('now'))",
-                            (candidate["node_id"], current_session_id),
-                        )
-                    prompt_snippet = _truncate_at_word_boundary(
-                        candidate["prompt_text"] or "", max_len=300
-                    )
-                    space_label = candidate["space"] or "global"
-                    review_block = _REVIEW_FRAMING.format(
-                        space=space_label,
-                        prompt_snippet=prompt_snippet,
-                        title=candidate["title"],
-                        content=candidate["content"],
-                        node_id=candidate["node_id"],
-                        whisper_log_id=candidate["whisper_log_id"],
-                    )
-                    result = result + review_block
-            except Exception as e:
-                logger.warning("Review mechanism failed: %s", e)
+        signal = maintenance_due_signal(self.engine, self.graph.conn)
+        if signal:
+            result = f"{result}\n{signal}" if result else signal
 
         if _return_debug:
             return result, _injected_ids

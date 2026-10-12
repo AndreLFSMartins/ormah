@@ -60,6 +60,7 @@ class MemoryNode(BaseModel):
     last_review: datetime | None = None  # last stability update (distinct from last_accessed)
     valid_until: datetime | None = None
     deleted_at: datetime | None = None  # tombstone stamp; ordering for sync merges uses this, never `updated`
+    superseded_by: str | None = None  # id of the consolidation node that replaced this one; blocks automatic promotion (#223)
     space: str | None = None
     tags: list[str] = Field(default_factory=list)
     connections: list[Connection] = Field(default_factory=list)

@@ -90,3 +90,13 @@ def reinforcement_due(
     if last_review is None:
         return True
     return (now - last_review) >= timedelta(days=cooldown_days)
+
+
+def promotion_floor(stability: float, initial_stability: float) -> float:
+    """``max(S, initial)`` — the lease a promoted node restarts from.
+
+    ``max``, never a sum: a node promoted twice in one cooldown window must end
+    at one initial lease, not two, and a node whose stability already exceeds the
+    initial value must not be pulled down to it.
+    """
+    return max(stability, initial_stability)

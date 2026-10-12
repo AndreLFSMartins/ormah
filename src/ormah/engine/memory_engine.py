@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from collections.abc import Callable
 from contextlib import contextmanager
 from functools import wraps
 import logging
@@ -15,12 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from ormah import lifecycle
+from ormah.embeddings.runtime import inference_request
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
 from ormah.engine.maintenance_signal import (
-    MAINTENANCE_DUE_SIGNAL,
     is_maintenance_due_signal,
+    maintenance_due_signal,
 )
 from ormah.engine.tier_manager import TierManager
 from ormah.engine.whisper_health import compute_whisper_health
@@ -41,7 +43,7 @@ from ormah.models.node import (
     Tier,
     UpdateNodeRequest,
 )
-from ormah.store.file_store import FileStore
+from ormah.store.file_store import FileStore, UnresolvedNodeReference
 from ormah.text.tokens import STOP_WORDS
 
 logger = logging.getLogger(__name__)
@@ -100,6 +102,7 @@ class MemoryEngine:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.maintenance_is_active: Callable[[], bool] | None = None
         self._memory_operation_lock = threading.RLock()
         self.file_store = FileStore(settings.nodes_dir, self._memory_operation_lock)
         self.db = Database(settings.db_path)
@@ -200,6 +203,12 @@ class MemoryEngine:
         defaults in place; running an unneeded one destroys real values. Only
         the total absence of any signal — no version key, no legacy flag, and
         no node carrying last_review — returns 0.
+
+        #223 deliberately does not bump this. The version records which
+        reinforcement model wrote a store's stability values; #223 changes a
+        creation default and adds a column, not the model. A bump would not
+        help either way — this is a store-level flag, and a real store spans
+        both eras of nodes.
         """
         row = self.db.conn.execute(
             "SELECT value FROM meta WHERE key = 'lifecycle_model_version'"
@@ -569,6 +578,7 @@ class MemoryEngine:
             title=title,
             content=req.content,
             confidence=req.confidence,
+            stability=self.settings.fsrs_initial_stability,
         )
 
         # Mark and promote identity nodes
@@ -697,6 +707,7 @@ class MemoryEngine:
             annotated.append(result)
         return annotated
 
+    @inference_request("recall")
     def recall_node(self, node_id: str, session_id: str | None = None) -> str | None:
         """Get a specific node with its neighbors, formatted as text."""
         node = self.graph.get_node(node_id)
@@ -780,12 +791,26 @@ class MemoryEngine:
     # Additional command-like words for detecting "pure temporal" queries.
     _STOP_WORDS = STOP_WORDS | frozenset({
         "after", "again", "above", "below", "between", "during", "further",
-        "get", "give", "here", "me", "once", "only", "out", "own", "same",
+        "get", "give", "here", "me", "once", "only", "out", "over", "own", "same",
         "show", "tell", "then", "through", "under", "until", "up", "us",
         "while", "work", "worked", "working",
     })
 
+    @inference_request("recall")
     def recall_search_structured(
+        self, query: str, limit: int = 10, default_space: str | None = None,
+        *, min_relevance: float | None = None,
+        auto_temporal: bool = True, spread_activation: bool = True,
+        query_vec: Any | None = None, **filters,
+    ) -> list[dict]:
+        """Deliberate structured recall, including direct engine and UI callers."""
+        return self._search_structured(
+            query, limit, default_space, min_relevance=min_relevance,
+            auto_temporal=auto_temporal, spread_activation=spread_activation,
+            query_vec=query_vec, **filters,
+        )
+
+    def _search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
         *, min_relevance: float | None = None,
         auto_temporal: bool = True, spread_activation: bool = True,
@@ -794,7 +819,7 @@ class MemoryEngine:
         """Search memories and return structured results (list of dicts).
 
         Same logic as recall_search but returns raw dicts instead of formatted text.
-        Used by the UI and any consumer that needs structured data.
+        Shared retrieval for whisper and deliberate recall; inherits request origin.
 
         *min_relevance* overrides the deliberate-recall floor
         (settings.recall_min_relevance_score). Whisper passes 0.0: it needs
@@ -809,13 +834,13 @@ class MemoryEngine:
             and not filters.get("created_after")
             and not filters.get("created_before")
         ):
-            from ormah.engine.prompt_classifier import (
-                extract_time_params, has_temporal_phrases, strip_temporal_phrases,
-            )
-            if has_temporal_phrases(query):
-                time_params = extract_time_params(query)
+            from ormah.engine.prompt_classifier import parser_for
+
+            parser = parser_for(self.settings.temporal_locale_codes)
+            if parser.has_temporal_phrases(query):
+                time_params = parser.extract_time_params(query)
                 filters.update(time_params)
-                stripped_query = strip_temporal_phrases(query)
+                stripped_query = parser.strip_temporal_phrases(query)
                 if stripped_query != query:
                     # A supplied vector belongs to the caller's original
                     # query. Once temporal preprocessing changes that query,
@@ -927,6 +952,7 @@ class MemoryEngine:
         ).fetchone()
         return row is not None
 
+    @inference_request("recall")
     def recall_search(
         self,
         query: str,
@@ -945,13 +971,13 @@ class MemoryEngine:
         query_for_log = query
         # Auto-extract temporal filters from query when none provided
         if not filters.get("created_after") and not filters.get("created_before"):
-            from ormah.engine.prompt_classifier import (
-                extract_time_params, has_temporal_phrases, strip_temporal_phrases,
-            )
-            if has_temporal_phrases(query):
-                time_params = extract_time_params(query)
+            from ormah.engine.prompt_classifier import parser_for
+
+            parser = parser_for(self.settings.temporal_locale_codes)
+            if parser.has_temporal_phrases(query):
+                time_params = parser.extract_time_params(query)
                 filters.update(time_params)
-                query = strip_temporal_phrases(query)
+                query = parser.strip_temporal_phrases(query)
 
         explicit_spaces = filters.get("spaces")
 
@@ -1108,22 +1134,33 @@ class MemoryEngine:
     @_serialized_memory_operation
     def delete_node(self, node_id: str) -> str | None:
         """Delete a memory node from disk and index. Returns confirmation or None."""
-        if node_id == self.user_node_id:
-            return "Cannot delete the user self node."
-
-        # Load full node from disk for audit snapshot
-        full_node = self.file_store.load(node_id)
+        # Load full node from disk for audit snapshot. Only a confirmed absence may
+        # fall back to the index: an ambiguous Short id or an unparseable file is not
+        # one, and the index lookup would pick a row the store could not vouch for.
+        try:
+            full_node = self.file_store.resolve(node_id)
+        except UnresolvedNodeReference as exc:
+            return f"Cannot delete {node_id}: {exc} Nothing was deleted."
         if full_node is None:
-            # Fall back to graph index to check existence
+            # Fall back to graph index to check existence. Exact Full id only:
+            # `get_node` answers a prefix with one arbitrary row of many, and the store
+            # has just confirmed that no file holds this reference.
             node = self.graph.get_node(node_id)
-            if node is None:
+            if node is None or node["id"] != node_id:
                 return None
             title = node.get("title") or node.get("content", "")[:60]
             snapshot = json.dumps(node)
+            node_type = node.get("type", "unknown")
+            node_id = node["id"]
         else:
             title = full_node.title or full_node.content[:60]
             snapshot = json.dumps(full_node.model_dump(mode="json"))
-            node = self.graph.get_node(node_id)
+            node_type = full_node.type.value
+            node_id = full_node.id  # the caller may have passed a Short id
+
+        # After resolution, so a Short id cannot slip past it.
+        if node_id == self.user_node_id:
+            return "Cannot delete the user self node."
 
         # Audit log before deletion
         self._write_audit_log(
@@ -1143,7 +1180,6 @@ class MemoryEngine:
         # Soft-delete from disk (move to deleted/ directory)
         self.file_store.soft_delete(node_id)
 
-        node_type = full_node.type.value if full_node else node.get("type", "unknown") if node else "unknown"
         return f"Deleted [{node_type}]: {title}\nID: {node_id}"
 
     @_serialized_memory_operation
@@ -1183,6 +1219,7 @@ class MemoryEngine:
 
         return f"Connected {req.source_id[:8]}... →[{req.edge.value}]→ {req.target_id[:8]}..."
 
+    @inference_request("general")
     def get_whisper_context(
         self,
         prompt: str,
@@ -1259,27 +1296,7 @@ class MemoryEngine:
         return f"{result.rstrip()}\n\n{onboarding}" if result else onboarding
 
     def _maybe_get_maintenance_due_signal(self) -> str:
-        if not getattr(self.settings, "claude_maintenance_enabled", False):
-            return ""
-
-        interval_hours = getattr(self.settings, "claude_maintenance_interval_hours", 24)
-        try:
-            row = self.graph.conn.execute(
-                "SELECT value FROM meta WHERE key = 'last_maintenance_run'"
-            ).fetchone()
-            last_run = row[0] if row else None
-            if not last_run:
-                return MAINTENANCE_DUE_SIGNAL
-
-            parsed_last_run = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-            if parsed_last_run.tzinfo is None:
-                parsed_last_run = parsed_last_run.replace(tzinfo=timezone.utc)
-            elapsed = datetime.now(timezone.utc) - parsed_last_run.astimezone(timezone.utc)
-            if elapsed.total_seconds() > interval_hours * 3600:
-                return MAINTENANCE_DUE_SIGNAL
-        except Exception as e:
-            logger.warning("Failed to compute maintenance_due: %s", e)
-        return ""
+        return maintenance_due_signal(self, self.graph.conn)
 
     @staticmethod
     def _strip_maintenance_due_signal(text: str) -> str:
@@ -1534,6 +1551,14 @@ class MemoryEngine:
         if merged_title is not None:
             kept.title = merged_title
 
+        # If the keeper was itself marked superseded by the node it is now absorbing,
+        # the marker has nothing left to point at: redirecting it would write
+        # kept.superseded_by == kept.id, a marker that always resolves live and buries
+        # the node forever. Absorbing the replacement means nothing supersedes it (#223).
+        # Cleared before save/index_single so markdown and the row agree from the start.
+        if kept.superseded_by == removed.id:
+            kept.superseded_by = None
+
         # Snapshot removed node before deletion
         snapshot = removed.model_dump(mode="json")
 
@@ -1544,6 +1569,32 @@ class MemoryEngine:
             (removed.id, removed.id),
         ).fetchall()
         original_edges = [dict(r) for r in edge_rows]
+
+        # Second discovery route for the supersession redirect below, because the
+        # first one reads the index while the promotion gate reads the file, and the
+        # two can diverge: _mark_superseded saves the markdown first and writes the row
+        # second, so a crash in between leaves a marker only in the file. The
+        # consolidator writes the derived_from edge BEFORE calling _mark_superseded, so
+        # inside that window the edge is already there and names the source.
+        #
+        # derived_from on its own proves nothing — it is a general relationship, which
+        # is exactly why #223 narrowed the promotion gate off it. The marker in the file
+        # stays the criterion; the edge only says which files are worth opening, which
+        # keeps this bounded to the consolidation cluster instead of scanning the store.
+        # Read before the transaction: file I/O must not run holding the write lock.
+        marked_in_markdown: set[str] = set()
+        for edge in original_edges:
+            if edge["edge_type"] != EdgeType.derived_from.value:
+                continue
+            if edge["source_id"] != removed.id:
+                continue
+            # Full-id check: FileStore resolves ids through an eight-character filename
+            # prefix and can hand back an unrelated colliding node (#280).
+            candidate = self.file_store.load(edge["target_id"])
+            if candidate is None or candidate.id != edge["target_id"]:
+                continue
+            if candidate.superseded_by == removed.id:
+                marked_in_markdown.add(candidate.id)
 
         # Merge tags from removed into kept
         removed_tags = set(removed.tags) - set(kept.tags)
@@ -1611,6 +1662,32 @@ class MemoryEngine:
                     }
                 )
 
+            # Consolidation sources marked superseded_by the removed node must follow
+            # it into the keeper. The marker is what blocks their automatic promotion,
+            # and after this merge the keeper is what represents them; left pointing at
+            # the soft-deleted node it reads as dangling, and the next confirmed use
+            # promotes a source back into the whisper-eligible tier (#223, PR #257).
+            #
+            # Union of both routes: the index, and the files named by the derived_from
+            # edges read above. A source found only by the second route has a row whose
+            # marker never landed, so the per-id UPDATE heals that row as it redirects.
+            # The keeper is excluded — its own marker was already cleared above.
+            redirected_sources = sorted(
+                {
+                    r["id"]
+                    for r in conn.execute(
+                        "SELECT id FROM nodes WHERE superseded_by = ?", (removed.id,)
+                    ).fetchall()
+                }
+                | marked_in_markdown
+                - {kept.id}
+            )
+            for source_id in redirected_sources:
+                conn.execute(
+                    "UPDATE nodes SET superseded_by = ? WHERE id = ?",
+                    (kept.id, source_id),
+                )
+
             # Clean up auto-linker checked pairs:
             # - removed node: delete all (node is gone)
             # - kept node: invalidate if content changed (merged_content applied)
@@ -1641,8 +1718,6 @@ class MemoryEngine:
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
-
-        self.file_store.soft_delete(removed.id)
 
         # Update markdown files: rewrite connections from removed→kept
         for node_id in affected_node_ids:
@@ -1690,6 +1765,20 @@ class MemoryEngine:
                 neighbor.touch_updated()
                 self.file_store.save(neighbor)
 
+        # Markdown side of the supersession redirect: the promotion gate reads the
+        # file, so the row alone is not enough. `updated` advances — unlike
+        # _mark_superseded, nothing else in this path stamps it, and the marker feeds
+        # LWW sync: a stale remote copy would otherwise win and restore the dead pointer.
+        for node_id in redirected_sources:
+            source = self.file_store.load(node_id)
+            # Full-id check: FileStore resolves ids through an eight-character filename
+            # prefix and can hand back an unrelated colliding node (#280).
+            if source is None or source.id != node_id:
+                continue
+            source.superseded_by = kept.id
+            source.touch_updated()
+            self.file_store.save(source)
+
         # Also fix the kept node's own connections that pointed to removed
         reload_kept = self.file_store.load(kept.id)
         if reload_kept:
@@ -1698,6 +1787,15 @@ class MemoryEngine:
                 reload_kept.connections = pruned
                 reload_kept.touch_updated()
                 self.file_store.save(reload_kept)
+
+        # Delete the old replacement last. The promotion gate reads superseded_by
+        # from source markdown, not from the index: deleting the removed node before
+        # the redirects above creates a crash window where the row points at the
+        # keeper but the file still points at the now-missing node, so confirmed use
+        # promotes the source even though the keeper represents it. While the
+        # removed node remains live, either the old or new marker safely blocks
+        # promotion.
+        self.file_store.soft_delete(removed.id)
 
         kept_title = kept.title or kept.content[:60]
         removed_title = removed.title or removed.content[:60]
@@ -2119,6 +2217,51 @@ class MemoryEngine:
             )
             node.last_review = now
 
+        # Reversible promotion (#223, decided in #191). Deliberately AFTER the
+        # cooldown block: the bounded update runs on the OLD stability first, then
+        # the floor lifts the result. The floor also runs when the cooldown blocked
+        # the numeric update — otherwise a second confirmed use in one day promotes
+        # with S=1, buying a ~29 h lease that the next decay run immediately revokes.
+        # promotion_floor is max() against a constant, so running it on every
+        # promotion cannot push stability past one initial lease.
+        #
+        # superseded_by blocks ONLY consolidation sources. A generic derived_from
+        # target promotes, which is the narrowing #191 asked for over the originally
+        # proposed blanket exclusion.
+        #
+        # And it blocks only while the consolidation node it points at still exists:
+        # a dangling marker (the replacement was deleted — the #192 scenario) would
+        # otherwise bury this memory forever with nothing left standing in for it, so
+        # the next confirmed use un-buries it. The marker itself is NOT cleared —
+        # it is the provenance record, and only the block is lifted. The extra load
+        # is cheap and rare: it runs only for an archival node that carries a marker.
+        #
+        # The id is compared in full, not merely tested for None: FileStore resolves
+        # an id through the eight-character prefix in the filename and returns the
+        # first match without re-checking what it loaded (#280), so a deleted
+        # replacement whose prefix collides with an unrelated node comes back as that
+        # node. `is not None` would read that as live and bury this memory forever.
+        promoted = False
+        if node.tier is Tier.archival:
+            replacement = (
+                self.file_store.load(node.superseded_by)
+                if node.superseded_by is not None
+                else None
+            )
+            superseded_by_live = (
+                replacement is not None and replacement.id == node.superseded_by
+            )
+            if not superseded_by_live:
+                node.stability = lifecycle.promotion_floor(
+                    node.stability, self.settings.fsrs_initial_stability
+                )
+                # Goes through TierManager.promote(), not `node.tier = ...`: this gives
+                # #223's root cause its first production caller and brings the tier-ordering
+                # guard along. promote() calls touch_updated(), so `updated` advances — that
+                # is correct, the tier genuinely changed, and `updated` feeds LWW sync; not
+                # advancing it would let a stale remote copy win and silently re-archive.
+                promoted = self.tier_manager.promote(node, Tier.working)
+
         # Standard access tracking
         node.last_accessed = now
         node.access_count += 1
@@ -2127,14 +2270,49 @@ class MemoryEngine:
         with self.db.transaction() as conn:
             conn.execute(
                 "UPDATE nodes SET access_count = ?, last_accessed = ?, stability = ?, "
-                "last_review = ? WHERE id = ?",
+                "last_review = ?, tier = ?, updated = ? WHERE id = ?",
                 (
                     node.access_count,
                     node.last_accessed.isoformat(),
                     node.stability,
                     node.last_review.isoformat() if node.last_review else None,
+                    node.tier.value,
+                    node.updated.isoformat(),
                     node_id,
                 ),
+            )
+
+        if promoted:
+            # After the transaction: _write_audit_log opens its own, so it cannot
+            # sit inside. Same position update_node places its own audit call.
+            self._write_audit_log(
+                operation="promote",
+                node_id=node_id,
+                detail=json.dumps({"from": "archival", "to": "working"}),
+            )
+
+    @_serialized_memory_operation
+    def _mark_superseded(self, source_id: str, consolidation_id: str) -> None:
+        """Record that *source_id* was replaced by *consolidation_id* (#223).
+
+        Written here rather than through update_node because superseded_by is
+        deliberately absent from UpdateNodeRequest: it is policy state, and no
+        agent sets it. Serialized for the same reason _record_confirmed_use is —
+        this is a load-modify-save pair.
+
+        `updated` is intentionally NOT advanced here: the consolidator's
+        update_node(tier=archival) on the next line already does it, and
+        touch_updated is reserved for content mutations.
+        """
+        node = self.file_store.load(source_id)
+        if node is None:
+            return
+        node.superseded_by = consolidation_id
+        self.file_store.save(node)
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE nodes SET superseded_by = ? WHERE id = ?",
+                (consolidation_id, source_id),
             )
 
     # --- Private helpers ---
@@ -2699,12 +2877,11 @@ class MemoryEngine:
         Fail-closed: an unqualified signal, a source outside the allowlist, a
         missing whisper_log_id, or an event that was never injected claims
         nothing. was_injected = 1 is the provenance test: only a memory the
-        agent actually saw can have been used. The session-start review path
-        (_find_review_candidate, _REVIEW_FRAMING) deliberately hands the agent a
-        was_injected = 0 event and asks whether it *would* have been useful, and
-        that answer is relevance, not use. The other two callers already satisfy
-        this — _log_feedback_candidates hardcodes was_injected = 1 and the
-        session watcher filters on it — so the condition costs them nothing.
+        agent actually saw can have been used. Historical held-back events have
+        was_injected = 0, so feedback on them can be relevance evidence but is
+        never use. The other two callers already satisfy this —
+        _log_feedback_candidates hardcodes was_injected = 1 and the session
+        watcher filters on it — so the condition costs them nothing.
 
         Enforced in SQL rather than by the caller so a future fourth caller
         cannot reopen the hole. changes() returns 0 both for a non-injected
