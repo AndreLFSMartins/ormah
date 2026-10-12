@@ -62,7 +62,7 @@ class TestWhisperMinScore:
 
         nodes = [_make_node_dict(f"node-{i}", f"Fact {i}") for i in range(5)]
         # Only 2 results above threshold (min_score=0.15, gate=0.55)
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
             {"node": nodes[1], "score": 0.6, "source": "hybrid"},
             {"node": nodes[2], "score": 0.1, "source": "hybrid"},
@@ -87,7 +87,7 @@ class TestWhisperMinScore:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict("node-0", "Irrelevant")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.05, "source": "hybrid"},
         ]
 
@@ -108,7 +108,7 @@ class TestWhisperCompactFormatting:
 
         long_content = "A" * 600
         node = {**_make_node_dict("node-1", "Some title"), "content": long_content}
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.9, "source": "hybrid"},
         ]
 
@@ -125,7 +125,7 @@ class TestWhisperCompactFormatting:
 
         giant_content = "word " * 800  # ~4KB, far over the cap
         node = {**_make_node_dict("node-1", "Some title"), "content": giant_content}
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.9, "source": "hybrid"},
         ]
 
@@ -157,7 +157,7 @@ class TestWhisperCompactFormatting:
 
         content = "word " * 100  # 500 chars
         node = {**_make_node_dict("node-1", "Some title"), "content": content}
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.9, "source": "hybrid"},
         ]
 
@@ -192,7 +192,7 @@ class TestWhisperFailSilently:
         for short in ["y", "ok", "n", "  y  "]:
             result = builder.build_whisper_context(prompt=short)
             assert result == "", f"Expected empty for {short!r}, got {result!r}"
-            mock_engine.recall_search_structured.assert_not_called()
+            mock_engine._search_structured.assert_not_called()
 
     def test_three_char_prompt_not_filtered(self, mock_graph):
         """Prompts of 3+ chars should proceed normally."""
@@ -200,7 +200,7 @@ class TestWhisperFailSilently:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict("node-0", "Some fact")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -215,7 +215,7 @@ class TestWhisperFailSilently:
 
     def test_search_failure_returns_empty(self, mock_graph):
         mock_engine = MagicMock()
-        mock_engine.recall_search_structured.side_effect = RuntimeError("search down")
+        mock_engine._search_structured.side_effect = RuntimeError("search down")
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         result = builder.build_whisper_context(prompt="test query")
@@ -230,7 +230,7 @@ class TestWhisperNodeLimit:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict(f"node-{i}", f"Fact {i}") for i in range(10)]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": n, "score": 0.9, "source": "hybrid"} for n in nodes
         ]
 
@@ -243,8 +243,8 @@ class TestWhisperNodeLimit:
 
         # Search fetches a deep pool (max_nodes * multiplier) for the
         # reranker/gate, but the final output stays capped at max_nodes.
-        mock_engine.recall_search_structured.assert_called_once()
-        call_kwargs = mock_engine.recall_search_structured.call_args
+        mock_engine._search_structured.assert_called_once()
+        call_kwargs = mock_engine._search_structured.call_args
         limit = call_kwargs.kwargs.get("limit") or call_kwargs[1].get("limit")
         assert limit == 3 * 5  # max_nodes * default candidate_pool_multiplier
         injected = sum(1 for i in range(10) if f"Fact {i}" in result)
@@ -253,7 +253,7 @@ class TestWhisperNodeLimit:
     def test_candidate_pool_multiplier_configurable(self, mock_graph):
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
-        mock_engine.recall_search_structured.return_value = []
+        mock_engine._search_structured.return_value = []
 
         builder.build_whisper_context(
             prompt="test",
@@ -261,7 +261,7 @@ class TestWhisperNodeLimit:
             candidate_pool_multiplier=3,
         )
 
-        call_kwargs = mock_engine.recall_search_structured.call_args
+        call_kwargs = mock_engine._search_structured.call_args
         limit = call_kwargs.kwargs.get("limit") or call_kwargs[1].get("limit")
         assert limit == 12
 
@@ -297,7 +297,7 @@ class TestWhisperNodeLimit:
         ] + [
             {"node": n, "score": 0.8, "source": "hybrid"} for n in other_nodes
         ]
-        mock_engine.recall_search_structured.return_value = all_results
+        mock_engine._search_structured.return_value = all_results
 
         max_nodes = 6
         result = builder.build_whisper_context(
@@ -330,7 +330,7 @@ class TestWhisperReranker:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict(f"node-{i}", f"Fact {i}") for i in range(4)]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
             {"node": nodes[1], "score": 0.7, "source": "hybrid"},
             {"node": nodes[2], "score": 0.6, "source": "hybrid"},
@@ -365,7 +365,7 @@ class TestWhisperReranker:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict(f"node-{i}", f"Fact {i}") for i in range(3)]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
             {"node": nodes[1], "score": 0.5, "source": "hybrid"},
             {"node": nodes[2], "score": 0.2, "source": "hybrid"},  # low embedding
@@ -398,7 +398,7 @@ class TestWhisperReranker:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict(f"node-{i}", f"Fact {i}") for i in range(3)]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
             {"node": nodes[1], "score": 0.7, "source": "hybrid"},
             {"node": nodes[2], "score": 0.6, "source": "hybrid"},
@@ -431,7 +431,7 @@ class TestWhisperReranker:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict("node-0", "Fact 0")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -452,7 +452,7 @@ class TestWhisperReranker:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict("node-0", "Fact 0")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -475,7 +475,7 @@ class TestWhisperReranker:
 
         # All below bi-encoder min_score
         nodes = [_make_node_dict("node-0", "Fact 0")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.01, "source": "hybrid"},
         ]
 
@@ -501,7 +501,7 @@ class TestWhisperWithProject:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         node = _make_node_dict("node-1", "Project fact", space="myproject")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.9, "source": "hybrid"},
         ]
 
@@ -511,7 +511,7 @@ class TestWhisperWithProject:
             injection_gate=0.0,
         )
 
-        call_kwargs = mock_engine.recall_search_structured.call_args[1]
+        call_kwargs = mock_engine._search_structured.call_args[1]
         assert call_kwargs["default_space"] == "myproject"
 
 
@@ -533,7 +533,58 @@ class TestWhisperIntentAware:
         result = builder.build_whisper_context(prompt="hello", min_score=0.1)
         assert result == ""
         # Should not even attempt a search
-        mock_engine.recall_search_structured.assert_not_called()
+        mock_engine._search_structured.assert_not_called()
+
+    @pytest.mark.parametrize("prompt", ["Thanks, that helps.", "THAT HELPS!"])
+    def test_acknowledgement_returns_empty_before_classifier_or_search(self, mock_graph, prompt):
+        """Acknowledgements stay silent even without a session continuation."""
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        builder._classifier = MagicMock()
+
+        result = builder.build_whisper_context(prompt=prompt, min_score=0.1)
+
+        assert result == ""
+        builder._classifier.classify.assert_not_called()
+        mock_engine._search_structured.assert_not_called()
+
+    def test_acknowledgement_is_silent_when_classifier_is_unavailable(self, mock_graph):
+        """The guard must not depend on local embedding-model availability."""
+        mock_engine = MagicMock()
+        mock_engine._get_hybrid_search.return_value = None
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+
+        result = builder.build_whisper_context(prompt="Thanks, that helps.", min_score=0.1)
+
+        assert result == ""
+        mock_engine._search_structured.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("prompt", "title"),
+        [
+            ("Thanks, now explain the cache.", "Cache invalidation"),
+            ("Done with that; start the deployment.", "Deployment checklist"),
+        ],
+    )
+    def test_substantive_prompt_with_acknowledgement_words_still_searches(
+        self, mock_graph, prompt, title,
+    ):
+        """Acknowledgement words must not swallow a new useful request."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        builder._classifier = MagicMock()
+        builder._classifier.classify.return_value = PromptIntent(categories=["general"])
+        node = _make_node_dict("substantive-1", title)
+        mock_engine._search_structured.return_value = [
+            {"node": node, "score": 0.8, "source": "hybrid"},
+        ]
+
+        result = builder.build_whisper_context(prompt=prompt, min_score=0.1)
+
+        assert title in result
+        mock_engine._search_structured.assert_called_once()
 
     def test_general_intent_searches_normally(self, mock_graph):
         """General intent should use normal search behavior."""
@@ -547,13 +598,13 @@ class TestWhisperIntentAware:
         builder._classifier = mock_classifier
 
         nodes = [_make_node_dict("node-0", "Auth module details")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
         result = builder.build_whisper_context(prompt="how does auth work", min_score=0.1)
         assert "Auth module details" in result
-        mock_engine.recall_search_structured.assert_called_once()
+        mock_engine._search_structured.assert_called_once()
 
     def test_temporal_intent_passes_created_after_and_before(self, mock_graph):
         """Temporal intent should add created_after and created_before to search params."""
@@ -573,10 +624,10 @@ class TestWhisperIntentAware:
         )
         builder._classifier = mock_classifier
 
-        mock_engine.recall_search_structured.return_value = []
+        mock_engine._search_structured.return_value = []
 
         builder.build_whisper_context(prompt="what did we do last week", min_score=0.1)
-        call_kwargs = mock_engine.recall_search_structured.call_args
+        call_kwargs = mock_engine._search_structured.call_args
         assert call_kwargs.kwargs.get("created_after") == "2026-02-23T00:00:00+00:00"
         assert call_kwargs.kwargs.get("created_before") == "2026-03-02T00:00:00+00:00"
 
@@ -598,12 +649,12 @@ class TestWhisperIntentAware:
         )
         builder._classifier = mock_classifier
 
-        mock_engine.recall_search_structured.return_value = []
+        mock_engine._search_structured.return_value = []
 
         builder.build_whisper_context(
             prompt="what did I work on whisper last week", min_score=0.1,
         )
-        call_kwargs = mock_engine.recall_search_structured.call_args
+        call_kwargs = mock_engine._search_structured.call_args
         query = call_kwargs.kwargs.get("query")
         # Should use the stripped query, not the raw prompt with "last week"
         assert "last week" not in query
@@ -612,7 +663,7 @@ class TestWhisperIntentAware:
     def test_identity_intent_runs_search(self, mock_graph):
         """Identity-only intent should still run search (not skip it)."""
         mock_engine = MagicMock()
-        mock_engine.recall_search_structured.return_value = []
+        mock_engine._search_structured.return_value = []
         mock_engine.settings.claude_maintenance_enabled = False
         builder = ContextBuilder(mock_graph, engine=mock_engine)
         conn = mock_graph.conn
@@ -642,7 +693,7 @@ class TestWhisperIntentAware:
         )
 
         # Search SHOULD be called even for identity-only intent
-        mock_engine.recall_search_structured.assert_called_once()
+        mock_engine._search_structured.assert_called_once()
         # With no search results, whisper stays silent (no graph neighbor dump)
         assert result == ""
 
@@ -656,14 +707,14 @@ class TestWhisperIntentAware:
         builder._classifier = mock_classifier
 
         nodes = [_make_node_dict("node-0", "Some fact")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
         result = builder.build_whisper_context(prompt="test query", min_score=0.1)
         # Should still work via normal search
         assert "Some fact" in result
-        mock_engine.recall_search_structured.assert_called_once()
+        mock_engine._search_structured.assert_called_once()
 
     def test_no_classifier_searches_normally(self, mock_graph):
         """If classifier can't be created (no engine hybrid search), search normally."""
@@ -673,7 +724,7 @@ class TestWhisperIntentAware:
         # _classifier is None by default
 
         nodes = [_make_node_dict("node-0", "A fact")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -709,7 +760,7 @@ class TestWhisperRerankerBlendIntegration:
             _make_node_dict("n2", "Dual storage markdown and SQLite"),
             _make_node_dict("n3", "Chose bge-base for embeddings"),
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.714, "source": "hybrid"},
             {"node": nodes[1], "score": 0.736, "source": "hybrid"},
             {"node": nodes[2], "score": 0.681, "source": "hybrid"},
@@ -741,7 +792,7 @@ class TestWhisperRerankerBlendIntegration:
             _make_node_dict("n1", "MemoryEngine central facade"),
             _make_node_dict("n2", "Dual storage markdown and SQLite"),
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.714, "source": "hybrid"},
             {"node": nodes[1], "score": 0.736, "source": "hybrid"},
         ]
@@ -767,7 +818,7 @@ class TestWhisperRerankerBlendIntegration:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict("n1", "Fact A")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.3, "source": "hybrid"},
         ]
 
@@ -809,7 +860,7 @@ class TestWhisperRerankerBlendIntegration:
         long_content = "z" * 1000
         node = _make_node_dict("n1", "Title")
         node["content"] = long_content
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.7, "source": "hybrid"},
         ]
 
@@ -851,7 +902,7 @@ class TestWhisperRerankerBlendIntegration:
         conn.commit()
 
         fact = _make_node_dict("fact-1", "Search uses hybrid FTS")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": pref, "score": 0.5, "source": "hybrid"},
             {"node": fact, "score": 0.6, "source": "hybrid"},
         ]
@@ -890,7 +941,7 @@ class TestWhisperRerankerBlendIntegration:
             _make_node_dict("mid", "Somewhat relevant"),
             _make_node_dict("low_emb", "Low embedding score"),
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
             {"node": nodes[1], "score": 0.5, "source": "hybrid"},
             {"node": nodes[2], "score": 0.1, "source": "hybrid"},  # below min_score
@@ -926,7 +977,7 @@ class TestWhisperRerankerBlendIntegration:
             _make_node_dict("first_emb", "First by embedding", tier="working", space="proj"),
             _make_node_dict("second_emb", "Second by embedding", tier="working", space="proj"),
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.9, "source": "hybrid"},
             {"node": nodes[1], "score": 0.5, "source": "hybrid"},
         ]
@@ -973,7 +1024,7 @@ class TestWhisperIdentityGating:
         conn.commit()
 
         # Identity result with low score — off-topic query dragged it in
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": pref, "score": 0.3, "source": "hybrid"},
         ]
 
@@ -1004,7 +1055,7 @@ class TestWhisperIdentityGating:
         conn.commit()
 
         # Identity result with high score — legitimate identity query
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": pref, "score": 0.9, "source": "hybrid"},
         ]
 
@@ -1034,7 +1085,7 @@ class TestWhisperIdentityGating:
         conn.commit()
 
         topical = _make_node_dict("fact-1", "Search pipeline details")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": pref, "score": 0.6, "source": "hybrid"},
             {"node": topical, "score": 0.8, "source": "hybrid"},
         ]
@@ -1098,7 +1149,7 @@ class TestWhisperPrecisionGuards:
         identity["space"] = None
         project_fact = _make_node_dict("fact-1", "Ormah runs on port 8787")
         project_fact["space"] = "ormah"
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": identity, "score": 0.82, "source": "hybrid"},
             {"node": project_fact, "score": 0.79, "source": "hybrid"},
         ]
@@ -1128,7 +1179,7 @@ class TestWhisperPrecisionGuards:
         project_fact = _make_node_dict("fact-1", "Auth uses JWT tokens")
         project_fact["space"] = "ormah"
         project_fact["content"] = "The auth flow uses JWT access tokens and refresh tokens."
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": global_pref, "score": 0.82, "source": "hybrid"},
             {"node": project_fact, "score": 0.79, "source": "hybrid"},
         ]
@@ -1150,7 +1201,7 @@ class TestWhisperPrecisionGuards:
         factual["content"] = "The theme system loads tokens, merges overrides, and hydrates CSS variables."
         preference = _make_node_dict("pref-1", "Prefers dark theme", node_type="preference")
         preference["content"] = "Use a dark theme with gold accent."
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": factual, "score": 0.81, "source": "hybrid"},
             {"node": preference, "score": 0.78, "source": "hybrid"},
         ]
@@ -1171,7 +1222,7 @@ class TestPreferenceApplicability:
         mock_engine = _make_engine_with_encoder(mock_graph)
         mock_engine.settings.whisper_exploration_enabled = False
         mock_engine.has_searchable_preferences.return_value = True
-        mock_engine.recall_search_structured.side_effect = [
+        mock_engine._search_structured.side_effect = [
             main_results,
             preference_results,
         ]
@@ -1209,11 +1260,11 @@ class TestPreferenceApplicability:
 
         assert "Prefer simple designs" in result
         assert "Graph component implementation" in result
-        preference_call = engine.recall_search_structured.call_args_list[1]
+        preference_call = engine._search_structured.call_args_list[1]
         assert preference_call.kwargs["types"] == ["preference"]
         assert preference_call.kwargs["auto_temporal"] is False
         assert preference_call.kwargs["spread_activation"] is False
-        main_query_vec = engine.recall_search_structured.call_args_list[0].kwargs["query_vec"]
+        main_query_vec = engine._search_structured.call_args_list[0].kwargs["query_vec"]
         assert preference_call.kwargs["query_vec"] is main_query_vec
         engine._get_hybrid_search.return_value.encoder.encode_query.assert_called_once_with(
             "build the graph component"
@@ -1285,7 +1336,7 @@ class TestPreferenceApplicability:
             )
 
         assert "Graph component implementation" in result
-        assert engine.recall_search_structured.call_count == 1
+        assert engine._search_structured.call_count == 1
         assert mock_ce.rerank.call_count == 1
         engine._get_hybrid_search.return_value.encoder.encode_query.assert_called_once()
 
@@ -1327,7 +1378,7 @@ class TestPreferenceApplicability:
                 preference_applicability_gate=0.40,
             )
 
-        main_call, preference_call = engine.recall_search_structured.call_args_list
+        main_call, preference_call = engine._search_structured.call_args_list
         assert main_call.kwargs["query"] == "build the graph component"
         assert main_call.kwargs["query_vec"] is main_vec
         assert preference_call.kwargs["query"] == "build the graph component yesterday"
@@ -1342,7 +1393,7 @@ class TestPreferenceApplicability:
         relevant["content"] = "Memory decay uses FSRS stability and retrievability."
         unrelated = _make_node_dict("fact-2", "MCP exposes six tools")
         unrelated["content"] = "remember, recall, recall_node, mark_outdated."
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": relevant, "score": 0.78, "source": "hybrid"},
             {"node": unrelated, "score": 0.74, "source": "hybrid"},
         ]
@@ -1370,7 +1421,7 @@ class TestWhisperContextBuffer:
         builder._classifier.classify.return_value = PromptIntent(categories=["continuation"])
 
         nodes = [_make_node_dict("node-0", "Whisper quality metrics")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -1380,12 +1431,39 @@ class TestWhisperContextBuffer:
             recent_prompts=["how's whisper quality?", "show me the eval results"],
         )
 
-        call_kwargs = mock_engine.recall_search_structured.call_args
+        call_kwargs = mock_engine._search_structured.call_args
         query = call_kwargs.kwargs.get("query") or call_kwargs[1].get("query")
         # Query should contain context from recent prompts
         assert "whisper quality" in query
         assert "eval results" in query
         assert "what about the metrics side?" in query
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "and the second one?",
+            "and how often does that run?",
+            "continue where we left off",
+        ],
+    )
+    def test_prelabelled_continuations_still_enrich_search_query(self, mock_graph, prompt):
+        """Acknowledgement handling must not regress useful short follow-ups."""
+        from ormah.engine.prompt_classifier import PromptIntent
+
+        mock_engine = MagicMock()
+        builder = ContextBuilder(mock_graph, engine=mock_engine)
+        builder._classifier = MagicMock()
+        builder._classifier.classify.return_value = PromptIntent(categories=["continuation"])
+        mock_engine._search_structured.return_value = []
+
+        builder.build_whisper_context(
+            prompt=prompt,
+            min_score=0.1,
+            recent_prompts=["how does the scheduler work?"],
+        )
+
+        query = mock_engine._search_structured.call_args.kwargs["query"]
+        assert query == f"how does the scheduler work? {prompt}"
 
     def test_reranker_judges_context_enhanced_followup_query(self, mock_graph):
         """The reranker must score the same context-enhanced query that search
@@ -1401,13 +1479,13 @@ class TestWhisperContextBuffer:
         builder._classifier.classify.return_value = PromptIntent(categories=["continuation"])
 
         node = _make_node_dict("node-0", "Second eval result summary")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.8, "source": "hybrid"},
         ]
 
         captured: dict = {}
 
-        def _capture_rerank(query, docs):
+        def _capture_rerank(query, docs, **kwargs):
             captured["query"] = query
             return [5.0 for _ in docs]
 
@@ -1438,7 +1516,7 @@ class TestWhisperContextBuffer:
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
-        mock_engine.recall_search_structured.return_value = []
+        mock_engine._search_structured.return_value = []
 
         builder.build_whisper_context(
             prompt="how does auth work",
@@ -1446,7 +1524,7 @@ class TestWhisperContextBuffer:
             recent_prompts=["how's whisper quality?", "show me the eval results"],
         )
 
-        call_kwargs = mock_engine.recall_search_structured.call_args
+        call_kwargs = mock_engine._search_structured.call_args
         query = call_kwargs.kwargs.get("query") or call_kwargs[1].get("query")
         assert query == "how does auth work"
 
@@ -1455,7 +1533,7 @@ class TestWhisperContextBuffer:
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
-        mock_engine.recall_search_structured.return_value = []
+        mock_engine._search_structured.return_value = []
 
         builder.build_whisper_context(
             prompt="how does auth work",
@@ -1463,7 +1541,7 @@ class TestWhisperContextBuffer:
             recent_prompts=None,
         )
 
-        call_kwargs = mock_engine.recall_search_structured.call_args
+        call_kwargs = mock_engine._search_structured.call_args
         query = call_kwargs.kwargs.get("query") or call_kwargs[1].get("query")
         assert query == "how does auth work"
 
@@ -1472,7 +1550,7 @@ class TestWhisperContextBuffer:
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
-        mock_engine.recall_search_structured.return_value = []
+        mock_engine._search_structured.return_value = []
 
         builder.build_whisper_context(
             prompt="how does auth work",
@@ -1480,7 +1558,7 @@ class TestWhisperContextBuffer:
             recent_prompts=[],
         )
 
-        call_kwargs = mock_engine.recall_search_structured.call_args
+        call_kwargs = mock_engine._search_structured.call_args
         query = call_kwargs.kwargs.get("query") or call_kwargs[1].get("query")
         assert query == "how does auth work"
 
@@ -1493,7 +1571,7 @@ class TestWhisperContextBuffer:
         builder._classifier = MagicMock()
         builder._classifier.classify.return_value = PromptIntent(categories=["continuation"])
 
-        mock_engine.recall_search_structured.return_value = []
+        mock_engine._search_structured.return_value = []
 
         builder.build_whisper_context(
             prompt="what about this part?",
@@ -1501,7 +1579,7 @@ class TestWhisperContextBuffer:
             recent_prompts=["old1", "old2", "old3", "old4", "old5"],
         )
 
-        call_kwargs = mock_engine.recall_search_structured.call_args
+        call_kwargs = mock_engine._search_structured.call_args
         query = call_kwargs.kwargs.get("query") or call_kwargs[1].get("query")
         # Should only contain last 2 + current
         assert "old1" not in query
@@ -1561,6 +1639,139 @@ class TestSessionBufferRoute:
 
         _session_buffers.clear()
 
+    def test_acknowledgement_does_not_reinject_served_context(self, tmp_path):
+        """The real route must not enrich an acknowledgement with its prior turn.
+
+        The deterministic classifier deliberately labels the acknowledgement as
+        ``continuation`` to reproduce the old failure.  The first route call
+        writes an injected whisper_log event for the seeded Markdown decision;
+        the second call uses the same session buffer and must remain silent.
+        """
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from ormah.api.routes_agent import _session_buffers, router
+        from ormah.engine.prompt_classifier import PromptIntent
+        from ormah.index.db import Database
+
+        _session_buffers.clear()
+        db = Database(tmp_path / "index.db")
+        db.init_schema()
+        graph = GraphIndex(db.conn)
+        node = _make_node_dict("markdown-choice", "Markdown source of truth", space="nova")
+        node["content"] = (
+            "Nova stores memories as Markdown because people can read, edit, version and "
+            "move them between tools. SQLite is a derived search index that can be rebuilt."
+        )
+        _insert_node(db.conn, node)
+        db.conn.commit()
+
+        prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        engine = MagicMock()
+        engine.settings = _make_settings_mock()
+        engine.db = db
+        encoder = MagicMock()
+        encoder.encode.return_value = prompt_vec
+        encoder.encode_query.return_value = prompt_vec
+        hybrid_search = MagicMock()
+        hybrid_search.encoder = encoder
+        engine._get_hybrid_search.return_value = hybrid_search
+        engine._search_structured.return_value = [
+            {"node": node, "score": 0.9, "source": "hybrid", "raw_cosine": 0.9},
+        ]
+        builder = ContextBuilder(graph, engine=engine)
+        builder._classifier = MagicMock()
+        builder._classifier.classify.side_effect = [
+            PromptIntent(categories=["general"]),
+            PromptIntent(categories=["continuation"]),
+        ]
+
+        def get_whisper_context(**kwargs):
+            return builder.build_whisper_context(
+                **kwargs,
+                min_score=0.1,
+                injection_gate=0.55,
+                topic_shift_enabled=True,
+                topic_shift_threshold=0.75,
+            )
+
+        engine.get_whisper_context.side_effect = get_whisper_context
+        app = FastAPI()
+        app.include_router(router)
+        app.state.engine = engine
+
+        try:
+            with TestClient(app) as client:
+                first = client.post(
+                    "/agent/whisper",
+                    json={
+                        "prompt": "Why did we choose Markdown as the source of truth?",
+                        "space": "nova",
+                        "session_id": "ack-later",
+                    },
+                )
+                assert first.status_code == 200
+                assert "Markdown source of truth" in first.json()["text"]
+                served = db.conn.execute(
+                    "SELECT was_injected FROM whisper_log WHERE session_id = ? AND node_id = ?",
+                    ("ack-later", "markdown-choice"),
+                ).fetchone()
+                assert served is not None and served["was_injected"] == 1
+
+                acknowledgement = client.post(
+                    "/agent/whisper",
+                    json={
+                        "prompt": "Thanks, that helps.",
+                        "space": "nova",
+                        "session_id": "ack-later",
+                    },
+                )
+
+            assert acknowledgement.status_code == 200
+            assert acknowledgement.json()["text"] == ""
+            assert engine._search_structured.call_count == 1
+            whisper_log_count = db.conn.execute(
+                "SELECT COUNT(*) FROM whisper_log WHERE session_id = ?",
+                ("ack-later",),
+            ).fetchone()[0]
+            assert whisper_log_count == 1
+        finally:
+            _session_buffers.clear()
+            db.close()
+
+    def test_session_gap_drops_acknowledgement_history(self):
+        """A stale buffer cannot make an acknowledgement a follow-up query."""
+        from collections import deque
+        import time
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from ormah.api.routes_agent import _session_buffers, router
+        from ormah.config import settings as global_settings
+
+        _session_buffers.clear()
+        gap_seconds = global_settings.whisper_session_gap_minutes * 60
+        _session_buffers["expired-ack"] = deque(
+            [("Why did we choose Markdown?", time.time() - gap_seconds - 1)],
+            maxlen=global_settings.whisper_context_buffer_size,
+        )
+        engine = MagicMock()
+        engine.get_whisper_context.return_value = ""
+        app = FastAPI()
+        app.include_router(router)
+        app.state.engine = engine
+
+        try:
+            with TestClient(app) as client:
+                response = client.post(
+                    "/agent/whisper",
+                    json={"prompt": "Thanks, that helps.", "session_id": "expired-ack"},
+                )
+
+            assert response.status_code == 200
+            assert engine.get_whisper_context.call_args.kwargs["recent_prompts"] is None
+        finally:
+            _session_buffers.clear()
+
 
 class TestWhisperTopicShift:
     """Topic-shift detection: skip injection when prompt is on the same topic."""
@@ -1590,7 +1801,7 @@ class TestWhisperTopicShift:
 
         assert result == ""
         # Should not call search since we skipped early
-        mock_engine.recall_search_structured.assert_not_called()
+        mock_engine._search_structured.assert_not_called()
 
     def test_topic_shift_triggers_injection(self, mock_graph):
         """Low similarity to recent prompts → proceed with whisper."""
@@ -1610,7 +1821,7 @@ class TestWhisperTopicShift:
         mock_engine._get_hybrid_search.return_value = mock_hybrid
 
         nodes = [_make_node_dict("node-0", "Auth details")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -1623,7 +1834,7 @@ class TestWhisperTopicShift:
         )
 
         assert "Auth details" in result
-        mock_engine.recall_search_structured.assert_called_once()
+        mock_engine._search_structured.assert_called_once()
 
     def test_follow_up_prompt_bypasses_same_topic_skip(self, mock_graph):
         """Underspecified follow-up prompts should still search even on same topic."""
@@ -1644,7 +1855,7 @@ class TestWhisperTopicShift:
         mock_engine._get_hybrid_search.return_value = mock_hybrid
 
         nodes = [_make_node_dict("node-0", "Metrics details")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -1657,7 +1868,7 @@ class TestWhisperTopicShift:
         )
 
         assert "Metrics details" in result
-        mock_engine.recall_search_structured.assert_called_once()
+        mock_engine._search_structured.assert_called_once()
 
     def test_cold_start_always_injects(self, mock_graph):
         """Empty recent_prompts (cold start) → always inject."""
@@ -1665,7 +1876,7 @@ class TestWhisperTopicShift:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict("node-0", "Some fact")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -1685,7 +1896,7 @@ class TestWhisperTopicShift:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict("node-0", "Some fact")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -1705,7 +1916,7 @@ class TestWhisperTopicShift:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict("node-0", "Some fact")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -1718,7 +1929,7 @@ class TestWhisperTopicShift:
         )
 
         assert "Some fact" in result
-        mock_engine.recall_search_structured.assert_called_once()
+        mock_engine._search_structured.assert_called_once()
 
     def test_encoder_failure_falls_through(self, mock_graph):
         """If encoder raises, should fall through to normal whisper."""
@@ -1730,7 +1941,7 @@ class TestWhisperTopicShift:
         mock_engine._get_hybrid_search.return_value = mock_hybrid
 
         nodes = [_make_node_dict("node-0", "Some fact")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -1753,7 +1964,7 @@ class TestWhisperTopicShift:
         mock_engine._get_hybrid_search.return_value = None
 
         nodes = [_make_node_dict("node-0", "Some fact")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.8, "source": "hybrid"},
         ]
 
@@ -1834,7 +2045,7 @@ class TestAffinityBoost:
         # Candidate scores 0.48 after cross-encoder — below gate of 0.55
         # but with +0.15 boost it becomes 0.63 → above gate
         rescued_node = _make_node_dict("rescued", "Rescued memory")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": rescued_node, "score": 0.48, "source": "hybrid"},
         ]
 
@@ -1860,7 +2071,7 @@ class TestAffinityBoost:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         node = _make_node_dict("node-1", "A fact")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.48, "source": "hybrid"},
         ]
 
@@ -1889,7 +2100,7 @@ class TestAffinityBoost:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         node = _make_node_dict("node-1", "Important fact")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.9, "source": "hybrid"},
         ]
 
@@ -1931,7 +2142,7 @@ class TestAffinityBoost:
         # Candidate with marginal CE relevance — above gate normally;
         # with -0.15 affinity boost it drops below the gate.
         node = _make_node_dict("marginal", "Marginal memory")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.60, "source": "hybrid"},
         ]
 
@@ -1978,7 +2189,7 @@ class TestExplorationSlot:
         # One candidate above gate (injected normally), one gated-out but above 0.40
         injected_node = _make_node_dict("injected", "Injected memory")
         explore_node = _make_node_dict("explore", "Exploration memory")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": injected_node, "score": 0.70, "source": "hybrid"},
             {"node": explore_node, "score": 0.49, "source": "hybrid"},
         ]
@@ -2028,7 +2239,7 @@ class TestExplorationSlot:
 
         injected_node = _make_node_dict("injected", "Injected memory")
         known_node = _make_node_dict("known", "Known gated memory")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": injected_node, "score": 0.70, "source": "hybrid"},
             {"node": known_node, "score": 0.49, "source": "hybrid"},
         ]
@@ -2076,7 +2287,7 @@ class TestExplorationSlot:
 
         injected_node = _make_node_dict("injected", "Injected memory")
         explore_node = _make_node_dict("explore", "Should not appear")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": injected_node, "score": 0.70, "source": "hybrid"},
             {"node": explore_node, "score": 0.49, "source": "hybrid"},
         ]
@@ -2117,7 +2328,7 @@ class TestExplorationCEGate:
             _make_node_dict("pass-1", "Relevant fact"),
             _make_node_dict("noise-1", "Noise fact"),
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.75, "source": "hybrid"},
             {"node": nodes[1], "score": 0.60, "source": "hybrid"},
         ]
@@ -2162,7 +2373,7 @@ class TestExplorationCEGate:
             _make_node_dict("pass-1", "Relevant fact"),
             _make_node_dict("maybe-1", "Maybe useful"),
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.75, "source": "hybrid"},
             {"node": nodes[1], "score": 0.60, "source": "hybrid"},
         ]
@@ -2207,7 +2418,7 @@ class TestExplorationCEGate:
             _make_node_dict("pass-1", "Relevant fact"),
             _make_node_dict("explore-1", "Explore me"),
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.70, "source": "hybrid"},
             {"node": nodes[1], "score": 0.45, "source": "hybrid"},
         ]
@@ -2271,7 +2482,7 @@ class TestWhisperLog:
         builder = ContextBuilder(graph, engine=mock_engine)
 
         node = _make_node_dict("node-log-1", "Logged memory")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.70, "source": "hybrid"},
         ]
 
@@ -2328,7 +2539,7 @@ class TestWhisperLog:
         builder = ContextBuilder(graph, engine=mock_engine)
 
         node = _make_node_dict("node-nolog-1", "Unlogged memory")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.80, "source": "hybrid"},
         ]
 
@@ -2378,7 +2589,7 @@ class TestWhisperLog:
         builder._classifier = mock_classifier
 
         temporal_node = _make_node_dict("temporal-node", "Recent memory")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": temporal_node, "score": 0.001, "source": "temporal"},
         ]
 
@@ -2392,8 +2603,8 @@ class TestWhisperLog:
         # Temporal results must never be logged
         assert len(rows) == 0
 
-    def test_whisper_log_records_pre_boost_score(self, db_graph):
-        """whisper_log.score should store the pre-boost blended score, not the boosted value."""
+    def test_whisper_log_records_adjusted_score(self, db_graph):
+        """whisper_log.score should include the affinity adjustment."""
         db, graph = db_graph
 
         prompt_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
@@ -2410,7 +2621,7 @@ class TestWhisperLog:
 
         node = _make_node_dict("node-preboost", "Pre-boost check")
         # CE gives blended ~0.60; affinity adds +0.10
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.60, "source": "hybrid"},
         ]
 
@@ -2431,15 +2642,11 @@ class TestWhisperLog:
 
         rows = db.conn.execute("SELECT * FROM whisper_log WHERE node_id = 'node-preboost'").fetchall()
         assert len(rows) == 1
-        # Score in the DB should be the pre-boost value, not boosted
-        # The actual blended score from mock reranker will differ, but it should NOT
-        # be the boosted score (pre_boost_score = r.get("_pre_boost_score", r["score"]))
-        # Since we patched compute_affinity_boost to return 0.10, the logged score
-        # should be less than the injected score by ~0.10
+        # The reranker score is 0.4 * (13 / 18) + 0.6 * 0.6. Diagnostics must
+        # retain the +0.10 adjustment applied before the gate.
         logged_score = rows[0]["score"]
-        # The logged score is the pre-boost (CE blended), not boosted
-        # We just verify a row was written — exact value depends on reranker mock
-        assert logged_score >= 0.0
+        expected_score = 0.4 * (13 / 18) + 0.6 * 0.6 + 0.10
+        assert logged_score == pytest.approx(expected_score)
 
     def test_whisper_log_records_candidates_rejected_before_reranking(self, db_graph):
         db, graph = db_graph
@@ -2455,7 +2662,7 @@ class TestWhisperLog:
 
         builder = ContextBuilder(graph, engine=mock_engine)
         node = _make_node_dict("trimmed-node", "Unrelated candidate")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {
                 "node": node,
                 "score": 0.20,
@@ -2495,7 +2702,7 @@ class TestWhisperLog:
         builder = ContextBuilder(graph, engine=mock_engine)
         relevant = _make_node_dict("overlap-node", "Deployment pipeline details")
         rejected = _make_node_dict("rejected-node", "Unrelated embedding neighbor")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": relevant, "score": 0.80, "source": "hybrid"},
             {"node": rejected, "score": 0.75, "source": "hybrid"},
         ]
@@ -2537,7 +2744,7 @@ class TestWhisperFlatRankedDisplay:
             {**_make_node_dict(f"node-{i}", f"Title {i}"), "content": f"Full content for node {i}, longer than a title."}
             for i in range(4)
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.9, "source": "hybrid"},
             {"node": nodes[1], "score": 0.8, "source": "hybrid"},
             {"node": nodes[2], "score": 0.7, "source": "hybrid"},
@@ -2564,7 +2771,7 @@ class TestWhisperFlatRankedDisplay:
             {**_make_node_dict(f"abcd{i:04d}", f"Title {i}"), "content": f"Full content for node {i}."}
             for i in range(4)
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.9, "source": "hybrid"},
             {"node": nodes[1], "score": 0.8, "source": "hybrid"},
             {"node": nodes[2], "score": 0.7, "source": "hybrid"},
@@ -2590,7 +2797,7 @@ class TestWhisperFlatRankedDisplay:
             _make_node_dict(f"nodeid{i:02d}", f"Title {i}")
             for i in range(3)
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.9, "source": "hybrid"},
             {"node": nodes[1], "score": 0.8, "source": "hybrid"},
             {"node": nodes[2], "score": 0.7, "source": "hybrid"},
@@ -2615,7 +2822,7 @@ class TestWhisperFlatRankedDisplay:
             {**_make_node_dict("core-001", "Core fact", tier="core"), "content": "Some core content."},
             {**_make_node_dict("work-001", "Working fact", tier="working"), "content": "Some working content."},
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.9, "source": "hybrid"},
             {"node": nodes[1], "score": 0.8, "source": "hybrid"},
         ]
@@ -2630,7 +2837,7 @@ class TestWhisperFlatRankedDisplay:
         assert "## Project:" not in result
 
     def test_flat_list_preserves_search_result_order(self, mock_graph):
-        # recall_search_structured always returns results sorted by score descending.
+        # _search_structured always returns results sorted by score descending.
         # Whisper should preserve that order — first result in list = first in output.
         mock_engine = MagicMock()
         builder = ContextBuilder(mock_graph, engine=mock_engine)
@@ -2639,7 +2846,7 @@ class TestWhisperFlatRankedDisplay:
             _make_node_dict("high-score", "High score title"),
             _make_node_dict("low-score", "Low score title"),
         ]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.9, "source": "hybrid"},
             {"node": nodes[1], "score": 0.6, "source": "hybrid"},
         ]
@@ -2659,7 +2866,7 @@ class TestWhisperFlatRankedDisplay:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         nodes = [_make_node_dict("node-x", "Some title")]
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": nodes[0], "score": 0.9, "source": "hybrid"},
         ]
 
@@ -2679,7 +2886,7 @@ class TestGateScoreContract:
     def _builder(self, mock_graph, results, ce_scores):
         mock_engine = _make_engine_with_encoder(mock_graph)
         builder = ContextBuilder(mock_graph, engine=mock_engine)
-        mock_engine.recall_search_structured.return_value = results
+        mock_engine._search_structured.return_value = results
         mock_ce = MagicMock()
         mock_ce.rerank.return_value = ce_scores
         return builder, mock_ce
@@ -2738,7 +2945,7 @@ class TestGateScoreContract:
 
         noise = _make_node_dict("cos-low", "Cosine-weak result")
         real = _make_node_dict("cos-high", "Cosine-strong result")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": noise, "score": 0.95, "source": "hybrid", "raw_cosine": 0.30},
             {"node": real, "score": 0.60, "source": "hybrid", "raw_cosine": 0.72},
         ]
@@ -2760,7 +2967,7 @@ class TestGateScoreContract:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         node = _make_node_dict("legacy-1", "Legacy scored result")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.80, "source": "hybrid"},
         ]
 
@@ -2780,7 +2987,7 @@ class TestGateScoreContract:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         node = _make_node_dict("other-proj", "Auth in project B uses JWT", space="project-b")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             # raw_cosine 0.72 clears 0.50 alone, but other-project factor 0.6
             # → 0.72 * 0.6 = 0.432 < 0.50: cross-project leakage prevented.
             {"node": node, "score": 0.80, "source": "hybrid",
@@ -2804,7 +3011,7 @@ class TestGateScoreContract:
 
         node = _make_node_dict("shaky", "Auth uses session cookies", space=None)
         node["confidence"] = 0.2  # confidence_factor 0.4 + 0.6*0.2 = 0.52
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             # 0.72 * 0.52 = 0.374 < 0.50: low-confidence memory gated out.
             {"node": node, "score": 0.80, "source": "hybrid", "raw_cosine": 0.72},
         ]
@@ -2841,7 +3048,7 @@ class TestWhisperDecisions:
         mock_hybrid.encoder = mock_encoder
         mock_engine._get_hybrid_search.return_value = mock_hybrid
         mock_engine.db = db
-        mock_engine.recall_search_structured.return_value = results or []
+        mock_engine._search_structured.return_value = results or []
         return ContextBuilder(graph, engine=mock_engine)
 
     def _decisions(self, db):
@@ -2952,7 +3159,7 @@ class TestExplorationRespectsSilence:
 
         # Single candidate: above the 0.40 exploration floor, below the gate.
         node = _make_node_dict("lonely", "Lonely candidate")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.60, "source": "hybrid"},
         ]
 
@@ -2984,7 +3191,7 @@ class TestTopicalFilterFailClosed:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         node = _make_node_dict("stranger", "Unrelated embedding neighbor")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.85, "source": "hybrid"},
         ]
 
@@ -3012,7 +3219,7 @@ class TestTopicalFilterFailClosed:
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 
         node = _make_node_dict("paraphrase", "Semantically equivalent answer")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.55, "source": "hybrid"},
         ]
 
@@ -3040,7 +3247,7 @@ class TestTopicalFilterFailClosed:
 
         strong = _make_node_dict("cos-strong", "Semantic twin")
         weak = _make_node_dict("cos-weak", "Embedding stranger")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": strong, "score": 0.80, "source": "hybrid", "raw_cosine": 0.78},
             {"node": weak, "score": 0.75, "source": "hybrid", "raw_cosine": 0.55},
         ]
@@ -3101,7 +3308,7 @@ class TestTopicShiftServedMemory:
 
         mock_engine, builder = self._builder(db, graph, vec)
         node = _make_node_dict("served-1", "Starved topic memory")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.85, "source": "hybrid", "raw_cosine": 0.80},
         ]
 
@@ -3128,7 +3335,7 @@ class TestTopicShiftServedMemory:
 
         mock_engine, builder = self._builder(db, graph, vec)
         node = _make_node_dict("served-2", "Served topic memory")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.85, "source": "hybrid", "raw_cosine": 0.80},
         ]
 
@@ -3153,7 +3360,7 @@ class TestTopicShiftServedMemory:
         vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
         mock_engine, builder = self._builder(db, graph, vec)
         node = _make_node_dict("served-3", "Sessionless topic memory")
-        mock_engine.recall_search_structured.return_value = [
+        mock_engine._search_structured.return_value = [
             {"node": node, "score": 0.85, "source": "hybrid", "raw_cosine": 0.80},
         ]
 
@@ -3250,7 +3457,7 @@ class TestEncodeOncePerWhisper:
         mock_hybrid = MagicMock()
         mock_hybrid.encoder = mock_encoder
         mock_engine._get_hybrid_search.return_value = mock_hybrid
-        mock_engine.recall_search_structured.return_value = []
+        mock_engine._search_structured.return_value = []
 
         builder = ContextBuilder(mock_graph, engine=mock_engine)
 

@@ -4,6 +4,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.engine.memory_engine import MemoryEngine, _embedding_text, _generate_title
 from ormah.models.node import ConnectRequest, CreateNodeRequest, EdgeType, NodeType, UpdateNodeRequest
@@ -600,6 +602,36 @@ class TestRecallFloorAndSpaceOrdering:
         assert mock_search.search.call_args.args[0] == "auth changes"
         assert mock_search.search.call_args.kwargs["query_vec"] is None
 
+    @pytest.mark.parametrize("method", ["recall_search_structured", "recall_search"])
+    def test_temporal_parsing_follows_the_engine_settings_not_the_environment(
+        self, engine, monkeypatch, method
+    ):
+        from ormah.engine import prompt_classifier
+
+        monkeypatch.setenv("ORMAH_TEMPORAL_LOCALES", "en")
+        prompt_classifier._default_parser.cache_clear()
+        engine.settings = engine.settings.model_copy(update={"temporal_locales": "pt-BR"})
+        ctx, mock_search = self._search_mock(engine, [])
+
+        with ctx:
+            getattr(engine, method)("mudanças no auth ontem", limit=4)
+
+        assert mock_search.search.call_args.args[0] == "mudanças no auth"
+        assert "created_after" in mock_search.search.call_args.kwargs
+
+    @pytest.mark.parametrize("method", ["recall_search_structured", "recall_search"])
+    def test_a_particle_left_by_the_strip_keeps_the_query_pure_temporal(self, engine, method):
+        # "over" without "the" stays in the residue; as a topical word it would
+        # let a full semantic pool skip the recency lookup.
+        results = [{"node": self._node("semantic-hit"), "score": 1.0, "source": "hybrid"}]
+        ctx, mock_search = self._search_mock(engine, results)
+
+        with ctx, patch.object(engine, "_supplement_temporal", return_value=[]) as supplement:
+            getattr(engine, method)("what did we work on over last week", limit=1)
+
+        assert mock_search.search.call_args.args[0] == "what did we work on over"
+        assert supplement.call_args.args[0] == []
+
     def test_temporal_supplements_respect_space_priority(self, engine):
         """A newer other-space node must NOT outrank an older current-space node."""
         newer_other = self._node("newer-other", space="other")
@@ -695,3 +727,28 @@ def test_memory_restore_lock_excludes_live_remember(engine):
     thread.join(timeout=2)
     assert finished.is_set()
     assert engine.file_store.load(result[0]) is not None
+
+
+def test_remember_uses_the_configured_initial_stability(engine):
+    """Set a NON-default value: testing with 5.814 would pass by accident if
+    someone also changed MemoryNode.stability's model default."""
+    from ormah.models.node import CreateNodeRequest
+
+    engine.settings.fsrs_initial_stability = 9.0
+
+    node_id, _ = engine.remember(CreateNodeRequest(content="a brand new memory"))
+
+    assert engine.file_store.load(node_id).stability == 9.0
+
+
+def test_remember_writes_the_initial_stability_to_the_index(engine):
+    from ormah.models.node import CreateNodeRequest
+
+    engine.settings.fsrs_initial_stability = 9.0
+
+    node_id, _ = engine.remember(CreateNodeRequest(content="a brand new memory"))
+
+    row = engine.db.conn.execute(
+        "SELECT stability FROM nodes WHERE id = ?", (node_id,)
+    ).fetchone()
+    assert row["stability"] == 9.0

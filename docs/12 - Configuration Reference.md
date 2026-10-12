@@ -295,6 +295,39 @@ backup taken before the upgrade.
 | `claude_maintenance_enabled` | `false` |
 | `claude_maintenance_interval_hours` | `24` |
 | `claude_maintenance_batch_size` | `25` |
+| `maintenance_timeout_minutes` | `30` |
+
+`ORMAH_MAINTENANCE_TIMEOUT_MINUTES` is a positive integer, in minutes. It limits
+agent analysis starting when batches become ready. Preparation already reserves
+maintenance; server-side application keeps the reservation until success or failure,
+even past the analysis deadline. Polling never extends the deadline. Expiry releases
+abandoned analysis and restores `maintenance_due` if the existing interval is overdue.
+Only successful application records `last_maintenance_run`.
+
+## Temporal Locales
+
+| Setting | Default |
+|---|---|
+| `temporal_locales` | `en` |
+
+The language packs consulted when a time reference is parsed out of a prompt.
+Comma-separated and order-preserving; the built-in codes are `en` and `pt-BR`,
+and they are case-sensitive. An unknown code is rejected at startup. The
+setting selects packs only — it never carries grammar. PT-BR is opt-in:
+`ORMAH_TEMPORAL_LOCALES=en,pt-BR`.
+
+Enabling the PT-BR grammar does not make the whisper/search stack
+multilingual. The PT-BR window and strip reach every search once the pack is
+enabled, because recall parses the query itself. But the whisper treats a
+prompt as a time question (relaxed score floor, no post-rerank score floor or
+injection gate, recency order within space priority) only when the intent
+classifier marks it `temporal`. The reranker still runs when enabled;
+temporal intent bypasses the later score floor and injection gate, not
+reranking itself. The
+classifier's archetypes are English: with the default
+`BAAI/bge-base-en-v1.5` encoder,
+1 of 8 direct PT-BR time questions was classified `temporal`; with `bge-m3`,
+8 of 8. For PT-BR use, a multilingual embedding model is recommended.
 
 ## Code Anchor
 

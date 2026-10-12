@@ -5,8 +5,10 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
+
+from ormah.engine.temporal import parse_locale_codes
 
 
 _ENV_FILES = [
@@ -88,7 +90,7 @@ class Settings(BaseSettings):
     working_decay_days: int = 14  # Deprecated: superseded by FSRS-based decay
 
     # FSRS spaced repetition decay
-    fsrs_initial_stability: float = 1.0    # days; starting stability for new nodes
+    fsrs_initial_stability: float = 5.814   # days; -7 / ln(0.3) — a seven-day unused lease
     fsrs_decay_threshold: float = 0.3      # R below this = decay candidate
     fsrs_max_stability: float = 365.0      # cap at 1 year
     # Bounded reinforcement (#221/#191): S' = S * (1 + g * S^-w * spacing).
@@ -301,6 +303,18 @@ class Settings(BaseSettings):
     claude_maintenance_enabled: bool = False
     claude_maintenance_interval_hours: int = 24  # hours between maintenance runs
     claude_maintenance_batch_size: int = 25  # candidates per type per run
+    maintenance_timeout_minutes: int = Field(default=30, gt=0)  # analysis reservation
+
+    # Temporal locale packs consulted when parsing a time reference out of a
+    # prompt. Declared as a plain ``str`` and parsed by the validator below,
+    # not as a ``list[str]``: pydantic-settings JSON-decodes complex types from
+    # the environment and would reject the comma-separated form the ``.env``
+    # file uses everywhere else. The setting selects packs; it never carries
+    # grammar. English only by default: the whisper's time-question handling
+    # follows the ``temporal`` intent, which the default English encoder does
+    # not assign to PT-BR text, so PT-BR is opted into together with a
+    # multilingual embedding model.
+    temporal_locales: str = "en"
 
     # --- Validators ---
 
@@ -665,6 +679,17 @@ class Settings(BaseSettings):
         if v < 1:
             raise ValueError(f"interval must be >= 1 minute, got {v}")
         return v
+
+    @field_validator("temporal_locales")
+    @classmethod
+    def _temporal_locales_known(cls, v: str) -> str:
+        parse_locale_codes(v)  # raises on an empty result or a code with no pack
+        return v
+
+    @property
+    def temporal_locale_codes(self) -> tuple[str, ...]:
+        """The enabled locale codes, ordered, trimmed and de-duplicated."""
+        return parse_locale_codes(self.temporal_locales)
 
     @property
     def llm_enabled(self) -> bool:
