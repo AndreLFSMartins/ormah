@@ -19,6 +19,7 @@ from typing import Any
 from ormah.background.llm_client import ingest_provider_configured
 from ormah.background.llm_errors import LlmCancelledError
 from ormah.background.memory_lock import RestoredUnderfoot
+from ormah.embeddings.runtime import inference_request
 from ormah.config import Settings
 from ormah.embeddings.text import embedding_text as _embedding_text
 from ormah.engine.context_builder import ContextBuilder
@@ -1284,6 +1285,7 @@ class MemoryEngine:
             annotated.append(result)
         return annotated
 
+    @inference_request("recall")
     def recall_node(self, node_id: str, session_id: str | None = None) -> str | None:
         """Get a specific node with its neighbors, formatted as text.
 
@@ -1379,7 +1381,21 @@ class MemoryEngine:
         "while", "work", "worked", "working",
     })
 
+    @inference_request("recall")
     def recall_search_structured(
+        self, query: str, limit: int = 10, default_space: str | None = None,
+        *, min_relevance: float | None = None,
+        auto_temporal: bool = True, spread_activation: bool = True,
+        query_vec: Any | None = None, **filters,
+    ) -> list[dict]:
+        """Deliberate structured recall, including direct engine and UI callers."""
+        return self._search_structured(
+            query, limit, default_space, min_relevance=min_relevance,
+            auto_temporal=auto_temporal, spread_activation=spread_activation,
+            query_vec=query_vec, **filters,
+        )
+
+    def _search_structured(
         self, query: str, limit: int = 10, default_space: str | None = None,
         *, min_relevance: float | None = None,
         auto_temporal: bool = True, spread_activation: bool = True,
@@ -1388,7 +1404,7 @@ class MemoryEngine:
         """Search memories and return structured results (list of dicts).
 
         Same logic as recall_search but returns raw dicts instead of formatted text.
-        Used by the UI and any consumer that needs structured data.
+        Shared retrieval for whisper and deliberate recall; inherits request origin.
 
         *min_relevance* overrides the deliberate-recall floor
         (settings.recall_min_relevance_score). Whisper passes 0.0: it needs
@@ -1521,6 +1537,7 @@ class MemoryEngine:
         ).fetchone()
         return row is not None
 
+    @inference_request("recall")
     def recall_search(
         self,
         query: str,
@@ -1862,6 +1879,7 @@ class MemoryEngine:
             matched_pattern=matched_pattern,
         )
 
+    @inference_request("general")
     def get_whisper_context(
         self,
         prompt: str,
@@ -2769,12 +2787,21 @@ class MemoryEngine:
         plus a summary string.  Batch sizes are capped: up to *limit_per_batch*
         pairs for link/conflict/merge (default from settings), up to 4 clusters
         for consolidation (max nodes per cluster from
-        ``settings.consolidation_max_cluster_nodes``).
+        ``settings.consolidation_max_cluster_nodes``).  The four batches
+        together are then cut to ``settings.claude_maintenance_payload_max_chars``
+        (see ``maintenance_budget``); a cut candidate stays pending for a
+        later run, and the summary counts only the emitted candidates.
         """
         from ormah.background.auto_linker import _find_link_candidates
         from ormah.background.conflict_detector import _find_conflict_candidates
         from ormah.background.consolidator import _find_consolidation_clusters
         from ormah.background.duplicate_merger import _find_merge_candidates
+        from ormah.engine.maintenance_budget import (
+            CONTENT_MAX_CHARS,
+            SPACE_MAX_CHARS,
+            TITLE_MAX_CHARS,
+            fit_to_budget,
+        )
 
         if limit_per_batch is None:
             limit_per_batch = getattr(self.settings, "claude_maintenance_batch_size", 25)
@@ -2823,13 +2850,13 @@ class MemoryEngine:
             else:
                 conn.execute("DELETE FROM meta WHERE key = 'maintenance_phase1_errors'")
 
-        def _norm(node: dict, content_limit: int | None = 400) -> dict:
+        def _norm(node: dict, content_limit: int | None = CONTENT_MAX_CHARS) -> dict:
             content = node.get("content") or ""
             return {
                 "id": node.get("id", ""),
-                "title": node.get("title", ""),
+                "title": (node.get("title") or "")[:TITLE_MAX_CHARS],
                 "type": node.get("type", ""),
-                "space": node.get("space", ""),
+                "space": (node.get("space") or "")[:SPACE_MAX_CHARS],
                 "content": content if content_limit is None else content[:content_limit],
             }
 
@@ -2850,27 +2877,29 @@ class MemoryEngine:
             ))
         ]
 
-        parts = []
-        if link_candidates:
-            parts.append(f"{len(link_candidates)} link candidates")
-        if conflict_candidates:
-            parts.append(f"{len(conflict_candidates)} conflict candidates")
-        if merge_candidates:
-            parts.append(f"{len(merge_candidates)} merge candidates")
-        if consolidation_clusters:
-            parts.append(f"{len(consolidation_clusters)} cluster(s)")
+        # The budget cut is the single owner of what Phase 1 issues; the formatter never cuts.
+        batches = fit_to_budget(
+            {
+                "link_candidates": [_norm_pair(c) for c in link_candidates],
+                "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
+                "merge_candidates": [_norm_pair(c) for c in merge_candidates],
+                "consolidation_clusters": consolidation_clusters,
+            },
+            self.settings.claude_maintenance_payload_max_chars,
+        )
+
+        labels = (
+            ("link_candidates", "link candidates"),
+            ("conflict_candidates", "conflict candidates"),
+            ("merge_candidates", "merge candidates"),
+            ("consolidation_clusters", "cluster(s)"),
+        )
+        parts = [f"{len(batches[key])} {label}" for key, label in labels if batches[key]]
         summary = ", ".join(parts) if parts else "nothing to process"
         if batch_errors:
             summary += "; FAILED: " + ", ".join(sorted(batch_errors))
 
-        return {
-            "batch_errors": batch_errors,
-            "link_candidates": [_norm_pair(c) for c in link_candidates],
-            "conflict_candidates": [_norm_pair(c) for c in conflict_candidates],
-            "merge_candidates": [_norm_pair(c) for c in merge_candidates],
-            "consolidation_clusters": consolidation_clusters,
-            "summary": summary,
-        }
+        return {"batch_errors": batch_errors, **batches, "summary": summary}
 
     @_serialized_memory_operation
     def apply_maintenance_results(self, results: dict) -> dict:

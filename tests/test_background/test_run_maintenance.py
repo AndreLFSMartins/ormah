@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from ormah.adapters.mcp_adapter import _format_maintenance_batches
 from ormah.engine.maintenance_signal import MAINTENANCE_DUE_SIGNAL
 from ormah.models.node import CreateNodeRequest, NodeType
 
@@ -589,10 +590,12 @@ class TestConsolidationBatchFidelity:
         assert len(json.dumps(kept, ensure_ascii=False)) <= 24000
 
     def test_worst_case_cardinality_stays_bounded(self, engine, monkeypatch):
-        """Four max-size clusters of large nodes stay within `4 x budget`.
+        """Four max-size clusters of large nodes stay within the Phase 1 budget.
 
-        With one prefix per cluster the bound is exactly `n_clusters * budget` —
-        unlike v2's bin-packing, where the sub-cluster count was unbounded. Node
+        Each cluster is still one prefix within its own budget. The clusters also
+        count against `claude_maintenance_payload_max_chars`, so the formatted
+        result stays under the 50,000 characters Claude Code keeps inline. Four
+        trimmed clusters format to ~73,000 characters without that cut. Node
         size is 6000 chars so the trim actually fires (3 of 5 survive), and
         `assert clusters` keeps the test from passing by emitting nothing.
         """
@@ -623,15 +626,11 @@ class TestConsolidationBatchFidelity:
 
         clusters = batches["consolidation_clusters"]
         assert clusters, "the trim dropped everything — the fixture proves nothing"
-        assert len(clusters) == 4, "one prefix per cluster"
         for sub in clusters:
             assert len(json.dumps(sub, ensure_ascii=False)) <= budget
 
-        payload = json.dumps(clusters, ensure_ascii=False)
-        bound = 4 * budget + 4096
-        assert len(payload) <= bound, (
-            f"consolidation batch is unbounded: {len(payload)} chars, bound {bound}"
-        )
+        text = _format_maintenance_batches(batches, "job-" + "0" * 32, "2026-10-13T12:00:00+00:00")
+        assert len(text) < 50_000, f"Phase 1 result is {len(text)} chars"
 
     def test_consolidation_cluster_carries_type(self, engine):
         seeded = _seed_long_nodes(engine, n=2, chars=600)

@@ -303,7 +303,14 @@ backup taken before the upgrade.
 | `claude_maintenance_interval_hours` | `24` |
 | `claude_maintenance_batch_size` | `25` |
 | `claude_maintenance_cluster_max_chars` | `24000` |
+| `claude_maintenance_payload_max_chars` | `45000` |
 | `maintenance_timeout_minutes` | `30` |
+
+`ORMAH_CLAUDE_MAINTENANCE_PAYLOAD_MAX_CHARS` bounds the size of the Phase 1 result.
+Claude Code saves an MCP result above 50,000 characters to a file, and the maintenance
+agent cannot read that file. The server takes candidates in turns from each batch until
+the next one does not fit. Candidates that do not fit stay pending for a later run. The
+value must be between 5,000 and 90,000, and it must hold one candidate at the field caps.
 
 `ORMAH_MAINTENANCE_TIMEOUT_MINUTES` is a positive integer, in minutes. It limits
 agent analysis starting when batches become ready. Preparation already reserves
