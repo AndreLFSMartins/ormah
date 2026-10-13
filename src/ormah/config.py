@@ -1155,12 +1155,15 @@ class Settings(BaseSettings):
     def _maintenance_payload_fits_one_candidate(self) -> "Settings":
         # A candidate larger than the whole budget could never be issued, and its
         # batch would stay empty in every run.
-        need = max_item_cost(self.consolidation_max_cluster_nodes)
+        need = max_item_cost(
+            self.consolidation_max_cluster_nodes, self.claude_maintenance_cluster_max_chars
+        )
         if self.claude_maintenance_payload_max_chars < need:
             raise ValueError(
                 f"claude_maintenance_payload_max_chars ({self.claude_maintenance_payload_max_chars}) "
                 f"is smaller than one maintenance candidate ({need}) with "
-                f"consolidation_max_cluster_nodes={self.consolidation_max_cluster_nodes}"
+                f"consolidation_max_cluster_nodes={self.consolidation_max_cluster_nodes} and "
+                f"claude_maintenance_cluster_max_chars={self.claude_maintenance_cluster_max_chars}"
             )
         return self
 

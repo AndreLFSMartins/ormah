@@ -51,18 +51,24 @@ def _item_cost(batch: str, item) -> int:
     return _PAIR_OVERHEAD + _node_cost(item["node_a"]) + _node_cost(item["node_b"])
 
 
-def max_item_cost(cluster_max_nodes: int) -> int:
+def max_item_cost(cluster_max_nodes: int, cluster_max_chars: int | None = None) -> int:
     """Largest cost one item can have at the field caps, its section headers included.
 
     A pair can occur in all three pair batches and is emitted as one group.
+    A cluster that carries full content has no content cap: *cluster_max_chars*
+    bounds the JSON of its nodes, which is longer than the sum of their fields.
     """
     pair_group = sum(
         _SECTION_OVERHEAD[name] + _PAIR_OVERHEAD + 2 * _NODE_MAX_CHARS for name in PAIR_BATCHES
     )
+    cluster_nodes = (
+        cluster_max_nodes * _NODE_MAX_CHARS if cluster_max_chars is None else cluster_max_chars
+    )
     cluster = (
         _SECTION_OVERHEAD[CLUSTER_BATCH]
         + _CLUSTER_OVERHEAD
-        + cluster_max_nodes * (_CLUSTER_NODE_OVERHEAD + _NODE_MAX_CHARS)
+        + cluster_max_nodes * _CLUSTER_NODE_OVERHEAD
+        + cluster_nodes
     )
     return max(pair_group, cluster)
 
