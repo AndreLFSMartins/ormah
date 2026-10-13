@@ -68,6 +68,29 @@ def test_recall_not_found(client):
     assert resp.status_code == 404
 
 
+def test_recall_by_an_ambiguous_short_id_names_every_candidate(client):
+    """Two memories share the Short id `deadbeef`. The agent holding only that Short id
+    must learn the reference is ambiguous and get the Full ids to retry with, not a
+    "not found" and not one of the two picked at random."""
+    from ormah.models.node import MemoryNode, NodeType, Tier
+
+    engine = client.app.state.engine
+    ids = [f"deadbeef-0000-0000-0000-00000000000{s}" for s in "ab"]
+    for node_id in ids:
+        node = MemoryNode(
+            id=node_id, type=NodeType.fact, tier=Tier.working,
+            title=f"Collider {node_id[-1]}", content="colliding", source="test",
+        )
+        engine.builder.index_single(engine.file_store.save(node))
+
+    resp = client.get("/agent/recall/deadbeef")
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "ambiguous" in detail.lower()
+    assert all(node_id in detail for node_id in ids)
+
+
 def test_stats(client):
     resp = client.get("/stats")
     assert resp.status_code == 200

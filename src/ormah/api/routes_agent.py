@@ -17,6 +17,7 @@ from ormah.engine.prompt_classifier import match_synthetic_pattern
 from ormah.models.node import ConnectRequest, CreateNodeRequest, UpdateNodeRequest
 from ormah.models.proposals import ResolveProposalRequest
 from ormah.models.search import SearchQuery
+from ormah.store.file_store import UnresolvedNodeReference
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,10 @@ def recall_node(
 ):
     """Get a specific memory with its connections."""
     engine = request.app.state.engine
-    text = engine.recall_node(node_id, session_id=session_id)
+    try:
+        text = engine.recall_node(node_id, session_id=session_id)
+    except UnresolvedNodeReference as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if text is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     return TextResponse(text=text, node_id=node_id)
