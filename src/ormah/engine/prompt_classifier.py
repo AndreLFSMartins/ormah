@@ -7,6 +7,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
+from threading import Lock
 
 import numpy as np
 
@@ -219,7 +220,7 @@ class PromptIntent:
     """Matched intent categories, e.g. ``["temporal"]``. Falls back to ``["general"]``."""
 
     search_params: dict = field(default_factory=dict)
-    """Extra kwargs to merge into ``recall_search_structured`` call."""
+    """Extra kwargs to merge into whisper's ``_search_structured`` call."""
 
     prompt_vec: np.ndarray | None = None
     """The (normalised) embedding of the prompt computed during classification.
@@ -257,6 +258,7 @@ class PromptClassifier:
         self._temporal_parser = temporal_parser
         # category -> (n_archetypes, dim) matrix of archetype embeddings
         self._archetype_vecs: dict[str, np.ndarray] | None = None
+        self._archetypes_lock = Lock()
 
     # ------------------------------------------------------------------
     # Lazy archetype encoding
@@ -265,13 +267,19 @@ class PromptClassifier:
     def _ensure_archetypes(self) -> None:
         if self._archetype_vecs is not None:
             return
-        self._archetype_vecs = {}
-        for category, prompts in ARCHETYPES.items():
-            vecs = self._encoder.encode_batch(prompts)  # (n, dim)
-            # Normalise rows (should already be, but be safe)
-            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-            norms = np.where(norms == 0, 1, norms)
-            self._archetype_vecs[category] = vecs / norms
+        with self._archetypes_lock:
+            if self._archetype_vecs is not None:
+                return
+            archetype_vecs: dict[str, np.ndarray] = {}
+            for category, prompts in ARCHETYPES.items():
+                vecs = self._encoder.encode_batch(prompts)  # (n, dim)
+                # Normalise rows (should already be, but be safe)
+                norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+                norms = np.where(norms == 0, 1, norms)
+                archetype_vecs[category] = vecs / norms
+            # Publish only the complete map so concurrent cold requests never
+            # classify against an empty or partially initialized category set.
+            self._archetype_vecs = archetype_vecs
 
     # ------------------------------------------------------------------
     # Public API

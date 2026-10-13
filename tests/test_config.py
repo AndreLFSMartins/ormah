@@ -326,6 +326,32 @@ def test_consolidation_inverted_bounds_rejected():
         _settings(consolidation_min_cluster_size=3, consolidation_max_cluster_nodes=2)
 
 
+# --- Claude maintenance payload budget ---
+
+def test_maintenance_payload_budget_default_fits_inline_limit():
+    assert _settings().claude_maintenance_payload_max_chars == 45_000
+
+
+@pytest.mark.parametrize("value", [5_000, 90_000])
+def test_maintenance_payload_budget_range_bounds_accepted(value):
+    assert _settings(claude_maintenance_payload_max_chars=value).claude_maintenance_payload_max_chars == value
+
+
+@pytest.mark.parametrize("value", [4_999, 90_001])
+def test_maintenance_payload_budget_out_of_range(value):
+    with pytest.raises(ValidationError, match="claude_maintenance_payload_max_chars must be"):
+        _settings(claude_maintenance_payload_max_chars=value)
+
+
+def test_maintenance_payload_budget_below_one_cluster_rejected():
+    # One cluster of 20 nodes at the field caps costs ~14,800 characters.
+    with pytest.raises(ValidationError, match="smaller than one maintenance candidate"):
+        _settings(consolidation_max_cluster_nodes=20, claude_maintenance_payload_max_chars=10_000)
+    assert _settings(
+        consolidation_max_cluster_nodes=20, claude_maintenance_payload_max_chars=15_000
+    ).claude_maintenance_payload_max_chars == 15_000
+
+
 # --- Session watcher reconcile (#34) ---
 
 def test_reconcile_interval_default_is_five():
