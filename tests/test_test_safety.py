@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from ormah import config
 from ormah.embeddings.cache import get_fastembed_cache_dir
 
 
@@ -17,3 +18,9 @@ def test_fastembed_cache_isolated_from_real_ormah_install(isolate_fastembed_cach
     cleanup_probe.unlink()
 
     assert not cleanup_probe.exists()
+
+
+def test_settings_ignore_the_real_home_env_file():
+    real_env_file = Path.home() / ".config" / "ormah" / ".env"
+
+    assert str(real_env_file) not in config._EXISTING_ENV_FILES
