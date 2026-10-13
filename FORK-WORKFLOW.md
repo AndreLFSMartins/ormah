@@ -84,7 +84,8 @@ the names as they are.
      the commits arrive carrying text written for the fork. The direction is always island →
      `local-main` (Recipe B), never the reverse.
    - Code, tests, commit messages and the PR carry **no** fork issue number, no local ADR
-     number and no mention of the council. State the reasoning in words. r-spade merges with
+     number and no mention of the council or of a review peer (Codex, Cursor, Claude). State
+     the reasoning in words. r-spade merges with
      merge commits, so the commit messages land on their `main`, not only the PR body — and
      fork and upstream numbers collide: `Closes #29` meant for fork #29 closes
      r-spade/ormah#29, an unrelated open issue. PR r-spade/ormah#301 had to be force-pushed
@@ -94,9 +95,14 @@ the names as they are.
      To close an upstream issue from a commit, qualify it: `Closes r-spade/ormah#<n>`.
    - The `pre-push` hook enforces it on every non-exempt ref: it blocks a push whose commit
      messages or added lines carry `AndreLFSMartins/ormah#N`, a closing keyword with a bare
-     `#N`, `ADR-NNNN` or `/council`. Ceiling: a bare `#N` with no closing keyword is not
-     caught, since it cannot be told apart from a real upstream ref. Scenarios:
-     `~/.config/ormah/githooks/test-prepush.sh`.
+     `#N`, `ADR-NNNN`, the word `council`, or `<codex|cursor|claude> peer` (case-insensitive).
+     Ceiling: a bare `#N` with no closing keyword is not caught, since it cannot be told apart
+     from a real upstream ref. Scenarios: `~/.config/ormah/githooks/test-prepush.sh`.
+   - Until 2026-10-12 the hook matched only `/council`. Texts like "Codex council finding" or
+     "Reported by the Codex peer" passed, so PRs opened before that date can carry them. The
+     wider hook now blocks the next push of such a PR. Clean it first: edit the comments in a
+     new commit, rewrite the messages with `git filter-branch --msg-filter … upstream/main..HEAD`,
+     confirm the tree is unchanged, then push with `--force-with-lease=<branch>:<old head>`.
    - A fix that started fork-only and later turns out to be upstream-worthy: new island,
      cherry-pick, clean the text **before the first push**.
 
