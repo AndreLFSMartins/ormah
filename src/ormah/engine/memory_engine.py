@@ -709,8 +709,12 @@ class MemoryEngine:
 
     @inference_request("recall")
     def recall_node(self, node_id: str, session_id: str | None = None) -> str | None:
-        """Get a specific node with its neighbors, formatted as text."""
-        node = self.graph.get_node(node_id)
+        """Get a specific node with its neighbors, formatted as text.
+
+        Raises `UnresolvedNodeReference` when `node_id` is a prefix shared by several
+        nodes; its message lists their Full ids.
+        """
+        node = self.graph.resolve_node(node_id)
         if node is None:
             return None
 
@@ -1143,8 +1147,8 @@ class MemoryEngine:
             return f"Cannot delete {node_id}: {exc} Nothing was deleted."
         if full_node is None:
             # Fall back to graph index to check existence. Exact Full id only:
-            # `get_node` answers a prefix with one arbitrary row of many, and the store
-            # has just confirmed that no file holds this reference.
+            # `get_node` still answers a unique prefix, and the store has just
+            # confirmed that no file holds this reference.
             node = self.graph.get_node(node_id)
             if node is None or node["id"] != node_id:
                 return None
