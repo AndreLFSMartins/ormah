@@ -99,19 +99,6 @@ def prevent_tests_mutating_real_ormah_install(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_settings_from_global_env(monkeypatch, tmp_path):
-    """Stop the global ~/.config/ormah/.env and stray ORMAH_* OS vars from
-    leaking into bare Settings() during tests (env pollution, not regressions).
-    """
-    empty_env = tmp_path / "empty.env"
-    empty_env.write_text("")
-    monkeypatch.setitem(Settings.model_config, "env_file", str(empty_env))
-    for key in list(os.environ):
-        if key.startswith("ORMAH_"):
-            monkeypatch.delenv(key, raising=False)
-
-
-@pytest.fixture(autouse=True)
 def _clean_llm_cancel_epoch():
     """ADR-0004 slice 2: llm_cancel is process-global state (a single epoch shared by every
     adapter/caller in the process), unlike the per-adapter cancel flag it replaced. Any test that
@@ -123,6 +110,14 @@ def _clean_llm_cancel_epoch():
     llm_cancel.begin_lifespan()
     yield
     llm_cancel.begin_lifespan()
+
+
+@pytest.fixture(autouse=True)
+def isolate_settings_from_developer_env(monkeypatch):
+    """Keep a checkout ``.env`` and exported ``ORMAH_*`` variables out of every ``Settings()``."""
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    for key in [k for k in os.environ if k.startswith("ORMAH_")]:
+        monkeypatch.delenv(key)
 
 
 @pytest.fixture(scope="session", autouse=True)
