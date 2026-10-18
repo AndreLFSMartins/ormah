@@ -334,7 +334,7 @@ class TestConfigureClaudeCodeMcp:
     def test_writes_mcp_config_to_claude_json(self, tmp_path):
         config_path = str(tmp_path / ".claude.json")
 
-        with patch("ormah.setup.shutil.which", return_value=None), \
+        with patch("ormah.setup._find_binary", return_value=None), \
              patch("ormah.setup.subprocess.run") as mock_run, \
              patch("ormah.setup.os.path.expanduser", return_value=config_path):
             configure_claude_code_mcp("/abs/path/ormah")
@@ -352,7 +352,7 @@ class TestConfigureClaudeCodeMcp:
         with open(config_path, "w") as f:
             json.dump({"mcpServers": {"fetch": {"command": "uvx"}}}, f)
 
-        with patch("ormah.setup.shutil.which", return_value=None), \
+        with patch("ormah.setup._find_binary", return_value=None), \
              patch("ormah.setup.subprocess.run") as mock_run, \
              patch("ormah.setup.os.path.expanduser", return_value=config_path):
             configure_claude_code_mcp("/abs/path/ormah")
@@ -1111,7 +1111,7 @@ class TestRunSetup:
     def test_server_timeout_exits_nonzero_without_success_summary(self, tmp_path, capsys):
         with ExitStack() as stack:
             stack.enter_context(patch("ormah.setup.get_ormah_bin_path", return_value="/abs/path/ormah"))
-            stack.enter_context(patch("ormah.setup.shutil.which", return_value=None))
+            stack.enter_context(patch("ormah.setup._find_binary", return_value=None))
             stack.enter_context(
                 patch("ormah.setup.generate_server_wrapper", return_value=tmp_path / "ormah-server")
             )
@@ -1212,7 +1212,7 @@ class TestRunSetup:
         wrapper = tmp_path / "ormah-server"
         with ExitStack() as stack:
             stack.enter_context(patch("ormah.setup.get_ormah_bin_path", return_value="/abs/path/ormah"))
-            stack.enter_context(patch("ormah.setup.shutil.which", return_value=None))
+            stack.enter_context(patch("ormah.setup._find_binary", return_value=None))
             stack.enter_context(patch("ormah.setup._read_env_file", return_value={}))
             stack.enter_context(patch("ormah.setup.generate_server_wrapper", return_value=wrapper))
             stack.enter_context(patch("ormah.setup._preload_local_models"))
