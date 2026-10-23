@@ -1915,6 +1915,7 @@ class MemoryEngine:
             CONTENT_MAX_CHARS,
             SPACE_MAX_CHARS,
             TITLE_MAX_CHARS,
+            cut_utf16,
             fit_to_budget,
         )
 
@@ -1929,10 +1930,10 @@ class MemoryEngine:
         def _norm(node: dict) -> dict:
             return {
                 "id": node.get("id", ""),
-                "title": (node.get("title") or "")[:TITLE_MAX_CHARS],
+                "title": cut_utf16(node.get("title") or "", TITLE_MAX_CHARS),
                 "type": node.get("type", ""),
-                "space": (node.get("space") or "")[:SPACE_MAX_CHARS],
-                "content": (node.get("content") or "")[:CONTENT_MAX_CHARS],
+                "space": cut_utf16(node.get("space") or "", SPACE_MAX_CHARS),
+                "content": cut_utf16(node.get("content") or "", CONTENT_MAX_CHARS),
             }
 
         def _norm_pair(c: dict) -> dict:

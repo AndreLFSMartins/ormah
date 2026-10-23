@@ -5,6 +5,10 @@ maintenance agent has no tool to read that file. The engine therefore cuts the
 four batches to one character budget before it issues them, so the batches the
 server issues are the batches the agent sees.
 
+Claude Code measures the result with JS ``.length``, so every size here is in
+UTF-16 code units: a character outside the BMP (an emoji) counts 2. The field
+caps are in the same unit, which keeps ``max_item_cost`` an upper bound.
+
 The cost of an item is an upper bound of its formatted size in
 ``mcp_adapter._format_maintenance_batches``: it counts every normalized field in
 full (the formatter cuts content shorter) plus a fixed overhead for the labels.
@@ -41,8 +45,23 @@ _NODE_MAX_CHARS = (
 )
 
 
+def utf16_len(text: str) -> int:
+    """Length of *text* as JS ``.length`` counts it."""
+    return len(text) + sum(ord(ch) > 0xFFFF for ch in text)
+
+
+def cut_utf16(text: str, limit: int) -> str:
+    """The longest prefix of *text* whose ``utf16_len`` is at most *limit*."""
+    units = 0
+    for i, ch in enumerate(text):
+        units += 2 if ord(ch) > 0xFFFF else 1
+        if units > limit:
+            return text[:i]
+    return text
+
+
 def _node_cost(node: dict) -> int:
-    return sum(len(node[k]) for k in ("id", "title", "type", "space", "content"))
+    return sum(utf16_len(node[k]) for k in ("id", "title", "type", "space", "content"))
 
 
 def _item_cost(batch: str, item) -> int:

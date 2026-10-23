@@ -318,10 +318,22 @@ def test_maintenance_payload_budget_out_of_range(value):
 def test_maintenance_payload_budget_below_one_cluster_rejected():
     # One cluster of 20 nodes at the field caps costs ~14,800 characters.
     with pytest.raises(ValidationError, match="smaller than one maintenance candidate"):
-        _settings(consolidation_max_cluster_nodes=20, claude_maintenance_payload_max_chars=10_000)
+        _settings(
+            claude_maintenance_enabled=True,
+            consolidation_max_cluster_nodes=20,
+            claude_maintenance_payload_max_chars=10_000,
+        )
     assert _settings(
-        consolidation_max_cluster_nodes=20, claude_maintenance_payload_max_chars=15_000
+        claude_maintenance_enabled=True,
+        consolidation_max_cluster_nodes=20,
+        claude_maintenance_payload_max_chars=15_000,
     ).claude_maintenance_payload_max_chars == 15_000
+
+
+def test_maintenance_payload_budget_not_checked_when_maintenance_disabled():
+    # A cluster size the budget cannot hold is valid while Claude maintenance is off.
+    s = _settings(claude_maintenance_enabled=False, consolidation_max_cluster_nodes=100)
+    assert s.consolidation_max_cluster_nodes == 100
 
 
 # --- Session watcher reconcile (#34) ---

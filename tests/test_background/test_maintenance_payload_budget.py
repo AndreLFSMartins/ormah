@@ -32,6 +32,16 @@ def _cluster(n: int = 5) -> list[dict]:
     return [_node() for _ in range(n)]
 
 
+def _non_bmp_node() -> dict:
+    # Every field over its cap, in a character that JS ``.length`` counts as 2.
+    return {"id": str(uuid.uuid4()), "title": "\U0001F600" * 300, "type": "fact",
+            "space": "\U0001F600" * 100, "content": "\U0001F600" * 500}
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _patch_finders(monkeypatch, link=(), conflict=(), merge=(), clusters=()):
     from ormah.background import auto_linker, conflict_detector, consolidator, duplicate_merger
 
@@ -203,6 +213,39 @@ class TestFormattedSizeBound:
 
         assert len(batches["link_candidates"]) < 150  # the budget binds
         assert len(sections) <= budget
+
+    @pytest.mark.parametrize("budget", [5_000, 45_000, 90_000])
+    def test_non_bmp_sections_fit_the_budget_in_utf16_units(self, engine, monkeypatch, budget):
+        # Claude Code measures the result with JS ``.length``, so the bound is in UTF-16 units.
+        def pair():
+            return {"node_a": _non_bmp_node(), "node_b": _non_bmp_node(), "similarity": 0.9}
+
+        _patch_finders(
+            monkeypatch,
+            link=[pair() for _ in range(40)],
+            conflict=[pair() for _ in range(40)],
+            merge=[pair() for _ in range(40)],
+            clusters=[[_non_bmp_node() for _ in range(5)] for _ in range(4)],
+        )
+        engine.settings.claude_maintenance_payload_max_chars = budget
+
+        batches = engine.get_maintenance_batches()
+        text = _format(batches)
+        sections = text[text.index("## "):]
+
+        assert batches["link_candidates"]  # the run still issues work
+        assert _utf16_len(sections) <= budget
+
+    def test_non_bmp_cluster_fits_the_validator_minimum(self, engine, monkeypatch):
+        # The settings validator accepts a budget of max_item_cost: a cluster at the field
+        # caps must fit it, or the consolidation batch never goes out.
+        from ormah.engine.maintenance_budget import max_item_cost
+
+        nodes = engine.settings.consolidation_max_cluster_nodes
+        _patch_finders(monkeypatch, clusters=[[_non_bmp_node() for _ in range(nodes)]])
+        engine.settings.claude_maintenance_payload_max_chars = max_item_cost(nodes)
+
+        assert len(engine.get_maintenance_batches()["consolidation_clusters"]) == 1
 
 
 class TestOverheadCalibration:

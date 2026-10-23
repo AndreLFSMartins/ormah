@@ -294,9 +294,9 @@ class Settings(BaseSettings):
     claude_maintenance_enabled: bool = False
     claude_maintenance_interval_hours: int = 24  # hours between maintenance runs
     claude_maintenance_batch_size: int = 25  # candidates per type per run
-    # Upper bound, in characters, of the Phase 1 batches. Claude Code saves an MCP
-    # result above 50,000 characters to a file the maintenance agent cannot read;
-    # the default leaves room for the formatter's header lines.
+    # Upper bound, in UTF-16 code units (JS ``.length``), of the Phase 1 batches.
+    # Claude Code saves an MCP result above 50,000 units to a file the maintenance
+    # agent cannot read; the default leaves room for the formatter's header lines.
     claude_maintenance_payload_max_chars: int = 45_000
     maintenance_timeout_minutes: int = Field(default=30, gt=0)  # analysis reservation
 
@@ -685,7 +685,10 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _maintenance_payload_fits_one_candidate(self) -> "Settings":
         # A candidate larger than the whole budget could never be issued, and its
-        # batch would stay empty in every run.
+        # batch would stay empty in every run. With Claude maintenance off, no
+        # scheduled run reads the budget, so a cluster size it cannot hold is valid.
+        if not self.claude_maintenance_enabled:
+            return self
         need = max_item_cost(self.consolidation_max_cluster_nodes)
         if self.claude_maintenance_payload_max_chars < need:
             raise ValueError(
