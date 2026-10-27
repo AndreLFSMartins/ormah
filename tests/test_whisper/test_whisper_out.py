@@ -426,9 +426,8 @@ class TestIngestEndpointExtraTags:
 
 class TestWhisperSetup:
     def test_whisper_setup_includes_precompact(self, monkeypatch, tmp_path):
-        """Setup generates both UserPromptSubmit and PreCompact hooks when whisper_out_enabled.
-
-        HOME is isolated: `whisper setup --global` WRITES to ~/.claude/settings.json."""
+        """Setup generates both UserPromptSubmit and PreCompact hooks when whisper_out_enabled."""
+        # --global writes ~/.claude/settings.json: keep it off the real HOME.
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(
             "ormah.adapters.cli_adapter.settings",
@@ -442,8 +441,8 @@ class TestWhisperSetup:
         assert "UserPromptSubmit" in out
 
     def test_whisper_setup_always_registers_precompact(self, monkeypatch, tmp_path):
-        """Setup always registers PreCompact hook (runtime flag gates execution, not
-        registration). HOME is isolated: --global writes to ~/.claude/settings.json."""
+        """Setup always registers PreCompact hook (runtime flag gates execution, not registration)."""
+        # --global writes ~/.claude/settings.json: keep it off the real HOME.
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr(
             "ormah.adapters.cli_adapter.settings",
