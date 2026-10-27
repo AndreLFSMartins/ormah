@@ -328,7 +328,7 @@ class TestConfigureClaudeCodeMcp:
     def test_writes_mcp_config_to_claude_json(self, tmp_path):
         config_path = str(tmp_path / ".claude.json")
 
-        with patch("ormah.setup.shutil.which", return_value=None), \
+        with patch("ormah.setup._find_binary", return_value=None), \
              patch("ormah.setup.subprocess.run") as mock_run, \
              patch("ormah.setup.os.path.expanduser", return_value=config_path):
             configure_claude_code_mcp("/abs/path/ormah")
@@ -346,7 +346,7 @@ class TestConfigureClaudeCodeMcp:
         with open(config_path, "w") as f:
             json.dump({"mcpServers": {"fetch": {"command": "uvx"}}}, f)
 
-        with patch("ormah.setup.shutil.which", return_value=None), \
+        with patch("ormah.setup._find_binary", return_value=None), \
              patch("ormah.setup.subprocess.run") as mock_run, \
              patch("ormah.setup.os.path.expanduser", return_value=config_path):
             configure_claude_code_mcp("/abs/path/ormah")
@@ -886,7 +886,7 @@ class TestConfigureClaudeDesktop:
 class TestConfigureCodexMcp:
     def test_writes_mcp_config_to_codex_toml(self, tmp_path):
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
@@ -910,7 +910,7 @@ class TestConfigureCodexMcp:
         )
 
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
@@ -935,7 +935,7 @@ class TestConfigureCodexMcp:
         )
 
         with (
-            patch("ormah.setup.shutil.which", return_value=None),
+            patch("ormah.setup._find_binary", return_value=None),
             patch("ormah.setup.subprocess.run") as mock_run,
             patch("ormah.setup.Path.home", return_value=tmp_path),
         ):
@@ -1105,7 +1105,7 @@ class TestRunSetup:
     def test_server_timeout_exits_nonzero_without_success_summary(self, tmp_path, capsys):
         with ExitStack() as stack:
             stack.enter_context(patch("ormah.setup.get_ormah_bin_path", return_value="/abs/path/ormah"))
-            stack.enter_context(patch("ormah.setup.shutil.which", return_value=None))
+            stack.enter_context(patch("ormah.setup._find_binary", return_value=None))
             stack.enter_context(
                 patch("ormah.setup.generate_server_wrapper", return_value=tmp_path / "ormah-server")
             )
@@ -1206,7 +1206,7 @@ class TestRunSetup:
         wrapper = tmp_path / "ormah-server"
         with ExitStack() as stack:
             stack.enter_context(patch("ormah.setup.get_ormah_bin_path", return_value="/abs/path/ormah"))
-            stack.enter_context(patch("ormah.setup.shutil.which", return_value=None))
+            stack.enter_context(patch("ormah.setup._find_binary", return_value=None))
             stack.enter_context(patch("ormah.setup._read_env_file", return_value={}))
             stack.enter_context(patch("ormah.setup.generate_server_wrapper", return_value=wrapper))
             stack.enter_context(patch("ormah.setup._preload_local_models"))
@@ -3717,7 +3717,20 @@ class TestRemoveFastembedCache:
 
 
 class TestPreloadLocalModels:
+    @pytest.fixture(autouse=True)
+    def isolate_model_caches(self, monkeypatch, tmp_path):
+        from ormah.embeddings import local_adapter, reranker
+
+        monkeypatch.setattr(local_adapter, "_model_cache", {})
+        monkeypatch.setattr(reranker, "_model_cache", {})
+        monkeypatch.setattr(local_adapter, "get_fastembed_cache_dir", lambda: tmp_path)
+        monkeypatch.setattr(reranker, "get_fastembed_cache_dir", lambda: tmp_path)
+
     def test_preloads_embedding_and_reranker_into_shared_cache(self, tmp_path):
+        from threading import current_thread
+
+        from ormah.embeddings import local_adapter, reranker
+
         fake_settings = MagicMock()
         fake_settings.embedding_provider = "local"
         fake_settings.embedding_model = "BAAI/bge-base-en-v1.5"
@@ -3730,10 +3743,30 @@ class TestPreloadLocalModels:
             patch("fastembed.TextEmbedding") as embed_cls,
             patch("fastembed.rerank.cross_encoder.TextCrossEncoder") as reranker_cls,
         ):
-            _preload_local_models()
+            threads = []
 
-        embed_cls.assert_called_once_with("BAAI/bge-base-en-v1.5", cache_dir=str(tmp_path))
-        reranker_cls.assert_called_once_with("Xenova/ms-marco-MiniLM-L-6-v2", cache_dir=str(tmp_path))
+            def record_thread(mock):
+                def construct(*args, **kwargs):
+                    threads.append(current_thread().name)
+                    return mock.return_value
+                return construct
+
+            embed_cls.side_effect = record_thread(embed_cls)
+            reranker_cls.side_effect = record_thread(reranker_cls)
+            _preload_local_models()
+            _preload_local_models()
+            assert local_adapter.LocalAdapter(fake_settings.embedding_model).model is embed_cls.return_value
+            assert reranker.preload_model(fake_settings.whisper_reranker_model) is reranker_cls.return_value
+            assert len(local_adapter._model_cache) == len(reranker._model_cache) == 1
+            assert len(threads) == 2
+            assert all(name.startswith("ormah-inference") for name in threads)
+
+        embed_cls.assert_called_once_with(
+            "BAAI/bge-base-en-v1.5", cache_dir=str(tmp_path), enable_cpu_mem_arena=False,
+        )
+        reranker_cls.assert_called_once_with(
+            "Xenova/ms-marco-MiniLM-L-6-v2", cache_dir=str(tmp_path), enable_cpu_mem_arena=False,
+        )
 
     def test_skips_reranker_preload_when_disabled(self, tmp_path):
         fake_settings = MagicMock()
@@ -3772,6 +3805,7 @@ class TestPreloadLocalModels:
         reranker_cls.assert_called_once_with(
             "Xenova/ms-marco-MiniLM-L-6-v2",
             cache_dir=str(tmp_path),
+            enable_cpu_mem_arena=False,
         )
 
 
