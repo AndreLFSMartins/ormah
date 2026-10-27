@@ -384,6 +384,21 @@ class TestSelectClusterWithinBudget:
         cluster = [self._node(f"n{i}", 400) for i in range(5)]
         assert _select_cluster_within_budget(cluster, budget=24000, min_size=2) == cluster
 
+    def test_budget_counts_utf16_units(self):
+        """An emoji is 1 Python character but 2 units of the Phase 1 budget.
+
+        Each node serializes to ~380 characters and ~680 UTF-16 units. Counted in
+        characters, two nodes fit 1,000; counted in units, only one does.
+        """
+        from ormah.engine.maintenance_budget import utf16_len
+        from ormah.engine.memory_engine import _select_cluster_within_budget
+
+        cluster = [self._node(f"n{i}", 0, content="\U0001F600" * 300) for i in range(3)]
+        result = _select_cluster_within_budget(cluster, budget=1000, min_size=1)
+
+        assert [n["id"] for n in result] == ["n0"]
+        assert sum(utf16_len(json.dumps(n, ensure_ascii=False)) for n in result) <= 1000
+
     def test_oversized_cluster_is_trimmed(self, caplog):
         from ormah.engine.memory_engine import _select_cluster_within_budget
 

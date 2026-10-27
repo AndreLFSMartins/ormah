@@ -230,11 +230,14 @@ def _select_cluster_within_budget(
     Nodes are never sliced. Returns [] when the seed alone exceeds the budget or
     when fewer than `min_size` nodes fit.
     """
+    from ormah.engine.maintenance_budget import utf16_len
+
     if not cluster:
         return []
 
+    # Sizes in UTF-16 units, the unit of the Phase 1 budget (see maintenance_budget).
     seed, matches = cluster[0], cluster[1:]
-    seed_size = len(json.dumps(seed, ensure_ascii=False))
+    seed_size = utf16_len(json.dumps(seed, ensure_ascii=False))
     if seed_size > budget:
         logger.warning(
             "consolidation: seed %s serializes to %d chars, over the %d-char budget; "
@@ -248,7 +251,7 @@ def _select_cluster_within_budget(
     skipped: list[str] = []
 
     for node in matches:
-        size = len(json.dumps(node, ensure_ascii=False))
+        size = utf16_len(json.dumps(node, ensure_ascii=False))
         if used + size > budget:
             skipped.append(node.get("id", "?"))
             continue
@@ -2800,6 +2803,7 @@ class MemoryEngine:
             CONTENT_MAX_CHARS,
             SPACE_MAX_CHARS,
             TITLE_MAX_CHARS,
+            cut_utf16,
             fit_to_budget,
         )
 
@@ -2854,10 +2858,10 @@ class MemoryEngine:
             content = node.get("content") or ""
             return {
                 "id": node.get("id", ""),
-                "title": (node.get("title") or "")[:TITLE_MAX_CHARS],
+                "title": cut_utf16(node.get("title") or "", TITLE_MAX_CHARS),
                 "type": node.get("type", ""),
-                "space": (node.get("space") or "")[:SPACE_MAX_CHARS],
-                "content": content if content_limit is None else content[:content_limit],
+                "space": cut_utf16(node.get("space") or "", SPACE_MAX_CHARS),
+                "content": content if content_limit is None else cut_utf16(content, content_limit),
             }
 
         def _norm_pair(c: dict) -> dict:
