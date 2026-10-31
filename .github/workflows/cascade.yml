@@ -1,8 +1,14 @@
-# Caller stub for the upward close cascade (issue #22). Canonical template: copy it
-# to .github/workflows/cascade.yml in a participating repository. It runs with that
+# Standalone stub for the upward close cascade (issue #123): the template that
+# standardise.py installs as .github/workflows/cascade.yml in a PUBLIC repository.
+# A public repository cannot call the hub's reusable workflow: the hub is private, and
+# its Actions access level `user` admits only private callers. Every run of the caller
+# stub there failed at startup with 0 jobs. So this file carries the reconcile job of
+# .github/workflows/reusable-cascade.yml itself; tests/test_cascade.py holds the two
+# jobs equal. A walk change must land in both files. audit.py then names every public
+# repository whose copy no longer matches.
+#
+# The walk and its rules are documented in reusable-cascade.yml. It runs with this
 # repository's own GITHUB_TOKEN; no secrets are passed.
-# workflow_dispatch lives here, not on the hub: dispatched on the hub, the run would
-# carry the hub's token, which cannot write to this repository.
 name: cascade
 
 on:
@@ -19,10 +25,151 @@ permissions:
   issues: write
   contents: read
 
+concurrency:
+  group: cascade-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
-  call:
-    uses: AndreLFSMartins/andre-hooks/.github/workflows/reusable-cascade.yml@main
-    with:
-      # fromJSON: workflow_dispatch passes a number input as a string, which the
-      # number-typed workflow_call input rejects before any job starts.
-      issue: ${{ fromJSON(inputs.issue || github.event.issue.number) }}
+  reconcile:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Close every parent whose sub-issues are all complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ inputs.issue || github.event.issue.number }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import time
+          import urllib.error
+          import urllib.request
+
+          API = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+          REPO = os.environ["REPO"]
+          TOKEN = os.environ["GH_TOKEN"]
+          MAX_PASSES = 4  # two levels close within 2 passes; one more must close nothing
+          RETRY_DELAYS = (1, 2)
+          CLOSED = set()  # closed by this run: the open list lags a PATCH by seconds
+
+
+          def call(method, url, body=None):
+              """One REST call, retried on any error; returns (json, next page url).
+
+              POST is never retried: a POST stored by GitHub whose response was lost would be
+              stored twice. The next run re-reads the marker instead."""
+              data = None if body is None else json.dumps(body).encode()
+              for delay in ((*RETRY_DELAYS, None) if method != "POST" else (None,)):
+                  req = urllib.request.Request(url, data=data, method=method, headers={
+                      "Authorization": f"Bearer {TOKEN}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  })
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as resp:
+                          nxt = re.search(r'<([^>]+)>;\s*rel="next"', resp.headers.get("Link") or "")
+                          return json.load(resp), nxt and nxt.group(1)
+                  except (urllib.error.URLError, TimeoutError) as exc:
+                      if delay is None:
+                          raise SystemExit(f"cascade: FAIL {method} {url}: {exc}")
+                      print(f"cascade: retry in {delay}s after {method} {url}: {exc}")
+                      time.sleep(delay)
+
+
+          def get_all(url):
+              items = []
+              while url:
+                  page, url = call("GET", url)
+                  items.extend(page)
+              return items
+
+
+          def children(issue):
+              return get_all(issue["url"] + "/sub_issues?per_page=100")
+
+
+          def abandoned(issue):
+              return issue["state"] == "closed" and (
+                  issue.get("state_reason") == "not_planned"
+                  or any(label["name"].lower() == "wontfix" for label in issue.get("labels") or [])
+              )
+
+
+          def complete(issue):
+              if issue["state"] != "closed":
+                  return False
+              if abandoned(issue):
+                  return True
+              summary = issue.get("sub_issues_summary")
+              if summary is not None and summary.get("total", 0) == 0:
+                  return True
+              return all(complete(c) for c in children(issue))
+
+
+          def parent_kids(issue):
+              """Sub-issues of a parent this run has not closed yet; None when there is nothing to judge."""
+              total = (issue.get("sub_issues_summary") or {}).get("total", 0)
+              if issue["number"] in CLOSED or total == 0:
+                  return None  # closed earlier in this run, or no sub-issues (or a pull request)
+              kids = children(issue)
+              if not kids:
+                  print(f"::warning::cascade: #{issue['number']} reports {total} sub-issues but the list came back empty; skipped")
+              return kids or None
+
+
+          def settle_record(issue, kids):
+              names = [f"#{n}" for n in sorted(c["number"] for c in kids if abandoned(c))]  # a set: order-free marker
+              if not names:
+                  return
+              marker = f"<!-- cascade:abandoned {' '.join(names)} -->"
+              comments = get_all(issue["url"] + "/comments?per_page=100")
+              if any(marker in (c.get("body") or "") for c in comments):
+                  return
+              body = f"Closed over abandoned sub-issues (not planned or `wontfix`): {', '.join(names)}\n\n{marker}"
+              call("POST", issue["url"] + "/comments", {"body": body})
+              print(f"cascade: #{issue['number']} abandonment record posted: {', '.join(names)}")
+
+
+          def settle_closed_records():
+              """Replay path: a closed parent still owed its record (the post failed after an earlier close)."""
+              for issue in get_all(f"{API}/repos/{REPO}/issues?state=closed&per_page=100"):
+                  kids = parent_kids(issue)
+                  if kids and all(complete(c) for c in kids):
+                      settle_record(issue, kids)
+
+
+          def reconcile_pass():
+              closed = 0
+              for issue in get_all(f"{API}/repos/{REPO}/issues?state=open&per_page=100"):
+                  n = issue["number"]
+                  kids = parent_kids(issue)
+                  if not kids:
+                      continue
+                  states = ", ".join(f"#{c['number']}={c['state']}" for c in kids)
+                  incomplete = [f"#{c['number']}" for c in kids if not complete(c)]
+                  if incomplete:
+                      print(f"cascade: #{n} stays open [{states}]; incomplete: {', '.join(incomplete)}")
+                      continue
+                  settle_record(issue, kids)  # before the close: a failed post leaves the parent open
+                  call("PATCH", issue["url"], {"state": "closed", "state_reason": "completed"})
+                  print(f"cascade: #{n} CLOSED [{states}]; every sub-issue complete")
+                  CLOSED.add(n)
+                  closed += 1
+              return closed
+
+
+          print(f"cascade: repo={REPO} triggering issue={os.environ.get('ISSUE') or '-'}")
+          for n in range(1, MAX_PASSES + 1):
+              closed = reconcile_pass()
+              print(f"cascade: pass {n} closed {closed}")
+              if not closed:
+                  break
+          else:
+              raise SystemExit(f"cascade: FAIL still closing issues after {MAX_PASSES} passes")
+          settle_closed_records()
+          PY
