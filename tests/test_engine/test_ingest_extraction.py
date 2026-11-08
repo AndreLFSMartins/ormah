@@ -309,7 +309,7 @@ def test_ollama_adapter_pins_the_input_window():
         def json(self):
             return {"response": "{}"}
 
-    def fake_post(url, json=None, timeout=None):
+    def fake_post(url, json=None, timeout=None, trust_env=None):
         captured.update(json)
         return _Resp()
 
@@ -348,7 +348,7 @@ def test_factory_passes_configured_num_ctx_to_the_request():
             return {"response": "{}"}
 
     original = httpx.post
-    httpx.post = lambda url, json=None, timeout=None: (captured.update(json), _Resp())[1]
+    httpx.post = lambda url, json=None, timeout=None, trust_env=None: (captured.update(json), _Resp())[1]
     reset_adapter()
     try:
         # 70000, not 8192: the boot validator rejects a window too small for the worst
@@ -385,7 +385,7 @@ def test_maintenance_adapter_does_not_inherit_the_ingest_window():
             return {"response": "{}"}
 
     original = httpx.post
-    httpx.post = lambda url, json=None, timeout=None: (captured.update(json), _Resp())[1]
+    httpx.post = lambda url, json=None, timeout=None, trust_env=None: (captured.update(json), _Resp())[1]
     reset_adapter()
     try:
         settings = Settings(

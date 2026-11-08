@@ -10,6 +10,12 @@ interface Props {
 function statusLabel(agent: AgentInfo): { text: string; cls: string } {
   if (!agent.available_on_current_os) return { text: "n/a on this OS", cls: "agent-status--na" };
   if (!agent.detected)               return { text: "not installed",    cls: "agent-status--absent" };
+  if (agent.capabilities && agent.wired) {
+    const whisper = agent.capabilities.whisper;
+    const text = whisper === "native_hook" || whisper === "native_extension"
+      ? "whisper configured" : "tools only";
+    return { text, cls: "agent-status--wired" };
+  }
   if (agent.wired)                   return { text: "connected",        cls: "agent-status--wired" };
   return                                    { text: "not wired",        cls: "agent-status--detected" };
 }
@@ -95,12 +101,46 @@ export default function AgentsPanel({ open, onClose }: Props) {
               <div className="admin-task-header">
                 <span className="admin-task-name">{agent.name}</span>
                 <span className={`agent-status ${cls}`}>{text}</span>
+                {agent.capabilities && <div className="admin-task-desc">{agent.capabilities.detail}</div>}
                 {errors[agent.id] && (
                   <div className="admin-task-desc" style={{ color: "var(--edge-contradicts)", marginTop: 4 }}>
                     {errors[agent.id]}
                   </div>
                 )}
               </div>
+
+              {agent.id === "opencode" && (
+                <div className="admin-task-desc" style={{ marginBottom: 12 }}>
+                  <p>Automatic memory recall and memory tools in OpenCode V1 and V2.</p>
+                  <details>
+                    <summary>How to enable Ormah</summary>
+                    <ol>
+                      <li>Install OpenCode and connect a model provider.</li>
+                      <li>Click connect here to configure OpenCode for the user running Ormah.</li>
+                      <li>Keep Ormah running, restart OpenCode in your project, and ask Ormah to save and recall a test fact.</li>
+                    </ol>
+                    <p>For project-only setup, use the CLI command in the guide. This panel shows user-level configuration on the Ormah server machine.</p>
+                    <a href="https://github.com/r-spade/ormah/blob/main/docs/integration-opencode.md" target="_blank" rel="noopener noreferrer">OpenCode setup guide</a>
+                  </details>
+                </div>
+              )}
+
+              {agent.id === "github_copilot" && (
+                <div className="admin-task-desc" style={{ marginBottom: 12 }}>
+                  <p>Automatic memory recall and memory tools in VS Code’s Local and Copilot chats.</p>
+                  <details>
+                    <summary>How to enable Ormah</summary>
+                    <ol>
+                      <li>Install VS Code and GitHub Copilot, then sign in to GitHub.</li>
+                      <li>Click connect here to configure the default VS Code profile on the machine running Ormah.</li>
+                      <li>Keep Ormah running. Reload VS Code, open your project, and approve the workspace, Ormah MCP server, and hooks when prompted.</li>
+                      <li>Start a Local or Copilot chat and ask Ormah to save and recall a test fact.</li>
+                    </ol>
+                    <p>For a single project or another VS Code profile, follow the setup guide. The connection status here reflects user-level setup.</p>
+                    <a href="https://github.com/r-spade/ormah/blob/main/docs/integration-github-copilot.md" target="_blank" rel="noopener noreferrer">Copilot setup guide</a>
+                  </details>
+                </div>
+              )}
 
               {agent.available_on_current_os && agent.detected && !agent.wired && (
                 <button
@@ -125,7 +165,7 @@ export default function AgentsPanel({ open, onClose }: Props) {
         })}
 
         {!loading && !hasUnwired && !fetchError && agents.length > 0 && (
-          <div className="admin-backup-note">All detected agents are connected.</div>
+          <div className="admin-backup-note">All detected agents are configured.</div>
         )}
 
         {fetchError && (

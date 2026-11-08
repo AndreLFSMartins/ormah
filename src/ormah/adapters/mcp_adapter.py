@@ -15,7 +15,7 @@ from mcp.types import TextContent, Tool
 
 from ormah.adapters.space_detect import detect_space_from_cwd
 from ormah.adapters.tool_schemas import TOOLS
-from ormah.config import settings
+from ormah.config import settings, uses_env_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +59,11 @@ def create_mcp_server(
     base_url: str,
     default_space: str | None = None,
     session_id: str | None = None,
+    headers: dict[str, str] | None = None,
+    instructions: str | None = None,
 ) -> Server:
     """Create an MCP server that delegates to the HTTP API."""
-    server = Server("ormah")
+    server = Server("ormah", instructions=instructions)
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
@@ -84,6 +86,7 @@ def create_mcp_server(
                 arguments,
                 default_space=default_space,
                 session_id=session_id,
+                **({"headers": headers} if headers else {}),
             )
             return [TextContent(type="text", text=result)]
         except httpx.ConnectError:
@@ -198,8 +201,12 @@ async def _dispatch(
     args: dict,
     default_space: str | None = None,
     session_id: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> str:
-    async with httpx.AsyncClient(base_url=base_url, timeout=_timeout_for_tool(name)) as client:
+    async with httpx.AsyncClient(
+        base_url=base_url, timeout=_timeout_for_tool(name), trust_env=uses_env_proxy(base_url),
+        **({"headers": headers} if headers else {}),
+    ) as client:
         if name == "remember":
             body = {
                 "content": args["content"],
@@ -208,7 +215,7 @@ async def _dispatch(
             }
             if args.get("title"):
                 body["title"] = args["title"]
-            if args.get("space"):
+            if "space" in args:
                 body["space"] = args["space"]
             if args.get("tags"):
                 body["tags"] = _coerce_list(args["tags"])
@@ -221,7 +228,7 @@ async def _dispatch(
             if args.get("links"):
                 body["connections"] = [{"target": node_id} for node_id in _coerce_list(args["links"])]
             params = {}
-            if default_space:
+            if default_space and "space" not in args:
                 params["default_space"] = default_space
             resp = await client.post("/agent/remember", json=body, params=params)
             if not resp.is_success:

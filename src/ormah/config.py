@@ -7,6 +7,8 @@ import math
 import os
 from pathlib import Path
 
+from urllib.parse import urlsplit
+
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
@@ -17,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 _DEPRECATED_FLUSH_BYTES_ENV = "ORMAH_SESSION_WATCHER_FLUSH_BYTES"
 _warned_flush_bytes = False
+
+
+def uses_env_proxy(url: str) -> bool:
+    """A proxy can't reach this machine's localhost; remote URLs may need one."""
+    parts = urlsplit(url)
+    return not (parts.scheme == "http" and parts.hostname in {"localhost", "127.0.0.1", "::1"})
+
 
 
 _ENV_FILES = [

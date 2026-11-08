@@ -296,7 +296,7 @@ class TestOllamaInputWindow:
             def json(self):
                 return {"response": "{}"}
 
-        def fake_post(url, json=None, timeout=None):
+        def fake_post(url, json=None, timeout=None, trust_env=None):
             sent.update(json)
             return _Resp()
 

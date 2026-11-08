@@ -26,7 +26,7 @@ BASE = f"http://localhost:{settings.port}"
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(base_url=BASE, timeout=30.0)
+    return httpx.Client(base_url=BASE, timeout=30.0, trust_env=False)
 
 
 def _api(fn):
@@ -258,7 +258,7 @@ def cmd_status(args):
 
 def _whisper_client() -> httpx.Client:
     """Client with short timeout for whisper hook — fail fast, never block the user."""
-    return httpx.Client(base_url=BASE, timeout=5.0)
+    return httpx.Client(base_url=BASE, timeout=5.0, trust_env=False)
 
 
 def cmd_whisper_inject(args):
@@ -484,7 +484,7 @@ def _outbox_lock():
 def _nudge_client() -> httpx.Client:
     """Short-timeout client for the hook (council R10): the manifest allows 30s TOTAL,
     so a single request must never be able to consume the whole budget."""
-    return httpx.Client(base_url=BASE, timeout=5.0)
+    return httpx.Client(base_url=BASE, timeout=5.0, trust_env=False)
 
 
 def _queue_nudge(path: str) -> str:
