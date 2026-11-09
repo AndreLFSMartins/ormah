@@ -230,6 +230,20 @@ git branch -d fix/<slug-that-landed>
 Identical commits merge cleanly on their own. Conflicts appear only where the maintainer
 edited your PR — resolve by taking their version.
 
+The merge changes only the files. The running Beta still serves the old code with the old
+dependencies. Finish the sync with two steps:
+
+```bash
+# 1. If pyproject.toml changed, install into the Beta's venv. It has no bin/pip, so
+#    `make install` would hit the ambient pip instead.
+git diff ORIG_HEAD HEAD -- pyproject.toml
+env -u VIRTUAL_ENV -u PYTHONPATH uv pip install --python .venv/bin/python -e ".[dev]"
+# 2. Restart the Beta, then probe /admin/health (CLAUDE.md, "The dev server is launchd-managed").
+launchctl kickstart -k "gui/$(id -u)/com.ormah.server.dev"
+```
+
+Read `~/.config/ormah/.env` before step 2: the restart is when any drift in that file goes live.
+
 ## Recipe D — branch hygiene (prune)
 
 The `/wt-start` Sweep implements these rules and is the normal way to apply them; the rules below
