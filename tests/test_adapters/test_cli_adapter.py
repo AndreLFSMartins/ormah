@@ -587,8 +587,6 @@ def test_whisper_inject_survives_space_detect_oserror(monkeypatch):
         "ormah.adapters.cli_adapter._whisper_client",
         lambda: httpx.Client(transport=transport, base_url="http://test"),
     )
-    monkeypatch.setattr("ormah.adapters.cli_adapter._load_cursors", lambda: {})
-    monkeypatch.setattr("ormah.adapters.cli_adapter._save_cursors", lambda c: None)
     monkeypatch.setattr("subprocess.run", MagicMock(side_effect=PermissionError))
     hook_input = json.dumps({"prompt": "hello", "cwd": "/tmp/locked-dir", "session_id": "test"})
     code, out, err = _run_cli(["whisper", "inject"], monkeypatch, stdin_text=hook_input)
