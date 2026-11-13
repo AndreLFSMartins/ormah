@@ -1,9 +1,9 @@
 """Phase 2 of run_maintenance rejects a merge that the Phase 1 assignment does not support.
 
-Worked example (2026-10-18): Phase 1 offered the merge pair (98f6a3d2, 53bacc36). Node
-53a4e68c was only a consolidation cluster member. The agent submitted keep=98f6a3d2,
-discard=53a4e68c, merged_content="placeholder". The server applied it: one node was
-deleted and the survivor's body became the literal "placeholder".
+Worked example (2026-10-18): Phase 1 offered the merge pair (A, B). Node C was only a
+consolidation cluster member. The agent submitted keep=A, discard=C,
+merged_content="placeholder". The server applied it: one node was deleted and the
+survivor's body became the literal "placeholder".
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from ormah.background.maintenance_manager import MaintenanceManager
 from ormah.models.node import CreateNodeRequest, NodeType
 
 GOOD_CONTENT = (
-    "The loop-ticket command has no production caller. cmd_ticket and cmd_preflight "
-    "repeat its steps, so it is a duplication to remove, not a bug."
+    "The nightly export job writes one compressed archive per day to the shared bucket. "
+    "Both source notes say this, so the merge keeps one copy of the fact."
 )
 
 
@@ -62,10 +62,10 @@ def three(engine):
     """keep and other form the offered pair; outsider is only in a cluster."""
     keep, other, outsider = _seed(
         engine,
-        "The loop-ticket routine lacks a producer, so a user triggers it by hand. Not a bug.",
-        "The loop-ticket command has no dedicated production caller; cmd_ticket repeats it.",
-        "The dispatcher must invoke the ata-reuniao-runner with the entry mode and verbatim "
-        "arguments, and keep the returned agent id for later use.",
+        "The nightly export job writes a compressed archive to the shared bucket each day.",
+        "The nightly export job uploads one archive per day to the shared storage bucket.",
+        "The release checklist needs a signed tag and a changelog entry before a version "
+        "is published to the package index.",
     )
     return keep, other, outsider
 
@@ -78,7 +78,7 @@ class TestMergeGate:
 
         counts = engine.apply_maintenance_results(
             {"merges": [{"keep_id": keep, "discard_id": outsider,
-                         "merged_title": "loop-ticket has no production caller (not a bug)",
+                         "merged_title": "nightly export writes one archive per day",
                          "merged_content": "placeholder"}]},
             issued=_issued((keep, other), cluster=(outsider,)),
         )
@@ -177,7 +177,7 @@ class TestMergeGate:
         assert _state(engine, survivors[0]) == ("merged", GOOD_CONTENT)
 
     def test_offered_pair_given_by_short_ids_is_applied(self, engine, three):
-        # A Node reference is a Full id or a Short id (GLOSSARY.md); Phase 1 issues Full ids.
+        # A merge may name a node by a unique id prefix; Phase 1 issues Full ids.
         keep, other, _ = three
 
         counts = engine.apply_maintenance_results(
