@@ -221,8 +221,9 @@ class MaintenanceManager:
     def _run_phase2(self, job_id: str, results: dict[str, Any]) -> None:
         t0 = time.monotonic()
         try:
-            # The assignment this job issued; the engine rejects a merge outside it.
-            # A job without batches issued nothing, so every merge is rejected.
+            # The batches this job issued; the engine rejects an item naming a node outside
+            # them, and a merge whose pair it did not offer. A job without batches issued
+            # nothing, so every item is rejected.
             with self._lock:
                 job = self._job
                 issued = (job.batches if job is not None and job.job_id == job_id else None) or {}

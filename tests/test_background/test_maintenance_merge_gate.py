@@ -211,7 +211,8 @@ class TestMergeGate:
                                     "content": "Gamma and Delta both cover the second topic.",
                                     "type": "fact"}],
             },
-            issued=_issued((a, b)),
+            # c and d are issued as a cluster: the edge and the consolidation are in the batch.
+            issued=_issued((a, b), cluster=(c, d)),
         )
 
         assert (

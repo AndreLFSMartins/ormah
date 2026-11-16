@@ -2911,74 +2911,79 @@ class MemoryEngine:
 
         Phase 2 of the ``run_maintenance`` two-call protocol.  Accepts
         ``results`` as returned by Claude (edges, merges, consolidations) and
-        applies each decision, returning counts.
+        applies each decision, returning a summary of counts and errors.
 
-        *issued* is the Phase 1 assignment (the batches of the job).  When it is
-        given, a merge whose pair is not one of its ``merge_candidates`` is
-        rejected.  A merge whose ``merged_content`` would erase a source is
-        rejected with or without it (see ``_merge_rejection``).  A rejected merge
-        changes nothing and is counted in ``rejected``.
+        *issued* is the Phase 1 assignment (the job's batches).  When it is given,
+        an item that names a node id outside it is rejected: the agent transcribes
+        ids by hand, and a typo must not reach an unrelated node.  A merge whose
+        pair is not one of its ``merge_candidates`` is rejected too.  An item that
+        names a node that does not exist, and a merge whose ``merged_content``
+        would erase a source (see ``_merge_rejection``), are rejected with or
+        without it.  A rejected item changes nothing and is counted in
+        ``rejected``.  Each rejection and each apply-time exception is listed in
+        ``errors`` as ``{kind, ids, reason}``; the rest of the submission still applies.
         """
         from ormah.background.auto_linker import _apply_edge
         from ormah.background.consolidator import _apply_consolidation
 
-        counts: dict[str, int] = {
+        summary: dict[str, Any] = {
             "edges": 0, "merges": 0, "consolidations": 0, "skipped": 0, "rejected": 0,
+            "errors": [],
         }
-        offered_merges = None if issued is None else {
-            frozenset((c["node_a"]["id"], c["node_b"]["id"]))
-            for c in issued.get("merge_candidates") or []
-        }
+        issued_ids = offered_merges = None
+        if issued is not None:
+            issued_ids = {
+                n["id"] for cluster in issued.get("consolidation_clusters") or [] for n in cluster
+            }
+            for name in ("link_candidates", "conflict_candidates", "merge_candidates"):
+                for c in issued.get(name) or []:
+                    issued_ids.update((c["node_a"]["id"], c["node_b"]["id"]))
+            offered_merges = {
+                frozenset((c["node_a"]["id"], c["node_b"]["id"]))
+                for c in issued.get("merge_candidates") or []
+            }
 
-        for e in results.get("edges", []):
-            try:
-                _apply_edge(
-                    self,
-                    e["node_a_id"],
-                    e["node_b_id"],
-                    e["edge_type"],
-                    e.get("reason", ""),
-                    similarity=0.0,
-                )
-                if e["edge_type"] != "none":
-                    counts["edges"] += 1
-                else:
-                    counts["skipped"] += 1
-            except Exception as exc:
-                logger.warning("apply_maintenance_results: edge failed: %s", exc)
+        def apply_edge(e: dict) -> str:
+            _apply_edge(
+                self, e["node_a_id"], e["node_b_id"], e["edge_type"], e.get("reason", ""),
+                similarity=0.0,
+            )
+            return "skipped" if e["edge_type"] == "none" else "edges"
 
-        for m in results.get("merges", []):
-            try:
-                reason = self._merge_rejection(m, offered_merges)
-                if reason is not None:
-                    counts["rejected"] += 1
-                    logger.warning(
-                        "apply_maintenance_results: merge %s / %s rejected: %s",
-                        m.get("keep_id"), m.get("discard_id"), reason,
-                    )
-                    continue
-                self.execute_merge(
-                    m["keep_id"],
-                    m["discard_id"],
-                    merged_content=m.get("merged_content"),
-                    merged_title=m.get("merged_title"),
-                )
-                counts["merges"] += 1
-            except Exception as exc:
-                logger.warning("apply_maintenance_results: merge failed: %s", exc)
+        def apply_merge(m: dict) -> str:
+            self.execute_merge(
+                m["keep_id"],
+                m["discard_id"],
+                merged_content=m.get("merged_content"),
+                merged_title=m.get("merged_title"),
+            )
+            return "merges"
 
-        for c in results.get("consolidations", []):
-            try:
-                _apply_consolidation(
-                    self,
-                    c["node_ids"],
-                    c["title"],
-                    c["content"],
-                    c.get("type", "fact"),
-                )
-                counts["consolidations"] += 1
-            except Exception as exc:
-                logger.warning("apply_maintenance_results: consolidation failed: %s", exc)
+        def apply_consolidation(c: dict) -> str:
+            _apply_consolidation(self, c["node_ids"], c["title"], c["content"], c.get("type", "fact"))
+            return "consolidations"
+
+        kinds = (
+            ("edge", "edges", lambda e: [e["node_a_id"], e["node_b_id"]], apply_edge),
+            ("merge", "merges", lambda m: [m["keep_id"], m["discard_id"]], apply_merge),
+            ("consolidation", "consolidations", lambda c: list(c["node_ids"]), apply_consolidation),
+        )
+        for kind, key, ids_of, apply in kinds:
+            for item in results.get(key, []):
+                ids: list = []
+                try:
+                    ids = ids_of(item)
+                    reason = self._maintenance_item_rejection(ids, issued_ids)
+                    if reason is None and kind == "merge":
+                        reason = self._merge_rejection(item, offered_merges)
+                    if reason is None:
+                        summary[apply(item)] += 1
+                        continue
+                    summary["rejected"] += 1
+                except Exception as exc:
+                    reason = f"{type(exc).__name__}: {exc}"
+                summary["errors"].append({"kind": kind, "ids": ids, "reason": reason})
+                logger.warning("apply_maintenance_results: %s %s failed: %s", kind, ids, reason)
 
         # Skip the stamp if the Phase 1 that produced these results had a
         # failed batch — apply_maintenance_results is a separate MCP call
@@ -3005,7 +3010,21 @@ class MemoryEngine:
             except Exception as exc:
                 logger.warning("apply_maintenance_results: failed to record timestamp: %s", exc)
 
-        return counts
+        return summary
+
+    def _maintenance_item_rejection(self, ids: list, issued_ids: set[str] | None) -> str | None:
+        """Why a Phase 2 item naming *ids* must not apply, or None when it can."""
+        if issued_ids is not None:
+            # Phase 1 issues Full ids; a submitted id may be a unique id prefix.
+            full = [(self.graph.get_node(i) or {}).get("id", i) for i in ids]
+            outside = [str(i) for i, f in zip(ids, full) if f not in issued_ids]
+            if outside:
+                return f"not in the issued batch: {', '.join(outside)}"
+        # Checked per item, after earlier items applied: a merge may have removed a node.
+        missing = [i for i in ids if self.graph.get_node(i) is None]
+        if missing:
+            return f"node not found: {', '.join(map(str, missing))}"
+        return None
 
     def _merge_rejection(
         self, merge: dict, offered: set[frozenset[str]] | None
